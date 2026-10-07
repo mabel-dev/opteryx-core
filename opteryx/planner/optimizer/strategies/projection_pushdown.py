@@ -67,7 +67,20 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
         # immediately — this costs nothing there. It stays open only where there is no
         # Project between the Distinct and the operator, which is the set-operation
         # shape: Distinct straight onto the semi/anti join the set op was rewritten to.
-        if context.seen_distincts:
+        #
+        # The same holds for a sort inside a UNION leg. A UNION aligns its legs by
+        # POSITION (compiler.py's UnionNode: each leg's first N columns), but the
+        # demand collected from above is by IDENTITY — and it is the LEFT leg's
+        # identities, the union's declared output. A sort in the RIGHT leg therefore
+        # saw none of its own columns as live, emitted zero of them, and the union
+        # refused the plan as "a UNION leg narrower than the union schema". (The left
+        # leg survived only because its identities happen to be the declared ones.)
+        # The leg's width is fixed by its own Project below the sort, so the sort has
+        # nothing to prune: UNKNOWN, keep every column.
+        if context.seen_distincts or (
+            context.seen_unions
+            and node.node_type in (LogicalPlanStepType.Order, LogicalPlanStepType.HeapSort)
+        ):
             node.pre_update_columns = set()
         else:
             node.pre_update_columns = set(context.collected_identities)

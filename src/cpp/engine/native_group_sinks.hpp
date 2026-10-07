@@ -2064,6 +2064,7 @@ struct UngroupedAggLocal : LocalSinkState {
     // hashes (partitioned for the parallel union at finalize).
     std::vector<std::array<UCDPartition, kGBParts>> dparts;
     std::vector<AggColMeta> meta;
+    uint64_t rows_seen = 0;   // every input row, read only by a zero-key GROUP BY
     bool init = false;
 };
 struct UngroupedAggGlobal : GlobalSinkState {
@@ -2078,6 +2079,7 @@ struct UngroupedAggGlobal : GlobalSinkState {
     // AND counted in parallel at finalize, mirroring GroupBySink).
     std::vector<std::array<std::vector<UCDPartition>, kGBParts>> dpending;
     std::vector<AggColMeta> meta;
+    uint64_t rows_seen = 0;
     bool init = false;
 };
 
@@ -2138,9 +2140,14 @@ struct UngroupedAggSink : Sink {
     std::vector<AggSpec2> specs;
     MorselBuffer* out;
     std::vector<AggSeed> seed;      // empty, or one per spec
+    // A GROUP BY whose keys were all constants (pruned by the binder): ONE group
+    // over every row, so it follows the GROUP BY rule - zero input rows emit zero
+    // rows, never the ungrouped aggregate's one row of COUNT()=0 / NULLs.
+    bool zero_key_group;
 
-    UngroupedAggSink(std::vector<AggSpec2> s, MorselBuffer* b, std::vector<AggSeed> seeds = {})
-        : specs(std::move(s)), out(b), seed(std::move(seeds)) {}
+    UngroupedAggSink(std::vector<AggSpec2> s, MorselBuffer* b, std::vector<AggSeed> seeds,
+                     bool zero_key)
+        : specs(std::move(s)), out(b), seed(std::move(seeds)), zero_key_group(zero_key) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<UngroupedAggGlobal>();
@@ -2253,6 +2260,7 @@ struct UngroupedAggSink : Sink {
         // An empty filter result can arrive as a zero-row (possibly zero-column)
         // morsel — nothing to count, nothing safe to capture meta from.
         if (in->num_rows() == 0) return SinkResult::CONTINUE;
+        l.rows_seen += in->num_rows();
         if (!l.init) {
             if (!capture_meta(l.meta, in, err)) return SinkResult::CONTINUE;
             l.cells.assign(specs.size(), AggCell{});
@@ -2426,6 +2434,7 @@ struct UngroupedAggSink : Sink {
             g.meta.resize(specs.size());
             g.init = true;
         }
+        g.rows_seen += l.rows_seen;
         if (l.init) {
             for (size_t s = 0; s < specs.size(); ++s) {
                 if (l.meta[s].is_string)   // BEFORE agg2_merge (reads pre-merge valid)
@@ -2472,6 +2481,17 @@ struct UngroupedAggSink : Sink {
     }
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<UngroupedAggGlobal&>(gs);
+        if (zero_key_group) {
+            // A seed folds rows the sink never sees, so rows_seen could not tell an
+            // empty input from a fully covered one - the compiler never pairs them.
+            if (!seed.empty()) {
+                err.code = 1;
+                err.msg = "zero-key GROUP BY was given an aggregate statistics seed — "
+                          "fail loud, never a silent wrong answer";
+                return;
+            }
+            if (g.rows_seen == 0) return;   // GROUP BY over zero rows: zero groups
+        }
         if (!g.init) {
             // zero morsels ever arrived: COUNT()=0, SUM/AVG/MIN/MAX=NULL
             g.cells.assign(specs.size(), AggCell{});

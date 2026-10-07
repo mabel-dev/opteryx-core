@@ -1938,6 +1938,43 @@ def _types_compatible(src, tgt) -> bool:
     return False
 
 
+def _conform_written_columns(feeder, target_types, plan_context) -> None:
+    """CAST each column a write sink receives to the type its target column DECLARES.
+
+    `_types_compatible` only compares CATEGORIES, so an INSERT/MERGE/UPDATE writing
+    `moons + 1` (INT64) into an INT8 column, or `gravity + 1` (DECIMAL(21,1)) into a
+    DECIMAL(3,1) column, passed the bind and the sink then wrote the expression's
+    type into the file. A relation whose files disagree with its schema is read
+    back wrong (the scan decodes each file at its own width) and refused by
+    OPTIMIZE's concat.
+
+    The CAST is the ordinary checked one: a value the declared type cannot hold
+    (out of range, or more decimal places than the scale) fails the statement
+    before anything is committed - it is never wrapped or rounded.
+
+    `feeder` is the source sub-plan's Exit; its columns are positional with
+    `target_types` (None = leave as is). The CAST is inserted fully bound, as
+    set-op leg coercion does (`_cast_leg_columns_to`), and the compiler's Exit
+    evaluates it. NULL-typed sources are left alone: there is no value to convert.
+    """
+    from opteryx.planner.binder.binder import _bound_cast_node
+    from opteryx.types.logical_type import LogicalCategory
+
+    columns = list(feeder.columns)
+    changed = False
+    for index, target in enumerate(target_types):
+        if target is None:
+            continue
+        column = columns[index]
+        current = column.schema_column.column_type
+        if current is None or current.category == LogicalCategory.NULL or current == target:
+            continue
+        columns[index] = _bound_cast_node(column, target, plan_context=plan_context)
+        changed = True
+    if changed:
+        feeder.columns = columns
+
+
 def _guard_relationships_through_dropped_column(node, context) -> None:
     """Refuse or warn when `DROP COLUMN` would leave a relationship pointing at
     nothing.
@@ -2611,6 +2648,15 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
     node.column_mapping = column_mapping
     node.target_column_names = [c.name for c in target_schema.columns]
 
+    # ---- 4b. SELECT source: write the DECLARED types, not the expression's ----
+    # (the VALUES feeder is rebound to the target's columns in step 5 instead)
+    if values_node is None:
+        _conform_written_columns(
+            feeder,
+            [c.column_type for c in target_columns_in_order],
+            context.plan_context,
+        )
+
     # ---- 5. VALUES feeder mutation: replace placeholder columns ----
     # The downstream FunctionDataset has been bound with placeholder column
     # names (`$col0`, ...). Replace those with LogicalColumns matching the
@@ -2774,6 +2820,14 @@ def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
                 f"{produced_category} is not compatible with target "
                 f"{target_column.category}"
             )
+
+    # Both arms (and UPDATE, which desugars here) write the DECLARED types; the
+    # three control columns after the target's are left as they are.
+    _conform_written_columns(
+        feeder,
+        [target_by_name[name].column_type for name in node.target_column_names],
+        context.plan_context,
+    )
 
     return node, context
 

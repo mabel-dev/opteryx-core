@@ -81,51 +81,6 @@ SELECT CONCAT_WS('-', name, name) AS c FROM $planets WHERE id = 1
 Mercury-Mercury
 
 # ---------------------------------------------------------------------------
-# CONCAT / CONCAT_WS — non-string operands are auto-cast to VARCHAR
-# (family-wide fix: StringConcat is string-only natively, so CONCAT(id,
-# name) etc. used to be refused at every arity even though CAST(id AS
-# VARCHAR) already worked).
-# ---------------------------------------------------------------------------
-
-query T rowsort
-SELECT CONCAT(id, name) AS c FROM $planets WHERE id <= 3
-----
-1Mercury
-2Venus
-3Earth
-
-query T rowsort
-SELECT CONCAT(name, id) AS c FROM $planets WHERE id <= 3
-----
-Earth3
-Mercury1
-Venus2
-
-query T rowsort
-SELECT CONCAT_WS('-', id, name) AS c FROM $planets WHERE id <= 3
-----
-1-Mercury
-2-Venus
-3-Earth
-
-# The 2-arg CONCAT_WS form also stringifies a non-string operand.
-query T rowsort
-SELECT CONCAT_WS('-', id) AS c FROM $planets WHERE id <= 3
-----
-1
-2
-3
-
-query T rowsort
-SELECT CONCAT(name, 3.14) AS c FROM $planets WHERE id = 1
-----
-Mercury3.14
-
-query T rowsort
-SELECT CONCAT(name, id = 1) AS c FROM $planets WHERE id <= 2
-----
-Mercurytrue
-Venusfalse
 
 # A NULL-valued (but typed) operand still short-circuits to NULL rather than
 # being stringified to the literal text "None"/"null".

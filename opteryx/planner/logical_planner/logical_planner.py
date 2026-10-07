@@ -1981,6 +1981,55 @@ def _rebase_over_aggregate(tree, names: dict, skipped: set, passthrough: set, me
     return tree
 
 
+def _refuse_ungrouped_select_expression(projection: list, groups: list, window_outputs: set) -> None:
+    """Refuse a SELECT expression that a grouped row has no single value for.
+
+    Every SELECT item over a GROUP BY must be, or be built only from, group keys,
+    aggregates and literals. An item that equals a key's rendering is that key
+    (`GROUP BY LEFT(name, 1)` serves `SELECT LEFT(name, 1)`); otherwise it is walked, and
+    any column reached that is not itself a key is ungrouped. `SELECT LEFT(name, 2) ...
+    GROUP BY LEFT(name, 1)` reaches `name`, which is not a key: the grouping dropped it,
+    and the compiler would be asked to recompute `LEFT(name, 2)` from a column the
+    aggregate no longer carries.
+    """
+    _key_renderings = {format_expression(_key).lower() for _key in groups}
+    # A bare identifier naming a SELECT alias resolves against the Project's own output
+    # (`COUNT(*) AS c, c + c`), so it is not a column of the grouped source.
+    _aliases = {(_column.alias or "").lower() for _column in projection if _column.alias}
+    _key_columns = [
+        ((_key.source_column or "").lower(), _key.source)
+        for _key in groups
+        if _key.node_type == NodeType.IDENTIFIER
+    ]
+
+    def _walk(_node):
+        if _node.node_type in (NodeType.AGGREGATOR, NodeType.LITERAL):
+            return
+        if format_expression(_node).lower() in _key_renderings:
+            return
+        if _node.node_type == NodeType.IDENTIFIER:
+            _name = (_node.source_column or "").lower()
+            if _name in window_outputs or _name in _aliases:
+                return
+            if any(
+                _name == _key_name and (_source is None or _node.source is None or _source == _node.source)
+                for _key_name, _source in _key_columns
+            ):
+                return
+            from opteryx.exceptions import SqlError
+
+            raise SqlError(
+                f"Column {md_code(format_expression(_node))} must appear in the **GROUP BY** clause "
+                "or must be part of an aggregate function. Either add it to the **GROUP BY** list, "
+                f"or add an aggregation such as `MIN({format_expression(_node)})`."
+            )
+        for _child in _node.children():
+            _walk(_child)
+
+    for _column in projection:
+        _walk(_column)
+
+
 def _group_by_all_keys(projection: list, window_outputs: set) -> list:
     """The keys `GROUP BY ALL` stands for — every projection expression that is neither
     an aggregate nor a window's output.
@@ -3177,6 +3226,8 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         # which aren't aggregates
         if _groups == NodeType.WILDCARD:
             _groups = _group_by_all_keys(_projection, _window_output_aliases)
+
+        _refuse_ungrouped_select_expression(_projection, _groups, _window_output_aliases)
 
         group_step = AggregateAndGroupStep()
         group_step.groups = _groups

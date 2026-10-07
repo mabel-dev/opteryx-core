@@ -3416,6 +3416,56 @@ cdef str _footer_type_rejection(path, size_t rg_i, const string& name, str kind,
             f"type '{logical.decode('utf-8', 'replace')}', which do not decode as '{kind}'")
 
 
+cdef str _footer_declared_mismatch(path, size_t rg_i, const string& name, str declared,
+                                   const string& physical, const string& logical):
+    """The footer gate's refusal for a column chunk that decodes, but not as the type
+    the relation DECLARES — a file written at another integer width or decimal
+    precision/scale than its schema. Reading it would misdecode it, not convert it."""
+    return (f"column '{name.decode('utf-8', 'replace')}' is declared {declared.upper()} but "
+            f"{path} row group {rg_i} stores it as physical type "
+            f"'{physical.decode('utf-8', 'replace')}', logical type "
+            f"'{logical.decode('utf-8', 'replace')}', which the scan cannot read as "
+            f"{declared.upper()}")
+
+
+cdef bint _int_ladder_position(const string& token, int* ladder, int* rank):
+    """(ladder, rank) of an integer footer/declared token: ladder 0 signed, 1 unsigned;
+    rank 0..3 by byte width. False for anything that is not a plain integer token."""
+    if token == b"int8":
+        ladder[0] = 0; rank[0] = 0
+    elif token == b"int16":
+        ladder[0] = 0; rank[0] = 1
+    elif token == b"int32":
+        ladder[0] = 0; rank[0] = 2
+    elif token == b"int64":
+        ladder[0] = 0; rank[0] = 3
+    elif token == b"uint8":
+        ladder[0] = 1; rank[0] = 0
+    elif token == b"uint16":
+        ladder[0] = 1; rank[0] = 1
+    elif token == b"uint32":
+        ladder[0] = 1; rank[0] = 2
+    elif token == b"uint64":
+        ladder[0] = 1; rank[0] = 3
+    else:
+        return False
+    return True
+
+
+cdef bint _int_file_reads_as_declared(const string& stored, const string& declared):
+    """Whether a file integer of width `stored` reads as the `declared` width: equal,
+    or a ladder widening the native Source applies (NativeParquetScanSource::
+    is_ladder_widening, opteryx `is_legal_widen` — the ALTER COLUMN ... TYPE policy).
+    A WIDER file is never admitted: nothing on the scan narrows, and the Source
+    emits a column it cannot widen exactly as decoded."""
+    cdef int fl, fr, tl, tr
+    if not _int_ladder_position(stored, &fl, &fr) or not _int_ladder_position(declared, &tl, &tr):
+        return False
+    if fl == tl:
+        return tr >= fr
+    return fl == 1 and tl == 0 and tr > fr
+
+
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=None,
                                 filesystem=None, footer_bytes_cache=None, dict absent=None):
     """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
@@ -3438,6 +3488,13 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     of its projected indices, set only for a file lacking at least one — for a Source
     that fills it with NULL. Every row group of the file must agree on what it lacks.
     Without ``absent`` a missing column is refused, for the callers that cannot fill.
+
+    A kind may be qualified with the type the relation DECLARES, ``family:declared``
+    ("int:int8", "decimal64:decimal(3,1)"), and then a file that stores the column
+    as anything else is refused, naming both types: a wider integer than declared
+    (a narrower one is admitted — the Source widens it), or any other decimal
+    precision/scale. DECIMAL kinds must be qualified; a bare "int" (TIME, IPv4)
+    checks the integer family only.
 
     ``expected_kinds[i]`` pairs with ``column_names[i]`` and is one of "int"
     (every integer width and signedness, plus parquet TIME), "float32",
@@ -3513,6 +3570,9 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     cdef string s_array = b"array<"
     cdef vector[string] wanted
     cdef list kinds = []
+    cdef list declared_types = []
+    cdef vector[string] declared
+    cdef string stored_int
     cdef dict orig_to_cpp
     cdef str fetch_url
 
@@ -3524,11 +3584,17 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     for k in range(ncols):
         name = column_names[k]
         wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
-        kind = expected_kinds[k]
+        kind, _, declared_type = expected_kinds[k].partition(":")
         if kind not in ("int", "float32", "float64", "varchar", "bool",
                         "decimal64", "decimal128", "date", "timestamp", "array"):
             return f"column '{name}' has kind '{kind}', which the native scan has no decoder for"
+        if declared_type and kind not in ("int", "decimal64", "decimal128"):
+            return f"column '{name}' has kind '{expected_kinds[k]}', which cannot carry a declared type"
+        if not declared_type and (kind == "decimal64" or kind == "decimal128"):
+            return f"column '{name}' has kind '{kind}' with no declared precision and scale"
         kinds.append(kind)
+        declared_types.append(declared_type)
+        declared.push_back(<string>(<str>declared_type).encode("utf-8"))
 
     # Transport eligibility, before any footer work: local, or remote-and-signable.
     # An unsignable remote path fails the gate — the pipeline's libcurl fetches carry
@@ -3629,6 +3695,15 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                                 csp.logical_type != s_uint32 and csp.logical_type != s_uint64 and \
                                 csp.logical_type.find(s_time) != 0:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
+                        if declared[<size_t>k].size() != 0:
+                            # The stored width: the IntType annotation, else the
+                            # physical width (bare, or TIME — which decodes as it).
+                            if csp.logical_type.size() != 0 and csp.logical_type.find(s_time) != 0:
+                                stored_int = csp.logical_type
+                            else:
+                                stored_int = csp.physical_type
+                            if not _int_file_reads_as_declared(stored_int, declared[<size_t>k]):
+                                return _footer_declared_mismatch(path, rg_i, wanted[<size_t>k], declared_types[k], csp.physical_type, csp.logical_type)
                     elif kind == "float32":
                         if csp.physical_type != s_float32:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
@@ -3712,9 +3787,17 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                         # WP-11: DECIMAL — rugo footer logical "decimal(p,s)". p≤18 is
                         # int64-backed (DK_POOL, decimal64); p>18 is int128 (DK_DECIMAL128,
                         # decimal128). The classifier already split them by the schema's
-                        # physical type; the gate only confirms the column IS a decimal.
+                        # physical type. Neither path rescales: the int64-backed one
+                        # attaches the DECLARED precision/scale to whatever the file
+                        # holds, and the int128 one attaches the FILE's, so a column
+                        # across two files would carry two descriptors (and two
+                        # widths, when one file is int64-backed) — garbage, including
+                        # in rows of the files that do match. So the file's decimal
+                        # must BE the declared one.
                         if csp.logical_type.find(s_decimal) != 0:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
+                        if csp.logical_type != declared[<size_t>k]:
+                            return _footer_declared_mismatch(path, rg_i, wanted[<size_t>k], declared_types[k], csp.physical_type, csp.logical_type)
                     else:  # float64
                         if csp.physical_type != s_float64:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)

@@ -209,6 +209,7 @@ q:
 	@$(PYTEST) tests/unit/operators/test_native_scan_residual_gate.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_is_json.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
+	@$(PYTEST) tests/integration/test_row_identity_native_scan_local.py -q
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
@@ -1092,7 +1093,7 @@ SLT_ROOT     := tests/tools/sqllogictest/tests
 # Use the binary on PATH if available, otherwise fall back to the sibling checkout.
 SQLLOGICTEST ?= $(shell command -v sqllogictest 2>/dev/null || echo ../sqllogictest/target/release/sqllogictest)
 
-.PHONY: slt slt-shapes slt-results slt-run-only slt-install
+.PHONY: slt slt-shapes slt-results slt-run-only slt-regressions slt-install
 
 slt-install: ## Install sqllogictest binary from mabel-dev fork
 	cargo install sqllogictest-bin \
@@ -1117,4 +1118,16 @@ slt-run-only: ## Run execute-only slt tests (no result checks)
 	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
 	  '$(SLT_ROOT)/run_only/*.slt'
 
-slt: slt-shapes slt-results slt-run-only ## Run the full sqllogictest suite
+slt-regressions: ## Run result-checking slt regression tests (one file per fixed bug)
+	$(SQLLOGICTEST) \
+	  --engine external \
+	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  '$(SLT_ROOT)/regressions/*.slt'
+
+slt: ## Run the full sqllogictest suite (every group runs; fails if any group failed)
+	@status=0; \
+	$(MAKE) --no-print-directory slt-shapes || status=1; \
+	$(MAKE) --no-print-directory slt-results || status=1; \
+	$(MAKE) --no-print-directory slt-run-only || status=1; \
+	$(MAKE) --no-print-directory slt-regressions || status=1; \
+	exit $$status

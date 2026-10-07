@@ -169,28 +169,28 @@ statement ok
 SELECT NOT FALSE
 
 
-statement error NotSupportedError
+statement ok
 SELECT APPROX_PERCENTILE(id, 0.5) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT AVG(id) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT COUNT(id) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT COUNT_DISTINCT(id) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT COUNT(DISTINCT id) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT MAX(id) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT MIN(id) FROM $planets GROUP BY TRUE
 
-statement error NotSupportedError
+statement ok
 SELECT SUM(id) FROM $planets GROUP BY TRUE
 
 
@@ -222,10 +222,10 @@ SELECT COUNT(*), SUM(id) FROM $planets
 
 
 # [712]
-statement error NotSupportedError
+statement ok
 SELECT SUM(14) FROM $planets GROUP BY FALSE
 
-statement error NotSupportedError
+statement ok
 SELECT COUNT(14) FROM $planets GROUP BY FALSE
 
 statement ok

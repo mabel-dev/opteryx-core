@@ -1,0 +1,5 @@
+{
+    "summary": "GROUP BY a constant with no aggregate over zero rows yields zero groups",
+    "statement": "SELECT 1 AS k FROM $planets WHERE id > 100 GROUP BY 1",
+    "result": {"k": []}
+}

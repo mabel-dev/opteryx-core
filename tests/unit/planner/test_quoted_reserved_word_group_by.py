@@ -79,9 +79,26 @@ def test_genuine_literal_group_by_still_one_group():
     assert _run("SELECT 'x' k, COUNT(*) c FROM $planets GROUP BY 'x'") == [("x", 9)]
 
 
+def test_literal_group_by_over_empty_input_is_zero_groups():
+    # GROUP BY over zero rows yields zero groups; only an ungrouped aggregate
+    # yields its one row of COUNT()=0.
+    assert _run("SELECT 1 k, COUNT(*) c FROM $planets WHERE id > 100 GROUP BY 1") == []
+    assert _run("SELECT 'x' k, COUNT(*) c FROM $planets WHERE id > 100 GROUP BY 'x'") == []
+    assert _run("SELECT COUNT(*) c FROM $planets WHERE id > 100") == [(0,)]
+
+
+def test_literal_group_by_without_aggregate():
+    # Pointless but valid SQL: one group, the constant, and none for no rows.
+    assert _run("SELECT 1 k FROM $planets GROUP BY 1") == [(1,)]
+    assert _run("SELECT 'x' k FROM $planets GROUP BY 'x'") == [("x",)]
+    assert _run("SELECT 1 k FROM $planets WHERE id > 100 GROUP BY 1") == []
+
+
 if __name__ == "__main__":  # pragma: no cover
     test_group_by_double_quoted_reserved_word()
     test_double_quoted_reserved_word_matches_backtick_identifier()
     test_double_quoted_compound_identifier_resolves()
     test_genuine_literal_group_by_still_one_group()
+    test_literal_group_by_over_empty_input_is_zero_groups()
+    test_literal_group_by_without_aggregate()
     print("✅ okay")

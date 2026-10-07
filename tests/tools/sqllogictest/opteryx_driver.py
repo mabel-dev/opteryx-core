@@ -60,6 +60,24 @@ def _create_ws_connector(**kwargs):
 
 register_workspace("ws", _create_ws_connector)
 
+# A second scratch workspace, ``cat``, on the PRODUCTION write path: OpteryxConnector
+# over opteryx_catalog's real datasets (manifests, snapshots, merge-on-read delete
+# vectors, merge/compaction commits), with only the metastore replaced by memory and
+# storage by this process's temp directory (tests/tools/local_catalog.py). MERGE,
+# UPDATE, DELETE, OPTIMIZE and VERSION AS OF are tested here; ``ws``
+# (LocalStoreConnector) supports none of them the way production runs them.
+# Its catalog writes would each emit an audit record; nothing here reads them, and
+# on stderr they interleave with the runner's own report.
+os.environ.setdefault("OPTERYX_CATALOG_AUDIT", "0")
+sys.path.insert(1, os.path.join(_REPO_ROOT, "tests", "tools"))
+from local_catalog import local_catalog_class  # noqa: E402
+
+from opteryx.connectors import OpteryxConnector  # noqa: E402
+
+register_workspace(
+    "cat", OpteryxConnector, catalog=local_catalog_class(os.path.join(_WS_ROOT, "cat"))
+)
+
 
 def _format_cell(value: Any) -> str:
     """Format a single result cell per sqllogictest conventions.
@@ -140,7 +158,9 @@ def _iter_json_values(stream):
 def _new_session():
     # Membership "Apollo 11" unlocks visibility-filtered datasets like
     # ``testdata.astronauts``; matches what the Python shape harness uses.
-    return opteryx.session(memberships=["Apollo 11", "opteryx"])
+    # A named user: catalog writes on the ``cat`` workspace are attributed, and the
+    # real catalog refuses an unattributed create/commit.
+    return opteryx.session(user="slt", memberships=["Apollo 11", "opteryx"])
 
 
 # A statement whose body is exactly this marker tells the driver to discard
@@ -151,8 +171,13 @@ SESSION_RESET_MARKER = "/* @@opteryx-driver: reset-session */"
 
 
 def main() -> int:
-    session = _new_session()
+    # stdout is the protocol channel to the runner and carries ONLY its JSON
+    # responses. Everything else that writes to sys.stdout - the catalog's audit and
+    # alert records, any stray print - goes to stderr, or it lands between
+    # responses and misaligns every answer after it.
     out = sys.stdout
+    sys.stdout = sys.stderr
+    session = _new_session()
 
     for message in _iter_json_values(sys.stdin.buffer):
         sql = message.get("sql", "") if isinstance(message, dict) else ""

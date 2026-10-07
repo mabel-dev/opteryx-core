@@ -44,41 +44,14 @@ TARGET = f"{WORKSPACE}.col.tgt"
 SOURCE = f"{WORKSPACE}.col.src"
 
 
-class _LocalDiskIO:
-    """Catalog-side FileIO over absolute local paths."""
-
-    class _In:
-        def __init__(self, path):
-            self._path = path
-
-        def open(self):
-            return open(self._path, "rb")
-
-    class _Out:
-        def __init__(self, path):
-            self._path = path
-            self._chunks = []
-
-        def create(self):
-            return self
-
-        def write(self, data):
-            self._chunks.append(data)
-
-        def close(self):
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
-            with open(self._path, "wb") as f:
-                for chunk in self._chunks:
-                    f.write(chunk)
-
-    def new_input(self, path):
-        return self._In(path)
-
-    def new_output(self, path):
-        return self._Out(path)
+# The shared local-disk catalog stack (tests/tools/local_catalog.py) - the same one the
+# SLT driver's `cat` workspace uses, so the two cannot drift. `_LocalDiskIO` stays as
+# a name other modules import.
+from tests.tools.local_catalog import LocalDiskIO as _LocalDiskIO  # noqa: E402
+from tests.tools.local_catalog import local_catalog_class  # noqa: E402
 
 
-def _build_dataset(location, identifier, columns, rows, disk_io, **write_options):
+def _build_dataset(location, identifier, columns, rows, disk_io, catalog=None, **write_options):
     """A real SimpleDataset on local disk holding one data file (`write_options` go to
     write_parquet)."""
     from draken.interop.vector_sequence import vector_from_sequence
@@ -107,17 +80,10 @@ def _build_dataset(location, identifier, columns, rows, disk_io, **write_options
         data, path, len(data), field_id_by_name=field_ids
     ).to_dict()
 
-    class _ManifestWriterCatalog:
-        io = disk_io
-        write_parquet_manifest = OpteryxCatalog.write_parquet_manifest
-
-        def save_snapshot(self, identifier, snapshot):
-            pass
-
-        def save_dataset_metadata(self, identifier, metadata, **kwargs):
-            pass
-
-    writer_catalog = _ManifestWriterCatalog()
+    # The catalog the dataset commits through: the env's own (shared-helper) catalog
+    # when given, else a standalone one over the same disk.
+    writer_catalog = catalog if catalog is not None else local_catalog_class(location, disk_io)(
+        workspace=WORKSPACE)
     snapshot_id = 1000
     manifest_path = writer_catalog.write_parquet_manifest(snapshot_id, [entry], location)
 
@@ -195,27 +161,9 @@ def merge_env(tmp_path):
     )
     datasets = {"col.tgt": target, "col.src": source, "col.dup": dup_source}
 
-    class _FakeCatalog:
-        def __init__(self, workspace=None, **kwargs):
-            self.workspace = workspace
-            self.io = disk_io
-
-        def dataset_exists(self, identifier):
-            return identifier in datasets
-
-        def load_dataset(self, identifier):
-            if identifier not in datasets:
-                raise KeyError(identifier)
-            return datasets[identifier]
-
-        # No vector index here: writes build no sync index files.
-        def list_vector_indexes(self, identifier):
-            return []
-
-        def get_relation(self, identifier):
-            if identifier in datasets:
-                return "dataset", datasets[identifier]
-            return None, None
+    catalog = local_catalog_class(str(tmp_path), disk_io)
+    for identifier, dataset in datasets.items():
+        catalog.store[f"{WORKSPACE}.{identifier}"] = dataset
 
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)
@@ -223,7 +171,7 @@ def merge_env(tmp_path):
     connectors._storage_prefixes.pop(WORKSPACE, None)
     connectors._connector_cache.clear()
 
-    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    opteryx.set_default_connector(OpteryxConnector, catalog=catalog)
     try:
         yield datasets
     finally:
@@ -666,32 +614,16 @@ def test_a_null_join_key_lands_in_the_right_population(tmp_path):
     )
     datasets = {"col.tgt": target, "col.src": source}
 
-    class _FakeCatalog:
-        # No vector index here: writes build no sync index files.
-        def list_vector_indexes(self, identifier):
-            return []
-
-        def __init__(self, workspace=None, **kwargs):
-            self.workspace = workspace
-            self.io = disk_io
-
-        def dataset_exists(self, identifier):
-            return identifier in datasets
-
-        def load_dataset(self, identifier):
-            return datasets[identifier]
-
-        def get_relation(self, identifier):
-            if identifier in datasets:
-                return "dataset", datasets[identifier]
-            return None, None
+    catalog = local_catalog_class(str(tmp_path), disk_io)
+    for identifier, dataset in datasets.items():
+        catalog.store[f"{WORKSPACE}.{identifier}"] = dataset
 
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
     connectors._storage_prefixes.pop(WORKSPACE, None)
     connectors._connector_cache.clear()
-    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    opteryx.set_default_connector(OpteryxConnector, catalog=catalog)
     try:
         list(opteryx.session(user="tester").execute_to_morsels(_SYNC))
         # `_target_rows` sorts, and a NULL key cannot be ordered against an int.
@@ -745,32 +677,16 @@ def test_merge_scales_past_the_removed_row_cap(tmp_path):
     )
     datasets = {"col.tgt": target, "col.src": source}
 
-    class _FakeCatalog:
-        # No vector index here: writes build no sync index files.
-        def list_vector_indexes(self, identifier):
-            return []
-
-        def __init__(self, workspace=None, **kwargs):
-            self.workspace = workspace
-            self.io = disk_io
-
-        def dataset_exists(self, identifier):
-            return identifier in datasets
-
-        def load_dataset(self, identifier):
-            return datasets[identifier]
-
-        def get_relation(self, identifier):
-            if identifier in datasets:
-                return "dataset", datasets[identifier]
-            return None, None
+    catalog = local_catalog_class(str(tmp_path), disk_io)
+    for identifier, dataset in datasets.items():
+        catalog.store[f"{WORKSPACE}.{identifier}"] = dataset
 
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
     connectors._storage_prefixes.pop(WORKSPACE, None)
     connectors._connector_cache.clear()
-    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    opteryx.set_default_connector(OpteryxConnector, catalog=catalog)
     try:
         list(opteryx.session(user="tester").execute_to_morsels(_UPSERT))
         snap = target.snapshot(None)
@@ -873,32 +789,16 @@ def test_composite_on_key(tmp_path):
     )
     datasets = {"col.tgt": target, "col.src": source}
 
-    class _FakeCatalog:
-        # No vector index here: writes build no sync index files.
-        def list_vector_indexes(self, identifier):
-            return []
-
-        def __init__(self, workspace=None, **kwargs):
-            self.workspace = workspace
-            self.io = disk_io
-
-        def dataset_exists(self, identifier):
-            return identifier in datasets
-
-        def load_dataset(self, identifier):
-            return datasets[identifier]
-
-        def get_relation(self, identifier):
-            if identifier in datasets:
-                return "dataset", datasets[identifier]
-            return None, None
+    catalog = local_catalog_class(str(tmp_path), disk_io)
+    for identifier, dataset in datasets.items():
+        catalog.store[f"{WORKSPACE}.{identifier}"] = dataset
 
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
     connectors._storage_prefixes.pop(WORKSPACE, None)
     connectors._connector_cache.clear()
-    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    opteryx.set_default_connector(OpteryxConnector, catalog=catalog)
     try:
         list(opteryx.session(user="tester").execute_to_morsels(f"""
             MERGE INTO {TARGET} AS n

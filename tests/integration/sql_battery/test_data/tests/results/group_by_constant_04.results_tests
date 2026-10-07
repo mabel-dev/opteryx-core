@@ -1,0 +1,5 @@
+{
+    "summary": "GROUP BY a constant with no aggregate: one group over all rows",
+    "statement": "SELECT 1 AS k FROM $planets GROUP BY 1",
+    "result": {"k": [1]}
+}

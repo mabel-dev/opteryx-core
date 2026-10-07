@@ -628,7 +628,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_pipeline_dop(size_t p, int dop)
         void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
         void set_queue_sink(size_t p, shared_ptr[MorselQueue] q)
-        void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf, cppvector[AggSeed] seed)
+        void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf, cppvector[AggSeed] seed,
+                          bint zero_key_group)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
                               cppvector[string] key_names,
                               cppvector[uint8_t] key_emit,
@@ -3060,14 +3061,17 @@ cdef class NativePlan:
     def set_queue_sink(self, size_t p, PyMorselQueue q):
         self._e.set_queue_sink(p, q._q)
 
-    def set_agg_sink(self, size_t p, list specs, size_t buf, list seed=None):
+    def set_agg_sink(self, size_t p, list specs, size_t buf, list seed, bint zero_key_group):
         """``specs`` = [(identity, fn:'CountStar'|'Count'|'Sum'|'Avg'|'Min'|'Max',
         operand col_idx | -1), ...] in output-column order.
 
         ``seed`` (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): None, or one entry
         per spec - None for a spec with nothing covered, else the covered row
         groups' partial ``(rows, valid, sum, any_extreme, min, max, operand
-        DrakenType)``, merged by the sink as if those rows had been sunk."""
+        DrakenType)``, merged by the sink as if those rows had been sunk.
+
+        ``zero_key_group``: a GROUP BY whose keys were all constants - one group
+        over every row, so zero input rows emit zero rows (never with a seed)."""
         cdef cppvector[AggSeed] seeds
         if seed is not None:
             if len(seed) != len(specs):
@@ -3085,7 +3089,7 @@ cdef class NativePlan:
                     <bint>any_extreme, <int64_t?>low, <int64_t?>high,
                     # COUNT(*) has no operand: its type is never read
                     0 if operand_type is None else <int?>operand_type))
-        self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf, seeds)
+        self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf, seeds, zero_key_group)
 
     def set_groupby_sink(self, size_t p, list key_idx, list key_names, list key_emit,
                          list specs, size_t buf, int64_t ndv_estimate):

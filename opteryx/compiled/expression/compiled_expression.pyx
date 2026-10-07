@@ -29,6 +29,7 @@ import draken.draken_native as _draken_native
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import InvalidFunctionParameterError
+from opteryx.exceptions import NotSupportedError
 
 import datetime as _datetime
 import decimal as _decimal
@@ -755,7 +756,7 @@ def _build_in_list_blob(values, left_type, int negate):
         # with count=0 is "matches nothing" (negate=True → "matches everything").
         in_range = [v for v in vals if 0 <= v <= 0xFFFFFFFFFFFFFFFF]
         return _pack_membership_blob(in_range, 3, negate)
-    if phys in ("VARCHAR", "NVARCHAR") and all(
+    if phys in ("VARCHAR", "NVARCHAR", "VARBINARY") and all(
             isinstance(v, (str, bytes)) for v in vals):
         return _pack_membership_blob(vals, 1, negate)
     if phys == "FLOAT64" and all(
@@ -2812,6 +2813,13 @@ cdef Py_ssize_t _linearize(
             _dp_sc = <object>node.parameters[_dp_operand].schema_column
             _dp_ct = (_dp_sc.column_type if _dp_sc is not None else None)
             _dp_phys = (_dp_ct.physical.name if _dp_ct is not None else "")
+            if _dp_phys == "DATE32" and _dp_part >= 5:
+                # HOUR/MINUTE/SECOND (part ids 5-7): a DATE has no sub-day
+                # resolution. Refused here rather than at kernel run time.
+                raise InvalidFunctionParameterError(
+                    "EXTRACT sub-day parts (hour, minute, second) require a TIMESTAMP "
+                    "operand; a DATE has no time-of-day."
+                )
             if _dp_phys in ("DATE32", "TIMESTAMP64"):
                 _dp_unit = 0
                 if _dp_phys == "TIMESTAMP64" and _dp_ct.logical is not None:
@@ -3376,13 +3384,13 @@ cdef Py_ssize_t _linearize(
                 source_phys_name, cast_target_type, cast_params, unit=cast_unit,
                 safe=cast_is_try, source_is_ipv4=source_is_ipv4
             )
-        except (NotImplementedError, ValueError) as e:
-            # `resolve_cast`'s refusals already name the pair they refused, so this
-            # only normalises the exception type — prepending the pair a second time
-            # produced "Unsupported CAST: DECIMAL → DATE: No native CAST DECIMAL →
-            # DATE", which said the same thing twice and named an internal component
-            # in between.
-            raise ValueError(str(e))
+        except NotImplementedError as e:
+            # A cast the engine refuses is NOT SUPPORTED — say so with the typed
+            # error, not a bare ValueError that reads as a defect. `resolve_cast`'s
+            # refusals already name the pair they refused, so the message is passed
+            # through untouched: prepending the pair a second time produced
+            # "Unsupported CAST: DECIMAL → DATE: No native CAST DECIMAL → DATE".
+            raise NotSupportedError(str(e))
 
         slot = bc._push_instr()
         slot.opcode = BC_CAST

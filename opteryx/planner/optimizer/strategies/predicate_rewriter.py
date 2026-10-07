@@ -2052,6 +2052,29 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
             # native kernel as a raw, unnormalised Eq.
             return _rewrite_predicate(predicate, telemetry, plan_context=plan_context)
 
+    # `INTERVAL '7' DAY < end - start` is `end - start > INTERVAL '7' DAY`. Put the
+    # subtraction on the left so reorder_interval_calc below sees it: left unflipped
+    # it compared INTERVAL with INTERVAL natively, which no kernel does, and died at
+    # execution as "BC_COMPARE fast path declined".
+    if (
+        predicate.node_type == NodeType.COMPARISON_OPERATOR
+        and predicate.value in _FLIP_OP
+        and predicate.left.node_type == NodeType.LITERAL
+        and predicate.right.node_type == NodeType.BINARY_OPERATOR
+        and predicate.right.value == "Minus"
+    ):
+        _dt_left = determine_type(predicate.left)
+        _dt_right = determine_type(predicate.right)
+        if (
+            _dt_left is not None and _dt_left.category == LogicalCategory.INTERVAL
+            and _dt_right is not None and _dt_right.category == LogicalCategory.INTERVAL
+        ):
+            predicate = predicate.replace(
+                value=_FLIP_OP[predicate.value],
+                left=predicate.right,
+                right=predicate.left,
+            )
+
     if (
         predicate.node_type == NodeType.COMPARISON_OPERATOR
         and predicate.left.node_type == NodeType.BINARY_OPERATOR

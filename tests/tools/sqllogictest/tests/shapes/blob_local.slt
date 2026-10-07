@@ -49,10 +49,10 @@ query shape 2 20
 SELECT * FROM testdata.planets WHERE id > gravity
 
 query shape 4 20
-SELECT * FROM testdata.planets WHERE surfacePressure IS NULL
+SELECT * FROM testdata.planets WHERE surface_pressure IS NULL
 
 query shape 5 20
-SELECT * FROM testdata.planets WHERE surfacePressure IS NOT NULL
+SELECT * FROM testdata.planets WHERE surface_pressure IS NOT NULL
 
 query shape 67 28
 SELECT * FROM testdata.planets, testdata.satellites WHERE testdata.planets.id = 5 AND testdata.satellites.planetId = 5
@@ -64,4 +64,4 @@ query shape 1416 28
 SELECT * FROM testdata.planets, testdata.satellites WHERE testdata.planets.id - testdata.satellites.planetId != 0
 
 query shape 4 20
-SELECT * FROM testdata.planets WHERE testdata.planets.id - testdata.planets.numberOfMoons < 0
+SELECT * FROM testdata.planets WHERE testdata.planets.id - testdata.planets.number_of_moons < 0

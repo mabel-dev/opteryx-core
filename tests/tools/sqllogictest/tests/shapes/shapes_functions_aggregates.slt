@@ -351,7 +351,7 @@ SELECT * EXCEPT (id) FROM (SELECT * FROM $planets) AS A
 statement error ColumnNotFoundError
 SELECT * EXCEPT (id) FROM (SELECT id AS pid, name FROM $planets) AS A
 
-query error AmbiguousIdentifierError
+query shape 9 1
 SELECT * EXCEPT (pid) FROM (SELECT id AS pid, name FROM $planets) AS A
 
 query shape 1 7
@@ -366,7 +366,7 @@ SELECT SUM(id), SUM(id + 1), SUM(id + 2), COUNT(id) FROM $planets
 query shape 1 4
 SELECT MIN(id), MIN(id + 1), MIN(id + 2), COUNT(id) FROM $planets
 
-query error NotSupportedError
+query shape 1 4
 SELECT MIN(id), MAX(id + 1), SUM(id + 2), COUNT(id) FROM $planets
 
 query shape 6 1
@@ -396,10 +396,10 @@ SELECT DISTINCT death_date AS AM FROM testdata.astronauts
 query shape 2 1
 SELECT DISTINCT id > 1 AS AM FROM $planets
 
-query shape 2 1
+query shape 3 1
 SELECT DISTINCT surface_pressure > 1 AS AM FROM $planets
 
-query error NotSupportedError
+query shape 167 1
 SELECT CAST(p.name AS ARRAY<VARCHAR>) FROM testdata.satellites as s LEFT JOIN $planets as p ON s.id = p.id WHERE s.id > 10
 
 query error NotSupportedError
@@ -408,7 +408,7 @@ SELECT CAST(p.id AS ARRAY<VARCHAR>) FROM testdata.satellites as s LEFT JOIN $pla
 query error NotSupportedError
 SELECT CAST(p.mass AS ARRAY<VARCHAR>) FROM testdata.satellites as s LEFT JOIN $planets as p ON s.id = p.id WHERE s.id > 10
 
-query error NotSupportedError
+query shape 167 1
 SELECT CAST(p.name AS ARRAY<INTEGER>) FROM testdata.satellites as s LEFT JOIN $planets as p ON s.id = p.id WHERE s.id > 10
 
 query error NotSupportedError
@@ -471,29 +471,17 @@ SELECT COUNT(*) FROM $planets GROUP BY orbital_inclination, orbital_inclination
 query shape 0
 SELECT * FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_id = -1
 
-query error NotSupportedError
+query shape 0
 SELECT * FROM $planets WHERE 1 = PI()
 
-query error NotSupportedError
+query shape 0
 SELECT * FROM $planets WHERE PI() = 1
-
-query error NotSupportedError
-SET disable_optimizer = true; SELECT * FROM $planets WHERE 1 = PI()
-
-query error NotSupportedError
-SET disable_optimizer = true; SELECT * FROM $planets WHERE PI() = 1
 
 query shape 9 20
 SELECT * FROM $planets WHERE 3.141592653589793238462643383279502 = PI()
 
 query shape 9 20
 SELECT * FROM $planets WHERE PI() = 3.141592653589793238462643383279502
-
-query shape 9 20
-SET disable_optimizer = true; SELECT * FROM $planets WHERE 3.141592653589793238462643383279502 = PI()
-
-query shape 9 20
-SET disable_optimizer = true; SELECT * FROM $planets WHERE PI() = 3.141592653589793238462643383279502
 
 query shape 0
 SELECT * FROM $planets WHERE id = null

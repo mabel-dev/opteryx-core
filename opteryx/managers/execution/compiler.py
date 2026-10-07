@@ -2468,7 +2468,7 @@ class _Compiler:
                     request, partials = covered
                     seed = _coverage_seed_partials(request, partials, specs)
             buf = self.nplan.new_buffer()
-            self.nplan.set_agg_sink(p, specs, buf, seed)
+            self.nplan.set_agg_sink(p, specs, buf, seed, False)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = [spec[0] for spec in specs]
@@ -2480,7 +2480,9 @@ class _Compiler:
             # that holds a single group into that group's seed.
             scan_identity = None
             coverage_keys = None
-            if self.statistics_coverage_enabled and len(in_edges) == 1:
+            # A zero-key GROUP BY (every key a pruned constant) takes no seed: its
+            # sink must SEE a row to know the one group exists (see below).
+            if self.statistics_coverage_enabled and len(in_edges) == 1 and node.step.groups:
                 child = self.plan[in_edges[0][0]]
                 if child.is_scan:
                     coverage_keys = _coverage_group_keys(node.step)
@@ -2500,7 +2502,29 @@ class _Compiler:
             group_cols = _group_by_identities(step)
             having = step.having_condition
             if not group_cols:
-                _unsupported("a GROUP BY with no keys")
+                # Every GROUP BY key was a constant, pruned by the aggregate binder:
+                # ONE group over all rows. The ungrouped sink computes it; its
+                # zero-key flag makes empty input emit zero rows (the GROUP BY rule),
+                # not one. The constant key column is projected above, as written.
+                if step.grouping_set_identities is not None:
+                    _unsupported("a GROUP BY ROLLUP/CUBE/GROUPING SETS over only constants")
+                raw_aggs = step.aggregates or []
+                layout = self._project_agg_operands(p, raw_aggs, layout)
+                # No aggregates (`SELECT 1 k FROM t GROUP BY 1`): the sink still
+                # emits the one group as a zero-column row, or nothing for no rows.
+                specs = (self._parse_aggregates(raw_aggs, layout, grouped=False)
+                         if raw_aggs else [])
+                buf = self.nplan.new_buffer()
+                self.nplan.set_agg_sink(p, specs, buf, None, True)
+                p2 = self.nplan.new_pipeline()
+                self.nplan.set_buffer_source(p2, buf)
+                out_layout = [spec[0] for spec in specs]
+                # Not a hash GROUP BY sink: registered unarmed, top-k fusion has
+                # nothing to cut in a single group.
+                self._groupby_sinks[node.identity] = (
+                    p, [], [], False, frozenset(out_layout))
+                self._apply_having(p2, having, out_layout)
+                return p2, out_layout
             # GROUP BY over a computed key (SUBSTRING(...), REGEXP_REPLACE(...)):
             # project the key expression to a stream column first, then group on it.
             computed_keys = []
@@ -3362,10 +3386,16 @@ class _Compiler:
                 # otherwise fail the scan closed as non-admissible. The native
                 # Source decodes each width exactly (DK_INT8/16/32, DK_UINT8/16/32/64)
                 # and the "int" footer gate admits the whole int/uint logical family.
-                kinds.append("int")
+                # A plain integer is qualified with its DECLARED width ("int:int8"):
+                # the gate admits a file stored at that width or narrower (the
+                # Source widens it, `widen_types`) and refuses a wider one, which
+                # nothing here can narrow. TIME and IPv4 (descriptor-carrying, no
+                # widen target) stay bare.
+                widen = _widen_target(sc, pt)
+                kinds.append(f"int:{pt.name.lower()}" if widen else "int")
                 string_types.append(0)
                 decimal_columns.append(0)
-                widen_types.append(_widen_target(sc, pt))
+                widen_types.append(widen)
                 logical_coerce.append(_ipv4_coerce(sc, pt))
             elif pt == DrakenType.FLOAT32:
                 kinds.append("float32")
@@ -3418,6 +3448,15 @@ class _Compiler:
                 # is_int64_decimal, packed) — None here means the logical descriptor
                 # was missing/out-of-range, so fail the scan closed (below).
                 kind_str, is_int64_decimal, packed = coerce
+                if pt in (DrakenType.DECIMAL, DrakenType.DECIMAL128):
+                    # The footer gate admits only files whose decimal is EXACTLY
+                    # the declared one: neither decimal path rescales, so another
+                    # precision/scale would be read under the declared descriptor
+                    # (int64-backed) or mix descriptors in one column (int128).
+                    lg = sc.column_type.logical
+                    if lg is None or lg.precision is None or lg.scale is None:
+                        return kinds, string_types, decimal_columns, logical_coerce, widen_types, pt.name
+                    kind_str = f"{kind_str}:decimal({int(lg.precision)},{int(lg.scale)})"
                 kinds.append(kind_str)
                 string_types.append(0)
                 widen_types.append(0)
@@ -6873,6 +6912,13 @@ def compile_to_native(plan, pool=None):
     p, layout = compiler.compile_node(in_edges[0][0])
     nplan.set_current_identity(exit_node.identity)  # exit select + queue sink
     nplan.set_current_display_name(exit_node.kind)
+
+    # A write sink's Exit carries a CAST to the target's declared type where the
+    # source column's type differs (binder relation._conform_written_columns).
+    computed = [column for column in exit_node.columns
+                if column.node_type != NodeType.IDENTIFIER]
+    if computed:
+        layout = compiler._add_computed(p, computed, layout)
 
     # Exit semantics: select the output columns (identities) in order, renamed to
     # their output names (aliases).

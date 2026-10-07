@@ -1,0 +1,67 @@
+# GROUP BY whose only keys are constants (2026-10-06).
+#
+# The aggregate binder prunes literal GROUP BY keys, including a positional key
+# that resolves to a constant SELECT item. The resulting zero-key grouping was
+# refused ("a GROUP BY with no keys"). It is ONE group over every row - and, as a
+# GROUP BY, ZERO groups over zero rows (unlike an ungrouped aggregate's one row).
+
+# positional key resolving to a constant
+query II
+SELECT 1 AS k, COUNT(*) AS c FROM $planets GROUP BY 1
+----
+1 9
+
+# string literal key
+query TI
+SELECT 'x' AS k, COUNT(*) AS c FROM $planets GROUP BY 'x'
+----
+x 9
+
+# the constant is not the first SELECT item
+query II
+SELECT COUNT(*) AS c, 1 AS k FROM $planets GROUP BY 2
+----
+9 1
+
+# empty input: zero groups
+query II
+SELECT 1 AS k, COUNT(*) AS c FROM $planets WHERE id > 100 GROUP BY 1
+----
+
+# ...whereas an ungrouped aggregate over empty input is one row
+query I
+SELECT COUNT(*) AS c FROM $planets WHERE id > 100
+----
+0
+
+# HAVING keeps the group
+query IIT
+SELECT 1 AS k, SUM(id) AS s, MAX(name) AS m FROM $planets GROUP BY 1 HAVING SUM(id) > 10
+----
+1 45 Venus
+
+# HAVING removes the group
+query II
+SELECT 1 AS k, SUM(id) AS s FROM $planets GROUP BY 1 HAVING SUM(id) > 1000
+----
+
+# no aggregate at all: still one group
+query I
+SELECT 1 AS k FROM $planets GROUP BY 1
+----
+1
+
+query T
+SELECT 'x' AS k FROM $planets GROUP BY 'x'
+----
+x
+
+query IT
+SELECT 1 AS k, 'y' AS j FROM $planets GROUP BY 1, 2
+----
+1 y
+
+# no aggregate, empty input: zero groups
+query I
+SELECT 1 AS k FROM $planets WHERE id > 100 GROUP BY 1
+----

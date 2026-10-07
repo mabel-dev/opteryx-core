@@ -1449,9 +1449,13 @@ public:
         out_q = std::move(q);
     }
     // `seed`: empty, or one AggSeed per spec - the planner's statistics seed (P3).
-    void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf, std::vector<AggSeed> seed = {}) {
+    // `zero_key_group`: a GROUP BY whose keys were all constants - zero input rows
+    // emit zero rows (see UngroupedAggSink).
+    void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf,
+                      std::vector<AggSeed> seed, bool zero_key_group) {
         set_sink_(p,
-            std::make_unique<UngroupedAggSink>(std::move(specs), sink_buffer_(buf), std::move(seed)));
+            std::make_unique<UngroupedAggSink>(std::move(specs), sink_buffer_(buf),
+                                               std::move(seed), zero_key_group));
     }
     // `key_emit` has one entry per key_idx entry: false = the key is hashed to
     // separate the groups but its values are never stored or emitted.

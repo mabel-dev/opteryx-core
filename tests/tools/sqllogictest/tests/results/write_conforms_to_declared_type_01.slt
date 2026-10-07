@@ -1,0 +1,156 @@
+# Writes store the type the target column DECLARES, not the source expression's.
+#
+# On the catalog-backed `cat` workspace (the production write path). INSERT ... SELECT,
+# MERGE (both arms) and UPDATE checked only the type CATEGORY, so `gravity + 1`
+# (DECIMAL(21,1)) was written into a DECIMAL(3,1) column and `moons + 1` (INT64) into
+# an INT8 one. The scan decoded each file at its own type: DECIMAL rows from the
+# ORIGINAL file read back as garbage, INT rows read as 0, and OPTIMIZE refused the
+# table ("concat: all inputs must share one type"). Every value is read back after
+# every write, and OPTIMIZE runs over the mixed history at the end.
+
+# ---- DECIMAL(3,1) target, DECIMAL(21,1) source ------------------------------------
+
+statement ok
+CREATE TABLE cat.wt.d AS SELECT id, gravity FROM $planets WHERE id <= 3
+
+statement ok
+INSERT INTO cat.wt.d SELECT id, gravity + 1 AS gravity FROM $planets WHERE id = 4
+
+query IR
+SELECT id, gravity FROM cat.wt.d ORDER BY id
+----
+1 3.700
+2 8.900
+3 9.800
+4 4.700
+
+statement ok
+CREATE TABLE cat.wt.ds AS SELECT id, gravity + 1 AS gravity FROM $planets WHERE id IN (3, 5)
+
+# MATCHED arm updates Earth from a DECIMAL(21,1) source; NOT MATCHED arm inserts Jupiter.
+statement ok
+MERGE INTO cat.wt.d AS t USING cat.wt.ds AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET gravity = s.gravity WHEN NOT MATCHED THEN INSERT (id, gravity) VALUES (s.id, s.gravity)
+
+query IR
+SELECT id, gravity FROM cat.wt.d ORDER BY id
+----
+1 3.700
+2 8.900
+3 10.800
+4 4.700
+5 24.100
+
+statement ok
+UPDATE cat.wt.d SET gravity = gravity + 1 WHERE id = 1
+
+query IR
+SELECT id, gravity FROM cat.wt.d ORDER BY id
+----
+1 4.700
+2 8.900
+3 10.800
+4 4.700
+5 24.100
+
+# A value DECIMAL(3,1) cannot hold fails the statement; nothing is committed.
+statement error (?s).*overflows DECIMAL\(3, 1\).*
+INSERT INTO cat.wt.d SELECT id, gravity * 100 AS gravity FROM $planets WHERE id = 6
+
+# More decimal places than the declared scale is refused, never rounded.
+statement error (?s).*more decimal places than the declared scale.*
+INSERT INTO cat.wt.d SELECT id, gravity / 3 AS gravity FROM $planets WHERE id = 4
+
+statement ok
+OPTIMIZE TABLE cat.wt.d
+
+query IR
+SELECT id, gravity FROM cat.wt.d ORDER BY id
+----
+1 4.700
+2 8.900
+3 10.800
+4 4.700
+5 24.100
+
+query TTTT
+SHOW COLUMNS FROM cat.wt.d
+----
+id INT8 1 []
+gravity DECIMAL(3, 1) 1 []
+
+# ---- INT8 / INT16 / INT32 targets, INT64 sources ----------------------------------
+
+statement ok
+CREATE TABLE cat.wt.i AS SELECT id, number_of_moons AS m8, CAST(number_of_moons AS INT16) AS m16, CAST(number_of_moons AS INT32) AS m32 FROM $planets WHERE id <= 6
+
+# Every source column is INT64 (arithmetic and integer literals).
+statement ok
+INSERT INTO cat.wt.i SELECT id, number_of_moons + 0 AS m8, number_of_moons + 1000 AS m16, number_of_moons + 100000 AS m32 FROM $planets WHERE id = 7
+
+statement ok
+INSERT INTO cat.wt.i SELECT 10 AS id, 5 AS m8, 5 AS m16, 5 AS m32
+
+query IIII
+SELECT id, m8, m16, m32 FROM cat.wt.i ORDER BY id
+----
+1 0 0 0
+2 0 0 0
+3 1 1 1
+4 2 2 2
+5 79 79 79
+6 82 82 82
+7 27 1027 100027
+10 5 5 5
+
+statement ok
+CREATE TABLE cat.wt.is AS SELECT id, number_of_moons + 1 AS m FROM $planets WHERE id IN (4, 8, 9)
+
+# MATCHED arm updates Mars; NOT MATCHED arm inserts Neptune and Pluto - all from INT64.
+statement ok
+MERGE INTO cat.wt.i AS t USING cat.wt.is AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET m8 = s.m, m16 = s.m, m32 = s.m WHEN NOT MATCHED THEN INSERT (id, m8, m16, m32) VALUES (s.id, s.m, s.m, s.m)
+
+statement ok
+UPDATE cat.wt.i SET m8 = m8 + 1, m16 = m16 + 1, m32 = m32 + 1 WHERE id = 7
+
+query IIII
+SELECT id, m8, m16, m32 FROM cat.wt.i ORDER BY id
+----
+1 0 0 0
+2 0 0 0
+3 1 1 1
+4 3 3 3
+5 79 79 79
+6 82 82 82
+7 28 1028 100028
+8 15 15 15
+9 6 6 6
+10 5 5 5
+
+# Out of range for the declared width fails the statement; nothing is committed.
+statement error (?s).*out of range for int8_t.*
+INSERT INTO cat.wt.i SELECT 11 AS id, 300 AS m8, 1 AS m16, 1 AS m32
+
+statement error (?s).*out of range for int16_t.*
+UPDATE cat.wt.i SET m16 = 40000 WHERE id = 1
+
+statement ok
+OPTIMIZE TABLE cat.wt.i
+
+query IIII
+SELECT id, m8, m16, m32 FROM cat.wt.i ORDER BY id
+----
+1 0 0 0
+2 0 0 0
+3 1 1 1
+4 3 3 3
+5 79 79 79
+6 82 82 82
+7 28 1028 100028
+8 15 15 15
+9 6 6 6
+10 5 5 5
+
+query IIII
+SELECT SUM(m8), SUM(m16), SUM(m32), COUNT(*) FROM cat.wt.i
+----
+219 1219 100219 10

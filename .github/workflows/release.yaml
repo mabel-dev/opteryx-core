@@ -19,12 +19,14 @@ jobs:
   # publishing wheels, with only the post-build import check standing between a
   # broken tree and PyPI.
   #
-  # The four suites are the sanctioned local floor from the engineering
+  # The five suites are the sanctioned local floor from the engineering
   # contract, run here exactly as a developer runs them:
-  #   make q   — minimum SQL regression battery (shapes)
+  #   make q   — minimum SQL regression battery (shapes) + row-identity writes
   #   make rt  — rugo unit tests
   #   make dt  — draken unit tests
   #   make st  — skene native C++ suite + Python binding/scan/dispatch tests
+  #   make slt — sqllogictest suite, incl. MERGE/UPDATE/DELETE/OPTIMIZE on the
+  #              catalog-backed `cat` workspace (tests/tools/local_catalog.py)
   #
   # None of them need cloud credentials, so these jobs need no secrets.
   #
@@ -157,6 +159,8 @@ jobs:
             name: make dt — draken unit tests
           - target: st
             name: make st — skene native suite + Python bindings
+          - target: slt
+            name: make slt — sqllogictest suite (incl. catalog-backed writes)
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -172,13 +176,40 @@ jobs:
           allow-prereleases: true
 
       # Runtime libssl/libcrypto only — the extensions link them dynamically.
-      # No Rust, no cython, no setuptools-rust: these jobs never compile.
+      # No cython, no setuptools-rust: these jobs never compile the engine. (The
+      # slt leg alone installs Rust, to build its sqllogictest runner - below.)
       # Preinstalled on the ubuntu-24.04 image; asserted, not installed, so a
       # flaking azure.archive.ubuntu.com mirror cannot hang the job.
       - name: Verify system packages
         run: |
           dpkg -s libssl-dev pkg-config > /dev/null
           pkg-config --exists openssl
+
+      # `make slt` drives the external sqllogictest-rs runner, a Rust binary - the one
+      # thing a floor leg builds rather than restores. Same build and cache key as the
+      # nightly sqllogictest workflow, so a warm cache makes this a no-op.
+      - name: Install Rust toolchain (slt only)
+        if: matrix.target == 'slt'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache sqllogictest build (slt only)
+        if: matrix.target == 'slt'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/sqllogictest
+          key: sqllogictest-${{ runner.os }}-${{ hashFiles('.github/workflows/sqllogictest.yaml') }}
+
+      - name: Build sqllogictest binary (slt only)
+        if: matrix.target == 'slt'
+        run: |
+          if ! command -v sqllogictest &>/dev/null; then
+            cargo install sqllogictest-bin \
+              --git https://github.com/mabel-dev/sqllogictest \
+              --locked
+          fi
 
       - name: Install requirements
         run: |
@@ -202,6 +233,14 @@ jobs:
       # this step and surfaced as a mid-suite ModuleNotFoundError instead.
       - name: Verify the compiled tree imports
         run: python -c "import draken, rugo, skene, opteryx; print(opteryx.__version__)"
+
+      # `make q` runs the catalog-backed MERGE/UPDATE/DELETE/OPTIMIZE tests
+      # (test_row_identity_native_scan_local.py), which skip themselves without
+      # opteryx_catalog. A skip must never be how the floor passes: 0.9.155 shipped
+      # refusing every MERGE because these tests never ran before a release.
+      - name: Verify opteryx_catalog is installed
+        run: |
+          python -c "import opteryx_catalog, importlib.metadata as m; print('opteryx-catalog', m.version('opteryx-catalog'))"
 
       - name: ${{ matrix.name }}
         run: make ${{ matrix.target }}

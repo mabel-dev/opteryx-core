@@ -183,7 +183,7 @@ SELECT s.planetId, p.avg_mass FROM testdata.satellites s JOIN (SELECT id, AVG(ma
 statement ok
 SELECT p.name || ' - ' || s.name AS planet_satellite FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId
 
-statement error InvalidInternalStateError
+statement error NotSupportedError
 SELECT * FROM $planets p JOIN (SELECT DISTINCT planetId FROM testdata.satellites WHERE albedo > 0.5) s ON p.id = s.planetId
 
 statement ok

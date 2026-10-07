@@ -1,0 +1,5 @@
+{
+    "summary": "GROUP BY a string literal: one group over all rows",
+    "statement": "SELECT 'x' AS k, COUNT(*) AS c FROM $planets GROUP BY 'x'",
+    "result": {"k": ["x"], "c": [9]}
+}

@@ -45,50 +45,11 @@ ROWS_PER_SEED_FILE = 120_000
 SEED_FILES = 3
 
 
-class _LocalDiskIO:
-    """Catalog-side FileIO over absolute local paths, counting reads."""
-
-    def __init__(self):
-        self.reads = []
-
-    class _In:
-        def __init__(self, path):
-            self._path = path
-
-        def open(self):
-            return open(self._path, "rb")
-
-    class _Out:
-        def __init__(self, path):
-            self._path = path
-            self._chunks = []
-            self.aborted = False
-
-        def create(self):
-            return self
-
-        def write(self, data):
-            self._chunks.append(bytes(data))
-
-        def close(self):
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
-            with open(self._path, "wb") as f:
-                for chunk in self._chunks:
-                    f.write(chunk)
-
-        def abort(self):
-            self.aborted = True
-            self._chunks = []
-
-    def new_input(self, path):
-        self.reads.append(path)
-        return self._In(path)
-
-    def new_output(self, path):
-        return self._Out(path)
-
-    def delete(self, path):
-        os.remove(path)
+# The shared local-disk catalog stack (tests/tools/local_catalog.py) - the same one the
+# SLT driver's `cat` workspace uses, so the two cannot drift. `_LocalDiskIO` stays as
+# a name other modules import.
+from tests.tools.local_catalog import LocalDiskIO as _LocalDiskIO  # noqa: E402
+from tests.tools.local_catalog import local_catalog_class  # noqa: E402
 
 
 def _build_dataset(location, identifier, disk_io):
@@ -123,17 +84,7 @@ def _build_dataset(location, identifier, disk_io):
             ).to_dict()
         )
 
-    class _ManifestWriterCatalog:
-        io = disk_io
-        write_parquet_manifest = OpteryxCatalog.write_parquet_manifest
-
-        def save_snapshot(self, identifier, snapshot):
-            pass
-
-        def save_dataset_metadata(self, identifier, metadata, **kwargs):
-            pass
-
-    writer_catalog = _ManifestWriterCatalog()
+    writer_catalog = local_catalog_class(location, disk_io)(workspace=WORKSPACE)
     snapshot_id = 1000
     manifest_path = writer_catalog.write_parquet_manifest(snapshot_id, entries, location)
 
@@ -175,47 +126,10 @@ def optimize_env(tmp_path):
     disk_io = _LocalDiskIO()
     target = _build_dataset(str(tmp_path / "tgt"), "col.tgt", disk_io)
     datasets = {"col.tgt": target}
-    leases: dict = {}
 
-    class _FakeCatalog:
-        def __init__(self, workspace=None, **kwargs):
-            self.workspace = workspace
-            self.io = disk_io
-
-        def dataset_exists(self, identifier):
-            return identifier in datasets
-
-        def load_dataset(self, identifier):
-            if identifier not in datasets:
-                raise KeyError(identifier)
-            return datasets[identifier]
-
-        def get_relation(self, identifier):
-            if identifier in datasets:
-                return "dataset", datasets[identifier]
-            return None, None
-
-        # The table has no vector index, so OPTIMIZE plans without row origins.
-        def list_vector_indexes(self, identifier):
-            return []
-
-        # Every compaction holds the maintenance lease (§5.7); its rules are the
-        # catalog's own, tested there. One claim per dataset here.
-        def claim_maintenance_lease(self, identifier, *, holder, operation, ttl_seconds):
-            from opteryx_catalog.catalog.maintenance_lease import MaintenanceLease
-
-            assert identifier not in leases, f"{identifier} already leased"
-            leases[identifier] = MaintenanceLease(
-                dataset=identifier, claim_id="c", holder=holder, operation=operation,
-                claimed_at_ms=1, expires_at_ms=1 + ttl_seconds * 1000,
-            )
-            return leases[identifier]
-
-        def renew_maintenance_lease(self, lease, *, ttl_seconds):
-            return lease
-
-        def release_maintenance_lease(self, lease):
-            return leases.pop(lease.dataset, None) is lease
+    catalog = local_catalog_class(str(tmp_path), disk_io)
+    for identifier, dataset in datasets.items():
+        catalog.store[f"{WORKSPACE}.{identifier}"] = dataset
 
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)
@@ -223,7 +137,7 @@ def optimize_env(tmp_path):
     connectors._storage_prefixes.pop(WORKSPACE, None)
     connectors._connector_cache.clear()
 
-    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    opteryx.set_default_connector(OpteryxConnector, catalog=catalog)
     try:
         yield target, disk_io
     finally:

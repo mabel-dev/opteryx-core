@@ -213,7 +213,7 @@ SELECT b'apple' ILIKE b'a%ple'
 statement error UnsupportedSyntaxError
 SELECT BLOB('apple') RLIKE 'a%ple'
 
-statement error SqlError
+statement ok
 SELECT b'apple' RLIKE b'a%ple'
 
 
@@ -764,22 +764,22 @@ SELECT CAST(BLOB('hello world') AS VARCHAR) RLIKE 'hello.*world'
 
 
 # EXTRACT returns different typed values depending on the input
-statement error NotSupportedError
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(CENTURY FROM birth_date) <= 15
 
-statement error NotSupportedError
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DECADE FROM birth_date) <= 15
 
-statement error NotSupportedError
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoyear FROM birth_date) < 1900
 
 statement ok
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1900
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DOY FROM birth_date) > 100
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(dayofyear FROM birth_date) > 100
 
 statement ok
@@ -788,25 +788,25 @@ SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(QUARTER FROM birth_date
 statement ok
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MONTH FROM birth_date) = 1
 
-statement error NotSupportedError
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(week FROM birth_date) = 1
 
-statement error NotSupportedError
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoweek FROM birth_date) = 1
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DOW FROM birth_date) = 0
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(dayofweek FROM birth_date) < 5
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(HOUR FROM birth_date) <= 15
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MINUTE FROM birth_date) <= 15
 
-statement ok
+statement error InvalidFunctionParameterError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(SECOND FROM birth_date) <= 15
 
 statement error InvalidFunctionParameterError

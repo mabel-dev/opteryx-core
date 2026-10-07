@@ -99,7 +99,7 @@ false
 true
 
 query I rowsort
-SELECT * FROM (VALUES ('true'), ('false'), (NULL)) AS tristatebooleans(bool) WHERE NOT bool = "true"
+SELECT * FROM (VALUES ('true'), ('false'), (NULL)) AS tristatebooleans(bool) WHERE NOT bool = 'true'
 ----
 false
 
@@ -189,12 +189,12 @@ SELECT SUM(val) FROM (VALUES (1), (2), (NULL)) AS test(val)
 query I rowsort
 SELECT AVG(val) FROM (VALUES (1.0), (3.0), (NULL)) AS test(val)
 ----
-0.571
+2.000
 
 query I rowsort
 SELECT COUNT(DISTINCT val) FROM (VALUES (1), (1), (NULL), (NULL)) AS test(val)
 ----
-2
+1
 
 # COUNT(DISTINCT *): whole-row identity, NOT COUNT(DISTINCT col)'s per-column
 # NULL exclusion — NULL is a normal value here. (1,'a') collapses to one row,

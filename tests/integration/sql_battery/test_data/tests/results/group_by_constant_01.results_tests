@@ -1,0 +1,5 @@
+{
+    "summary": "GROUP BY a positional constant: the pruned key leaves one group over all rows",
+    "statement": "SELECT 1 AS k, COUNT(*) AS c FROM $planets GROUP BY 1",
+    "result": {"k": [1], "c": [9]}
+}

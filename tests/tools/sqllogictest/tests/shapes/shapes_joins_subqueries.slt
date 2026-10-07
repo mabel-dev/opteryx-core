@@ -186,7 +186,7 @@ SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships)
 
 # REGEXP_REPLACE with a non-'\1' replacement is not natively supported (the RE2
 # runtime matcher was removed; only whole-match capture -> _DFA_EXTRACT remains).
-query error NotSupportedError
+query error InvalidFunctionParameterError
 SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'
 
 query shape 9 2
@@ -573,7 +573,7 @@ statement error UnsupportedSyntaxError
 SELECT p.name FROM $planets p WHERE p.number_of_moons < (SELECT AVG(p2.number_of_moons) FROM $planets p2 WHERE p2.orbital_period > p.orbital_period)
 
 # an uncorrelated subquery that could return many rows must not silently multiply
-statement error UnsupportedSyntaxError
+statement error DataError
 SELECT name FROM $planets WHERE gravity = (SELECT gravity FROM $planets)
 
 # --- EXISTS / NOT EXISTS ---------------------------------------------------

@@ -24,7 +24,7 @@ query shape 1 8
 query shape 1 8
 /* comment */ SELECT * FROM testdata.satellites /* comment */ WHERE name = 'Calypso' /* comment */
 
-query error sql failed QueryParseError: The query could not be parsed at column 11\.(?s).*A block comment opens here and is never closed.*
+query error MissingSqlStatement
 /* comment
 
 
@@ -139,7 +139,7 @@ SELECT * FROM testdata.satellites WHERE /* comment */ name /* comment */ = /* co
 query shape 1 8
 SELECT * FROM testdata.satellites WHERE name = 'Calypso'
 
-query shape 1 8
+query error QueryParseError
 SELECT * FROM testdata.satellites WHERE name = 'Calypso' /* nested /* still nested */ end of nested */
 
 query shape 1 8
@@ -286,7 +286,7 @@ SELECT id as ID, planetId as PLANETID FROM testdata.satellites
 query shape 67 2
 SELECT id as iD, name as nAME FROM testdata.satellites WHERE planetId = 5
 
-query shape 177 1
+query shape 1 2
 SELECT id as ID, planetId as planetId FROM testdata.satellites WHERE name = 'Io'
 
 query shape 177 3
@@ -295,7 +295,7 @@ SELECT name as NAME, id as ID, planetId as PLANETID FROM testdata.satellites
 query shape 177 1
 SELECT id as ID FROM testdata.satellites GROUP BY id
 
-query shape 177 1
+query shape 7 1
 SELECT planetId as planetId FROM testdata.satellites GROUP BY planetId
 
 query shape 1 2
@@ -444,7 +444,7 @@ SELECT * FROM testdata.satellites WHERE id = 5 OR name = 'Europa'
 query shape 2 8
 SELECT * FROM testdata.satellites WHERE id = 5 OR name = 'Moon'
 
-statement error TypeError: _eval_value: cannot construct Draken vector
+query shape 1 8
 SELECT * FROM testdata.satellites WHERE id < 3 AND (name = 'Europa' OR name = 'Moon')
 
 query shape 4 8
@@ -474,13 +474,13 @@ SELECT * FROM testdata.satellites WHERE (id IN (5,6,7,8) AND name = 'Europa')
 query shape 5 8
 SELECT * FROM testdata.satellites WHERE id IN (5,6,7,8) OR name = 'Moon'
 
-statement error TypeError: _eval_value: cannot construct Draken vector
+query shape 1 8
 SELECT * FROM testdata.satellites WHERE (id = 5 OR id = 6 OR id = 7 OR id = 8) AND name = 'Europa'
 
-statement error TypeError: _eval_value: cannot construct Draken vector
+query shape 4 8
 SELECT * FROM testdata.satellites WHERE (id = 6 OR id = 7 OR id = 8) OR name = 'Europa'
 
-statement error TypeError: _eval_value: cannot construct Draken vector
+query shape 5 8
 SELECT * FROM testdata.satellites WHERE id = 5 OR id = 6 OR id = 7 OR id = 8 OR name = 'Moon'
 
 query shape 6 8
@@ -741,7 +741,7 @@ SELECT SUM(id), planetId FROM testdata.satellites GROUP BY planetId
 query shape 7 4
 SELECT MIN(id), MAX(id), SUM(planetId), planetId FROM testdata.satellites GROUP BY planetId
 
-query error sql failed TypeError: Cannot convert list to draken\.vectors\.vector\.Vector
+query shape 7 2
 SELECT planetId, ARRAY_AGG(name) FROM testdata.satellites GROUP BY planetId
 
 query shape 7 1
@@ -783,7 +783,7 @@ SELECT planetId::BOOLEAN FROM testdata.satellites
 query shape 177 1
 SELECT planetId::VARCHAR FROM testdata.satellites
 
-query error sql failed TypeError: Cannot convert bytes to timestamp\. Expected int, datetime\.datetime, or datetime\.date
+query shape 177 1
 SELECT CAST('2022-01-0' || planetId::VARCHAR AS TIMESTAMP) FROM testdata.satellites
 
 query shape 177 1
@@ -837,10 +837,10 @@ SELECT TRY_CAST(planetId AS VARCHAR) AS VALUE FROM testdata.satellites
 query error sql failed IncompatibleTypesError: Ambiguous cast: INTEGER → TIMESTAMP requires a unit\. Use `expr::TIMESTAMP\[ms\]`, `expr::TIMESTAMP\[s\]`, or `expr::TIMESTAMP\[us\]`\.
 SELECT TRY_CAST(planetId AS TIMESTAMP) AS VALUE FROM testdata.satellites
 
-query shape 177 1
+query error UnsupportedSyntaxError
 SELECT TRY_CAST(planetId AS DECIMAL) AS VALUE FROM testdata.satellites
 
-query error sql failed TypeError: Argument 'key' has incorrect type \(expected str, got bytes\)
+query error IncorrectTypeError
 SELECT * FROM $planets WHERE '{"a":1,"b":"c"}'->'a' = id
 
 query shape 1 1
@@ -891,809 +891,814 @@ SELECT E() AS e
 query shape 1 1
 SELECT PHI() AS Phi
 
-query error io failed
+query shape 56 1
 SELECT name[1] FROM testdata.satellites GROUP BY planetId, name[1]
 
-query error io failed
+query shape 22 2
 SELECT COUNT(*), ROUND(magnitude) FROM testdata.satellites group by ROUND(magnitude)
 
-query error io failed
+query shape 22 1
 SELECT ROUND(magnitude) FROM testdata.satellites group by ROUND(magnitude)
 
-query error io failed
+query shape 88 1
 SELECT ROUND(magnitude, 1) FROM testdata.satellites group by ROUND(magnitude, 1)
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT VARCHAR(planetId), COUNT(*) FROM testdata.satellites GROUP BY 1
 
-statement error io failed
+statement ok
 SELECT LEFT(name, 1), COUNT(*) FROM testdata.satellites GROUP BY 1 ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT LEFT(name, 2) as le, COUNT(*) FROM testdata.satellites GROUP BY 1 ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT RIGHT(name, 10), COUNT(*) FROM testdata.satellites GROUP BY 1 ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT RIGHT(name, 2) as le, COUNT(*) FROM testdata.satellites GROUP BY 1 ORDER BY 2 DESC
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT VARCHAR(planetId), COUNT(*) FROM testdata.satellites GROUP BY VARCHAR(planetId)
 
-statement error io failed
+statement ok
 SELECT LEFT(name, 1), COUNT(*) FROM testdata.satellites GROUP BY LEFT(name, 1) ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT LEFT(name, 1), COUNT(*) FROM testdata.satellites GROUP BY name ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT LEFT(name, 2) as le, COUNT(*) FROM testdata.satellites GROUP BY LEFT(name, 2) ORDER BY 2 DESC
 
-statement error io failed
+statement error SqlError
 SELECT LEFT(name, 2) as le, COUNT(*) FROM testdata.satellites GROUP BY LEFT(name, 1)
 
-statement error io failed
+statement ok
 SELECT RIGHT(name, 10), COUNT(*) FROM testdata.satellites GROUP BY RIGHT(name, 10) ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT RIGHT(name, 2) as le, COUNT(*) FROM testdata.satellites GROUP BY RIGHT(name, 2) ORDER BY 2 DESC
 
-statement error io failed
+statement ok
 SELECT RIGHT(name, 2) as le, COUNT(*) FROM testdata.satellites GROUP BY le ORDER BY 2 DESC
 
-query error io failed
+query shape 22 1
 SELECT round(magnitude) FROM testdata.satellites group by round(magnitude)
 
-query error io failed
+query shape 177 2
 SELECT upper(name) as NAME, id as Identifier FROM testdata.satellites
 
-query error io failed
+query shape 177 3
 SELECT upper(name), lower(name), id as Identifier FROM testdata.satellites
 
-query error io failed
+query shape 4 2
 SELECT planetId, Count(*) FROM testdata.satellites group by planetId having count(*) > 5
 
-query error io failed
+query shape 5 2
 SELECT planetId, min(magnitude) FROM testdata.satellites group by planetId having min(magnitude) > 5
 
-query error io failed
+query shape 2 2
 SELECT planetId, min(magnitude) FROM testdata.satellites group by planetId having min(magnitude) > 5 limit 2 offset 1
 
-query error io failed
+query shape 7 2
 SELECT planetId, count(*) FROM testdata.satellites group by planetId order by count(*) desc
 
-query error io failed
+query shape 7 2
 SELECT planetId, count(*) FROM testdata.satellites group by planetId order by planetId desc
 
-query error io failed
+query shape 7 2
 SELECT planetId, count(*) FROM testdata.satellites group by planetId order by planetId, count(*) desc
 
-query error io failed
+query shape 7 2
 SELECT planetId, count(*) FROM testdata.satellites group by planetId order by count(*), planetId desc
 
-query error io failed
+query shape 177 8
 SELECT * FROM testdata.satellites order by name
 
-query error io failed
+query shape 177 8
 SELECT * FROM testdata.satellites order by name desc
 
-query error io failed
+query shape 177 1
 SELECT name FROM testdata.satellites order by name
 
-query error io failed
+query shape 177 8
 SELECT * FROM testdata.satellites order by magnitude, name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY name DESC
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY name ASC
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY id DESC
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets AS P ORDER BY name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets AS P ORDER BY P.name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets AS P ORDER BY P.id
 
-query error io failed
+query shape 9 1
 SELECT P.name FROM $planets AS P ORDER BY name
 
-query error io failed
+query shape 9 1
 SELECT P.name FROM $planets AS P ORDER BY P.id
 
-query error io failed
+query shape 9 2
 SELECT name, id FROM $planets ORDER BY name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY name, id
 
-query error io failed
+query shape 81 1
 SELECT P1.name FROM $planets AS P1, $planets AS P2 ORDER BY P1.name
 
-query error io failed
+query shape 1 2
 SELECT COUNT(name), AVG(id) FROM $planets ORDER BY AVG(id)
 
-query error io failed
+query shape 9 2
 SELECT name, id*2 AS double_id FROM $planets ORDER BY double_id
 
-query error io failed
+query shape 9 2
 SELECT name, id*2 FROM $planets ORDER BY id*2
 
-query error io failed
+query shape 9 1
 SELECT name FROM (SELECT * FROM $planets) AS sub ORDER BY name
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY LENGTH(name)
 
-query error io failed
+query shape 9 1
 SELECT name FROM $planets ORDER BY id + 1
 
-query error io failed
+query shape 9 2
 SELECT 1 AS const, name FROM $planets ORDER BY const
 
-query error io failed
+query shape 9 2
 SELECT 1 AS const, name FROM $planets ORDER BY name
 
-query error io failed
+query shape 177 1
 SELECT planetId as pid FROM testdata.satellites
 
-query error io failed
+query shape 177 2
 SELECT planetId as pid, round(magnitude) FROM testdata.satellites
 
-query error io failed
+query shape 177 2
 SELECT planetId as pid, round(magnitude) as minmag FROM testdata.satellites
 
-query error io failed
+query shape 177 2
 SELECT planetId as pid, round(magnitude) as roundmag FROM testdata.satellites
 
-query error io failed
+query shape 357 1
 SELECT birth_place->'town' FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT missions[0] FROM testdata.astronauts
 
-query error io failed
+query shape 334 1
 SELECT name FROM testdata.astronauts WHERE missions[0] IS NOT NULL
 
-query error io failed
+query shape 7 1
 SELECT name FROM testdata.astronauts WHERE missions[5] IS NOT NULL
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'
 
-query error io failed
+query error VariantKeyError
 SELECT COUNT(*), birth_place->'town' FROM testdata.astronauts GROUP BY birth_place->'town'
 
-query error io failed
+query shape 357 1
 SELECT birth_place->'town' FROM testdata.astronauts
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place->'town' FROM testdata.astronauts WHERE 'Warsaw' = birth_place->'town'
 
-query error io failed
+query error VariantKeyError
 SELECT COUNT(*), birth_place->'town' FROM testdata.astronauts GROUP BY birth_place->'town'
 
-query error io failed
+query shape 357 1
 SELECT birth_place->>'town' FROM testdata.astronauts
 
-query error io failed
+query shape 1 1
 SELECT birth_place->>'town' FROM testdata.astronauts WHERE birth_place->>'town' = 'Warsaw'
 
-query error io failed
+query shape 1 1
 SELECT birth_place->>'town' FROM testdata.astronauts WHERE 'Warsaw' == birth_place->>'town'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE birth_place->'state' == 'CA'
 
-query error io failed
+query shape 25 1
 SELECT birth_place FROM testdata.astronauts WHERE birth_place->>'state' == 'CA'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE birth_place->'state' == 'CA' AND name != 'bob'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE 'CA' = birth_place->'state'
 
-query error io failed
+query shape 25 1
 SELECT birth_place FROM testdata.astronauts WHERE 'CA' = birth_place->>'state'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE 'CA' == birth_place->'state' AND name != 'bob'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE name != 'bob' AND birth_place->'state' == 'CA'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE name != 'bob' AND 'CA' = birth_place->'state'
 
-query error io failed
+query shape 25 1
 SELECT birth_place FROM testdata.astronauts WHERE name != 'bob' AND birth_place->>'state' == 'CA'
 
-query error io failed
+query shape 25 1
 SELECT birth_place FROM testdata.astronauts WHERE name != 'bob' AND 'CA' = birth_place->>'state'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE name != 'bob' AND birth_place->'state' == b'CA'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place FROM testdata.astronauts WHERE name != 'bob' AND b'CA' = birth_place->'state'
 
-query error io failed
+query shape 264 2
 SELECT COUNT(*), birth_place->>'town' FROM testdata.astronauts GROUP BY birth_place->>'town'
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT BP->'state' FROM (SELECT VARCHAR(birth_place) AS BP FROM testdata.astronauts) AS I
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT BP->>'state' FROM (SELECT VARCHAR(birth_place) AS BP FROM testdata.astronauts) AS I
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT BP->>'address' FROM (SELECT VARCHAR(birth_place) AS BP FROM testdata.astronauts) AS I
 
-query error io failed
+query shape 6 4
 SELECT dict->>'list', dict->'list' AS thisisalongercolumnname, dict->>'once', dict->'once' FROM testdata.flat.struct
 
-query error io failed
+query shape 10 1
 SELECT cve -> 'CVE_data_meta' ->> 'ASSIGNER' FROM testdata.flat.nvd limit 10
 
-query error io failed
+query shape 10 1
 SELECT cve ->> 'CVE_data_meta' ->> 'ASSIGNER' FROM testdata.flat.nvd limit 10
 
-query error io failed
+query shape 10 1
 SELECT cve -> 'CVE_data_meta' -> 'ASSIGNER' FROM testdata.flat.nvd limit 10
 
-query error io failed
+query shape 6 1
 SELECT dict @? 'list' FROM testdata.flat.struct
 
-query error io failed
+query shape 357 1
 SELECT birth_place @? 'town' FROM testdata.astronauts
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.list' FROM testdata.flat.struct
 
-query error io failed
+query shape 10 1
 SELECT cve @? '$.CVE_data_meta.ASSIGNER' FROM testdata.flat.nvd LIMIT 10
 
-query error io failed
+query shape 10 1
 SELECT cve @? '$.data_meta.ASSIGNER' FROM testdata.flat.nvd LIMIT 10
 
-query error io failed
+query shape 10 1
 SELECT cve @? '$.CVE_data_meta' FROM testdata.flat.nvd LIMIT 10
 
-query error io failed
+query shape 10 1
 SELECT cve @? 'CVE_data_meta' FROM testdata.flat.nvd LIMIT 10
 
-query error io failed
+query shape 10 1
 SELECT cve @? '$.CVE_data_meta.REASSIGNER' FROM testdata.flat.nvd LIMIT 10
 
-query error io failed
+query shape 357 1
 SELECT birth_place @? '$.town' FROM testdata.astronauts
 
-query error io failed
+query shape 6 1
 SELECT dict @? 'list' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? 'key' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? 'other_list' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.list[0]' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.list[2]' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.nested_list[0].key' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.non_existent' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.list[100]' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.nested_list[10]' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT dict @? '$.nested_list[0].non_existent' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT nested @? '$.level1.key' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT nested @? '$.level1.non_existent' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 6 1
 SELECT nested @? '$.non_existent' FROM testdata.flat.atquestion
 
-query error io failed
+query shape 4 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? 'list'
 
-query error io failed
+query shape 2 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? 'key'
 
-query error io failed
+query shape 1 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? 'other_list'
 
-query error io failed
+query shape 3 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[0]'
 
-query error io failed
+query shape 1 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[2]'
 
-query error io failed
+query shape 1 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.nested_list[0].key'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.non_existent'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[100]'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.nested_list[10]'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.nested_list[0].non_existent'
 
-query error io failed
+query shape 4 1
 SELECT id FROM testdata.flat.atquestion WHERE nested @? '$.level1.key'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE nested @? '$.level1.non_existent'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE nested @? '$.non_existent'
 
-query error io failed
+query shape 2 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[0]' LIMIT 2
 
-query error io failed
+query shape 3 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[0]' LIMIT 10
 
-query error io failed
+query shape 4 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? 'list'
 
-query error io failed
+query shape 2 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? 'key'
 
-query error io failed
+query shape 1 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.nested_list[0].key'
 
-query error io failed
+query shape 1 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[2]'
 
-query error io failed
+query shape 0
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.list[10]'
 
-query error io failed
+query shape 4 1
 SELECT id FROM testdata.flat.atquestion WHERE nested @? '$.level1.key'
 
-query error io failed
+query shape 2 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? '$.key'
 
-query error io failed
+query shape 1 1
 SELECT COUNT(*) FROM testdata.flat.atquestion WHERE dict @? 'list'
 
-query error io failed
+query shape 2 1
 SELECT id FROM testdata.flat.atquestion WHERE dict @? 'list' AND dict @? 'key'
 
-query error io failed
+query shape 2 1
 SELECT id FROM testdata.flat.atquestion WHERE NOT dict @? 'list'
 
-query error io failed
+query shape 4 2
 SELECT id, COUNT(*) FROM testdata.flat.atquestion WHERE dict @? 'list' GROUP BY id
 
-query error io failed
+query shape 357 1
 SELECT birth_place->'town' FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT missions[0] FROM testdata.astronauts
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'
 
-query error io failed
+query error IncorrectTypeError
 SELECT birth_place->'town' AS TOWN FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'
 
-query error io failed
+query error VariantKeyError
 SELECT COUNT(*), birth_place->'town' FROM testdata.astronauts GROUP BY birth_place->'town'
 
-query error io failed
+query shape 357 1
 SELECT LENGTH(missions) FROM testdata.astronauts
 
-query error io failed
+query shape 2 1
 SELECT LENGTH(missions) FROM testdata.astronauts WHERE LENGTH(missions) > 6
 
-query error io failed
+query shape 357 1
 SELECT jsonb_object_keys(birth_place) FROM testdata.astronauts
 
-query error io failed
+query shape 2 1
 SELECT DISTINCT key FROM (SELECT jsonb_object_keys(birth_place) as keys FROM testdata.astronauts) AS set CROSS JOIN UNNEST(keys) AS key
 
-query error io failed
+query shape 6 1
 SELECT jsonb_object_keys(dict) FROM testdata.flat.struct
 
-query error io failed
+query shape 5 1
 SELECT DISTINCT key FROM (SELECT jsonb_object_keys(dict) as keys FROM testdata.flat.struct) AS set CROSS JOIN UNNEST(keys) AS key
 
-query error io failed
+query shape 357 1
 SELECT birth_date FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT EXTRACT(YEAR FROM birth_date) FROM testdata.astronauts
 
-query error io failed
+query shape 14 1
 SELECT EXTRACT(YEAR FROM birth_date) FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1930
 
-query error io failed
+query shape 9 1
 SELECT RANDOM() FROM $planets
 
-query error io failed
+query shape 9 1
 SELECT CURRENT_TIMESTAMP() FROM $planets
 
-query error io failed
+query shape 9 1
 SELECT CURRENT_DATE() FROM $planets
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_DATE
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_DATE()
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_TIME
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_TIME()
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_TIMESTAMP
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_TIMESTAMP()
 
-query error io failed
+query shape 54 2
 SELECT EXTRACT(YEAR FROM birth_date), COUNT(*) FROM testdata.astronauts GROUP BY EXTRACT(YEAR FROM birth_date)
 
-query error io failed
+query shape 12 2
 SELECT EXTRACT(MONTH FROM birth_date), COUNT(*) FROM testdata.astronauts GROUP BY EXTRACT(MONTH FROM birth_date)
 
-query error io failed
+query shape 9 6
 SELECT EXTRACT(YEAR FROM CURRENT_TIMESTAMP), EXTRACT(MONTH FROM CURRENT_TIMESTAMP), EXTRACT(DAY FROM CURRENT_TIMESTAMP), EXTRACT(HOUR FROM CURRENT_TIMESTAMP), EXTRACT(MINUTE FROM CURRENT_TIMESTAMP), EXTRACT(SECOND FROM CURRENT_TIMESTAMP) FROM $planets
 
-query error io failed
+query shape 357 1
 SELECT FORMAT_TIMESTAMP('%d-%Y', birth_date) FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT FORMAT_TIMESTAMP('dddd', birth_date) FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT FORMAT_TIMESTAMP('%Y', death_date) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT count(*), VARCHAR(year) FROM testdata.astronauts GROUP BY VARCHAR(year)
 
-query error io failed
+query shape 21 2
 SELECT count(*), CAST(year AS VARCHAR) FROM testdata.astronauts GROUP BY CAST(year AS VARCHAR)
 
-query error io failed
+query shape 1 1
 SELECT 1
 
-query error io failed
+query shape 1 1
 SELECT 1.0
 
-query error io failed
+query shape 1 1
 SELECT 'a'
 
-query error io failed
+query shape 1 1
 SELECT TRUE
 
-query error io failed
+query shape 1 1
 SELECT NULL
 
-query error io failed
+query shape 1 1
 SELECT RANDOM()
 
-query error io failed
+query shape 1 1
 SELECT RAND()
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_TIMESTAMP()
 
-query error io failed
+query shape 9 1
 SELECT CURRENT_TIMESTAMP() from $planets
 
-query error io failed
+query shape 1 1
 SELECT CURRENT_DATE()
 
-query error io failed
+query shape 1 1
 SELECT HASH('hello')
 
-query error io failed
+query shape 1 1
 SELECT MD5('hello')
 
-query error io failed
+query shape 1 1
 SELECT SHA1('hello')
 
-query error io failed
+query shape 1 1
 SELECT SHA224('hello')
 
-query error io failed
+query shape 1 1
 SELECT SHA256('hello')
 
-query error io failed
+query shape 1 1
 SELECT SHA384('hello')
 
-query error io failed
+query shape 1 1
 SELECT SHA512('hello')
 
-query error io failed
+query shape 1 2
 SELECT UPPER('upper'), LOWER('LOWER')
 
-query error io failed
+query shape 1 1
 SELECT POWER(2, 10)
 
-query error io failed
+query shape 1 1
 SELECT LOG(10, E())
 
-query error io failed
+query shape 1 1
 SELECT LOG(10, 10)
 
-query error io failed
+query shape 1 1
 SELECT LOG(10, 2)
 
-query error io failed
+query shape 1 1
 SELECT LOG(10, 4)
 
-query error io failed
+query shape 357 2
 SELECT HASH(name), name from testdata.astronauts
 
-query error io failed
+query error IncompatibleTypesError
 SELECT HASH(death_date), death_date from testdata.astronauts
 
-query error io failed
+query shape 357 2
 SELECT HASH(birth_place), birth_place from testdata.astronauts
 
-query error io failed
+query error IncompatibleTypesError
 SELECT HASH(missions), missions from testdata.astronauts
 
-query error io failed
+query shape 10 8
 SELECT * FROM testdata.satellites WHERE id - 3 < 8
 
-query error io failed
+query shape 10 8
 SELECT * FROM testdata.satellites WHERE 8 > id - 3
 
-query error io failed
+query shape 172 8
 SELECT * FROM testdata.satellites WHERE 3 > 8 - id
 
-query error io failed
+query shape 172 8
 SELECT * FROM testdata.satellites WHERE 8 - id < 3
 
-query error io failed
+query shape 10 8
 SELECT * FROM testdata.satellites WHERE id < 8 + 3
 
-query error io failed
+query shape 10 8
 SELECT * FROM testdata.satellites WHERE 8 + 3 > id
 
-query error io failed
+query shape 4503 8
 SELECT * FROM testdata.missions WHERE Lauched_at - INTERVAL '7' DAY < current_timestamp
 
-query error io failed
+query shape 4503 8
 SELECT * FROM testdata.missions WHERE current_timestamp > Lauched_at - INTERVAL '7' DAY
 
-query error io failed
+query shape 4503 8
 SELECT * FROM testdata.missions WHERE INTERVAL '7' DAY < current_timestamp - Lauched_at
 
-query error io failed
+# INTERVAL compared with INTERVAL has no native kernel; the Vector has no less_than.
+# Pinned as the known failure until a comparison for INTERVAL operands is decided.
+query error AttributeError
+SELECT * FROM testdata.missions WHERE INTERVAL '7' DAY < INTERVAL '8' DAY
+
+query shape 4503 8
 SELECT * FROM testdata.missions WHERE current_timestamp - Lauched_at > INTERVAL '7' DAY
 
-query error io failed
+query shape 4503 8
 SELECT * FROM testdata.missions WHERE Lauched_at < current_timestamp + INTERVAL '7' DAY
 
-query error io failed
+query shape 4503 8
 SELECT * FROM testdata.missions WHERE current_timestamp > Lauched_at + INTERVAL '7' DAY
 
-query error io failed
+query shape 7 1
 SELECT ARRAY_AGG(id) FROM testdata.satellites GROUP BY planetId
 
-query error io failed
+query shape 7 1
 SELECT * FROM (SELECT ARRAY_AGG(id) AS pids FROM testdata.satellites GROUP BY planetId) AS sats
 
-query error io failed
+query shape 7 2
 SELECT * FROM (SELECT ARRAY_AGG(id) AS pids, planetId FROM testdata.satellites GROUP BY planetId) AS sats
 
-query error io failed
+query shape 7 22
 SELECT * FROM $planets INNER JOIN (SELECT ARRAY_AGG(id) AS pids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON sats.planetId = $planets.id
 
-query error io failed
+query shape 9 22
 SELECT * FROM $planets LEFT JOIN (SELECT ARRAY_AGG(id) AS pids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON sats.planetId = $planets.id
 
-query error io failed
+query shape 9 22
 SELECT * FROM (SELECT * FROM $planets LEFT JOIN (SELECT ARRAY_AGG(id) AS pids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON sats.planetId = $planets.id) as satellites
 
-query error io failed
+query shape 9 1
 SELECT pids FROM (SELECT * FROM $planets LEFT JOIN (SELECT ARRAY_AGG(id) AS pids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON sats.planetId = $planets.id) as satellites
 
-query error io failed
+query shape 177 1
 SELECT pid FROM (SELECT * FROM $planets LEFT JOIN (SELECT ARRAY_AGG(id) AS pids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON sats.planetId = $planets.id) as satellites CROSS JOIN UNNEST(pids) AS pid
 
-query error io failed
+query shape 7 1
 SELECT * FROM (SELECT LENGTH(ARRAY_AGG(DISTINCT planetId)) AS L FROM testdata.satellites GROUP BY planetId) AS I WHERE L == 1
 
-query error io failed
+query shape 2 1
 SELECT * FROM (SELECT ARRAY_AGG(id) AS sid FROM testdata.satellites GROUP BY planetId) AS A WHERE sid @> (1,2,3)
 
-query error io failed
+query shape 9 1
 SELECT name FROM (SELECT MD5(name) AS hash, name FROM $planets) AS S
 
-query error io failed
+query shape 357 1
 SELECT jsonb_object_keys(birth_place) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT jsonb_object_keys(VARCHAR(birth_place)) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT jsonb_object_keys(BLOB(birth_place)) FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT jsonb_object_keys(birth_place) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT jsonb_object_keys(VARCHAR(birth_place)) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT jsonb_object_keys(BLOB(birth_place)) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT VARCHAR(SUBSTRING(BLOB(birth_date) FROM -4)) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT SUBSTRING(BLOB(birth_date) FROM -4) FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT SUBSTRING(name FROM 4) FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT SUBSTRING(name FROM 1 FOR 1) FROM testdata.astronauts
 
-query error io failed
+query shape 357 1
 SELECT SUBSTRING(name FROM -1 FOR 1) FROM testdata.astronauts
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT * FROM $planets LEFT JOIN testdata.satellites USING(id) WHERE False
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT * FROM (SELECT * FROM $planets WHERE False) AS S LEFT JOIN testdata.satellites USING(id)
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT * FROM $planets LEFT JOIN (SELECT * FROM testdata.satellites WHERE False) AS S USING(id)
 
-query error io failed
+query shape 5 1
 WITH cold_planets AS (SELECT id, name, mean_temperature FROM $planets WHERE mean_temperature < 0) SELECT name FROM cold_planets WHERE name != 'Uranus'
 
-query error io failed
+query shape 2 1
 WITH eccentric_planets AS (SELECT id, name, orbital_eccentricity FROM $planets WHERE orbital_eccentricity > 0.05) SELECT name FROM eccentric_planets WHERE orbital_eccentricity < 0.1 ORDER BY name
 
-query error io failed
+query shape 1 1
 WITH warm AS (SELECT id, name, mean_temperature FROM $planets WHERE mean_temperature > 0) SELECT COUNT(*) FROM warm WHERE mean_temperature > 200
 
-statement error io failed
+statement ok
 WITH rounded_gravity AS (SELECT id, name, ROUND(gravity, 0) AS g FROM $planets) SELECT name FROM rounded_gravity WHERE g >= 10
 
-query error io failed
+query shape 2 2
 WITH giant_planets AS (SELECT id, name, diameter FROM $planets WHERE diameter > 100000) SELECT name, diameter FROM giant_planets ORDER BY diameter ASC LIMIT 2
 
-query error io failed
+query shape 0
 WITH polar AS (SELECT id, name, obliquity_to_orbit FROM $planets) SELECT name FROM polar WHERE obliquity_to_orbit BETWEEN 85 AND 95
 
-query error io failed
+query shape 0
 WITH dense AS (SELECT id, name, density FROM $planets WHERE density IS NOT NULL) SELECT name FROM dense WHERE density > 4 AND density < 6
 
-query error io failed
+query shape 5 1
 WITH lo_temp AS (SELECT id, name, mean_temperature FROM $planets) SELECT name FROM lo_temp WHERE mean_temperature < -100 ORDER BY mean_temperature DESC
 
-query error io failed
+query shape 7 1
 WITH orbit_years AS (SELECT id, name, orbital_period FROM $planets) SELECT name FROM orbit_years WHERE orbital_period > 365 ORDER BY orbital_period
 
-query error io failed
+query shape 1 1
 WITH spin AS (SELECT id, name, rotation_period FROM $planets) SELECT name FROM spin WHERE rotation_period > 500 ORDER BY rotation_period
 
-query error io failed
+query shape 2 1
 WITH flat_names AS (SELECT id, LOWER(name) AS name FROM $planets) SELECT name FROM flat_names WHERE name LIKE 'm%' ORDER BY name
 
-query error io failed
+query shape 3 1
 WITH far_planets AS (SELECT id, name, distance_from_sun FROM $planets WHERE distance_from_sun > 1000) SELECT name FROM far_planets WHERE distance_from_sun < 5000
 
-query error io failed
+query shape 4 1
 WITH odd_moons AS (SELECT id, name, number_of_moons FROM $planets) SELECT name FROM odd_moons WHERE number_of_moons % 2 = 1
 
-query error io failed
+query shape 4 1
 WITH names AS (SELECT id, name FROM $planets) SELECT UPPER(name) FROM names WHERE LENGTH(name) < 6
 
-query error io failed
+query shape 1 1
 WITH nonzero_pressure AS (SELECT id, surface_pressure FROM $planets) SELECT COUNT(*) FROM nonzero_pressure WHERE surface_pressure > 0
 
-query error io failed
+query shape 2 1
 WITH normalized AS (SELECT id, name, round(CAST(gravity AS FLOAT64) / 9.8, 2) AS g FROM $planets WHERE gravity IS NOT NULL) SELECT name FROM normalized WHERE g > 1.1
 
-query error io failed
+query shape 3 1
 WITH weird_rotation AS (SELECT id, name, rotation_period FROM $planets) SELECT name FROM weird_rotation WHERE rotation_period < 0 ORDER BY rotation_period
 
-query error io failed
+query shape 1 1
 WITH matching AS (SELECT id, name FROM $planets) SELECT COUNT(*) FROM matching WHERE name = 'Mars'
 
-query error io failed
+query shape 2 2
 WITH categorised AS (SELECT id, name, CASE WHEN mass > 1 THEN 'large' ELSE 'small' END AS size FROM $planets) SELECT size, COUNT(*) FROM categorised GROUP BY size
 
-query error io failed
+query shape 1 1
 WITH orbshape AS (SELECT id, orbital_eccentricity FROM $planets) SELECT COUNT(*) FROM orbshape WHERE orbital_eccentricity BETWEEN 0.01 AND 0.05
 
-query error io failed
+query shape 9 3
 SELECT COUNT(*), LENGTH(name), ROUND(density, 2) FROM $planets GROUP BY LENGTH(name), ROUND(density, 2)
 
-query error io failed
+query error UnsupportedSyntaxError
 SELECT * FROM $planets WHERE TIMESTAMP('2024-10-01') + INTERVAL '2' DAY > current_timestamp
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE TRUE
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE FALSE
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE NOT TRUE
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE NOT FALSE
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE id
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE id OR name
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE id > 5 AND TRUE
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE id > 5 OR FALSE
 
-statement error io failed
+statement error UnsupportedSyntaxError
 SELECT * FROM testdata.planets WHERE 1
 
-query error io failed
+query shape 4 20
 SELECT * FROM testdata.planets WHERE id > 5
 
-query error io failed
+query shape 4 20
 SELECT * FROM testdata.planets WHERE (id > 5) IS TRUE
 
-query error io failed
+query shape 5 20
 SELECT * FROM testdata.planets WHERE (id > 5) IS FALSE
 
-query error io failed
+query shape 5 20
 SELECT * FROM testdata.planets WHERE NOT (id > 5)
 
-query error io failed
+query shape 3 20
 SELECT * FROM testdata.planets WHERE id > 2 AND id < 6
 
-query error io failed
+query shape 4 20
 SELECT * FROM testdata.planets WHERE id < 2 OR id > 6

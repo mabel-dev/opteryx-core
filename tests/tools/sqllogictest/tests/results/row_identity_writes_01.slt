@@ -1,0 +1,125 @@
+# Row-addressing writes - MERGE, UPDATE, DELETE, OPTIMIZE - on the catalog-backed
+# `cat` workspace (OpteryxConnector over opteryx_catalog's real datasets on local
+# disk, tests/tools/local_catalog.py): the path production writes take.
+#
+# These read back every row after every write, because the failures they guard
+# against were silent:
+#   * 0.9.155 refused every MERGE (`footer_gate`): the target's row-identity scan
+#     asked the parquet footer for the synthesized `$file` column.
+#   * 0.9.153-0.9.155 deleted rows from the WRONG FILE when an UPDATE/DELETE's WHERE
+#     pruned files: `$file` was the file's position in the scan's pruned list, but
+#     the write sink mapped it through the unpruned one.
+#
+# Columns are cast to INTEGER so every file the table holds has one physical type.
+
+statement ok
+CREATE TABLE cat.rw.t AS SELECT CAST(id AS INTEGER) AS id, name, CAST(number_of_moons AS INTEGER) AS moons FROM $planets WHERE id <= 6
+
+statement ok
+CREATE TABLE cat.rw.s AS SELECT CAST(id AS INTEGER) AS id, name, CAST(CASE WHEN id = 4 THEN number_of_moons + 1 ELSE number_of_moons END AS INTEGER) AS moons FROM $planets WHERE id >= 3
+
+# A second source snapshot, so VERSION AS OF PREVIOUS has something to exclude.
+statement ok
+INSERT INTO cat.rw.s SELECT 99 AS id, 'Junk' AS name, CAST(number_of_moons AS INTEGER) AS moons FROM $planets WHERE id = 1
+
+# The production sync shape: guarded UPDATE, INSERT, BY SOURCE DELETE, pinned source.
+statement ok
+MERGE INTO cat.rw.t AS n USING cat.rw.s VERSION AS OF PREVIOUS AS u ON n.id = u.id WHEN MATCHED AND (n.moons IS DISTINCT FROM u.moons) THEN UPDATE SET moons = u.moons WHEN NOT MATCHED THEN INSERT (id, name, moons) VALUES (u.id, u.name, u.moons) WHEN NOT MATCHED BY SOURCE THEN DELETE
+
+# 1 and 2 deleted BY SOURCE; Mars updated 2 -> 3; 7-9 inserted; 99 excluded by the pin.
+query ITI
+SELECT id, name, moons FROM cat.rw.t ORDER BY id
+----
+3 Earth 1
+4 Mars 3
+5 Jupiter 79
+6 Saturn 82
+7 Uranus 27
+8 Neptune 14
+9 Pluto 5
+
+# The next hourly fire: the target now carries delete vectors; nothing differs.
+statement ok
+MERGE INTO cat.rw.t AS n USING cat.rw.s VERSION AS OF PREVIOUS AS u ON n.id = u.id WHEN MATCHED AND (n.moons IS DISTINCT FROM u.moons) THEN UPDATE SET moons = u.moons WHEN NOT MATCHED THEN INSERT (id, name, moons) VALUES (u.id, u.name, u.moons) WHEN NOT MATCHED BY SOURCE THEN DELETE
+
+query ITI
+SELECT id, name, moons FROM cat.rw.t ORDER BY id
+----
+3 Earth 1
+4 Mars 3
+5 Jupiter 79
+6 Saturn 82
+7 Uranus 27
+8 Neptune 14
+9 Pluto 5
+
+# id 10 lands in a third file; `WHERE id = 10` prunes the other two, so the scan's
+# file positions differ from the table's - the shape that misaddressed rows.
+statement ok
+INSERT INTO cat.rw.t SELECT 10 AS id, 'PlanetX' AS name, 5 AS moons FROM $planets WHERE id = 1
+
+statement ok
+UPDATE cat.rw.t SET moons = moons + 100 WHERE id = 10
+
+query ITI
+SELECT id, name, moons FROM cat.rw.t ORDER BY id
+----
+3 Earth 1
+4 Mars 3
+5 Jupiter 79
+6 Saturn 82
+7 Uranus 27
+8 Neptune 14
+9 Pluto 5
+10 PlanetX 105
+
+statement ok
+DELETE FROM cat.rw.t WHERE id = 10
+
+query ITI
+SELECT id, name, moons FROM cat.rw.t ORDER BY id
+----
+3 Earth 1
+4 Mars 3
+5 Jupiter 79
+6 Saturn 82
+7 Uranus 27
+8 Neptune 14
+9 Pluto 5
+
+# Rows the MERGE appended, addressed after further commits.
+statement ok
+UPDATE cat.rw.t SET moons = moons + 1 WHERE id = 7
+
+statement ok
+DELETE FROM cat.rw.t WHERE id = 9
+
+query ITI
+SELECT id, name, moons FROM cat.rw.t ORDER BY id
+----
+3 Earth 1
+4 Mars 3
+5 Jupiter 79
+6 Saturn 82
+7 Uranus 28
+8 Neptune 14
+
+# Compaction over a multi-file table with delete vectors: same rows, no deletes left.
+statement ok
+OPTIMIZE TABLE cat.rw.t
+
+query ITI
+SELECT id, name, moons FROM cat.rw.t ORDER BY id
+----
+3 Earth 1
+4 Mars 3
+5 Jupiter 79
+6 Saturn 82
+7 Uranus 28
+8 Neptune 14
+
+statement ok
+DROP TABLE cat.rw.t
+
+statement ok
+DROP TABLE cat.rw.s
