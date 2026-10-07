@@ -75,10 +75,11 @@ SKENE_SRC_NAMES := checksum probe writer reader reader_v2 reader_v3 chunk_decode
 DRAKEN_SIMD_NAMES := simd_hash simd_env cpu_features
 LIB_SRCS := $(patsubst %,src/%.cpp,$(SKENE_SRC_NAMES)) \
             $(patsubst %,$(DRAKEN_ROOT)/draken/simd/%.cpp,$(DRAKEN_SIMD_NAMES)) \
-            $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp
+            $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp \
+            $(DRAKEN_ROOT)/draken/core/mem_account.cpp
 LIB_OBJS := $(patsubst %,$(BUILD)/%.o,$(SKENE_SRC_NAMES)) \
             $(patsubst %,$(BUILD)/draken_%.o,$(DRAKEN_SIMD_NAMES)) \
-            $(BUILD)/draken_vector_alloc.o $(BUILD)/lz4.o
+            $(BUILD)/draken_vector_alloc.o $(BUILD)/draken_mem_account.o $(BUILD)/lz4.o
 
 TEST_SRCS := $(wildcard tests/test_*.cpp)
 TEST_BINS := $(patsubst tests/%.cpp,$(BUILD)/%,$(TEST_SRCS))
@@ -139,6 +140,11 @@ $(BUILD)/draken_%.o: $(DRAKEN_ROOT)/draken/simd/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/draken_vector_alloc.o: $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Standalone binaries have no draken_native to resolve draken_mem_* against, so
+# they carry their own process memory account (draken/core/mem_account.h).
+$(BUILD)/draken_mem_account.o: $(DRAKEN_ROOT)/draken/core/mem_account.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # lz4 is C, unlike the vendored zstd sources, which this tree carries renamed to

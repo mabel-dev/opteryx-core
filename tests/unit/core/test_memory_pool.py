@@ -875,6 +875,26 @@ def test_repeated_latch_compact_unlatch_cycles():
         assert pool.py_read(ref) == ref_data[ref]
 
 
+def test_peak_used_size_is_the_high_water_mark():
+    """peak_used_size records the most the pool ever held at once, and survives
+    the release that lowers used_size — it is what scan telemetry compares to
+    the plan-time reservation."""
+    mp = MemoryPool(4096)
+    assert mp.py_get_stats()["peak_used_size"] == 0
+    a = mp.py_commit(b"a" * 1000)
+    b = mp.py_commit(b"b" * 1000)
+    both = mp.py_get_stats()["used_size"]
+    assert mp.py_get_stats()["peak_used_size"] == both
+    mp.py_release(a)
+    mp.py_release(b)
+    stats = mp.py_get_stats()
+    assert stats["used_size"] == 0
+    assert stats["peak_used_size"] == both
+    c = mp.py_commit(b"c" * 500)
+    assert mp.py_get_stats()["peak_used_size"] == both
+    mp.py_release(c)
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

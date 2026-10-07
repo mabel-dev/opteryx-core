@@ -538,7 +538,7 @@ Answers checked identical (Q1/3/21/28/34) on both.
   c6a — cross-hardware and rough, but a per-row gap of ~2-3× remains on top of
   the cache and scaling.
 
-## 17. Tier M — process-lifetime file-mapping cache (from the Q28/scaling hand-off, 2026-10-07)
+## 17. Mapped-file cache (was "tier M") — process-lifetime file-mapping cache (from the Q28/scaling hand-off, 2026-10-07)
 
 Source: `scratch/C7_HANDOFF_mmap_tier.md` (Q28 / scaling session). Proposal only;
 nothing built. That session owns the `io_pipeline.hpp` mmap / destructor lines
@@ -599,3 +599,320 @@ a further, separate saving on top.
 | D-C7-M3 | ARM | x86-only first cut / both from the start |
 | D-C7-M4 | Home | draken `.so` behind a C bridge (hand-off) — and T1 there too? |
 | D-C7-M5 | Reaper contention | `munmap` takes the process mmap lock for write; a reaper unmapping while another query faults can stall it — accept, or bound reaper work? |
+
+**Rulings / answers (2026-10-07):**
+- **Name and goal:** "tier M" is renamed the **mapped-file cache**. Functional
+  goal: keep local data files open and mapped between queries, so a query that
+  reads files an earlier query read does not pay again to open them, map them,
+  fault their pages into the process, or unmap them at the end.
+- **D-C7-M2 cap:** a file count, well below `vm.max_map_count` — ~4k files.
+- **D-C7-M3:** x86 first (it looks mostly like an x86 issue).
+- **D-C7-M4 home — advised: draken `.so`, behind C functions.** The deciding
+  constraint: the caller is rugo's `io_pipeline.hpp`, which is compiled into
+  several `.so`s, and rugo may depend only on draken (rugo is opteryx-free and
+  ships standalone). draken is one `.so` per process and ships in both wheels,
+  and the trace bridge already uses this pattern. An opteryx `.so`
+  (pool_reader, thread_pool) would make rugo depend on opteryx. Interface
+  sketch: `acquire(path) -> {base, len, handle}` (refcount +1, maps on miss),
+  `release(handle)` (refcount −1); the cap is set once at init by the owner.
+  An entry is evicted only at refcount 0 and is handed to the reaper.
+- **D-C7-M5 unmap stalls:** yes — the deferred release (the other session's
+  reaper, option A) is the answer: no query pays an unmap. What remains is
+  that the kernel's `munmap` still takes the process mapping lock while the
+  reaper runs, so a query faulting pages at that moment waits briefly. With the
+  cache, unmaps only happen on eviction (rare under a 4k cap), so no extra
+  mechanism unless a measurement shows a stall.
+
+**Mapped-file cache ceiling — i5 (2026-10-07, idle box, tree `~/c7-20261006/tree`
+= no reaper, canon 20 files, default DOP, 6 back-to-back runs, run 1 discarded;
+`scratch/c7_mapped_file_probe.py`):**
+
+| q | wall ms | CPU s | minflt (all kinds) | teardown ms (inline munmap) |
+|---|---|---|---|---|
+| 3 (control) | 94 | 0.48 | 20,035 | 0.4 |
+| 16 | 254 | 1.09 | 10,710 | 2.3 |
+| 21 | 261 | 1.36 | 5,824 | 14.3 |
+| 22 | 311 | 1.63 | 6,710 | 16.3 |
+| 23 | 740 | 3.95 | 19,165 | 36.4 |
+| 28 | 515 | 2.81 | 40,891 | 14.4 |
+| 34 | 983 | 5.27 | 34,510 | 14.3 |
+| 36 | 238 | 1.01 | 554 | 1.7 |
+
+Micro (same 20 files, page-cache warm): open+fstat+mmap **19.6 µs/file**;
+soft fault **3.7 µs** each, mapping 16 pages per fault (Linux fault-around,
+64 KiB); munmap+close of a fully touched file 5.8 ms.
+
+What the cache would remove, Q28 (worst case for it among these):
+- open+mmap: 20 × 19.6 µs = **0.4 ms**.
+- file page faults: `minflt` counts every fault (heap, fresh anonymous memory
+  too — Q3 reads almost nothing yet shows 20k). File faults are bounded by bytes
+  mapped: ~0.5 GB of compressed URL / 64 KiB ≈ 7.6k faults × 3.7 µs ≈ **28 ms of
+  CPU ≈ 1% of Q28's 2.81 CPU-s**; spread over the workers, < 1% of wall. Q21:
+  even all 5.8k faults = 21 ms CPU, 1.6%.
+- teardown munmap: 14.4 ms on the critical path — **already taken off it by the
+  other session's reaper** (14.4 → 0.7-7.6 ms). The cache would also save the
+  reaper's 0.7 ms/file of background CPU (~14 ms here).
+
+**Verdict: beyond the reaper, the mapped-file cache's ceiling is ~1-2% on the
+i5 — under the ±5% gate.** The real cost was the serial teardown, and the
+reaper already removes it from wall time. Repeat faults are cheap on Linux
+because fault-around maps 16 pages per fault. Recommend: not built; recorded as
+measured.
+
+## 18. Production memory check (2026-10-07, Cloud Monitoring, read-only)
+
+Ruling under test: budget = 80% of the container − 4 GiB, off below 2 GiB.
+Prod engine = Cloud Run `worker-opteryx-app-git` (project `mabeldev`, us-east1):
+**16 GiB, 4 vCPU, concurrency 1, min instances 0**. Metric
+`run.googleapis.com/container/memory/utilizations`, p99 per window, max across
+instances.
+
+| window | resolution | peak |
+|---|---|---|
+| last 24 h | 1 min | **20.9%** (3.3 GiB); hourly p99 never above 10% |
+| last 7 days | 1 h | 17.2% |
+| last 30 days | 1 min | **83.9% (13.4 GiB)** on 13 Sep; 82.9% 11 Sep; **81.9% 30 Sep**; 77.9% 27 Sep; 59% 1 Oct |
+
+- Spikes are rare: 66 minutes above 4 GiB in 30 days, 31 above 7.2 GiB. The
+  last 5 days stayed ≤ 31%.
+- The top spikes sit at :26 past 00/06/12/18 h — a 6-hourly pattern (scheduled
+  work?), not established.
+- **A dedicated 8.8 GiB cache would have run the instance out of memory on at
+  least 4 days of the last 30** (8.8 + 13.4 > 16 GiB). Sizing a dedicated cache
+  to the 30-day peak leaves 16 − 13.4 = 2.6 GiB minus headroom → under the
+  2 GiB rule → off.
+- So on prod's 16 GiB the cache only works if it **gives memory back** when a
+  query needs it (Pivot's shared-pool model / the "release quickly" ruling),
+  not as a fixed reservation.
+
+## 19. Rulings — budget and pressure (2026-10-07)
+
+Supersedes the 20% default (§12/§14) and the 80% − 4 GiB proposal (§18).
+- **Budget = 70% of the container − 4 GiB** by default. Both numbers (the
+  percentage and the reserve) are **configurable and visible in VARIABLES**
+  (`SHOW VARIABLES`). Cache off if the result is under 2 GiB. Container = cgroup
+  limit when set, else physical RAM. Prod 16 GiB → 7.2 GiB.
+- **Compaction:** a compaction statement flushes the cache before it runs and
+  its reads are never admitted (planning decides, execution acts on a flag).
+- **Give-way release as a safety net:** large query-memory reservations ask the
+  cache to free that many bytes first (agg/spill budget sites are the candidate
+  hook — not yet checked that every large allocation passes through them).
+- **Residual risk accepted:** a spike that bypasses the release or outruns it
+  (prod, 30 days: at most one minute, 14 Sep 10:55, 49%).
+
+## 20. Give-way release — code read (2026-10-07)
+
+- No central query-memory accounting exists. `engine/agg_budgets.hpp` /
+  `engine/spill_budgets.hpp` are fixed per-operator ceilings (MEDIAN,
+  ARRAY_AGG, CIDR_AGG, spill flush/ceiling) each sink checks against its own
+  buffer.
+- `draken/core/alloc.h` (`draken_malloc/calloc/realloc`) is one entry point for
+  draken-owned buffers, plain `malloc` underneath, no accounting. Most large
+  query memory bypasses it: `src/cpp/engine` has 81 `draken_*` alloc calls vs
+  1,621 `std::vector`/resize/reserve sites; rugo parquet 1 vs 735; carchar 0 vs 95.
+- Options: (1) reroute large allocations through draken and release from there
+  (Pivot's model; large refactor); (2) RSS + cache check at native morsel
+  boundaries (small; reactive, a single big resize can outrun it); (3) cgroup
+  memory-pressure / PSI notification (reactive, Linux-only); (4) put decompressed
+  pages in a file on ephemeral disk and read via the OS page cache, so the
+  kernel reclaims them under pressure (needs a real disk; cold-run write cost;
+  competes with spill space).
+- Recommended: (2) as the safety net with the residual risk accepted; (4)
+  ceiling-tested later; (1) is its own programme. Awaiting ruling.
+
+## 21. Step 1 for give-way option 1a — where peak query memory sits (2026-10-07)
+
+Tool (scratch): `scratch/c7_peakmem.c` — a malloc-interposing shim (LD_PRELOAD /
+DYLD_INSERT_LIBRARIES) recording every allocation ≥ PEAK_MIN with its call stack
+and snapshotting live bytes per call site at the process's peak;
+`scratch/c7_peakmem_run.py` runs one query per process. Mac: ClickBench canon
+100 files + TPC-H SF10. i5: debug-symbols build (`~/c7-20261006/tree-sym`),
+canon 20 files + TPC-H SF10, sites resolved with addr2line.
+
+Findings:
+- **At ≥ 1 MiB the tracker misses most GROUP BY memory** (Mac CB33: 10.0 GiB max
+  RSS, 0.85 GiB tracked). At ≥ 64 KiB it sees most of it (CB19 6.4 of 7.6 GiB,
+  CB33 6.0 of 10.0), in ~130-150k allocations of 64-200 KiB per query. A charge
+  threshold for 1a must be ~64 KiB, not 1 MiB (~150k atomic adds per query).
+- **Where it is (i5, symbolised), in the GROUP BY sink, all from
+  `GroupBySink::sink` (`native_group_sinks.hpp` ~3800-3972):**
+  1. key store — `draken::AppendBuffer<uint8_t>::extend` (:3937/:3953) → already
+     `draken_realloc`;
+  2. per-group aggregate lanes — `std::vector<uint64_t/int64_t/__int128>` (:3803,
+     :3935, :3968, :3972) → std allocator;
+  3. `opteryx::carchar::CarcharIndex` slots (`carchar_index.hpp:162`,
+     `std::vector<Slot>`) → std allocator;
+  4. `GBPartition` vector (`maybe_flush`, :3582) → std allocator, small.
+- **Outside GROUP BY:** the scan's `opteryx::MemoryPool` (created in
+  `open_native_scan_plan`, 256 MiB-15 GiB **reserved**, mostly untouched — Mac
+  CB24 15.2 GiB reserved vs 0.95 GiB max RSS); join build `gather_rows`
+  (`sort.hpp:764`, `draken_malloc`); rugo decode buffers (`AppendBuffer` →
+  draken) and `build_direct_string_dict` (`pool_sink_draken_alloc` → draken).
+- TPC-H SF10 peaks are modest (≤ ~2 GiB max RSS on both boxes); the big peaks
+  are high-cardinality GROUP BY (CB19, CB33, CB34/35).
+- The remaining gap between tracked bytes and max RSS (e.g. i5 CB33 1.9 vs 1.38
+  GiB) is allocations < 64 KiB, Python, and — on Linux — touched pages of the
+  whole-file mmaps, which count in RSS but are page cache.
+
+**Size of 1a:** "four, not forty". Most large query memory already goes through
+the single `draken_malloc/realloc` entry point. What doesn't is the GROUP BY
+lanes and the carchar index (std::vector) — switch those to a tracked
+allocator — plus a decision on the scan `MemoryPool` reservation (charge what
+is touched, or size it smaller). Join build and decode are already draken.
+
+## 22. Scan MemoryPool — reserved vs used (2026-10-07; ruled: shrink it)
+
+Telemetry added (built, `make q` passes): `PoolStats.peak_used_size`
+(`src/cpp/memory_pool.{hpp,cpp}`, `memory_pool.{pxd,pyx}`, test in
+`tests/unit/core/test_memory_pool.py`); `NativeScanPlan.diagnostics()` reports
+`scan_pool_reserved_bytes / _peak_used_bytes / _commits / _failed_reservations`;
+`compiler.py` sums them per query. Probe: `scratch/c7_scan_pool_probe.py`.
+
+Sizing today (`pool_reader.pyx:3288`): largest projected row group
+(uncompressed) × 2 × (in-flight window + 1), floor 256 MiB, one malloc.
+
+Mac results:
+- ClickBench canon, 43 queries: **75 GiB reserved in total, 0 bytes used**
+  (every column direct-path).
+- TPC-H SF10: pool used by DECIMAL columns — TQ01 246 of 324 MiB (76%), TQ06 111
+  of 256 (43%), the rest ≤ 7%; TQ04/12/13/16/21 0. No failed reservations.
+- List columns (positive control): `flat.unnest_bench` 46 MiB of 321 MiB,
+  `array_types` 1.4 KB of 256 MiB, tweets 0.5 MiB of 813 MiB.
+
+Implications: the 256 MiB floor (and any reservation for scans with no
+pool-eligible column) is pure waste; the formula is not uniformly oversized
+(TQ01 76%), and pool bytes per value exceed parquet's uncompressed width for
+decimals, so a new formula must count pool-eligible columns at their SERIALIZED
+width. Next: what a failed reservation does today (must fail loud).
+
+**Failed reservation today (code read, 2026-10-07):** `reserve_for_write` →
+no fit → compaction → still none → `failed_commits++`, `{-1, nullptr}` (scan
+pool has auto_resize off) → decode worker sets `result.success=false`,
+"MemoryPool exhausted serializing column: <name>" (`io_pipeline.hpp` ~3277) →
+`NativeParquetScanSource` (`:1594-1608`) `err.code=1`, query FAILS LOUD. No
+back-pressure: entries are released by the consumer after building the column
+(`native_*_pool_decode.hpp`), so a pool smaller than the in-flight window's
+need turns a transient shortage into a query failure. Pool-path choice is made
+at decode time (`direct_kind_for`), so plan time sees only type-driven cases
+(decimal, list, struct), not data-driven residual shapes.
+Options: (1) lazy allocation — malloc on first reserve; zero risk, removes the
+reservation from every scan that never uses the pool (all of ClickBench, 5 of
+22 TPC-H); (2) type-based tighter sizing at serialized width + floor (risks new
+exhaustion failures; needs A/B with failure telemetry); (3) back-pressure
+(design change, deadlock risk). Recommended (1) first. Awaiting go-ahead.
+
+## 23. Phase A built — process memory account (2026-10-07)
+
+- `draken/core/mem_account.{h,cpp}`: one account per process, compiled into
+  `draken_native` only (consumers resolve `draken_mem_*` at load; verified by
+  `nm`: one `T`, every consumer `U`). Standalone native builds carry their own
+  copy: skene/Makefile, and the Makefile's `DRAKEN_KERNEL_SRCS`, JSON bench,
+  `decoded-column-reset-test`, `rle-dict-test`.
+- `draken/core/alloc.h`: malloc/calloc/realloc/aligned/free charge ≥ 64 KiB by
+  usable size. TEMPORARY A/B switch `DRAKEN_MEM_ACCOUNT=0` (remove when banked).
+- `draken/core/tracked_allocator.h`: `TrackedAllocator` (value-init, std
+  semantics) for GROUP BY partition/lane arrays + key validity;
+  `TrackedUninitAllocator` for carchar `slots_` (was uninitialized_allocator).
+- Scan `MemoryPool`: allocated lazily on first fit; used bytes charged.
+- Telemetry: `memory_charged_peak_bytes`, `memory_charged_end_bytes`.
+- Coverage (Mac, canon 100 files): charged peak / max RSS — CB19 4.95/7.13,
+  CB33 5.43/9.56, CB17 1.85/3.62, CB34 7.08/5.86 (capacity > touched); end
+  charge ≤ 0.15 GiB (pairs balance).
+- Tests: make q, dt (3596), st (57), rt (2067 after the standalone-link fix) pass.
+- A/B on vs off (Mac, 5 rounds, alternating): ClickBench median 9.16 → 9.22 s
+  (on slower 4/5, ranges overlap), TPC-H SF10 neutral (on faster 3/5). Neutral
+  within noise; possible ~0.5-1% on ClickBench from usable-size lookups on free.
+Next: Phase B (the cache) on top.
+
+## 24. Phase B built — the chunk cache (2026-10-07)
+
+- `draken/core/chunk_cache.{h,cpp}` (draken_native only): one entry = one
+  column chunk, every page decompressed into one buffer + an index by page
+  offset within the chunk; key = (path, chunk's absolute first byte). 16 shards,
+  CLOCK eviction, admission by measured decompression ns per byte (a new entry
+  never evicts a resident worth more per byte). Pin count + EVICTED bit in one
+  atomic word, so exactly one side frees an entry. Chunks a predicate decode
+  left incomplete are remembered (no refill by predicate decodes).
+- Give-way in `draken/core/mem_account.cpp`: the cache holds at most
+  `min(B, C - R - charged)`; `draken_mem_charge` shrinks it on the charging
+  thread. Config: `CHUNK_CACHE_MEMORY_PERCENT` (70) and
+  `CHUNK_CACHE_RESERVE_BYTES` (4 GiB); container = cgroup limit else RAM;
+  B < 2 GiB → off. Applied once at `import opteryx`. VARIABLES:
+  `chunk_cache_memory_percent`, `chunk_cache_reserve_bytes`,
+  `chunk_cache_budget_bytes` (SERVER), `chunk_cache_admit` (USER, session).
+- rugo: `DecompressIntoRaw`; `DecodeColumnFromChunk(..., const ChunkCacheRequest*)`
+  — all four decompression sites (dict page, parallel pages, serial v1, v2
+  values) served from a hit or decompressed straight into the fill buffer;
+  masked/jump-plan decodes never fill; `commit()` header-walks the chunk and
+  inserts only when every compressed page has a slot. Byte-array dictionaries
+  are copied into the output arena (never aliased). The pipeline passes the
+  request at its three decode sites (mmap, remote, pread).
+- `chunk_cache_admit = false`: `execute_native` flushes the cache and sets every
+  scan plan to no-fill before the engine starts (for compaction jobs — the
+  compaction caller must SET it; compaction runs outside this repo).
+- Telemetry per query: `chunk_cache_{bytes,entries,hits,misses,inserts,refused,
+  evictions,give_way_bytes,limit}` (process-lifetime counters).
+- Tests: `tests/unit/core/test_chunk_cache.py` (repeat scan hits with identical
+  answer; admit=false flushes and never fills; < 2 GiB budget = off + flush;
+  config validation; VARIABLES rows). make q passes (SHOW VARIABLES now 32 rows).
+- Functional (Mac, indicative only — train, not a benchmark): canon Q28 run 1
+  ~630 ms vs ~540 ms cache off (fill cost), runs 2+ ~204 ms vs ~221-271 ms;
+  rugo Q21 runs 2+ 128-159 ms, Q23 223-247 ms (from 445); answers identical.
+  Give-way under a 5.5 GiB budget: cache 5.41 → 0.06 GiB while CB33 charged
+  5.44 GiB; CB17/19/28 answers identical cache on vs off.
+
+Outstanding (needs a stable machine; NOT done):
+1. Cache on/off A/B and leave-one-out of the admission rule (Mac + x86).
+2. Churn under pressure: with a tight limit, heavy GROUP BYs keep filling and
+   giving away (15.8 GiB given away for 67 hits) — admission should not evict
+   residents to admit while query memory is near the limit.
+3. Remove the temporary `DRAKEN_MEM_ACCOUNT=0` switch once Phase A is banked.
+4. The compaction job must `SET chunk_cache_admit = false` (outside this repo).
+
+**Phase B follow-ups (2026-10-07):**
+- Admission under pressure: when query memory holds the limit below the budget,
+  an insert may only use free room (no evicting residents to admit). Kept, but
+  it does not remove the churn seen in the tight-budget check — that churn is
+  BETWEEN queries: query memory drops, the cache regains its budget and refills
+  with the next query's chunks, and the following heavy query gives them away
+  (6 alternating heavy queries on a 5.5 GiB budget: 3,735 inserts, 15.8 GiB
+  given away, 56 hits). The working sets simply do not fit. Remedy on the table:
+  admit a chunk only on its SECOND miss (a small set of recently missed keys) —
+  costs one more cold run before a repeat query hits (ClickBench try 2, a
+  dashboard's second refresh). Changes the cost-based admission ruling: needs
+  the architect.
+- Cache key for remote chunks: the fetch path up to the first '?' — a pre-signed
+  URL's query string (credential, expiry) changes per query. Prod (Cloud Run)
+  does not sign by default (`signs_urls` False), so prod keys were already stable.
+- Linux (i5, gcc, glibc): Phase A and Phase B compile clean; make q 525 passed /
+  5 failed, all 5 DatasetNotFoundError for tpcds_001 (the box's older testdata);
+  test_chunk_cache + test_memory_pool 47/47.
+- Mac suites: make q, dt 3596, rt 2067, st 57 pass; tests/unit/core +
+  parquet_io + variable visibility: 10 failures, all on the 2026-09-26 known
+  list (test_lruk set() arity ×7, date32 coercion ×3).
+- Concurrency stress (Mac, correctness only): 4 threads × CB 3/13/21/22/28/34 ×3
+  reps on a 3 GiB budget — 54 runs, 0 errors, every answer identical to a
+  cache-off run; 5,092 inserts, 3,968 hits, 27.6 GiB given way (all eviction via
+  give-way: under concurrent query memory the pressure rule refused rather than
+  evicted).
+- `reference/variables.json` is regenerated by the pre-commit hook (four new
+  variables); not regenerated by hand here.
+
+## 25. Cache on/off A/B — Mac (2026-10-07, stable power/network window)
+
+ClickBench canon (100 files), all 43 queries; arms `CHUNK_CACHE_MEMORY_PERCENT`
+0 (off) vs 70 (on, 40.8 GiB budget — the whole suite fits); 4 rounds, arm order
+alternating, fresh process per arm, 3 runs per query, run 1 (fill) discarded,
+best of runs 2-3 (`scratch/c7_ceiling_probe.py one`).
+
+| | off | on | on/off | rounds on faster |
+|---|---|---|---|---|
+| suite | 7.75-8.16 s | 7.27-7.61 s | **0.912** | 4/4, ranges separate |
+
+Per query (4/4 rounds, ranges separate): Q23 0.433, Q39 0.673, Q22 0.683, Q21
+0.753, Q25 0.789, Q28 0.814, Q27 0.820, Q26 0.841, Q18 0.863, Q6 0.867, Q40
+0.877, Q31 0.889, Q13 0.891, Q35 0.892. No query > 1.05.
+The decompress-free ceiling (§15, Mac canon) was 0.916: the cache delivers it.
+Hot path only — run-1 fill cost not in this table (indicative +16%, §24).
+Still outstanding: x86 A/B, admission leave-one-out, removing the
+DRAKEN_MEM_ACCOUNT switch.

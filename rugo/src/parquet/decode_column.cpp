@@ -17,6 +17,9 @@
 #include "simd_validity_bitmap.hpp"
 #include "type_widening.hpp"
 #include "thread_pool.hpp"
+#include "core/chunk_cache.h"   // C7 cross-query decompressed chunk cache (draken_native)
+#include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -459,6 +462,157 @@ int32_t PreScanPages(
 }
 
 // ---------------------------------------------------------------------------
+// ChunkPageSource — this call's view of the cross-query chunk cache (C7).
+// ---------------------------------------------------------------------------
+// HIT: every compressed page of the chunk is served from the pinned entry; the
+// decoder still walks the page headers in `data`, but never decompresses.
+// FILL (miss + admit): each page is decompressed straight into one buffer sized
+// by the chunk's total_uncompressed_size; commit() inserts it only when a header
+// walk proves every compressed page has its slot (partial chunks are not cached
+// — any skipped page, early exit or error leaves a gap and the fill is dropped).
+// Otherwise (no request, uncompressed column, cache off): the scratch path,
+// exactly as before.
+namespace {
+class ChunkPageSource {
+ public:
+  // `skips_pages`: the decode is masked or follows a page jump plan, so it skips
+  // pages by design — never fill. `predicated`: a dictionary skip / page search
+  // may stop early; fill, but remember a chunk that came out incomplete.
+  ChunkPageSource(const ChunkCacheRequest* req, const ColumnStats* col,
+                  const uint8_t* data, bool skips_pages, bool predicated)
+      : req_(req), data_(data), predicated_(predicated) {
+    if (req == nullptr || col->codec == 0 || !draken_cc_enabled()) return;
+    int fill_ok = 0;
+    entry_ = draken_cc_lookup(req->path, req->path_len, req->chunk_offset,
+                              predicated ? 1 : 0, &fill_ok);
+    if (entry_ == nullptr && fill_ok && req->admit && !skips_pages &&
+        col->total_uncompressed_size > 0) {
+      cap_ = static_cast<size_t>(col->total_uncompressed_size);
+      fill_ = draken_cc_fill_alloc(static_cast<int64_t>(cap_));
+    }
+  }
+  ~ChunkPageSource() {
+    if (entry_ != nullptr) draken_cc_unpin(entry_);
+    if (fill_ != nullptr) {   // never committed: the decode stopped short or failed
+      draken_cc_fill_discard(fill_);
+      mark_incomplete();
+    }
+  }
+  ChunkPageSource(const ChunkPageSource&) = delete;
+  ChunkPageSource& operator=(const ChunkPageSource&) = delete;
+
+  // HIT: the cached bytes of the page whose compressed region starts at `src`.
+  bool cached(const uint8_t* src, const uint8_t** out, size_t* len) const {
+    if (entry_ == nullptr) return false;
+    int64_t n = 0;
+    if (!draken_cc_page(entry_, static_cast<int64_t>(src - data_), out, &n)) {
+      throw std::runtime_error("chunk cache entry has no page at chunk offset " +
+                               std::to_string(src - data_));
+    }
+    *len = static_cast<size_t>(n);
+    return true;
+  }
+
+  // FILL: reserve the slot for the page at `src`. Single-threaded (the caller's
+  // thread, also for the parallel path, which reserves before dispatch).
+  // nullptr when not filling.
+  uint8_t* reserve(const uint8_t* src, size_t usize) {
+    if (fill_ == nullptr) return nullptr;
+    if (used_ + usize > cap_) {   // footer under-states the chunk: give up the fill
+      abandon();
+      return nullptr;
+    }
+    uint8_t* dst = fill_ + used_;
+    index_.push_back(static_cast<int64_t>(src - data_));
+    index_.push_back(static_cast<int64_t>(used_));
+    index_.push_back(static_cast<int64_t>(usize));
+    used_ += usize;
+    return dst;
+  }
+
+  void add_cost(int64_t ns) { cost_ns_.fetch_add(ns, std::memory_order_relaxed); }
+
+  void abandon() {
+    if (fill_ != nullptr) draken_cc_fill_discard(fill_);
+    fill_ = nullptr;
+  }
+
+  void mark_incomplete() const {
+    if (predicated_) draken_cc_mark_incomplete(req_->path, req_->path_len, req_->chunk_offset);
+  }
+
+  // The decompressed bytes of one page for a serial decode site: cached, filled,
+  // or (neither) decompressed into `scratch`. Throws on a decompression error.
+  const uint8_t* page(const uint8_t* src, size_t csize, size_t usize,
+                      rugo::compression::CompressionCodec codec,
+                      draken::AppendBuffer<uint8_t>& scratch, size_t* out_size) {
+    const uint8_t* p = nullptr;
+    if (cached(src, &p, out_size)) return p;
+    if (uint8_t* dst = reserve(src, usize)) {
+      const auto t0 = std::chrono::steady_clock::now();
+      rugo::compression::DecompressIntoRaw(src, csize, usize, codec, dst);
+      add_cost(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now() - t0).count());
+      *out_size = usize;
+      return dst;
+    }
+    rugo::compression::DecompressInto(src, csize, usize, codec, scratch);
+    *out_size = scratch.size();
+    return scratch.data();
+  }
+
+  // After a successful decode of the whole chunk `data_[0, size)`.
+  void commit(size_t size) {
+    if (fill_ == nullptr) return;
+    std::vector<int64_t> have;
+    have.reserve(index_.size() / 3);
+    for (size_t i = 0; i < index_.size(); i += 3) have.push_back(index_[i]);
+    std::sort(have.begin(), have.end());
+    const uint8_t* cursor = data_;
+    const uint8_t* end = data_ + size;
+    while (cursor < end) {
+      TInput in{cursor, end};
+      PageHeader h = ParsePageHeader(in);
+      const uint8_t* body = in.p;
+      if (body > end) { abandon(); return; }
+      size_t csize = static_cast<size_t>(h.compressed_page_size);
+      const size_t avail = static_cast<size_t>(end - body);
+      if (csize == 0 || csize > avail) csize = avail;
+      const bool v2 = h.page_type == 3;
+      if (h.page_type != 0 && h.page_type != 2 && h.page_type != 3) { abandon(); return; }
+      if (!(v2 && !h.is_compressed)) {
+        const uint8_t* region =
+            v2 ? body + h.repetition_levels_byte_length + h.definition_levels_byte_length : body;
+        if (!std::binary_search(have.begin(), have.end(), static_cast<int64_t>(region - data_))) {
+          abandon();
+          mark_incomplete();
+          return;
+        }
+      }
+      cursor = body + csize;
+    }
+    // Ownership of fill_ passes to the cache whether it admits it or not.
+    draken_cc_insert(req_->path, req_->path_len, req_->chunk_offset, fill_,
+                     static_cast<int64_t>(used_), index_.data(),
+                     static_cast<int32_t>(index_.size() / 3),
+                     cost_ns_.load(std::memory_order_relaxed));
+    fill_ = nullptr;
+  }
+
+ private:
+  const ChunkCacheRequest* req_;
+  const uint8_t* data_;
+  bool predicated_ = false;
+  const DrakenChunkEntry* entry_ = nullptr;
+  uint8_t* fill_ = nullptr;
+  size_t cap_ = 0;
+  size_t used_ = 0;
+  std::vector<int64_t> index_;   // (offset in data_, start in fill_, length) triples
+  std::atomic<int64_t> cost_ns_{0};
+};
+}  // namespace
+
+// ---------------------------------------------------------------------------
 // DecodeColumnFromChunk (internal)
 // ---------------------------------------------------------------------------
 // Decodes a single column starting at target_col->dictionary_page_offset (if
@@ -482,8 +636,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                     const ValuePredicate* skip_pred,
                                     const PageJumpPlan* jump,
                                     PageSearchOut* search,
-                                    bool length_only) {
+                                    bool length_only,
+                                    const ChunkCacheRequest* cache) {
   result.reset();
+  ChunkPageSource pages(cache, target_col, file_data,
+                        /*skips_pages=*/row_mask != nullptr || jump != nullptr,
+                        /*predicated=*/skip_pred != nullptr || search != nullptr);
   if (search != nullptr) {
     search->row_mask.clear();
     search->applied = false;
@@ -732,13 +890,20 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             { RUGO_TEL_START(_dc_t0);
               draken::AppendBuffer<uint8_t>& dict_dst =
                   zc_byte_array ? result.string_dict_arena : dict_decompressed_data;
-              rugo::compression::DecompressInto(
+              size_t got = 0;
+              const uint8_t* got_ptr = pages.page(
                   dict_compressed_data, dict_compressed_size,
-                  dict_page_header.uncompressed_page_size, codec,
-                  dict_dst);
+                  dict_page_header.uncompressed_page_size, codec, dict_dst, &got);
+              // The zero-copy byte_array dictionary IS the output arena, which the
+              // result owns: a page served from the chunk cache (or filled into it)
+              // is copied in rather than aliased.
+              if (zc_byte_array && got_ptr != dict_dst.data()) {
+                dict_dst.assign(got_ptr, got_ptr + got);
+                got_ptr = dict_dst.data();
+              }
               RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _dc_t0);
-              dict_data_ptr  = dict_dst.data();
-              dict_data_size = dict_dst.size(); }
+              dict_data_ptr  = got_ptr;
+              dict_data_size = got; }
           } catch (const std::exception &e) {
             // Fail loud: surface the specific decompression reason rather than
             // collapsing to a generic "Decode failed" upstream.
@@ -1411,10 +1576,20 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           double*  ivec_f64  = result.float64_values.empty() ? nullptr : result.float64_values.data();
 
           RUGO_TEL_START(_pp_t0);
+          ChunkPageSource* pages_ptr = &pages;
           for (const PageTask& ptask : page_tasks) {
             if (ptask.skip_page) { ++result.pages_skipped; continue; }
 
-            pool.push_task([ptask, col_type, col_codec,
+            // Chunk cache (C7): resolved HERE, on the calling thread — the cached
+            // page pointer, or this page's fill slot. Workers never touch the
+            // cache's bookkeeping; a fill slot is disjoint memory per page.
+            const uint8_t* cc_ptr = nullptr;
+            size_t         cc_len = 0;
+            uint8_t*       cc_dst = nullptr;
+            if (!pages.cached(ptask.compressed_data, &cc_ptr, &cc_len))
+              cc_dst = pages.reserve(ptask.compressed_data, ptask.uncompressed_size);
+
+            pool.push_task([ptask, col_type, col_codec, cc_ptr, cc_len, cc_dst, pages_ptr,
                             xint64, xfloat64, xint32, xfloat32,
                             ivec_i32, ivec_i64, ivec_f32, ivec_f64,
                             &any_error, &decoded_count,
@@ -1447,6 +1622,27 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               if (col_codec == 0) {
                 dp = ptask.compressed_data;
                 ds = ptask.compressed_size;
+              } else if (cc_ptr != nullptr) {
+                dp = cc_ptr;
+                ds = cc_len;
+              } else if (cc_dst != nullptr) {
+                try {
+                  auto codec = rugo::compression::CodecFromInt(col_codec);
+                  const auto c0 = std::chrono::steady_clock::now();
+                  RUGO_TEL_START(_pf_t0);
+                  rugo::compression::DecompressIntoRaw(
+                      ptask.compressed_data, ptask.compressed_size,
+                      ptask.uncompressed_size, codec, cc_dst);
+                  RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pf_t0);
+                  pages_ptr->add_cost(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - c0).count());
+                  dp = cc_dst;
+                  ds = ptask.uncompressed_size;
+                } catch (...) {
+                  any_error.store(true, std::memory_order_relaxed);
+                  finish_task();
+                  return;
+                }
               } else {
                 try {
                   auto codec = rugo::compression::CodecFromInt(col_codec);
@@ -1534,6 +1730,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           }
           RUGO_TEL_ACCUM(rugo_tel::page_parallel_ns, _pp_t0);
 
+          // A failed parallel pass falls back to the sequential loop, which
+          // would reserve the same pages again: drop this call's fill.
+          if (any_error.load()) pages.abandon();
           if (!any_error.load()) {
             total_collected = prescan_total;
             result.pages_decoded += decoded_count.load();
@@ -1728,13 +1927,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           try {
             auto codec = rugo::compression::CodecFromInt(target_col->codec);
             { RUGO_TEL_START(_pg_t0);
-              rugo::compression::DecompressInto(
-                  compressed_data, compressed_size,
-                  page_header.uncompressed_page_size, codec,
-                  page_decompressed_data);
+              data_ptr = pages.page(compressed_data, compressed_size,
+                                    page_header.uncompressed_page_size, codec,
+                                    page_decompressed_data, &data_size);
               RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pg_t0); }
-            data_ptr  = page_decompressed_data.data();
-            data_size = page_decompressed_data.size();
           } catch (const std::exception &e) {
             // Decompression failure: capture the specific reason and stop the
             // page loop. total_rows_all_pages falls short of total_needed, so
@@ -1856,12 +2052,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           try {
             auto codec = rugo::compression::CodecFromInt(target_col->codec);
             { RUGO_TEL_START(_pg_t0);
-              rugo::compression::DecompressInto(
-                  values_region, values_csize, values_usize, codec,
-                  page_decompressed_data);
+              data_ptr = pages.page(values_region, values_csize,
+                                    static_cast<size_t>(values_usize), codec,
+                                    page_decompressed_data, &data_size);
               RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pg_t0); }
-            data_ptr  = page_decompressed_data.data();
-            data_size = page_decompressed_data.size();
           } catch (const std::exception &e) {
             result.error_message = e.what();
             break;
@@ -3185,6 +3379,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {
       result.success = (total_rows_all_pages == total_needed);
+      if (result.success) pages.commit(file_size);
       if (!result.success) {
         // A short page walk is a corrupt chunk or a decoder bug, never an
         // "absent column": say how short, so it cannot be misread as the latter.
@@ -3195,6 +3390,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
     } else {
       result.success = (total_collected > 0);
+      if (result.success) pages.commit(file_size);
     }
 
     if (dict_size > 0 && result.pages_decoded == 0 && !result.dict_all_filtered)

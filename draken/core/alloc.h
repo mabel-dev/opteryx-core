@@ -31,9 +31,37 @@
 #define DRAKEN_USABLE_SIZE(p) ((size_t)0)
 #endif
 
+#include "mem_account.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Process memory account (mem_account.h): blocks of at least
+// DRAKEN_MEM_ACCOUNT_MIN usable bytes are charged when allocated and
+// uncharged when freed. Both sides use the allocator's usable size, so the
+// pair is exact without the free side knowing the request.
+// TEMPORARY A/B switch (C7 Phase A): DRAKEN_MEM_ACCOUNT=0 disables charging
+// for the whole process (read once). Removed once the A/B is banked.
+static inline int draken_mem_account_enabled(void) {
+    static const int on = []() {
+        const char* v = getenv("DRAKEN_MEM_ACCOUNT");
+        return (v && v[0] == '0') ? 0 : 1;
+    }();
+    return on;
+}
+
+static inline void draken_mem_note_alloc(void* p) {
+    if (p == nullptr || !draken_mem_account_enabled()) return;
+    const int64_t n = (int64_t)DRAKEN_USABLE_SIZE(p);
+    if (n >= DRAKEN_MEM_ACCOUNT_MIN) draken_mem_charge(n);
+}
+
+static inline void draken_mem_note_free(void* p) {
+    if (p == nullptr || !draken_mem_account_enabled()) return;
+    const int64_t n = (int64_t)DRAKEN_USABLE_SIZE(p);
+    if (n >= DRAKEN_MEM_ACCOUNT_MIN) draken_mem_uncharge(n);
+}
 
 // Diagnostic-trace configuration, resolved from the environment EXACTLY ONCE
 // per process (magic-static init is thread-safe). getenv is a linear scan of
@@ -63,6 +91,7 @@ static inline const DrakenTraceConfig* draken_trace_config(void) {
 
 static inline void* draken_malloc(size_t size) {
     void* p = malloc(size);
+    draken_mem_note_alloc(p);
     const DrakenTraceConfig* tc = draken_trace_config();
     if (tc->enabled && p != nullptr) {
         size_t asize = DRAKEN_USABLE_SIZE(p);
@@ -89,6 +118,7 @@ static inline void* draken_malloc(size_t size) {
 // draken_free.
 static inline void* draken_calloc(size_t count, size_t size) {
     void* p = calloc(count, size);
+    draken_mem_note_alloc(p);
     const DrakenTraceConfig* tc = draken_trace_config();
     if (tc->enabled && p != nullptr) {
         size_t asize = DRAKEN_USABLE_SIZE(p);
@@ -112,7 +142,11 @@ static inline void* draken_calloc(size_t count, size_t size) {
 // Returns NULL on failure with the original block untouched, like realloc.
 // Pairs with draken_free.
 static inline void* draken_realloc(void* ptr, size_t size) {
+    draken_mem_note_free(ptr);
     void* p = realloc(ptr, size);
+    // On failure realloc leaves the original block untouched: re-charge it.
+    // realloc(ptr, 0) may free ptr and return NULL — then there is nothing left.
+    draken_mem_note_alloc(p != nullptr ? p : (size != 0 ? ptr : nullptr));
     const DrakenTraceConfig* tc = draken_trace_config();
     if (tc->enabled && p != nullptr) {
         size_t asize = DRAKEN_USABLE_SIZE(p);
@@ -134,6 +168,7 @@ static inline void* draken_aligned_malloc(size_t size, size_t alignment) {
     if (alignment < sizeof(void*)) alignment = sizeof(void*);
     void* p = nullptr;
     if (posix_memalign(&p, alignment, size) != 0) p = nullptr;
+    draken_mem_note_alloc(p);
     const DrakenTraceConfig* tc = draken_trace_config();
     if (tc->enabled && p != nullptr) {
         size_t asize = DRAKEN_USABLE_SIZE(p);
@@ -176,6 +211,7 @@ static inline void draken_free(void* ptr) {
         }
     }
 
+    draken_mem_note_free(ptr);
     free(ptr);
 }
 

@@ -194,6 +194,11 @@ code is written.
 
 ### C7. In-process page cache across queries (Opteryx's own)
 - **D4 (2026-10-04):** in scope as an improvement, kept only if it pays.
+- **Status (2026-10-07):** designed, ceiling-measured and BUILT — process memory
+  account (Phase A) + decompressed column-chunk cache with give-way (Phase B); see
+  docs/C7_PAGE_CACHE_DESIGN.md §15-§24. The cache on/off A/B (Mac + x86) and the
+  admission leave-one-out are still OUTSTANDING; until they bank, "kept only if it
+  pays" is unanswered.
 - **Gap:** only metadata is cached across queries (parsed footers, skene
   readers, manifests). The rugo mmap cache is per query. Pivot keeps compressed
   and decompressed pages in RAM, evicted with CLOCK, and when one copy of a page

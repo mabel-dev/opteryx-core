@@ -64,6 +64,7 @@
 #include <ankerl/unordered_dense.h>
 
 #include "core/append_buffer.h"   // draken::AppendBuffer — key-store raw/arena
+#include "core/tracked_allocator.h"   // draken::tracked_vector — partition arrays charged to the memory account
 
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
@@ -156,7 +157,7 @@ struct GroupKeyColumn {
     const LogicalType* logical = nullptr;  // borrowed; carried to output columns
     draken::AppendBuffer<uint8_t> raw;    // elem_size bytes/row (slots for strings)
     draken::AppendBuffer<uint8_t> arena;  // strings only: consolidated long-string bytes
-    std::vector<uint8_t> validity;  // lazy — see comment above
+    draken::tracked_vector<uint8_t> validity;  // lazy — see comment above
 
     size_t row_count() const { return elem_size ? raw.size() / elem_size : 0; }
 
@@ -2685,15 +2686,15 @@ struct UngroupedAggSink : Sink {
 // Per-spec columnar collector lanes. Growth is vector resize (zero-filling) once
 // per morsel per partition — never per row, never per group.
 struct GBLanes {
-    std::vector<int64_t>  valid;   // non-NULL operand rows (every kind but Rows)
-    std::vector<int64_t>  i64;     // SumI/AvgI exact sums; MinMaxNum raw containers
-    std::vector<double>   f64;     // SumF/AvgF sums; Stddev family/Corr Σx
-    std::vector<double>   f64sq;   // Stddev family/Corr Σx²
-    std::vector<double>   f64y;    // Corr Σy
-    std::vector<double>   f64yy;   // Corr Σy²
-    std::vector<double>   f64xy;   // Corr Σxy
-    std::vector<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
-    std::vector<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
+    draken::tracked_vector<int64_t>  valid;   // non-NULL operand rows (every kind but Rows)
+    draken::tracked_vector<int64_t>  i64;     // SumI/AvgI exact sums; MinMaxNum raw containers
+    draken::tracked_vector<double>   f64;     // SumF/AvgF sums; Stddev family/Corr Σx
+    draken::tracked_vector<double>   f64sq;   // Stddev family/Corr Σx²
+    draken::tracked_vector<double>   f64y;    // Corr Σy
+    draken::tracked_vector<double>   f64yy;   // Corr Σy²
+    draken::tracked_vector<double>   f64xy;   // Corr Σxy
+    draken::tracked_vector<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
+    draken::tracked_vector<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     std::vector<std::string> sval; // MinMaxStr extremes
     std::vector<GBArrayAggState> aa;  // ArrayAgg per-group element lists
     std::vector<opteryx::roaring32::Roaring32> cidr;  // CidrAgg per-group address sets
@@ -3007,9 +3008,9 @@ struct GBPartition {
     opteryx::medius::MediusMap<128> mid;   // FOOTPRINT TEST: 2KB/partition instead of 8KB
     bool use_mid = true;
     bool use_parvi = false;           // armed by GroupBySink when the NDV estimate is low
-    std::vector<uint64_t> hashes;
+    draken::tracked_vector<uint64_t> hashes;
     std::vector<GroupKeyColumn> keycols;
-    std::vector<int64_t> grows;       // COUNT(*) rows lane (any Rows spec)
+    draken::tracked_vector<int64_t> grows;       // COUNT(*) rows lane (any Rows spec)
     std::vector<GBLanes> lanes;       // one per spec
     std::vector<GBCountDistinct> cd;  // one per spec (only CountDistinct fills it)
     // Built in ADAPTIVE RAW MODE: every row appended as its own group, `index` never
@@ -3020,7 +3021,7 @@ struct GBPartition {
     // (source index << 32 | row) into the partition's queued sources, instead of a
     // copy in `keycols`. Group identity is the hash, so the values are needed once —
     // at emit — and are gathered from the source then. Empty everywhere else.
-    std::vector<uint64_t> keyref;
+    draken::tracked_vector<uint64_t> keyref;
 
     size_t size() const { return hashes.size(); }
 

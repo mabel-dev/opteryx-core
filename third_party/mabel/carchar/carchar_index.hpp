@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "carchar_common.hpp"
+#include "core/tracked_allocator.h"   // draken::TrackedAllocator — charged to the process memory account
 
 // Hot-path probe/insert statistics (probe lengths, lookup/insert counts).
 // Diagnostic-only — no production consumer reads them — but they cost two adds
@@ -321,7 +322,7 @@ class CarcharIndex {
     }
 
     std::size_t capacity_ = 0;
-    std::vector<std::uint8_t> control_;
+    std::vector<std::uint8_t, draken::TrackedAllocator<std::uint8_t>> control_;
     // Uninitialized-allocator vectors: allocated but never pre-filled, because
     // an empty slot's hash/payload are never read (see initialize_storage).
     // H16 (2026-08-14): hashes_ and payload_refs_ were SEPARATE allocations, so a
@@ -337,7 +338,7 @@ class CarcharIndex {
     };
     static_assert(sizeof(Slot) == 16, "Slot must be exactly two 64-bit words");
     static_assert(alignof(Slot) >= 8, "Slot must be 8-byte aligned for the probe");
-    std::vector<Slot, detail::uninitialized_allocator<Slot>> slots_;
+    std::vector<Slot, draken::TrackedUninitAllocator<Slot>> slots_;
     std::size_t size_ = 0;
     std::size_t resize_threshold_ = 0;
     double load_factor_ = 0.80;

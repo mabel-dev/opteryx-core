@@ -82,6 +82,20 @@ from opteryx._draken_abi import check_draken_abi
 
 check_draken_abi()
 
+# Process memory account + cross-query chunk cache (C7, docs/C7_PAGE_CACHE_DESIGN.md):
+# configured ONCE per process from config — the container is the cgroup memory
+# limit when one is set (Cloud Run), else physical RAM.
+from opteryx import config as _c7_config
+from opteryx.compiled.platform import cgroup_memory_limit_bytes as _c7_cgroup_bytes
+from opteryx.compiled.platform import physical_memory_total_bytes as _c7_physical_bytes
+from opteryx.compiled.structures.memory_pool import configure_chunk_cache as _c7_configure
+
+_c7_configure(
+    _c7_cgroup_bytes() or _c7_physical_bytes(),
+    _c7_config.CHUNK_CACHE_MEMORY_PERCENT,
+    _c7_config.CHUNK_CACHE_RESERVE_BYTES,
+)
+
 if OPTERYX_DEBUG:  # pragma: no cover
     from opteryx.debugging import OpteryxImportFinder
 

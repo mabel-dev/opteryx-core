@@ -664,6 +664,15 @@ def draken_rugo_extensions(parquet_created_by):
                 # One TU on purpose — see the note at the top of the file.
                 "draken/morsels/cxx_morsel_ops.cpp",
                 "draken/core/vector_alloc.cpp",
+                # The process memory account (core/mem_account.h). draken_native is
+                # its ONLY home: every other extension resolves draken_mem_* from
+                # here at load (RTLD_GLOBAL), so the process holds one account.
+                # Never add it to a consumer's sources.
+                "draken/core/mem_account.cpp",
+                # The cross-query decompressed parquet chunk cache (core/chunk_cache.h),
+                # same single-home rule: rugo's decoder (pool_reader, rugo_native)
+                # resolves draken_cc_* from here. Never add it to a consumer.
+                "draken/core/chunk_cache.cpp",
                 "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
                 "draken/core/lazy_region.cpp",  # lazy branch evaluation: row selection / narrow / scatter
                 # bool_vector_from_bits — the CPython-returning bridge that used

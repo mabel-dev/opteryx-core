@@ -181,6 +181,7 @@ cdef class MemoryPool:
             'releases': s.releases,
             'compactions': s.compactions,
             'resizes': s.resizes,
+            'peak_used_size': s.peak_used_size,
         }
 
     cpdef list py_get_free_segments(self):
@@ -221,3 +222,104 @@ cdef class MemoryPool:
     @property
     def py_size(self):
         return self._pool.get_stats().total_size
+
+
+# The process memory account (draken/core/mem_account.h). The account itself
+# lives in draken_native; these read it for query telemetry.
+cdef extern from "core/mem_account.h" nogil:
+    int64_t draken_mem_charged()
+    int64_t draken_mem_peak()
+    void draken_mem_reset_peak()
+
+
+def process_memory_charged() -> int:
+    """Bytes currently charged to the process memory account."""
+    return draken_mem_charged()
+
+
+def process_memory_peak() -> int:
+    """High-water mark of the process memory account since the last reset."""
+    return draken_mem_peak()
+
+
+def reset_process_memory_peak() -> None:
+    """Restart the high-water mark at the current charge (query start)."""
+    draken_mem_reset_peak()
+
+
+cdef extern from "core/mem_account.h" nogil:
+    void draken_mem_configure(int64_t container_bytes, int64_t reserve_bytes, int64_t cache_budget_bytes)
+    int64_t draken_mem_container()
+    int64_t draken_mem_reserve()
+    int64_t draken_mem_cache_budget()
+    int64_t draken_mem_cache_limit()
+    int64_t draken_mem_system_available()
+
+
+cdef extern from "core/chunk_cache.h" nogil:
+    ctypedef struct DrakenChunkCacheStats:
+        int64_t bytes
+        int64_t entries
+        int64_t hits
+        int64_t misses
+        int64_t inserts
+        int64_t refused
+        int64_t evictions
+        int64_t give_way_bytes
+    DrakenChunkCacheStats draken_cc_stats()
+    void draken_cc_flush()
+
+
+# The cache is off below this budget: a small install would pay the fill cost
+# and thrash (ruling, docs/C7_PAGE_CACHE_DESIGN.md §14).
+CHUNK_CACHE_MIN_BUDGET_BYTES = 2 << 30
+
+
+def configure_chunk_cache(int64_t container_bytes, int64_t memory_percent, int64_t reserve_bytes) -> int:
+    """Configure the process memory account and return the cache budget it got.
+
+    budget = memory_percent% x container - reserve; under 2 GiB the cache is
+    off (budget 0). Called once at import with the config values."""
+    if container_bytes < 0 or reserve_bytes < 0 or not (0 <= memory_percent <= 100):
+        raise ValueError(
+            f"chunk cache configuration out of range: container={container_bytes}, "
+            f"percent={memory_percent}, reserve={reserve_bytes}"
+        )
+    cdef int64_t budget = container_bytes * memory_percent // 100 - reserve_bytes
+    if budget < CHUNK_CACHE_MIN_BUDGET_BYTES:
+        budget = 0
+    draken_mem_configure(container_bytes, reserve_bytes, budget)
+    if budget == 0:
+        draken_cc_flush()
+    return budget
+
+
+def chunk_cache_budget_bytes() -> int:
+    """The chunk cache's configured budget (0 = off)."""
+    return draken_mem_cache_budget()
+
+
+def chunk_cache_stats() -> dict:
+    """Process-lifetime chunk cache counters plus the current limit."""
+    cdef DrakenChunkCacheStats s = draken_cc_stats()
+    return {
+        "bytes": s.bytes,
+        "entries": s.entries,
+        "hits": s.hits,
+        "misses": s.misses,
+        "inserts": s.inserts,
+        "refused": s.refused,
+        "evictions": s.evictions,
+        "give_way_bytes": s.give_way_bytes,
+        "budget": draken_mem_cache_budget(),
+        "limit": draken_mem_cache_limit(),
+        "container": draken_mem_container(),
+        "reserve": draken_mem_reserve(),
+        # The OS's available memory at the last refresh (-1 = not readable).
+        "system_available": draken_mem_system_available(),
+    }
+
+
+def flush_chunk_cache() -> None:
+    """Drop every chunk cache entry (pinned ones go when their readers finish)."""
+    draken_cc_flush()

@@ -390,6 +390,18 @@ DecodedTable ReadParquet(const uint8_t* data, size_t size,
 // it at entry. Hoist one `out` above a per-row-group column loop and pass it each
 // column to reuse its vector capacity across columns. `out` is a function-local
 // per worker invocation — no cross-thread sharing.
+// Cross-query chunk cache request (docs/C7_PAGE_CACHE_DESIGN.md; the cache is
+// draken/core/chunk_cache.h). `data` handed to DecodeColumnFromChunk must be
+// the chunk itself (chunk-relative offsets in `target_col`), as the IO pipeline
+// passes it; page bytes are cached by their offset within that buffer.
+// nullptr = no cache (standalone rugo, the Python reader, the patcher).
+struct ChunkCacheRequest {
+  const char* path;
+  size_t      path_len;
+  int64_t     chunk_offset;  // absolute file offset of the chunk's first byte
+  bool        admit;         // false: use hits, never fill (compaction)
+};
+
 void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                            const ColumnStats* target_col,
                            int64_t* ext_int64   = nullptr,
@@ -401,7 +413,8 @@ void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                            const ValuePredicate* skip_pred = nullptr,
                            const PageJumpPlan* jump = nullptr,
                            PageSearchOut* search = nullptr,
-                           bool length_only = false);
+                           bool length_only = false,
+                           const ChunkCacheRequest* cache = nullptr);
 
 // In-place convenience: mask-only (matches the 4-arg by-value convenience below).
 inline void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
@@ -411,10 +424,11 @@ inline void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_
                                   const ValuePredicate* skip_pred = nullptr,
                                   const PageJumpPlan* jump = nullptr,
                                   PageSearchOut* search = nullptr,
-                                  bool length_only = false) {
+                                  bool length_only = false,
+                                  const ChunkCacheRequest* cache = nullptr) {
   DecodeColumnFromChunk(out, data, size, target_col,
                         nullptr, nullptr, nullptr, nullptr,
-                        row_mask, prefer_dict, skip_pred, jump, search, length_only);
+                        row_mask, prefer_dict, skip_pred, jump, search, length_only, cache);
 }
 
 // By-value overload (thin shim over the in-place primary — see decode_column.cpp).

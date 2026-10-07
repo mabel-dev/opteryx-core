@@ -1,11 +1,13 @@
 #include "memory_pool.hpp"
 
+#include "core/alloc.h"   // draken_mem_account_enabled + the process memory account (mem_account.h)
+
 namespace opteryx {
 
 MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t alignment)
     : size_(size), used_size_(0), alignment_(alignment), auto_resize_(auto_resize),
       name_(name), next_ref_id_(1), commits_(0), failed_commits_(0), reads_(0),
-      read_locks_(0), compactions_(0), releases_(0), resizes_(0) {
+      read_locks_(0), compactions_(0), releases_(0), resizes_(0), peak_used_size_(0) {
 
     if (size <= 0) {
         throw std::invalid_argument("MemoryPool size must be a positive integer");
@@ -15,15 +17,17 @@ MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t
         throw std::invalid_argument("Alignment must be a power of two");
     }
 
-    pool_ = static_cast<unsigned char*>(malloc(size));
-    if (!pool_) {
-        throw std::bad_alloc();
-    }
+    // The block is allocated on first use (ensure_pool_no_lock), not here: a
+    // scan pool is sized at plan time for every projected column, but only
+    // columns the decoder sends down the pool path ever write into it — most
+    // scans never do (docs/C7_PAGE_CACHE_DESIGN.md §22).
+    pool_ = nullptr;
 
     segments_[0] = {0, size, true};
 }
 
 MemoryPool::~MemoryPool() {
+    if (used_size_ > 0 && draken_mem_account_enabled()) draken_mem_uncharge(used_size_);
     if (pool_) {
         free(pool_);
         pool_ = nullptr;
@@ -141,6 +145,12 @@ void MemoryPool::compaction_no_lock() {
     segments_ = std::move(new_segments);
 }
 
+bool MemoryPool::ensure_pool_no_lock() {
+    if (pool_ != nullptr) return true;
+    pool_ = static_cast<unsigned char*>(malloc(size_));
+    return pool_ != nullptr;
+}
+
 bool MemoryPool::resize_pool_no_lock(int64_t new_size) {
     unsigned char* new_pool = static_cast<unsigned char*>(realloc(pool_, new_size));
     if (!new_pool) {
@@ -197,7 +207,8 @@ PoolStats MemoryPool::get_stats_no_lock() {
     return {
         size_, total_used, total_free, used_blocks, free_blocks,
         largest_free, fragmentation,
-        commits_, failed_commits_, reads_, releases_, compactions_, resizes_
+        commits_, failed_commits_, reads_, releases_, compactions_, resizes_,
+        peak_used_size_
     };
 }
 
@@ -247,7 +258,7 @@ int64_t MemoryPool::commit(const void* data, int64_t length) {
         }
     }
 
-    if (seg_key == -1) {
+    if (seg_key == -1 || !ensure_pool_no_lock()) {
         failed_commits_++;
         return -1;
     }
@@ -268,6 +279,8 @@ int64_t MemoryPool::commit(const void* data, int64_t length) {
     std::memcpy(pool_ + seg_key, data, length);
     metadata_[ref_id] = {seg_key, block_len, 0, length};
     used_size_ += block_len;
+    if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
+    if (draken_mem_account_enabled()) draken_mem_charge(block_len);
     commits_++;
 
     return ref_id;
@@ -330,6 +343,7 @@ void MemoryPool::release(int64_t ref_id) {
 
     it->second.is_free = true;
     used_size_ -= it->second.length;
+    if (draken_mem_account_enabled()) draken_mem_uncharge(it->second.length);
 
     // Coalesce right neighbor
     auto right = std::next(it);
@@ -381,7 +395,7 @@ ReserveResult MemoryPool::reserve_for_write(int64_t size) {
         }
     }
 
-    if (seg_key == -1) {
+    if (seg_key == -1 || !ensure_pool_no_lock()) {
         failed_commits_++;
         return {-1, nullptr, 0};
     }
@@ -402,6 +416,8 @@ ReserveResult MemoryPool::reserve_for_write(int64_t size) {
     int64_t ref_id = next_ref_id_++;
     metadata_[ref_id] = {seg_key, block_len, 1, 0};
     used_size_ += block_len;
+    if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
+    if (draken_mem_account_enabled()) draken_mem_charge(block_len);
     commits_++;
     read_locks_++;
 
@@ -425,6 +441,7 @@ void MemoryPool::clear() {
 
     segments_.clear();
     metadata_.clear();
+    if (used_size_ > 0 && draken_mem_account_enabled()) draken_mem_uncharge(used_size_);
     used_size_    = 0;
     next_ref_id_  = 1;
     commits_      = 0;
@@ -434,6 +451,7 @@ void MemoryPool::clear() {
     compactions_  = 0;
     releases_     = 0;
     resizes_      = 0;
+    peak_used_size_ = 0;
 
     segments_[0] = {0, size_, true};
 }

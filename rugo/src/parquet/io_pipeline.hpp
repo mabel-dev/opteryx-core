@@ -1909,6 +1909,10 @@ class ParquetIOPipeline {
     // Destination pool for serialized columns. Set once before any submit via
     // set_pool_sink(); workers reserve+serialize+finalize through it.
     PoolSink pool_sink_;
+    // Chunk cache admission for this pipeline (C7): false = use cache hits but
+    // never fill (a compaction scan reads every byte once — caching it would only
+    // evict useful entries). Set before the first submit.
+    bool chunk_cache_admit_ = true;
 
     // Pushed per-value predicates (ValuePredicate, decode.hpp), keyed by parquet
     // column name. Set once before any submit (workers read it const, no
@@ -3334,6 +3338,17 @@ class ParquetIOPipeline {
                 if (adjusted.dictionary_page_offset >= 0)
                     adjusted.dictionary_page_offset -= base_offset;
 
+                // Cross-query decompressed chunk cache (C7): every decode below
+                // hands the decoder this chunk, chunk-relative, so the key is the
+                // file path plus the chunk's first byte. Files are immutable for
+                // the life of the process (ruling), so the path is the identity.
+                // A pre-signed fetch URL carries its credential (and expiry) in the
+                // query string, which changes per query: the object is the URL up
+                // to the '?', so that is the key.
+                const size_t cc_key_len = std::min(item.path.find('?'), item.path.size());
+                const ChunkCacheRequest cc_req{item.path.data(), cc_key_len,
+                                               base_offset, chunk_cache_admit_};
+
                 // prefer_dict: keep the dictionary (compressed/Dict shape) for
                 // plain int32/int64 dict columns when not masking. Masked (pass-2)
                 // decode stays on the existing path — it only touches survivor rows
@@ -3428,7 +3443,7 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     // A jumped-over page is never faulted in from the mapping.
@@ -3451,7 +3466,7 @@ class ParquetIOPipeline {
                     result.bytes_fetched += col_fetched[i];   // what was actually transferred
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only);
+                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -3462,7 +3477,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }
@@ -3809,6 +3824,8 @@ class ParquetIOPipeline {
     // (the default) leaves decoding byte-for-byte unchanged.
     std::vector<uint8_t> length_only_columns_;
     void set_length_only_columns(const std::vector<uint8_t>& v) { length_only_columns_ = v; }
+    // C7: false = this scan may use chunk-cache hits but never fills the cache.
+    void set_chunk_cache_admit(bool v) { chunk_cache_admit_ = v; }
 
 #ifdef RUGO_ENABLE_HTTP
     // Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-derived

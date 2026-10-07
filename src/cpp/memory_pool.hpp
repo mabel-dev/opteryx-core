@@ -28,6 +28,9 @@ struct PoolStats {
     int64_t releases;
     int64_t compactions;
     int64_t resizes;
+    // High-water mark of used_size since construction or clear(): the most of
+    // the pool any moment actually held, against total_size (what was reserved).
+    int64_t peak_used_size;
 };
 
 struct ReadResult {
@@ -122,6 +125,7 @@ private:
     int64_t compactions_;
     int64_t releases_;
     int64_t resizes_;
+    int64_t peak_used_size_;
 
     static constexpr int64_t kLargeAllocThreshold = 1 << 20; // 1 MiB
     static constexpr int64_t kMinSplitRemainder   = 256;
@@ -129,6 +133,8 @@ private:
     int64_t find_best_fit_no_lock(int64_t size);
     int64_t find_best_fit_large_no_lock(int64_t size);
     void compaction_no_lock();
+    // Allocate the block on first use; false when malloc fails.
+    bool ensure_pool_no_lock();
     bool resize_pool_no_lock(int64_t new_size);
     int64_t get_fragmentation_no_lock();
     PoolStats get_stats_no_lock();

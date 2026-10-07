@@ -2898,6 +2898,7 @@ cdef class NativeScanPlan:
              "count": self.pipeline_ptr.http_latency_bucket(i)}
             for i in range(n_buckets)
         ]
+        cdef dict pool_stats = self._pool.py_get_stats()
         return {
             "http_request_count": self.pipeline_ptr.http_request_count(),
             "http_fetch_ops": self.pipeline_ptr.http_fetch_ops(),
@@ -2934,7 +2935,24 @@ cdef class NativeScanPlan:
             # here is always the real number, auto (max(workers, fetch_ahead) + 2)
             # or the override.
             "in_flight_limit": self.in_flight_limit,
+            # The scan's MemoryPool, sized at plan time for every projected column
+            # (`dyn_pool_size`), against what the pool path actually held. Only
+            # columns direct_kind_for() sends to DK_POOL are written into it.
+            "scan_pool_reserved_bytes": pool_stats["total_size"],
+            "scan_pool_peak_used_bytes": pool_stats["peak_used_size"],
+            "scan_pool_commits": pool_stats["commits"],
+            "scan_pool_failed_reservations": pool_stats["failed_commits"],
         }
+
+    def set_chunk_cache_admit(self, bint admit):
+        """C7: whether this scan may FILL the cross-query chunk cache (hits are
+        always used). Must be called before execution submits any row group —
+        `execute_native` sets it on every scan plan before the engine starts.
+        A plan already closed (e.g. answered at plan time) submits nothing, so
+        there is no pipeline to configure."""
+        if self._closed or self.pipeline_ptr == NULL:
+            return
+        self.pipeline_ptr.set_chunk_cache_admit(admit)
 
     def set_pass1_predicate(self, size_t fn, size_t ctx, list columns):
         """R3 latmat: push the pass-1 predicate onto this plan's decode workers so the

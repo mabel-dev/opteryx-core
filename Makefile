@@ -294,6 +294,7 @@ decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completen
 	    -I$(CURDIR)/draken \
 	    -I$(CURDIR)/third_party/ankerl \
 	    $(CURDIR)/rugo/src/parquet/decoded_column_reset_test.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
 	    -o decoded_column_reset_test
 	@/tmp/opteryx-tests/decoded_column_reset_test
 	$(call print_green,"✓ DecodedColumn reset completeness test passed")
@@ -353,6 +354,7 @@ rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 	    -I$(CURDIR)/third_party/lz4 \
 	    -I$(CURDIR)/third_party/miniz \
 	    $(CURDIR)/rugo/src/parquet/rle_direct_dict_test.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
 	    -o rle_direct_dict_test
 	@/tmp/opteryx-tests/rle_direct_dict_test
 	$(call print_green,"✓ RLE direct-dict tests passed")
@@ -376,6 +378,7 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 # calls one of them. Mirrors the list in build_common.py — keep them in step.
 DRAKEN_KERNEL_SRCS := \
 	$(CURDIR)/draken/core/vector_alloc.cpp \
+	$(CURDIR)/draken/core/mem_account.cpp \
 	$(CURDIR)/draken/ops/compare_dv.cpp \
 	$(CURDIR)/draken/ops/arithmetic_dv.cpp \
 	$(CURDIR)/draken/ops/kernels/error_handling.cpp \
@@ -488,6 +491,7 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 	    $(CURDIR)/draken/ops/kernels/json_validate_bench.cpp \
 	    $(CURDIR)/draken/ops/kernels/function_json_validate.cpp \
 	    $(CURDIR)/draken/core/vector_alloc.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
 	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
 	    $(JSON_VALIDATE_BENCH_DIR)/yyjson.o \
 	    -o $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench
@@ -1092,8 +1096,11 @@ SLT_DRIVER   := tests/tools/sqllogictest/opteryx_driver.py
 SLT_ROOT     := tests/tools/sqllogictest/tests
 # Use the binary on PATH if available, otherwise fall back to the sibling checkout.
 SQLLOGICTEST ?= $(shell command -v sqllogictest 2>/dev/null || echo ../sqllogictest/target/release/sqllogictest)
+# The command sqllogictest runs once per .slt file to execute queries. slt-coverage
+# overrides it to run the driver under coverage.
+SLT_CMD      ?= $(PYTHON) $(SLT_DRIVER)
 
-.PHONY: slt slt-shapes slt-results slt-run-only slt-regressions slt-install
+.PHONY: slt slt-coverage slt-shapes slt-results slt-run-only slt-regressions slt-install
 
 slt-install: ## Install sqllogictest binary from mabel-dev fork
 	cargo install sqllogictest-bin \
@@ -1103,25 +1110,25 @@ slt-install: ## Install sqllogictest binary from mabel-dev fork
 slt-shapes: ## Run shape-checking slt tests
 	$(SQLLOGICTEST) \
 	  --engine external \
-	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  --external-engine-command-template "$(SLT_CMD)" \
 	  '$(SLT_ROOT)/shapes/*.slt'
 
 slt-results: ## Run result-checking slt tests
 	$(SQLLOGICTEST) \
 	  --engine external \
-	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  --external-engine-command-template "$(SLT_CMD)" \
 	  '$(SLT_ROOT)/results/*.slt'
 
 slt-run-only: ## Run execute-only slt tests (no result checks)
 	$(SQLLOGICTEST) \
 	  --engine external \
-	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  --external-engine-command-template "$(SLT_CMD)" \
 	  '$(SLT_ROOT)/run_only/*.slt'
 
 slt-regressions: ## Run result-checking slt regression tests (one file per fixed bug)
 	$(SQLLOGICTEST) \
 	  --engine external \
-	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  --external-engine-command-template "$(SLT_CMD)" \
 	  '$(SLT_ROOT)/regressions/*.slt'
 
 slt: ## Run the full sqllogictest suite (every group runs; fails if any group failed)
@@ -1130,4 +1137,20 @@ slt: ## Run the full sqllogictest suite (every group runs; fails if any group fa
 	$(MAKE) --no-print-directory slt-results || status=1; \
 	$(MAKE) --no-print-directory slt-run-only || status=1; \
 	$(MAKE) --no-print-directory slt-regressions || status=1; \
+	exit $$status
+
+# Python coverage of the full suite. The driver is a subprocess per .slt file, so each
+# runs under `coverage run --parallel-mode` and the data files are combined after.
+# Measures PYTHON only: planning (parser, binder, optimizer) and the Python glue.
+# Cython modules (.pyx) are not traced in a normal build and native code (C++/Rust) is
+# not instrumented, so execution is invisible here. Report: htmlcov/slt/index.html.
+# Exits non-zero if the suite failed, but still reports what the run covered.
+slt-coverage: ## Run the full sqllogictest suite under Python coverage (planning code only)
+	@rm -f .coverage.slt .coverage.slt.*
+	@status=0; \
+	COVERAGE_FILE=.coverage.slt $(MAKE) --no-print-directory slt \
+	  SLT_CMD="$(PYTHON) -m coverage run --parallel-mode $(SLT_DRIVER)" || status=1; \
+	COVERAGE_FILE=.coverage.slt $(COVERAGE) combine --quiet || status=1; \
+	COVERAGE_FILE=.coverage.slt $(COVERAGE) report --fail-under=0 --skip-covered --sort=cover || status=1; \
+	COVERAGE_FILE=.coverage.slt $(COVERAGE) html --fail-under=0 --directory=htmlcov/slt --quiet || status=1; \
 	exit $$status

@@ -60,6 +60,7 @@ from opteryx.compiled.agg_budgets import cidr_agg_state_budget_bytes as _cidr_ag
 from opteryx.compiled.agg_budgets import median_budget_bytes as _median_budget_bytes
 from opteryx.compiled.spill_budgets import spill_ceiling_bytes as _spill_ceiling_bytes
 from opteryx.compiled.spill_budgets import spill_flush_bytes as _spill_flush_bytes
+from opteryx.compiled.structures.memory_pool import chunk_cache_budget_bytes as _chunk_cache_budget_bytes
 from opteryx.exceptions import PermissionsError, VariableNotFoundError, md_code, md_column
 from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
 
@@ -384,6 +385,10 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "parquet_io_memory_budget_bytes": (
         INT64, FromConfig("PARQUET_IO_MEMORY_BUDGET_BYTES"),
         VariableOwner.USER, Visibility.RESTRICTED),
+    # C7: false = this statement's parquet scans may use chunk-cache hits but never
+    # fill it, and the cache is flushed before it runs. For compaction-style jobs
+    # that read every byte once (ruling: compaction flushes, never admits).
+    "chunk_cache_admit": (BOOLEAN, True, VariableOwner.USER, Visibility.UNRESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an
@@ -500,6 +505,15 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # ELEMENT cap that no longer exists (it bounded nothing — the group count is
     # unbounded — while refusing ordinary group sizes).
     "median_memory_budget_bytes": (INT64, _median_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    # Cross-query decompressed chunk cache (C7, docs/C7_PAGE_CACHE_DESIGN.md): the
+    # configured share of the container and the reserve held back from it, and the
+    # budget they produce (0 = off: under 2 GiB). Process-wide, set at import.
+    "chunk_cache_memory_percent": (
+        INT64, FromConfig("CHUNK_CACHE_MEMORY_PERCENT"), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "chunk_cache_reserve_bytes": (
+        INT64, FromConfig("CHUNK_CACHE_RESERVE_BYTES"), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "chunk_cache_budget_bytes": (
+        INT64, _chunk_cache_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
     # Morsel spill (engine/spill_budgets.hpp, docs/MORSEL_SPILL_DESIGN.md): the
     # flush trigger and the backpressure ceiling for buffered accumulation.
     # Enforced only when a spill root is configured (KVSTORE_LOCATION);

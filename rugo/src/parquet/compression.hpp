@@ -33,6 +33,17 @@ void DecompressInto(
     draken::AppendBuffer<uint8_t>& out_buf
 );
 
+// Decompress into caller-owned memory of exactly `uncompressed_size` bytes
+// (the page header's figure). Used by the chunk cache's fill path, which
+// decompresses each page straight into the cache entry's buffer.
+void DecompressIntoRaw(
+    const uint8_t* compressed_data,
+    size_t compressed_size,
+    size_t uncompressed_size,
+    CompressionCodec codec,
+    uint8_t* out
+);
+
 // Codec-specific implementations
 std::vector<uint8_t> DecompressSnappy(
     const uint8_t* data, 

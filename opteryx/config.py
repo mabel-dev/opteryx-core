@@ -469,6 +469,20 @@ directory block — because the reader's parsed state is private to skene and ha
 no size of its own to report. Keyed by (path, size, mtime), so a rewritten file
 is a new entry. Must be positive."""
 
+CHUNK_CACHE_MEMORY_PERCENT: int = int(get("CHUNK_CACHE_MEMORY_PERCENT", 70))
+"""Cross-query decompressed parquet chunk cache (C7, docs/C7_PAGE_CACHE_DESIGN.md):
+the share of the CONTAINER's memory (cgroup limit when set, else physical RAM)
+the cache may hold, before the reserve below is subtracted. Budget =
+percent x container - CHUNK_CACHE_RESERVE_BYTES; a budget under 2 GiB turns
+the cache off (small installs would only thrash). The cache also gives way to
+query memory: it holds at most container - reserve - query bytes. Process-wide
+(one cache per process); read at import."""
+
+CHUNK_CACHE_RESERVE_BYTES: int = int(get("CHUNK_CACHE_RESERVE_BYTES", 4 << 30))
+"""Bytes of the container held back from the chunk cache for memory the
+process memory account does not see (Python, allocations under 64 KiB,
+third-party libraries). See CHUNK_CACHE_MEMORY_PERCENT."""
+
 PARQUET_IO_MEMORY_BUDGET_BYTES: int = int(get("PARQUET_IO_MEMORY_BUDGET_BYTES", 0))
 """Memory admission budget for one parquet scan's IO pipeline, in BYTES.
 0 = auto: half of the cgroup memory limit when one is in effect (Cloud Run),

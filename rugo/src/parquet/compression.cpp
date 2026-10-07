@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <climits>
+#include <cstring>
 
 // Include vendored compression libraries
 #include "snappy.h"   // third_party/snappy (on the include path)
@@ -247,34 +248,36 @@ std::string CodecName(CompressionCodec codec) {
 // out_buf across consecutive pages in the same column chunk avoids per-page
 // heap allocation after the first page.
 // ---------------------------------------------------------------------------
-void DecompressInto(
+void DecompressIntoRaw(
     const uint8_t* compressed_data,
     size_t compressed_size,
     size_t uncompressed_size,
     CompressionCodec codec,
-    draken::AppendBuffer<uint8_t>& out_buf)
+    uint8_t* out)
 {
     switch (codec) {
         case CompressionCodec::UNCOMPRESSED:
-            out_buf.assign(compressed_data, compressed_data + compressed_size);
+            if (compressed_size != uncompressed_size) {
+                throw std::runtime_error(
+                    "uncompressed page: stored size differs from the header's uncompressed size");
+            }
+            std::memcpy(out, compressed_data, compressed_size);
             break;
 
         case CompressionCodec::SNAPPY: {
-            out_buf.resize_uninit(uncompressed_size);
             if (!snappy::RawUncompress(
                     reinterpret_cast<const char*>(compressed_data),
                     compressed_size,
-                    reinterpret_cast<char*>(out_buf.data()))) {
+                    reinterpret_cast<char*>(out))) {
                 throw std::runtime_error("Snappy decompression failed");
             }
             break;
         }
 
         case CompressionCodec::ZSTD: {
-            out_buf.resize_uninit(uncompressed_size);
             size_t result = ZSTD_decompressDCtx(
                 get_thread_dctx(),
-                out_buf.data(), uncompressed_size,
+                out, uncompressed_size,
                 compressed_data, compressed_size);
             if (ZSTD_isError(result)) {
                 std::ostringstream oss;
@@ -285,16 +288,12 @@ void DecompressInto(
         }
 
         case CompressionCodec::GZIP: {
-            out_buf.resize_uninit(uncompressed_size);
-            gzip_decode(compressed_data, compressed_size,
-                        out_buf.data(), uncompressed_size);
+            gzip_decode(compressed_data, compressed_size, out, uncompressed_size);
             break;
         }
 
         case CompressionCodec::LZ4_RAW: {
-            out_buf.resize_uninit(uncompressed_size);
-            lz4_raw_decode(compressed_data, compressed_size,
-                           out_buf.data(), uncompressed_size);
+            lz4_raw_decode(compressed_data, compressed_size, out, uncompressed_size);
             break;
         }
 
@@ -315,6 +314,21 @@ void DecompressInto(
             throw std::runtime_error(oss.str());
         }
     }
+}
+
+void DecompressInto(
+    const uint8_t* compressed_data,
+    size_t compressed_size,
+    size_t uncompressed_size,
+    CompressionCodec codec,
+    draken::AppendBuffer<uint8_t>& out_buf)
+{
+    if (codec == CompressionCodec::UNCOMPRESSED) {
+        out_buf.assign(compressed_data, compressed_data + compressed_size);
+        return;
+    }
+    out_buf.resize_uninit(uncompressed_size);
+    DecompressIntoRaw(compressed_data, compressed_size, uncompressed_size, codec, out_buf.data());
 }
 
 }  // namespace compression

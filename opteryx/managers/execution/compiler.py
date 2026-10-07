@@ -6960,6 +6960,11 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     from opteryx.operators._operators import NativeErrorSlot
     from opteryx.operators._operators import build_terminal_exc
     from opteryx.operators._operators import native_plan_execute
+    from opteryx.compiled.structures.memory_pool import process_memory_charged
+    from opteryx.compiled.structures.memory_pool import process_memory_peak
+    from opteryx.compiled.structures.memory_pool import reset_process_memory_peak
+    from opteryx.compiled.structures.memory_pool import flush_chunk_cache
+    from opteryx.compiled.structures.memory_pool import chunk_cache_stats
     from opteryx.operators._operators import native_trace_drain
     from opteryx.operators._operators import native_trace_drain_file_symbols
     from opteryx.operators._operators import native_trace_host_info
@@ -7077,6 +7082,16 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             # recording.
             _trace_query_seq = native_trace_start_query()
             native_trace_set_enabled(True)
+        # Chunk cache (C7): `chunk_cache_admit = false` (compaction-style jobs) flushes
+        # the cache and keeps this statement's scans from filling it. Set on every
+        # scan plan before the engine submits a single row group.
+        _chunk_cache_admit = bool(_resolve_var("chunk_cache_admit", _query_variables, True))
+        if not _chunk_cache_admit:
+            flush_chunk_cache()
+        for _sp in nplan.scan_plans:
+            _sp.set_chunk_cache_admit(_chunk_cache_admit)
+        # Process memory account: the peak is per query from here.
+        reset_process_memory_peak()
         _t0 = _t.perf_counter_ns()
         handle = native_plan_execute(pool, nplan, dop, out_q, errslot)
         _submit_ns = _t.perf_counter_ns() - _t0
@@ -7247,6 +7262,17 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             # Native scan plans are read here BEFORE close_scan_plans tears their
             # pipelines down, into one io_scan_diagnostics list.
             if telemetry is not None:
+                # Process memory account (draken/core/mem_account.h): the most
+                # charged at once during this query, and what is still charged
+                # at teardown (a value that keeps growing across queries is an
+                # alloc/free pairing leak in the account).
+                telemetry._reading["memory_charged_peak_bytes"] = process_memory_peak()
+                telemetry._reading["memory_charged_end_bytes"] = process_memory_charged()
+                # Chunk cache (C7), process-lifetime counters as of this query's end.
+                _cc = chunk_cache_stats()
+                for _k in ("bytes", "entries", "hits", "misses", "inserts", "refused",
+                           "evictions", "give_way_bytes", "limit", "system_available"):
+                    telemetry._reading[f"chunk_cache_{_k}"] = _cc[_k]
                 # Per-join build-side consolidation decisions. Same harvest point and
                 # the same reason as the scan diagnostics below: a native decision made
                 # once at finalize, which nothing in the plan can show. Consolidation
@@ -7284,6 +7310,13 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                     telemetry._reading["io_http_retries"] = sum(
                         d.get("http_retries", 0) for d in _io_diags
                     )
+                    # Scan MemoryPools: reserved at plan time vs peak actually held.
+                    # Summed over scans; only native scan plans report them.
+                    _pool_diags = [d for d in _io_diags if "scan_pool_reserved_bytes" in d]
+                    if _pool_diags:
+                        for _k in ("scan_pool_reserved_bytes", "scan_pool_peak_used_bytes",
+                                   "scan_pool_failed_reservations"):
+                            telemetry._reading[_k] = sum(d[_k] for d in _pool_diags)
                     # ns → auto-converted to seconds in as_dict (time_ prefix).
                     telemetry._reading["time_engine_io_worker_blocked"] = sum(
                         d.get("worker_blocked_ns", 0) for d in _io_diags

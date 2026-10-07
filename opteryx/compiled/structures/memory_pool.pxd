@@ -19,6 +19,7 @@ cdef extern from "memory_pool.hpp" namespace "opteryx":
         int64_t releases
         int64_t compactions
         int64_t resizes
+        int64_t peak_used_size
 
     cdef struct ReadResult:
         const void* ptr

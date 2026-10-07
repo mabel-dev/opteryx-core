@@ -72,6 +72,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # string column. Set once at plan time; empty → no string hashing.
         void set_hash_key_columns(const vector[uint8_t]& v)
         void set_length_only_columns(const vector[uint8_t]& v)
+        void set_chunk_cache_admit(bint v)
         # Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-
         # derived timeout floor). Set once at plan time, by value — see
         # HttpTuning's comment in http_client.hpp for why this is never stored
