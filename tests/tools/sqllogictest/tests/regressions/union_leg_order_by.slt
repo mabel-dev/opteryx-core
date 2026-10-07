@@ -1,0 +1,97 @@
+# ORDER BY inside a UNION leg (2026-10-07).
+#
+# A UNION aligns its legs by POSITION, but the optimiser's liveness set is by
+# IDENTITY and comes from the LEFT leg. A sort in the RIGHT leg saw none of its
+# own columns as live, emitted zero of them, and the plan was refused as "a UNION
+# leg narrower than the union schema". It did not need a hidden sort column:
+# `ORDER BY name` over a projected `name` failed the same way.
+
+# sort key is projected
+query T rowsort
+(SELECT name FROM $planets WHERE id < 3 ORDER BY name) UNION (SELECT name FROM $planets WHERE id < 3 ORDER BY name)
+----
+Mercury
+Venus
+
+# sort keys are NOT projected, and differ per leg
+query T rowsort
+(SELECT name FROM $planets WHERE id < 3 ORDER BY mass DESC) UNION (SELECT name FROM $planets WHERE id < 3 ORDER BY diameter ASC)
+----
+Mercury
+Venus
+
+# UNION ALL keeps both legs' rows
+query I rowsort
+(SELECT id FROM $planets WHERE id < 3 ORDER BY name) UNION ALL (SELECT id FROM $planets WHERE id < 3 ORDER BY mass)
+----
+1
+1
+2
+2
+
+# LIMIT in each leg: the two heaviest and the two lightest
+query T rowsort
+(SELECT name FROM $planets ORDER BY mass DESC LIMIT 2) UNION (SELECT name FROM $planets ORDER BY mass ASC LIMIT 2)
+----
+Jupiter
+Mercury
+Pluto
+Saturn
+
+# two projected columns, hidden sort keys
+query IT rowsort
+(SELECT id, name FROM $planets WHERE id < 3 ORDER BY mass) UNION (SELECT id, name FROM $planets WHERE id < 3 ORDER BY diameter)
+----
+1 Mercury
+2 Venus
+
+# ORDER BY on a column the leg does not project, in ONE leg only. The hidden sort
+# key rides through the leg's Project (the EXIT that normally trims it is absent in
+# a set operation), and the binder counted it as a second column of that leg:
+# "UNION: column count mismatch - left has 2, right has 1".
+query T rowsort
+(SELECT name FROM $planets WHERE id < 3 ORDER BY mass LIMIT 2) UNION (SELECT name FROM $planets WHERE id < 3)
+----
+Mercury
+Venus
+
+query T rowsort
+(SELECT name FROM $planets WHERE id < 3) UNION (SELECT name FROM $planets WHERE id < 3 ORDER BY diameter)
+----
+Mercury
+Venus
+
+# the count check still fires on a real difference in width
+query error column count mismatch
+(SELECT name FROM $planets ORDER BY mass) UNION (SELECT name, id FROM $planets)
+
+# A sorted leg whose column type differs from the other leg's. The leg's type
+# coercion went onto the SORT's columns instead of the leg's Project, so the legs
+# reached the executor as INT8 against FLOAT64 ("all inputs must share one type").
+# Once the cast landed on the Project it replaced the column the sort reads, so the
+# original rides through as a pass-through.
+query R rowsort
+(SELECT id FROM $planets WHERE id < 3 ORDER BY id) UNION ALL (SELECT mass FROM $planets WHERE id < 3)
+----
+0.330
+1.000
+2.000
+4.870
+
+# the sort key is hidden, not the cast column
+query R rowsort
+(SELECT id FROM $planets WHERE id < 3 ORDER BY mass) UNION ALL (SELECT mass FROM $planets WHERE id < 3)
+----
+0.330
+1.000
+2.000
+4.870
+
+# LIMIT in the cast leg
+query R rowsort
+(SELECT id FROM $planets ORDER BY id DESC LIMIT 2) UNION ALL (SELECT mass FROM $planets ORDER BY mass LIMIT 2)
+----
+0.015
+0.330
+8.000
+9.000

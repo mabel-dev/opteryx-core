@@ -77,7 +77,7 @@ opteryx-core (driven by `make tpch` and the dedicated benchmark harnesses).
 
 For queries where the *dimensions* matter but the values are too large or
 volatile to pin literally, use `query shape <rows> [<cols>]` (added to
-sqllogictest by this project). [tests/shape.slt](tests/shape.slt)
+sqllogictest by this project). [tests/shapes/shape.slt](tests/shapes/shape.slt)
 exercises it against `$planets`.
 
 ```text

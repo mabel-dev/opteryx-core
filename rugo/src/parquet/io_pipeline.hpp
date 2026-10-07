@@ -50,6 +50,7 @@
 #include "http_client.hpp"
 #endif
 #include "decode.hpp"
+#include "telemetry.hpp"   // rugo_tel::mm_reap_* (MappingReaper)
 #include "page_index.hpp"
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
@@ -81,6 +82,74 @@
 #endif
 
 namespace rugo {
+
+// Off-critical-path unmapper for the whole-file local mmap cache (H6).
+//
+// On x86 every local file is mapped whole, once per pipeline, and the pipeline's destructor
+// used to `munmap` each one SERIALLY on the query's critical path: ~0.65 ms per file (a mapping
+// with ~6k touched pages), i.e. ~70 ms of a ~400 ms Q28 at 100 files, constant across DOP
+// (scan teardown, `time_engine_teardown_close_scans`). Unmapping per row group instead only
+// moves the same work into the workers (measured neutral-to-worse), so the work is kept and
+// taken OFF the query: the destructor hands its mappings here and returns.
+//
+// One detached native thread per extension; the object is deliberately leaked so the thread can
+// never race static destruction at process exit (the OS reclaims the address space then anyway).
+// Ownership: a submitted mapping belongs to the reaper. The caller has already waited for its
+// workers (`wait_shutdown()`), so no slice into it is held — the same guarantee the inline
+// `munmap` relied on. NOTE: `munmap` takes the process-wide mmap lock for write, so a reaper
+// unmapping while the next query faults pages can stall that query; it yields between files.
+class MappingReaper {
+public:
+    struct Mapping { void* base; size_t len; };
+
+    static MappingReaper& instance() {
+        static MappingReaper* r = new MappingReaper();
+        return *r;
+    }
+
+    void submit(std::vector<Mapping>&& maps) {
+        if (maps.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!started_) {
+                started_ = true;
+                std::thread([this] { run(); }).detach();
+            }
+            for (const Mapping& m : maps) queue_.push_back(m);
+        }
+        cv_.notify_one();
+    }
+
+private:
+    MappingReaper() = default;
+
+    void run() {
+        std::vector<Mapping> batch;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [this] { return !queue_.empty(); });
+                batch.swap(queue_);
+            }
+            for (const Mapping& m : batch) {
+                const auto t0 = std::chrono::steady_clock::now();
+                munmap(m.base, m.len);
+                rugo_tel::mm_reap_ns.fetch_add(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0).count(),
+                    std::memory_order_relaxed);
+                rugo_tel::mm_reap_files.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::yield();
+            }
+            batch.clear();
+        }
+    }
+
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<Mapping> queue_;
+    bool started_ = false;
+};
 
 
 // C-ABI sink for handing decoded columns to the opteryx side. Pure C types only
@@ -3885,11 +3954,16 @@ class ParquetIOPipeline {
         // H6: release the whole-file mappings only after wait_shutdown() — no
         // ticket can still hold a slice into them. No lock needed: workers are
         // done and the destructor is single-threaded by definition.
+        //
+        // The munmaps are handed to the MappingReaper rather than done here: serially they
+        // cost ~0.65 ms per file on the query's critical path (see MappingReaper).
+        std::vector<MappingReaper::Mapping> to_reap;
         for (auto& kv : local_mmap_cache_) {
             if (kv.second.base != MAP_FAILED)
-                munmap(kv.second.base, kv.second.len);
+                to_reap.push_back({kv.second.base, kv.second.len});
         }
         local_mmap_cache_.clear();
+        MappingReaper::instance().submit(std::move(to_reap));
     }
 
     // Wire the destination MemoryPool. Must be called before any submit; the

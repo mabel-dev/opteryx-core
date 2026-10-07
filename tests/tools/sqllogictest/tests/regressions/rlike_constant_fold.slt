@@ -1,0 +1,48 @@
+# RLIKE / NOT RLIKE with a constant subject (2026-10-07).
+#
+# Constant folding evaluates an all-literal expression through the VM, but the
+# RLIKE kernel only accepts a pre-compiled DFA pattern and the compile step ran
+# in a LATER strategy. `'apple' RLIKE 'a.ple'` therefore reached the kernel with
+# raw regex text and failed with "malformed compiled DFA blob". Strings and bytes
+# alike; `%` is an ordinary character in a regex, not a wildcard.
+
+query I
+SELECT 'apple' RLIKE 'a.ple'
+----
+1
+
+query I
+SELECT 'apple' NOT RLIKE 'a.ple'
+----
+0
+
+query I
+SELECT b'apple' RLIKE b'ap+le'
+----
+1
+
+query I
+SELECT b'apple' RLIKE b'a%ple'
+----
+0
+
+# nested under other expressions
+query T
+SELECT CASE WHEN 'apple' RLIKE '^a' THEN 'yes' ELSE 'no' END
+----
+yes
+
+query I
+SELECT 'apple' RLIKE 'ap+le' AND 'x' RLIKE 'y'
+----
+0
+
+# as a filter: constant-true keeps the rows, constant-false removes them
+query T
+SELECT name FROM $planets WHERE 'apple' RLIKE 'a.ple' AND id = 1
+----
+Mercury
+
+query T
+SELECT name FROM $planets WHERE 'apple' RLIKE 'z'
+----

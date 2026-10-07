@@ -537,3 +537,65 @@ Answers checked identical (Q1/3/21/28/34) on both.
   2.19 CPU-s per 20M rows (~11 CPU-s per 100M) vs Pivot ~4 vCPU-s per 100M on
   c6a — cross-hardware and rough, but a per-row gap of ~2-3× remains on top of
   the cache and scaling.
+
+## 17. Tier M — process-lifetime file-mapping cache (from the Q28/scaling hand-off, 2026-10-07)
+
+Source: `scratch/C7_HANDOFF_mmap_tier.md` (Q28 / scaling session). Proposal only;
+nothing built. That session owns the `io_pipeline.hpp` mmap / destructor lines
+(option A, `MappingReaper`, ~1860-1910 and ~3880-3895) — C7 does not edit them.
+
+**Finding it rests on (theirs, measured):** on x86, `RUGO_LOCAL_MMAP_CACHE_DEFAULT=1`
+maps each local file whole once per pipeline, and `~ParquetIOPipeline()`
+unmaps every file serially on the query's critical path: ~0.65 ms per file on
+the i5, ~70 ms of a ~400 ms Q28 on the 32-core c7a. ARM unmaps per row group
+inside the workers and doesn't show it. Turning the per-query mmap cache off
+moves the cost into the workers rather than removing it.
+
+**The tier:** a cache of whole-file `PROT_READ | MAP_SHARED` mappings that
+outlives the query, keyed by path (+ size + mtime_ns in the hand-off; under the
+D-C7-4 ruling path alone is enough).
+- **It owns no memory.** Resident pages stay kernel page-cache pages (shared,
+  reclaimable, not OOM-able); the cache holds address space and page-table
+  entries (~8 B per touched 4 KiB page, ~5 MB for Q28's 2.6 GB read set).
+  So the 20% budget, the < 1 GiB off-switch and the memory-release ruling
+  (D-C7-6) do not apply to it. Its limits are `vm.max_map_count` (65,530 on
+  the i5) and `RLIMIT_AS`.
+- **Removes per query:** open + mmap per file, the teardown munmap, and the
+  soft page faults on pages an earlier query already touched (page tables stay
+  populated).
+- **Needs refcounts or an epoch:** eviction must not unmap a mapping another
+  query is still slicing. Evicted mappings go to option A's reaper
+  (`submit(vector<pair<void*, size_t>>&&)`) so no query pays an unmap.
+- **Single instance:** `io_pipeline.hpp` is header-only and compiled into both
+  `pool_reader.so` and `_operators.so`; a `static` in rugo exists twice. The
+  hand-off proposes the **draken `.so` behind a C bridge** (draken is one `.so`
+  and ships in both wheels). That also answers D-C7-2 for T1 better than my
+  `pool_reader.so` proposal (§3): one home for both tiers, valid in the
+  standalone rugo wheel.
+- **Per architecture:** ARM's per-row-group maps measured 1.02-1.08× slower
+  with the whole-file cache (never explained). First cut x86-only via the D3
+  mechanism, A/B on both arches.
+
+**Why it matters for C7's verdict:** the i5 ceiling (§15) showed a T1 hit
+recovers only ~1/3 of the measured decompress time, because that time includes
+faulting in and reading the compressed bytes. Part of that fault cost is
+exactly what tier M removes — with **no memory budget**, so it doesn't hit the
+"working set doesn't fit at 20%" wall that sinks T1. Their teardown finding is
+a further, separate saving on top.
+
+**Ceiling for tier M before building (proposal):**
+1. Teardown share: option A's reaper result measures it directly (theirs).
+2. Fault share: per query, soft faults (`ru_minflt`) × measured cost per fault,
+   back-to-back queries in one process; plus the mmap/open cost per file.
+   On the i5 and the Mac, canon 20 files, Q28 + the LIKE queries + controls.
+3. Gate as usual: build only if 1 + 2 clear the ±5% band on the i5.
+
+**Decisions for the architect (tier M):**
+
+| # | Decision | Options |
+|---|---|---|
+| D-C7-M1 | Does tier M join C7 (or replace T1 as C7's first build)? | M only / M then T1 / T1 only / close C7 |
+| D-C7-M2 | Cap shape | files / mapped bytes / both; defaults; container-aware or not |
+| D-C7-M3 | ARM | x86-only first cut / both from the start |
+| D-C7-M4 | Home | draken `.so` behind a C bridge (hand-off) — and T1 there too? |
+| D-C7-M5 | Reaper contention | `munmap` takes the process mmap lock for write; a reaper unmapping while another query faults can stall it — accept, or bound reaper work? |

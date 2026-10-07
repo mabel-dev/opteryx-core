@@ -338,10 +338,11 @@ def _columns_for_side(
 
     deduped = None
     if resolved_any:
+        hidden = _branch_hidden_identities(self, node, relation_names)
         seen_identities = set()
         deduped = []
         for col in columns:
-            if col.identity in seen_identities:
+            if col.identity in seen_identities or col.identity in hidden:
                 continue
             seen_identities.add(col.identity)
             deduped.append(col)
@@ -359,15 +360,16 @@ def _columns_for_side(
     raise KeyError(relation_names)
 
 
-def _branch_project_columns(self, node: PlanStep, relation_names: List[str], context: BindingContext):
-    """Find a set-op branch's own bound Project columns by walking the graph.
+def _branch_nodes(self, node: PlanStep, relation_names: List[str]):
+    """Yield the nodes of a set-op branch, nearest the set operation first.
 
-    Returns None if the branch (or a Project within it) cannot be located —
-    the caller decides what that means for its own resolution strategy.
+    The branch is each direct input of `node` that owns one of `relation_names`;
+    from its top node the walk descends breadth-first through the graph. Yields
+    nothing if the graph, or the set operation within it, cannot be located.
     """
     graph = self.graph
     if graph is None:
-        return None
+        return
 
     set_op_nid = None
     for nid, n in graph.nodes(True):
@@ -375,16 +377,11 @@ def _branch_project_columns(self, node: PlanStep, relation_names: List[str], con
             set_op_nid = nid
             break
     if set_op_nid is None:
-        return None
+        return
 
     rel_set = set(relation_names)
     for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
         if _branch_owns_a_relation(graph, child_nid, rel_set):
-            # The branch's output columns live on its top node — usually the
-            # direct Project child. With chained set operations the direct child
-            # is a column-less wrapper (e.g. DISTINCT over a nested set op), so
-            # descend through column-less nodes to the first node that carries
-            # schema columns and use those.
             descent = [child_nid]
             descent_seen = set()
             while descent:
@@ -392,38 +389,72 @@ def _branch_project_columns(self, node: PlanStep, relation_names: List[str], con
                 if cur in descent_seen:
                     continue
                 descent_seen.add(cur)
-                cur_node = graph[cur]
-                # A nested set operation, already rewritten to a semi/anti Join by
-                # `_rewrite_setop_to_join`, states what it exports. A Join's own
-                # `.columns` are the identifiers of its ON condition — BOTH legs'
-                # keys — so reading them here counts a two-column output for a
-                # one-column set operation.
-                carried = (
-                    cur_node.setop_leg_columns
-                    if cur_node.node_type in steps_with("setop_leg_columns")
-                    else None
-                )
-                if carried is not None:
-                    return [schema_column for _, schema_column in carried]
-                # Only a node that STATES a projection counts — same restriction
-                # `_setop_leg_columns` applies via `_PROJECTING_STEPS`. Without it, a
-                # HAVING Filter sitting directly below the set-op (any leg ending
-                # `GROUP BY ... HAVING ...`) is mistaken for the leg's own Project:
-                # a Filter's `.columns` are its predicate's referenced identifiers
-                # (e.g. `sum(mass) > 0` -> `[mass]`), not an output list, and that
-                # short leg-arity got reported as the branch's true column count.
-                if cur_node.node_type in _PROJECTING_STEPS:
-                    branch_columns = []
-                    for col in (cur_node.columns or []):
-                        schema_column = col.schema_column
-                        if schema_column is not None:
-                            branch_columns.append(schema_column)
-                    if branch_columns:
-                        return branch_columns
+                yield graph[cur]
                 for upstream_nid, _, _ in graph.ingoing_edges(cur):
                     descent.append(upstream_nid)
 
+
+def _branch_project_columns(self, node: PlanStep, relation_names: List[str], context: BindingContext):
+    """Find a set-op branch's own bound Project columns by walking the graph.
+
+    Returns None if the branch (or a Project within it) cannot be located —
+    the caller decides what that means for its own resolution strategy.
+
+    The branch's output columns live on its top node — usually the direct Project
+    child. With chained set operations the direct child is a column-less wrapper
+    (e.g. DISTINCT over a nested set op), so the walk descends through column-less
+    nodes to the first node that carries schema columns and uses those.
+    """
+    for cur_node in _branch_nodes(self, node, relation_names):
+        # A nested set operation, already rewritten to a semi/anti Join by
+        # `_rewrite_setop_to_join`, states what it exports. A Join's own
+        # `.columns` are the identifiers of its ON condition — BOTH legs'
+        # keys — so reading them here counts a two-column output for a
+        # one-column set operation.
+        carried = (
+            cur_node.setop_leg_columns
+            if cur_node.node_type in steps_with("setop_leg_columns")
+            else None
+        )
+        if carried is not None:
+            return [schema_column for _, schema_column in carried]
+        # Only a node that STATES a projection counts — same restriction
+        # `_setop_leg_columns` applies via `_PROJECTING_STEPS`. Without it, a
+        # HAVING Filter sitting directly below the set-op (any leg ending
+        # `GROUP BY ... HAVING ...`) is mistaken for the leg's own Project:
+        # a Filter's `.columns` are its predicate's referenced identifiers
+        # (e.g. `sum(mass) > 0` -> `[mass]`), not an output list, and that
+        # short leg-arity got reported as the branch's true column count.
+        if cur_node.node_type in _PROJECTING_STEPS:
+            branch_columns = []
+            for col in (cur_node.columns or []):
+                schema_column = col.schema_column
+                if schema_column is not None:
+                    branch_columns.append(schema_column)
+            if branch_columns:
+                return branch_columns
+
     return None
+
+
+def _branch_hidden_identities(self, node: PlanStep, relation_names: List[str]) -> set:
+    """Identities of the columns a set-op branch's Project carries for a node ABOVE it.
+
+    ORDER BY and HAVING expressions absent from the SELECT list ride through the
+    Project as `passthrough_columns`, so the sort or filter above can read them;
+    the query's EXIT is what normally trims them. A set-op branch has no EXIT, so
+    they stay in the branch's relation schema — and a width counted from that
+    schema then includes columns the branch never declared. `(SELECT name FROM t
+    ORDER BY mass) UNION (SELECT name FROM t)` counted two columns against one.
+    """
+    for cur_node in _branch_nodes(self, node, relation_names):
+        if cur_node.node_type == LogicalPlanStepType.Project:
+            return {
+                col.schema_column.identity
+                for col in (cur_node.passthrough_columns or [])
+                if col.schema_column is not None
+            }
+    return set()
 
 
 def _branch_project_node(self, node: PlanStep, relation_names: List[str]):
@@ -432,39 +463,19 @@ def _branch_project_node(self, node: PlanStep, relation_names: List[str]):
     Same matching/descent as `_branch_project_columns`, but returns the actual
     graph node — so its `.columns` can be mutated in place — instead of a copy
     of its bound SchemaColumns. Returns None if no such node can be located.
+
+    Only a node that STATES a projection qualifies (`_PROJECTING_STEPS`), for the
+    reason `_branch_project_columns` gives. This lookup used to take the first node
+    with any bound column, so a leg topped by a Sort returned the SORT — whose
+    `.columns` are its order keys — and the leg-type coercion was cast onto the
+    sort key instead of the leg's output: `(SELECT id FROM t ORDER BY id) UNION ALL
+    (SELECT mass FROM t)` reached the executor with INT8 against FLOAT64.
     """
-    graph = self.graph
-    if graph is None:
-        return None
-
-    set_op_nid = None
-    for nid, n in graph.nodes(True):
-        if n is node:
-            set_op_nid = nid
-            break
-    if set_op_nid is None:
-        return None
-
-    rel_set = set(relation_names)
-    for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
-        if _branch_owns_a_relation(graph, child_nid, rel_set):
-            descent = [child_nid]
-            descent_seen = set()
-            while descent:
-                cur = descent.pop(0)
-                if cur in descent_seen:
-                    continue
-                descent_seen.add(cur)
-                cur_node = graph[cur]
-                # Skipped for the same reason as in `_branch_project_columns`: a
-                # Join's `.columns` are its ON condition's identifiers, so it is
-                # never the node whose column list a caller wants to read or cast.
-                if cur_node.node_type != LogicalPlanStepType.Join and any(
-                    col.schema_column is not None for col in (cur_node.columns or [])
-                ):
-                    return cur_node
-                for upstream_nid, _, _ in graph.ingoing_edges(cur):
-                    descent.append(upstream_nid)
+    for cur_node in _branch_nodes(self, node, relation_names):
+        if cur_node.node_type in _PROJECTING_STEPS and any(
+            col.schema_column is not None for col in (cur_node.columns or [])
+        ):
+            return cur_node
 
     return None
 
@@ -715,9 +726,56 @@ def _coerce_branch_to(self, branch: PlanStep, context: BindingContext, coerced_t
         _retype_declared_columns(branch.columns, context, coerced_types)
         return
 
+    original_columns = branch.columns
     branch.columns = _cast_leg_columns_to(
         branch.columns, coerced_types, plan_context=context.plan_context
     )
+
+    # A cast REPLACES the column with a new one under a new identity, so a sort in
+    # the leg that orders by the original column can no longer find it
+    # (`(SELECT id FROM t ORDER BY id) UNION ALL (SELECT mass FROM t)`). The original
+    # rides through the Project as a pass-through, exactly as an ORDER BY column that
+    # was never projected does.
+    if branch.node_type == LogicalPlanStepType.Project:
+        read_above = _sort_key_identities_above(self, branch)
+        carried = {col.schema_column.identity for col in (branch.passthrough_columns or [])}
+        kept = [
+            original
+            for original, cast in zip(original_columns, branch.columns)
+            if cast is not original
+            and original.schema_column is not None
+            and original.schema_column.identity in read_above
+            and original.schema_column.identity not in carried
+        ]
+        if kept:
+            branch.passthrough_columns = list(branch.passthrough_columns or []) + kept
+
+
+def _sort_key_identities_above(self, project: PlanStep) -> set:
+    """Identities of the ORDER BY keys of every sort between `project` and the set
+    operation it feeds — what the leg's own sort still reads off the Project."""
+    graph = self.graph
+    nid = None
+    for candidate, step in graph.nodes(True):
+        if step is project:
+            nid = candidate
+            break
+    identities = set()
+    while nid is not None:
+        consumers = graph.outgoing_edges(nid)
+        if not consumers:
+            break
+        nid = consumers[0][1]
+        step = graph[nid]
+        if step.node_type in _SET_OP_STEP_TYPES:
+            break
+        if step.node_type in (LogicalPlanStepType.Order, LogicalPlanStepType.HeapSort):
+            identities.update(
+                col.schema_column.identity
+                for col, _asc, _nulls_first in step.order_by
+                if col.schema_column is not None
+            )
+    return identities
 
 
 def _set_op_common_type(left_type, right_type):

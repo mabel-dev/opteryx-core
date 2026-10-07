@@ -74,29 +74,11 @@ jobs:
       - name: Compile Opteryx extensions
         run: make compile
 
-      - name: Run sqllogictest suite (shapes)
-        run: |
-          sqllogictest \
-            --engine external \
-            --external-engine-command-template "python3 tests/tools/sqllogictest/opteryx_driver.py" \
-            'tests/tools/sqllogictest/tests/shapes/*.slt'
-        env:
-          OPTERYX_HOME: ${{ github.workspace }}
-
-      - name: Run sqllogictest suite (results)
-        run: |
-          sqllogictest \
-            --engine external \
-            --external-engine-command-template "python3 tests/tools/sqllogictest/opteryx_driver.py" \
-            'tests/tools/sqllogictest/tests/results/*.slt'
-        env:
-          OPTERYX_HOME: ${{ github.workspace }}
-
-      - name: Run sqllogictest suite (run-only)
-        run: |
-          sqllogictest \
-            --engine external \
-            --external-engine-command-template "python3 tests/tools/sqllogictest/opteryx_driver.py" \
-            'tests/tools/sqllogictest/tests/run_only/*.slt'
+      # `make slt` is the single definition of what the suite is. This job used to
+      # repeat each group's glob by hand, so a group added to the Makefile (the
+      # regressions group) was never run here. It runs every group and fails if
+      # any one failed, and it is the same command release.yaml gates on.
+      - name: Run sqllogictest suite
+        run: make slt
         env:
           OPTERYX_HOME: ${{ github.workspace }}
