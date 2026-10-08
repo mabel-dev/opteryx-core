@@ -299,6 +299,19 @@ decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completen
 	@/tmp/opteryx-tests/decoded_column_reset_test
 	$(call print_green,"✓ DecodedColumn reset completeness test passed")
 
+chunk-cache-test: ## Build and run the chunk cache policy tests (S3-FIFO admission, cost-weighted CLOCK)
+	$(call print_blue,"Building and running chunk cache policy tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O1 -Wall -Wextra \
+	    -I$(CURDIR)/draken/core \
+	    $(CURDIR)/draken/core/chunk_cache_test.cpp \
+	    $(CURDIR)/draken/core/chunk_cache.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
+	    -o chunk_cache_test
+	@/tmp/opteryx-tests/chunk_cache_test
+	$(call print_green,"✓ chunk cache policy tests passed")
+
 page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse + page-predicate tests
 	$(call print_blue,"Building and running PageIndex tests...")
 	@mkdir -p /tmp/opteryx-tests

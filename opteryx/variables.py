@@ -356,6 +356,9 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         FLOAT64, FromConfig("PARQUET_IO_COALESCE_WASTE_RATIO"), VariableOwner.USER, Visibility.RESTRICTED),
     "parquet_io_coalesce_max_bytes": (
         INT64, FromConfig("PARQUET_IO_COALESCE_MAX_BYTES"), VariableOwner.USER, Visibility.RESTRICTED),
+    # Absolute gap below which runs always merge — see PARQUET_IO_COALESCE_GAP_BYTES.
+    "parquet_io_coalesce_gap_bytes": (
+        INT64, FromConfig("PARQUET_IO_COALESCE_GAP_BYTES"), VariableOwner.USER, Visibility.RESTRICTED),
     # Skene v3's own range coalescer (design R12) — same rule as parquet's, own
     # knobs; see SKENE_IO_COALESCE_* in config.py.
     "skene_io_coalesce_waste_ratio": (

@@ -688,7 +688,7 @@ instances.
 ## 19. Rulings — budget and pressure (2026-10-07)
 
 Supersedes the 20% default (§12/§14) and the 80% − 4 GiB proposal (§18).
-- **Budget = 70% of the container − 4 GiB** by default. Both numbers (the
+- **Budget = 70% of the container − 4 GiB** by default (**60% from 2026-10-08**, §27). Both numbers (the
   percentage and the reserve) are **configurable and visible in VARIABLES**
   (`SHOW VARIABLES`). Cache off if the result is under 2 GiB. Container = cgroup
   limit when set, else physical RAM. Prod 16 GiB → 7.2 GiB.
@@ -836,7 +836,7 @@ Next: Phase B (the cache) on top.
   left incomplete are remembered (no refill by predicate decodes).
 - Give-way in `draken/core/mem_account.cpp`: the cache holds at most
   `min(B, C - R - charged)`; `draken_mem_charge` shrinks it on the charging
-  thread. Config: `CHUNK_CACHE_MEMORY_PERCENT` (70) and
+  thread. Config: `CHUNK_CACHE_MEMORY_PERCENT` (70; 60 from 2026-10-08) and
   `CHUNK_CACHE_RESERVE_BYTES` (4 GiB); container = cgroup limit else RAM;
   B < 2 GiB → off. Applied once at `import opteryx`. VARIABLES:
   `chunk_cache_memory_percent`, `chunk_cache_reserve_bytes`,
@@ -960,3 +960,40 @@ Test caveat: tests/unit/core/test_chunk_cache.py expects the cache to fill; on a
 machine with < 4 GiB actually available the cache correctly refuses and those
 asserts would fail.
 make q + cache/pool tests (47) pass.
+
+## 27. S3-FIFO admission + cost-weighted CLOCK — BUILT 2026-10-08
+
+Rulings 2026-10-08: S3-FIFO probation is ADMISSION, CLOCK is EVICTION; keep a
+key-only memory of the last 2048 probation evictions; cost = time to fetch +
+decompress, fetch 0 for local files; extra sweeps capped.
+
+- **Probation:** every new chunk enters a per-shard FIFO. Nothing is evicted
+  while the cache has room, so an empty cache fills completely. Once full,
+  probation is evicted first while it holds more than 10% of the limit: a chunk
+  hit while on probation moves to MAIN; one that was not is evicted and its key
+  remembered (2048 in all, 128 per shard). A remembered chunk filled again goes
+  straight to MAIN.
+- **MAIN:** CLOCK. A hit gives the chunk `weight` extra sweeps on top of the ref
+  bit: `floor(log2(cost ns per byte))`, clamped to 0..7 (8 lives in all).
+  Under 2 ns/byte (a local decompress) is plain CLOCK.
+- **Cost:** measured decompress ns, plus for a remote chunk a modelled re-fetch
+  of 30 ms + compressed bytes / 60 MB/s (a rough form, not a measurement).
+  Local fetch is 0: its page faults already land inside the decompress timing.
+  The old cost gate (an incoming chunk could not evict a dearer resident) is
+  gone.
+- **Across shards:** each victim is first looked for with one CLOCK lap per
+  shard over all 16 shards; only if none yields does a shard sweep until
+  something goes. Without this, round-robin shard order made a shard of
+  expensive chunks burn their lives while another shard held cold cheap ones
+  (found by the policy test: 18 expensive vs 15 cheap evicted → 1 vs 25).
+- Only ADMIT evictions from probation are remembered — not MAIN evictions,
+  not give-way, not flush. Flush also clears the remembered keys.
+- Counters: `probation_bytes`, `promotions`, `remembered_hits` (stats,
+  telemetry `chunk_cache_*`).
+- Tests: `make chunk-cache-test` (draken/core/chunk_cache_test.cpp): empty
+  fills, one-hit chunks leave first and are remembered, expensive outlive cheap,
+  flush forgets. Not part of `make q`.
+- Budget RULED 2026-10-08: 60% of the container − 4 GiB (16 GiB box 5.6 GiB,
+  32 GiB box 15.2 GiB; c6a.4xlarge ≈ 14.5 GiB).
+- Outstanding: leave-one-out (probation, remembered keys, cost weighting);
+  one-process x86 A/B at the new budget.

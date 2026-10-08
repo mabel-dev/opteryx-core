@@ -675,8 +675,9 @@ cdef class CppIOPipeline:
         # Remote range coalescing (rugo-side, not HttpClient state) — None keeps
         # ParquetIOPipeline's own defaults.
         if coalesce_tuning is not None:
-            _waste_ratio, _max_bytes = coalesce_tuning
-            self.pipeline.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes)
+            _waste_ratio, _max_bytes, _gap_bytes = coalesce_tuning
+            self.pipeline.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes,
+                                              <int64_t>_gap_bytes)
         if http_tuning is not None:
             (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
              _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11,
@@ -706,6 +707,11 @@ cdef class CppIOPipeline:
         for x in needles:
             v.push_back(x)
         self.pipeline.add_int_needles(column.encode('utf-8'), v)
+
+    def add_int_range(self, str column, int64_t lo, int64_t hi):
+        """Register a pushed inclusive int range (kind 6) for PageIndex page
+        pruning. Ignored for a column already carrying a predicate."""
+        self.pipeline.add_int_range(column.encode('utf-8'), lo, hi)
 
     def add_str_pred(self, str column, int kind, list patterns):
         """Phase 2: register a pushed string decode-skip predicate. kind: 1=membership
@@ -1073,6 +1079,7 @@ cdef class CppIOPipeline:
             "page_index_pages_pruned": self.pipeline.page_index_pages_pruned(),
             "page_index_bytes_pruned": self.pipeline.page_index_bytes_pruned(),
             "page_index_row_groups_pruned": self.pipeline.page_index_row_groups_pruned(),
+            "page_index_rows_all_pass": self.pipeline.page_index_rows_all_pass(),
             "page_index_fetches": self.pipeline.page_index_fetches(),
             "page_index_bytes_fetched": self.pipeline.page_index_bytes_fetched(),
             "page_index_gate_declines": self.pipeline.page_index_gate_declines(),
@@ -2027,17 +2034,51 @@ def _needle_slot(value):
 def _flatten_value_predicates(predicates):
     """Flatten pushed (col, op, value) triples into the decoder's per-value
     predicate inputs (ValuePredicate, rugo/src/parquet/decode.hpp):
-    ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])})``. kind: 1=membership
-    (=/IN), 2=starts-with, 3=ends-with, 4=contains, 5=not-contains. One predicate
-    per column for strings (first wins) — a single conjunct is sound for skipping.
-    `str_preds` keeps the order the conjuncts were pushed in, and the page search
-    picks its column in that order (first registered kind 4/5 column wins).
+    ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])}, int_ranges{col:[lo, hi]})``.
+    kind: 1=membership (=/IN), 2=starts-with, 3=ends-with, 4=contains,
+    5=not-contains. One predicate per column for strings (first wins) — a single
+    conjunct is sound for skipping. `str_preds` keeps the order the conjuncts were
+    pushed in, and the page search picks its column in that order (first
+    registered kind 4/5 column wins).
 
     Every int needle leaves here already in the probe's int64 slot (`_needle_slot`)
     — the two callers below push straight into a `vector[int64_t]` and must not be
-    the place that discovers a value does not fit."""
+    the place that discovers a value does not fit.
+
+    `int_ranges` (kind 6: PageIndex page pruning, and range settlement) intersects
+    every Gt/GtEq/Lt/LtEq conjunct with a Python int literal on a column into one
+    inclusive [lo, hi] (lo > hi = contradictory conjuncts, every page fails). A
+    bound beyond int64 on its OPEN side is clamped (`x > -2**70` is `x >= INT64_MIN`
+    for every value an int64 page bound can express; rugo treats a uint64 bound
+    past INT64_MAX as undecidable). One beyond int64 on its CLOSED side (`x > 2**70`)
+    cannot be clamped — that would claim INT64_MAX passes — so the conjunct is
+    left out of the range, which only weakens pruning; see `range_conjuncts_exact`."""
+    return _flatten_value_predicates_exact(predicates)[:3]
+
+
+def range_conjuncts_exact(triples):
+    """The columns of `triples` when EVERY triple is an int range conjunct
+    (Gt/GtEq/Lt/LtEq, Python int literal) that `_flatten_value_predicates` folds
+    into its column's kind-6 range without leaving any out, else None. The
+    planner's half of the range-settlement proof: such ranges ARE the predicate."""
+    if not triples:
+        return None
+    for p_col, p_op, p_val in triples:
+        if p_op not in _RANGE_OPS or type(p_val) is not int:
+            return None
+    _, _, int_ranges, declined = _flatten_value_predicates_exact(triples)
+    if declined:
+        return None
+    return set(int_ranges)
+
+
+def _flatten_value_predicates_exact(predicates):
+    """`_flatten_value_predicates` plus the set of columns one or more of whose
+    range conjuncts could not be represented (left out of the range)."""
     int_needles = {}
     str_preds = {}
+    int_ranges = {}
+    declined = set()
     _kind = {"_STARTS_WITH": 2, "_ENDS_WITH": 3, "InStr": 4, "NotInStr": 5}
     for pred in predicates:
         p_col, p_op, p_val = pred
@@ -2072,7 +2113,25 @@ def _flatten_value_predicates(predicates):
             b = p_val if isinstance(p_val, bytes) else (p_val.encode("utf-8") if isinstance(p_val, str) else None)
             if b is not None and p_col not in str_preds:
                 str_preds[p_col] = (_kind[p_op], [b])
-    return int_needles, str_preds
+        elif p_op in _RANGE_OPS and type(p_val) is int:
+            if p_op in ("Gt", "GtEq"):
+                lo = p_val + 1 if p_op == "Gt" else p_val
+                if lo > _I64_MAX:
+                    declined.add(p_col)
+                    continue
+                rng = int_ranges.setdefault(p_col, [_I64_MIN, _I64_MAX])
+                rng[0] = max(rng[0], lo)
+            else:
+                hi = p_val - 1 if p_op == "Lt" else p_val
+                if hi < _I64_MIN:
+                    declined.add(p_col)
+                    continue
+                rng = int_ranges.setdefault(p_col, [_I64_MIN, _I64_MAX])
+                rng[1] = min(rng[1], hi)
+    return int_needles, str_preds, int_ranges, declined
+
+
+_RANGE_OPS = frozenset(("Gt", "GtEq", "Lt", "LtEq"))
 
 
 cdef inline bint _is_remote_url(str url):
@@ -2683,7 +2742,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
     if predicates:
-        int_needles, str_preds = _flatten_value_predicates(predicates)
+        int_needles, str_preds, int_ranges = _flatten_value_predicates(predicates)
         for cname, needles in int_needles.items():
             if needles and cname not in str_preds:
                 src.pipeline.add_int_needles(cname, needles)
@@ -2691,6 +2750,9 @@ cpdef IpcRowGroupSource open_ipc_source(
             kind, pats = str_preds[cname]
             if pats:
                 src.pipeline.add_str_pred(cname, kind, pats)
+        # Last: a column with a membership/string predicate keeps that one.
+        for cname, (lo, hi) in int_ranges.items():
+            src.pipeline.add_int_range(cname, lo, hi)
     return src
 
 
@@ -2923,12 +2985,15 @@ cdef class NativeScanPlan:
             "page_index_pages_pruned": self.pipeline_ptr.page_index_pages_pruned(),
             "page_index_bytes_pruned": self.pipeline_ptr.page_index_bytes_pruned(),
             "page_index_row_groups_pruned": self.pipeline_ptr.page_index_row_groups_pruned(),
+            "page_index_rows_all_pass": self.pipeline_ptr.page_index_rows_all_pass(),
             "page_index_fetches": self.pipeline_ptr.page_index_fetches(),
             "page_index_bytes_fetched": self.pipeline_ptr.page_index_bytes_fetched(),
             "page_index_gate_declines": self.pipeline_ptr.page_index_gate_declines(),
             # Scan prefilter: rows reaching the worker-side predicate / surviving it.
             "prefilter_rows_in": self.pipeline_ptr.prefilter_rows_in(),
             "prefilter_rows_out": self.pipeline_ptr.prefilter_rows_out(),
+            # Range settlement: rows proven ALL-PASS by statistics, never evaluated.
+            "settled_rows": self.pipeline_ptr.settled_rows(),
             # The submission window this scan actually ran — the read-back that
             # proves `parquet_io_in_flight_limit` reached the NATIVE path, which
             # it did not before 2026-09-16. 0 is not a valid window, so a reading
@@ -2994,6 +3059,17 @@ cdef class NativeScanPlan:
             return
         self.set_pass1_predicate(fn, ctx, columns)
         self.pipeline_ptr.set_prefilter(True)
+
+    def set_range_settle(self):
+        """Arm range settlement (ParquetIOPipeline::set_range_settle): the
+        prefilter's predicate is EXACTLY the AND of this scan's int range
+        conjuncts, over predicate columns nothing downstream reads — the caller
+        (compiler._arm_scan_prefilter) proved both. Row groups / pages the
+        statistics prove ALL-PASS then skip decoding and evaluating those columns.
+        Raises if the pipeline does not hold a range for every predicate column."""
+        if self.pipeline_ptr == NULL:
+            return
+        self.pipeline_ptr.set_range_settle(True)
 
     cpdef void close(self):
         if self._closed:
@@ -3370,8 +3446,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     # Set once here, at plan time, before any submit; HttpTuning travels BY
     # VALUE per request, so this never touches shared client state.
     if coalesce_tuning is not None:
-        _waste_ratio, _max_bytes = coalesce_tuning
-        plan.pipeline_ptr.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes)
+        _waste_ratio, _max_bytes, _gap_bytes = coalesce_tuning
+        plan.pipeline_ptr.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes,
+                                              <int64_t>_gap_bytes)
     if http_tuning is not None:
         (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
          _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11,
@@ -3402,7 +3479,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef int64_t _needle
     cdef bytes _pat
     if predicates:
-        int_needles, str_preds = _flatten_value_predicates(predicates)
+        int_needles, str_preds, int_ranges = _flatten_value_predicates(predicates)
         for cname, needles in int_needles.items():
             if needles and cname not in str_preds:
                 _int_v.clear()
@@ -3417,6 +3494,9 @@ cpdef NativeScanPlan open_native_scan_plan(
                     _pat = p if isinstance(p, bytes) else str(p).encode('utf-8')
                     _str_v.push_back(<string>_pat)
                 plan.pipeline_ptr.add_str_pred(cname.encode('utf-8'), <int>kind, _str_v)
+        # Last: a column with a membership/string predicate keeps that one.
+        for cname, (lo, hi) in int_ranges.items():
+            plan.pipeline_ptr.add_int_range(cname.encode('utf-8'), <int64_t>lo, <int64_t>hi)
     # A pool sink must be wired regardless — the decode worker's pool-path
     # (dk=0) branch expects one to exist even though this plan's Source never
     # routes a column there deliberately (it fails loud on dk=0 instead).

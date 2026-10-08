@@ -98,6 +98,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1092,6 +1093,26 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     std::vector<uint8_t> prefilter_is_pred_;
 
     // Plan-time only, on the compiler's thread, before run() is entered.
+    // The template a settled result's filter-only predicate columns are filled
+    // from: an unowned all-NULL INT64 constant. Its type is never observed — the
+    // Select after this Source drops those columns — it only has to be a valid
+    // DrakenVector.
+    static const CxxColumn& settled_placeholder() {
+        static const int64_t zero = 0;
+        static const CxxColumn tpl = [] {
+            CxxColumn c;
+            c.view.data = const_cast<int64_t*>(&zero);
+            c.view.selection = draken_zero_sel(1);
+            c.view.data_length = 1;
+            c.view.length = 1;
+            c.view.validity = const_cast<uint8_t*>(draken_zero_validity(1));
+            c.view.type = DRAKEN_INT64;
+            c.view.flags = 0;
+            return c;
+        }();
+        return tpl;
+    }
+
     void set_prefilter(ExprProgram prog, ExprFilterFn fn, std::vector<uint8_t> is_pred) {
         prefilter_prog_ = std::move(prog);
         prefilter_fn_ = fn;
@@ -1205,6 +1226,15 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         apply_row_admission(*g);
         g->submit_cap = limit_submit_cap(*g);
         assign_fetch_blocks(*g);
+        // Each scanned file's whole PageIndex region, so the pipeline reads it once.
+        if (footer_map != nullptr && pipeline != nullptr) {
+            std::unordered_set<std::string> seen;
+            for (const auto& wi : *work_items)
+                if (seen.insert(wi.first).second) {
+                    auto fit = footer_map->find(wi.first);
+                    if (fit != footer_map->end()) pipeline->set_page_index_extent(wi.first, *fit->second);
+                }
+        }
         // The Top-N boundary is NOT applied here: it does not exist yet — the sink
         // this scan feeds produces it while the scan runs. It is tested per unit in
         // get_morsel's submit loop, over whatever the runtime bound kept.
@@ -1675,7 +1705,45 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                               "a decimal column recognized via decimal_columns)";
                 }
             };
-            if (prefilter_ && !result.survivor_mask.empty()) {
+            if (result.settled) {
+                // Range settlement (ParquetIOPipeline::set_range_settle): the worker
+                // applied the whole predicate; every non-predicate column holds the
+                // survivors and the predicate columns were never emitted. Those are
+                // filter-only by the planner's proof (compiler._arm_scan_prefilter),
+                // so the Select after this Source drops them: they ride as all-NULL
+                // constant placeholders only to keep the read-set layout.
+                if (!prefilter_ || prefilter_is_pred_.size() != ncols ||
+                    result.settled_rows <= 0 ||
+                    result.settled_rows > static_cast<int64_t>(UINT32_MAX)) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: a settled result without an armed "
+                              "prefilter, or with an impossible row count";
+                    return SourceResult::FINISHED;
+                }
+                const uint32_t n = static_cast<uint32_t>(result.settled_rows);
+                for (size_t i = 0; i < ncols; ++i) {
+                    if (prefilter_is_pred_[i]) {
+                        m->columns.push_back(null_constant_column(settled_placeholder(), n));
+                        continue;
+                    }
+                    if (is_absent(i)) {
+                        m->columns.push_back(null_constant_column(null_templates_[i], n));
+                        continue;
+                    }
+                    CxxColumn col;
+                    if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
+                    if (col.view.length != n) {
+                        err.code = 1;
+                        err.msg = "NativeParquetScanSource: a settled column's length does not "
+                                  "match the settled row count";
+                        return SourceResult::FINISHED;
+                    }
+                    m->columns.push_back(std::move(col));
+                }
+                if (!identity_kinds_.empty() &&
+                    !append_row_identity(*m, result.path, result.rg_idx, kept_ptr, kept_len, -1, err))
+                    return SourceResult::FINISHED;
+            } else if (prefilter_ && !result.survivor_mask.empty()) {
                 // The worker ran the predicate: the predicate columns are full
                 // length, every other column already holds the survivors only.
                 if (prefilter_is_pred_.size() != ncols) {

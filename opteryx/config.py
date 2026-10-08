@@ -375,6 +375,28 @@ row group's column chunks are contiguous — merging them wastes nothing.
 Unbounded wins on an UNCAPPED link (0.60s vs 0.90s) but is 2x worse here, so
 the default is bounded until production tells us which regime it is in."""
 
+PARQUET_IO_COALESCE_GAP_BYTES: int = int(get("PARQUET_IO_COALESCE_GAP_BYTES", 64 * 1024))
+"""Merge two remote byte runs whose gap is at most this many bytes, whatever the
+waste ratio says (still bounded by PARQUET_IO_COALESCE_MAX_BYTES). 0 = off.
+Default 64 KiB — UNRATIFIED for production (see the regime note below).
+
+The waste ratio is RELATIVE: it prices thrown-away bytes against useful ones and
+never against what a range GET costs. PageIndex page pruning is where that bites:
+it cuts a column chunk into [dictionary page][pruned hole][kept pages], the hole
+is large next to the few kept bytes, and every pruned column becomes two GETs
+where it was one. A gap smaller than (round-trip time x per-request bandwidth)
+is cheaper to fetch than to skip — that product is this knob, and it is
+REGIME-dependent (HTTP/1.1 with few connections pays each extra GET in full;
+HTTP/2 multiplexing overlaps them), so it is SET-able like the ratio.
+
+Measured 2026-10-09, dev/throttle_server.py (20 ms RTT, 100 Mbps/connection,
+HTTP/1.1, 3 connections), 20 ClickBench files at 64 KiB pages, hot medians vs 0:
+    gap      SELECT * clustered   SELECT * sorted   wide GROUP BY   others
+    64 KiB   0.28 (288->55 GETs)  0.43              1.01            flat
+    256 KiB  0.26                 0.41              1.15            flat
+    1 MiB    0.38                 0.55              1.92            flat
+Past ~256 KiB it re-buys the bytes page pruning removed. GCS (HTTP/2) unmeasured."""
+
 SKENE_IO_COALESCE_WASTE_RATIO: float = float(get("SKENE_IO_COALESCE_WASTE_RATIO", 0.10))
 """Skene's own range coalescer (design R12, docs/SKENE_V3_FORMAT_DESIGN.md): merge
 a v3 scan's planned ranges while the bytes THROWN AWAY stay within this fraction of
@@ -469,7 +491,7 @@ directory block — because the reader's parsed state is private to skene and ha
 no size of its own to report. Keyed by (path, size, mtime), so a rewritten file
 is a new entry. Must be positive."""
 
-CHUNK_CACHE_MEMORY_PERCENT: int = int(get("CHUNK_CACHE_MEMORY_PERCENT", 70))
+CHUNK_CACHE_MEMORY_PERCENT: int = int(get("CHUNK_CACHE_MEMORY_PERCENT", 60))
 """Cross-query decompressed parquet chunk cache (C7, docs/C7_PAGE_CACHE_DESIGN.md):
 the share of the CONTAINER's memory (cgroup limit when set, else physical RAM)
 the cache may hold, before the reserve below is subtracted. Budget =

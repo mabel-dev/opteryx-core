@@ -21,9 +21,11 @@ struct ValuePredicate {
   // -1 none, 0 int membership (=/IN), 1 str membership (=/IN),
   // 2 str starts-with, 3 str ends-with, 4 str contains (LIKE '%x%'),
   // 5 str not-contains (NOT LIKE '%x%': a value passes when it contains none of
-  // the patterns).
+  // the patterns), 6 int range (lo <= v <= hi, int_vals = {lo, hi}; consumed
+  // ONLY by PageIndex page pruning — the IO pipeline never hands it to the
+  // decoder).
   int kind = -1;
-  const std::vector<int64_t>*     int_vals = nullptr;  // kind 0
+  const std::vector<int64_t>*     int_vals = nullptr;  // kinds 0, 6
   const std::vector<std::string>* str_vals = nullptr;  // kinds 1..5 (operands/patterns)
 };
 

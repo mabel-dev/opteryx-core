@@ -73,6 +73,7 @@ OffsetIndexData ParseOffsetIndex(const uint8_t *data, size_t size);
 //   1 str membership (=/IN)   str_vals, column physical byte_array
 //   2 str starts-with         str_vals (one or more prefixes; ANY may match)
 //   3 str ends-with / 4 str contains: no bounds test exists — only null pages prune
+//   6 int range: NOT this function — see EvaluatePageRange below
 // `physical_type` is ColumnStats::physical_type; `is_unsigned` the E33 IntType
 // verdict (StatsLogicalIsUnsigned). A kind/type combination with no sound test
 // keeps every non-null page. A ColumnIndex whose min/max lists are not exactly
@@ -85,3 +86,35 @@ size_t EvaluatePagePredicate(const ColumnIndexData &ci, size_t num_pages,
                              const std::string &physical_type,
                              bool is_unsigned,
                              std::vector<uint8_t> &keep);
+
+// Three-valued per-page verdict of an inclusive int64 range conjunct
+// (ValuePredicate kind 6, lo <= v <= hi). Same shape as Rayforce's per-chunk
+// zone-map test: a page whose [min, max] lies wholly outside [lo, hi] FAILS
+// (no row can match), one wholly inside with no NULL PASSES (every row
+// matches), anything else is MIXED. Nonzero = keep, so `verdict` drops straight
+// into the same keep-mask loop EvaluatePagePredicate feeds.
+enum PageVerdict : uint8_t { kPageAllFail = 0, kPageMixed = 1, kPageAllPass = 2 };
+
+// Fills `verdict` (size num_pages) and returns the number of kPageAllFail pages.
+// Applies only to physical int32/int64 with a plain integer logical type
+// (`int8`..`int64`, `uint8`..`uint64`): DATE/TIME/TIMESTAMP/DECIMAL ride the
+// same physical types in other units, and a bare int bound against them would
+// compare across domains — those columns get kPageMixed on every non-null page.
+// Integer page bounds are exact (no truncation), so PASS is sound; PASS also
+// needs the page's null_count to be present and zero, else the page is MIXED.
+// A bound past INT64_MAX (uint64) is MIXED: the int64 range cannot speak for it.
+size_t EvaluatePageRange(const ColumnIndexData &ci, size_t num_pages,
+                         int64_t lo, int64_t hi,
+                         const std::string &physical_type,
+                         const std::string &logical_type,
+                         std::vector<uint8_t> &verdict);
+
+// The PASS half of the same test for ONE [min, max] (a row group's footer
+// statistics, or one page's ColumnIndex entry): true only when every row of the
+// chunk satisfies lo <= v <= hi — a plain-integer column, both bounds present and
+// decodable inside the int64 range, and null_count known to be 0 (-1 = unknown).
+// False means "not proven", never "fails".
+bool RangeBoundsAllPass(const std::string &min_raw, const std::string &max_raw,
+                        int64_t null_count, int64_t lo, int64_t hi,
+                        const std::string &physical_type,
+                        const std::string &logical_type);

@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -244,6 +245,58 @@ int main() {
           "string needles on an int column: kept");
     check(EvaluatePagePredicate(ci, 1, -1, nullptr, nullptr, "int64", false, keep) == 0,
           "no predicate: kept");
+  }
+  section("int range: three-valued page verdicts");
+  {
+    ColumnIndexData ci;
+    ci.null_pages  = {0, 0, 1, 0, 0};
+    ci.min_values  = {le64(0), le64(100), "", le64(300), le64(400)};
+    ci.max_values  = {le64(99), le64(199), "", le64(399), le64(499)};
+    ci.null_counts = {0, 0, 50, 0, 3};
+    std::vector<uint8_t> v;
+    size_t failed = EvaluatePageRange(ci, 5, 150, 450, "int64", "int64", v);
+    check(failed == 2, "below-range page and null page fail");
+    check(v == std::vector<uint8_t>({kPageAllFail, kPageMixed, kPageAllFail, kPageAllPass,
+                                     kPageMixed}),
+          "fail / mixed / null-fail / pass / mixed (straddles hi)");
+    EvaluatePageRange(ci, 5, 300, 499, "int64", "int64", v);
+    check(v[3] == kPageAllPass && v[4] == kPageMixed, "a page holding NULLs is never PASS");
+    EvaluatePageRange(ci, 5, 99, 100, "int64", "int64", v);
+    check(v[0] == kPageMixed && v[1] == kPageMixed, "bounds are inclusive on both ends");
+    check(EvaluatePageRange(ci, 5, 10, 5, "int64", "int64", v) == 5, "empty range fails all");
+    ColumnIndexData nc = ci;
+    nc.null_counts.clear();
+    EvaluatePageRange(nc, 5, 300, 399, "int64", "int64", v);
+    check(v[3] == kPageMixed, "absent null_counts: no PASS");
+  }
+  section("int range: domains it must not speak for");
+  {
+    ColumnIndexData ci;
+    ci.null_pages  = {0, 0};
+    ci.min_values  = {le32(-5), le32(static_cast<int32_t>(0xC0A80000u))};
+    ci.max_values  = {le32(5),  le32(static_cast<int32_t>(0xC0A8FFFFu))};
+    ci.null_counts = {0, 0};
+    std::vector<uint8_t> v;
+    EvaluatePageRange(ci, 2, 0xC0A80000LL, 0xC0A8FFFFLL, "int32", "uint32", v);
+    check(v[1] == kPageAllPass, "uint32 zero-extends: page 1 lies inside the range");
+    EvaluatePageRange(ci, 2, 0xC0A80000LL, 0xC0A8FFFFLL, "int32", "int32", v);
+    check(v[1] == kPageAllFail, "the same bits read signed lie below it");
+    EvaluatePageRange(ci, 2, -10, 10, "int32", "int32", v);
+    check(v == std::vector<uint8_t>({kPageAllPass, kPageAllFail}), "signed int32 reads negative");
+    for (const char* lt : {"date32[day]", "decimal(9,2)", "time[ms]", "timestamp[ms]"}) {
+      check(EvaluatePageRange(ci, 2, 1000, 2000, "int32", lt, v) == 0 &&
+                v == std::vector<uint8_t>({kPageMixed, kPageMixed}),
+            "non-integer logical type: every page MIXED");
+    }
+    check(EvaluatePageRange(ci, 2, 1000, 2000, "double", "double", v) == 0,
+          "float column: every page MIXED");
+    ColumnIndexData u64;
+    u64.null_pages  = {0};
+    u64.min_values  = {le64(-1)};   // 2^64-1 as uint64
+    u64.max_values  = {le64(-1)};
+    u64.null_counts = {0};
+    EvaluatePageRange(u64, 1, 0, std::numeric_limits<int64_t>::max(), "int64", "uint64", v);
+    check(v[0] == kPageMixed, "uint64 bound past INT64_MAX: MIXED, never FAIL");
   }
 
   // ── writer → reader round trip ─────────────────────────────────────────────

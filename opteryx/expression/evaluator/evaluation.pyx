@@ -612,7 +612,8 @@ from draken.core.buffers cimport DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_DATE32
 from draken.core.buffers cimport DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_SEL_PERMUTATION
 from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_is_inline, str_data, str_clone_with_offset
-from draken.core.buffers cimport draken_zero_sel, draken_zero_validity
+from draken.core.buffers cimport draken_zero_sel, draken_zero_validity, draken_identity_sel
+from draken.core.buffers cimport DRAKEN_DICT_CODES_DENSE
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
@@ -2435,6 +2436,330 @@ cdef inline DrakenVector** _dv_cache_for(
         arena, <size_t>count * sizeof(DrakenVector*))
 
 
+# ---------------------------------------------------------------------------
+# PoC 2026-10-08 — cache-sized expression tiling (EXPR_TILE_ROWS).
+#
+# A morsel is one row group (64K-262K rows), so every intermediate the DV* VM
+# produces is 512 KB+ for an 8-byte type — past L1/L2. With EXPR_TILE_ROWS = T > 0
+# the engine spans run the SAME VM over T-row sub-slices of the morsel: each tile's
+# intermediates are T rows and live in a per-tile frame arena that is destroyed
+# before the next tile, so the next tile's kernel outputs are malloc'd from the
+# blocks just freed (cache-hot reuse). Each tile's result is written straight into
+# the full-length output. T == 0 is the whole-morsel path, untouched. Default is
+# per-arch at compile time (_EXPR_TILE_ROWS_DEFAULT): 4096 on x86-64, 0 elsewhere;
+# the EXPR_TILE_ROWS env var overrides it.
+#
+# Eligibility is decided per morsel BEFORE anything runs (_tile_eligible): every
+# loaded column must slice as a truthful view — identity-dense (data offset),
+# constant (prefix of the zero selection) or a dict whose value count is below the
+# tile length (selection offset, still a true dict) — and no instruction may read an
+# ARRAY child. The one thing only a run can tell is the result type: tile 0's result
+# must be BOOL or fixed-width with no ARRAY child; otherwise tile 0 is discarded and
+# the morsel runs whole (counted in expr_tile_stats()["result_refused"]).
+# Tiles start at multiples of T (T % 8 == 0, so validity/BOOL slices are byte
+# aligned); the remainder joins the last tile, so every tile has >= T rows.
+# ---------------------------------------------------------------------------
+cdef extern from "core/buffers.h" nogil:
+    int draken_is_constant(const DrakenVector* v)
+    int draken_is_dict(const DrakenVector* v)
+    int draken_type_is_string_storage(DrakenType t)
+
+cdef extern from *:
+    """
+    static unsigned long long _expr_tile_ctr[7];
+    static inline void _expr_tile_count(int k) {
+        __atomic_fetch_add(&_expr_tile_ctr[k], 1ULL, __ATOMIC_RELAXED);
+    }
+    static inline unsigned long long _expr_tile_read(int k) {
+        return __atomic_load_n(&_expr_tile_ctr[k], __ATOMIC_RELAXED);
+    }
+    /* Per-arch default, ruled 2026-10-09 from the 2026-10-08 A/B: x86-64 (i5-8500,
+       256 KB L2/core) ran arithmetic chains 3-12% faster at 4096; Apple Silicon ran
+       them 0-16% slower at every size. Everything not measured stays off. */
+    #if defined(__x86_64__) || defined(_M_X64)
+    #define _EXPR_TILE_ROWS_DEFAULT 4096
+    #else
+    #define _EXPR_TILE_ROWS_DEFAULT 0
+    #endif
+    static inline void _expr_tile_reset(void) {
+        for (int k = 0; k < 7; ++k) __atomic_store_n(&_expr_tile_ctr[k], 0ULL, __ATOMIC_RELAXED);
+    }
+    """
+    void _expr_tile_count(int k) noexcept nogil
+    unsigned long long _expr_tile_read(int k) noexcept nogil
+    void _expr_tile_reset() noexcept nogil
+    int _EXPR_TILE_ROWS_DEFAULT
+
+DEF _TILE_CTR_TILED = 0
+DEF _TILE_CTR_SMALL = 1
+DEF _TILE_CTR_INELIGIBLE = 2       # an input type/instruction cannot be sliced
+DEF _TILE_CTR_RESULT_REFUSED = 3
+DEF _TILE_CTR_BIG_DICT = 4          # a dict input with data_length >= tile length
+DEF _TILE_CTR_NOT_IDENTITY = 5      # a non-dict, non-constant input without SEL_IDENTITY
+DEF _TILE_CTR_SHAPE_KEPT = 6        # preserve_shape span with a compressed input
+
+cdef uint32_t _EXPR_TILE_ROWS = 0
+
+
+def set_expr_tile_rows(int rows):
+    """Set the PoC tile length (0 = untiled). Must be 0 or a positive multiple of 8."""
+    global _EXPR_TILE_ROWS
+    if rows < 0 or (rows % 8) != 0:
+        raise ValueError(f"EXPR_TILE_ROWS must be 0 or a positive multiple of 8, got {rows}")
+    _EXPR_TILE_ROWS = <uint32_t>rows
+
+
+def get_expr_tile_rows():
+    return _EXPR_TILE_ROWS
+
+
+def expr_tile_stats(bint reset=False):
+    """Morsel counts per tiling outcome since the last reset (proves the knob moves)."""
+    stats = {
+        "tiled": _expr_tile_read(_TILE_CTR_TILED),
+        "small": _expr_tile_read(_TILE_CTR_SMALL),
+        "ineligible": _expr_tile_read(_TILE_CTR_INELIGIBLE),
+        "result_refused": _expr_tile_read(_TILE_CTR_RESULT_REFUSED),
+        "big_dict": _expr_tile_read(_TILE_CTR_BIG_DICT),
+        "not_identity": _expr_tile_read(_TILE_CTR_NOT_IDENTITY),
+        "shape_kept": _expr_tile_read(_TILE_CTR_SHAPE_KEPT),
+    }
+    if reset:
+        _expr_tile_reset()
+    return stats
+
+
+import os as _os
+set_expr_tile_rows(int(_os.environ.get("EXPR_TILE_ROWS", str(_EXPR_TILE_ROWS_DEFAULT))))
+
+
+cdef int _tile_eligible(BytecodeInstr* instrs, Py_ssize_t count,
+                        DrakenVector** dv_cache, uint32_t tile,
+                        bint dense_inputs_only) noexcept nogil:
+    """-1 = every input slices; otherwise the _TILE_CTR_* reason it does not."""
+    cdef Py_ssize_t k
+    cdef const DrakenVector* v
+    for k in range(count):
+        if (instrs[k].flags & BC_C_NATIVE_CHILD) != 0:
+            return _TILE_CTR_INELIGIBLE
+        if instrs[k].opcode != BC_LOAD_COL:
+            continue
+        v = dv_cache[k]
+        if v == NULL or v.type == DRAKEN_ARRAY or v.type == DRAKEN_VECTOR_FP16:
+            return _TILE_CTR_INELIGIBLE
+        if (v.flags & DRAKEN_SEL_IDENTITY) != 0:
+            if (v.type == DRAKEN_BOOL or v.type == DRAKEN_NULL
+                    or draken_type_is_string_storage(v.type)
+                    or _dv_result_elem_size(v.type) != 0):
+                continue
+            return _TILE_CTR_INELIGIBLE
+        if draken_is_constant(v) or draken_is_dict(v):
+            if dense_inputs_only:
+                return _TILE_CTR_SHAPE_KEPT
+            if draken_is_constant(v) or v.data_length < tile:
+                continue
+            return _TILE_CTR_BIG_DICT
+        return _TILE_CTR_NOT_IDENTITY
+    return -1
+
+
+cdef inline void _tile_view(const DrakenVector* base, uint32_t off, uint32_t t,
+                            DrakenVector* out, DrakenStringArena* hdr) noexcept nogil:
+    """A t-row view of rows [off, off+t) of `base`; shapes per _tile_eligible."""
+    out[0] = base[0]
+    out.length = t
+    if base.validity != NULL:
+        out.validity = base.validity + (off >> 3)
+    if draken_is_constant(base):
+        out.flags = base.flags & ~DRAKEN_DICT_CODES_DENSE
+        return
+    if (base.flags & DRAKEN_SEL_IDENTITY) != 0:
+        out.data_length = t
+        if base.data == NULL or base.type == DRAKEN_NULL:
+            return
+        if base.type == DRAKEN_BOOL:
+            out.data = <uint8_t*>base.data + (off >> 3)
+        elif draken_type_is_string_storage(base.type):
+            hdr[0] = (<DrakenStringArena*>base.data)[0]
+            hdr.slots = hdr.slots + off
+            hdr.length = t
+            if hdr.null_bitmap != NULL:
+                hdr.null_bitmap = hdr.null_bitmap + (off >> 3)
+            hdr.owns_buffers = 0
+            out.data = <void*>hdr
+        else:
+            out.data = <uint8_t*>base.data + <size_t>off * _dv_result_elem_size(base.type)
+        return
+    # dict with data_length < t: codes offset, value array shared
+    out.selection = base.selection + off
+    out.flags = base.flags & ~DRAKEN_DICT_CODES_DENSE
+
+
+cdef inline int _tile_emit(const DrakenVector* r, uint32_t off, uint32_t t,
+                           uint32_t num_rows, size_t es, bint bulk_identity,
+                           uint8_t* out_data, uint8_t** out_validity) noexcept nogil:
+    """Write one tile's result into rows [off, off+t) of the full-length output.
+    The fixed-width copy mirrors the untiled boundary it replaces, so an A/B measures
+    tiling and not a copy change: _dv_copy_result_dense gathers element by element,
+    _dv_copy_result_preserve_shape (bulk_identity) memcpys an identity result."""
+    cdef uint32_t i, phys
+    cdef size_t nb = (<size_t>t + 7) >> 3
+    cdef uint8_t* dst
+    cdef const uint8_t* sbits
+    if r.type == DRAKEN_BOOL:
+        dst = out_data + (off >> 3)
+        if (r.flags & DRAKEN_SEL_IDENTITY) != 0:
+            memcpy(dst, r.data, nb)
+        else:
+            memset(dst, 0, nb)
+            sbits = <const uint8_t*>r.data
+            for i in range(t):
+                phys = r.selection[i]
+                if (sbits[phys >> 3] >> (phys & 7)) & 1:
+                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        if t & 7:
+            dst[nb - 1] &= <uint8_t>((1 << (t & 7)) - 1)
+    elif bulk_identity and (r.flags & DRAKEN_SEL_IDENTITY) != 0:
+        memcpy(out_data + <size_t>off * es, r.data, <size_t>t * es)
+    else:
+        for i in range(t):
+            memcpy(out_data + (<size_t>off + i) * es,
+                   <const uint8_t*>r.data + <size_t>r.selection[i] * es, es)
+    if r.validity != NULL:
+        if out_validity[0] == NULL:
+            out_validity[0] = <uint8_t*>draken_malloc(((<size_t>num_rows + 7) >> 3))
+            if out_validity[0] == NULL:
+                return 2
+            memset(out_validity[0], 0xFF, ((<size_t>num_rows + 7) >> 3))
+        memcpy(out_validity[0] + (off >> 3), r.validity, nb)
+    return 0
+
+
+cdef int _dv_try_tiled(
+    BytecodeInstr* instrs, Py_ssize_t count, DrakenVector** dv_cache,
+    uint32_t num_rows, DrakenFrameArena* outer, bint dense_inputs_only,
+    DrakenVector* out, int* err_op, const char** err_msg,
+) noexcept nogil:
+    """Run the program tile by tile into a full-length dense result.
+
+    Returns -1 when tiling does not apply (knob off, morsel < 2 tiles, ineligible
+    inputs, or tile 0's result type is not BOOL/fixed-width) — nothing is left
+    allocated and the caller runs the whole-morsel path. 0 → `out` is a dense
+    identity-selection vector whose data/validity are draken_malloc'd and OWNED BY
+    THE CALLER (selection is the shared global identity). Otherwise the
+    c_execute_dv_inner rc with err_op/err_msg set (98 = a later tile changed result
+    type, 97 = a later tile produced an ARRAY child)."""
+    cdef uint32_t T = _EXPR_TILE_ROWS
+    if T == 0:
+        return -1
+    if num_rows < 2 * T:
+        _expr_tile_count(_TILE_CTR_SMALL)
+        return -1
+    cdef int why = _tile_eligible(instrs, count, dv_cache, T, dense_inputs_only)
+    if why >= 0:
+        _expr_tile_count(why)
+        return -1
+    cdef uint32_t ntiles = num_rows // T
+    cdef DrakenVector* dv_stack[64]
+    cdef DrakenVector  dv_store[64]
+    cdef DrakenVector* views = <DrakenVector*>draken_frame_arena_alloc(
+        outer, <size_t>count * sizeof(DrakenVector))
+    cdef DrakenStringArena* hdrs = <DrakenStringArena*>draken_frame_arena_alloc(
+        outer, <size_t>count * sizeof(DrakenStringArena))
+    cdef DrakenVector** tcache = <DrakenVector**>draken_frame_arena_alloc(
+        outer, <size_t>count * sizeof(DrakenVector*))
+    cdef uint8_t* out_data = NULL
+    cdef uint8_t* out_validity = NULL
+    cdef DrakenType out_type = DRAKEN_NULL
+    cdef size_t es = 0
+    cdef uint32_t tile, off, t
+    cdef Py_ssize_t k
+    cdef int rc = 0
+    cdef VecResult* child = NULL
+    cdef DrakenFrameArena* arena
+    cdef const DrakenVector* r
+    if views == NULL or hdrs == NULL or tcache == NULL:
+        err_op[0] = -99
+        err_msg[0] = NULL
+        return 99
+    for k in range(count):
+        tcache[k] = dv_cache[k]
+    for tile in range(ntiles):
+        off = tile * T
+        t = T if tile + 1 < ntiles else num_rows - off
+        for k in range(count):
+            if instrs[k].opcode == BC_LOAD_COL:
+                _tile_view(dv_cache[k], off, t, &views[k], &hdrs[k])
+                tcache[k] = &views[k]
+        arena = draken_frame_arena_create()
+        if arena == NULL:
+            err_op[0] = -99
+            err_msg[0] = NULL
+            rc = 99
+            break
+        rc = c_execute_dv_inner(instrs, count, tcache, dv_stack, dv_store, arena,
+                                (<Py_ssize_t>t + 7) >> 3, t, err_op, err_msg, &child)
+        if rc != 0:
+            if child != NULL:
+                draken_vecresult_discard_c(child)
+            draken_frame_arena_destroy(arena)
+            break
+        r = dv_stack[0]
+        if tile == 0:
+            if r.type == DRAKEN_BOOL:
+                es = 0
+            else:
+                es = _dv_result_elem_size(r.type)
+            if child != NULL or (r.type != DRAKEN_BOOL and es == 0):
+                if child != NULL:
+                    draken_vecresult_discard_c(child)
+                draken_frame_arena_destroy(arena)
+                _expr_tile_count(_TILE_CTR_RESULT_REFUSED)
+                return -1
+            out_type = r.type
+            if out_type == DRAKEN_BOOL:
+                out_data = <uint8_t*>draken_malloc(((<size_t>num_rows + 7) >> 3))
+            else:
+                out_data = <uint8_t*>draken_malloc(<size_t>num_rows * es)
+            if out_data == NULL:
+                draken_frame_arena_destroy(arena)
+                err_op[0] = -99
+                err_msg[0] = NULL
+                return 99
+        elif child != NULL:
+            draken_vecresult_discard_c(child)
+            draken_frame_arena_destroy(arena)
+            err_op[0] = -97
+            err_msg[0] = NULL
+            rc = 97
+            break
+        elif r.type != out_type:
+            draken_frame_arena_destroy(arena)
+            err_op[0] = -98
+            err_msg[0] = "expression tiling: result type changed between tiles"
+            rc = 98
+            break
+        rc = _tile_emit(r, off, t, num_rows, es, dense_inputs_only, out_data, &out_validity)
+        draken_frame_arena_destroy(arena)
+        if rc != 0:
+            err_op[0] = -99
+            err_msg[0] = NULL
+            break
+    if rc != 0:
+        draken_free(out_data)
+        draken_free(out_validity)
+        return rc
+    _expr_tile_count(_TILE_CTR_TILED)
+    out.data = out_data
+    out.selection = draken_identity_sel(num_rows)
+    out.data_length = num_rows
+    out.length = num_rows
+    out.validity = out_validity
+    out.type = out_type
+    out.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION
+    return 0
+
+
 cdef int _dv_filter_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
@@ -2458,6 +2783,7 @@ cdef int _dv_filter_span_cxx(
     cdef int rc
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     cdef VecResult* child_vr = NULL
+    cdef DrakenVector tiled
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
@@ -2469,6 +2795,17 @@ cdef int _dv_filter_span_cxx(
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    rc = _dv_try_tiled(instrs, count, dv_cache, <uint32_t>num_rows, arena, False,
+                       &tiled, err_op, err_msg)
+    if rc == 0:
+        out_filtered[0] = cxx_mask_c(m, &tiled)
+        draken_free(tiled.data)
+        draken_free(tiled.validity)
+        draken_frame_arena_destroy(arena)
+        return 0
+    if rc != -1:
+        draken_frame_arena_destroy(arena)
+        return rc
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
                             arena, nbytes, <uint32_t>num_rows, err_op, err_msg, &child_vr)
     if rc == 0 and child_vr != NULL:
@@ -2507,6 +2844,7 @@ cdef int _dv_filter_span_with_consts_cxx(
     cdef int rc
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     cdef VecResult* child_vr = NULL
+    cdef DrakenVector tiled
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
@@ -2518,6 +2856,18 @@ cdef int _dv_filter_span_with_consts_cxx(
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    rc = _dv_try_tiled(instrs, count, dv_cache, <uint32_t>num_rows, arena, False,
+                       &tiled, err_op, err_msg)
+    if rc == 0:
+        out_filtered[0] = cxx_mask_with_consts_c(
+            m, &tiled, const_col_idx, <const DrakenVector* const*>const_scalar_dv, n_consts)
+        draken_free(tiled.data)
+        draken_free(tiled.validity)
+        draken_frame_arena_destroy(arena)
+        return 0
+    if rc != -1:
+        draken_frame_arena_destroy(arena)
+        return rc
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
                             arena, nbytes, <uint32_t>num_rows, err_op, err_msg, &child_vr)
     if rc == 0 and child_vr != NULL:
@@ -2600,6 +2950,7 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
     cdef Py_ssize_t k = 0
     cdef DrakenFrameArena* arena = NULL
     cdef VecResult* child_vr = NULL
+    cdef DrakenVector tiled
     if count > 256 or num_rows == 0:
         return -1
     arena = draken_frame_arena_create()
@@ -2624,6 +2975,19 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
             dv_cache[k] = lit_dv[k]
         else:
             dv_cache[k] = NULL
+    rc = _dv_try_tiled(instrs, count, dv_cache, num_rows, arena, False,
+                       &tiled, &err_op, &err_msg)
+    if rc == 0:
+        memcpy(out_mask, tiled.data, <size_t>nbytes)
+        if tiled.validity != NULL:
+            c_bitmap_and_inplace(out_mask, tiled.validity, <size_t>nbytes)
+        draken_free(tiled.data)
+        draken_free(tiled.validity)
+        draken_frame_arena_destroy(arena)
+        return 0
+    if rc != -1:
+        draken_frame_arena_destroy(arena)
+        return rc
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
                             arena, nbytes, num_rows, &err_op, &err_msg, &child_vr)
     if rc == 0 and child_vr != NULL:
@@ -3228,6 +3592,9 @@ cdef int _dv_eval_span_cxx(
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
     cdef int rc
     cdef VecResult* child_local = NULL
+    cdef DrakenVector tiled
+    cdef uint32_t* tiled_sel
+    cdef uint32_t ti
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     out_child[0] = NULL
     out_arena[0] = NULL
@@ -3242,6 +3609,32 @@ cdef int _dv_eval_span_cxx(
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
+    # preserve_shape (computed GROUP BY / DISTINCT key): tiled only when every
+    # loaded column is identity-dense, i.e. when the untiled result is dense anyway.
+    rc = _dv_try_tiled(instrs, count, dv_cache, <uint32_t>num_rows, arena,
+                       preserve_shape, &tiled, err_op, err_msg)
+    if rc == 0:
+        tiled_sel = <uint32_t*>draken_malloc(
+            <size_t>(num_rows if num_rows > 0 else 1) * sizeof(uint32_t))
+        if tiled_sel == NULL:
+            draken_free(tiled.data)
+            draken_free(tiled.validity)
+            draken_frame_arena_destroy(arena)
+            err_op[0] = -99
+            err_msg[0] = NULL
+            return 99
+        for ti in range(<uint32_t>num_rows):
+            tiled_sel[ti] = ti
+        tiled.selection = tiled_sel
+        out_vec[0] = tiled
+        out_data[0] = tiled.data
+        out_validity[0] = tiled.validity
+        out_sel[0] = tiled_sel
+        draken_frame_arena_destroy(arena)
+        return 0
+    if rc != -1:
+        draken_frame_arena_destroy(arena)
+        return rc
     rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
                             arena, nbytes, <uint32_t>num_rows, err_op, err_msg, &child_local)
     if rc == 0:

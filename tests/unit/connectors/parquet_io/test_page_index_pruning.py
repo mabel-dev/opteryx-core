@@ -277,13 +277,19 @@ def _wide_narrow_fixture(tmp):
 
 
 def test_gate_declines_when_the_index_cannot_repay_itself():
-    """The index is read only when it costs at most a tenth of the bytes it could
-    remove. Narrow projection: declined, and NOT read. Wide: read and used.
-    Either way the rows are the same — the gate never changes the answer."""
+    """On a REMOTE path the index is read only when it costs at most a tenth of
+    the bytes it could remove. Narrow projection: declined, and NOT read. Wide:
+    read and used. Either way the rows are the same — the gate never changes the
+    answer."""
     with tempfile.TemporaryDirectory() as tmp:
         path = _wide_narrow_fixture(tmp)
-        narrow, _, d_narrow = _scan(path, ["k"], [("k", "Eq", 7)])
-        wide, _, d_wide = _scan(path, ["k", "fat1", "fat2"], [("k", "Eq", 7)])
+        proc, port = _server(tmp)
+        try:
+            url = f"http://127.0.0.1:{port}/{os.path.basename(path)}"
+            narrow, _, d_narrow = _scan(url, ["k"], [("k", "Eq", 7)])
+            wide, _, d_wide = _scan(url, ["k", "fat1", "fat2"], [("k", "Eq", 7)])
+        finally:
+            proc.kill(); proc.wait()
 
     # Declined: nothing fetched, nothing pruned, the decline is COUNTED so a
     # reader can tell "chose not to look" from "there was nothing to look at".
@@ -299,6 +305,18 @@ def test_gate_declines_when_the_index_cannot_repay_itself():
 
     # Same answer through both paths.
     assert [v for v in narrow["k"] if v == 7] == [v for v in wide["k"] if v == 7] == [7] * 1000
+
+
+def test_local_files_are_exempt_from_the_gate():
+    """The gate prices a serial round trip; a local index read has none, so the
+    narrow projection the remote gate declines reads the index and prunes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _wide_narrow_fixture(tmp)
+        narrow, _, d = _scan(path, ["k"], [("k", "Eq", 7)])
+    assert d["page_index_gate_declines"] == 0
+    assert d["page_index_fetches"] >= 1
+    assert d["page_index_pages_pruned"] > 0
+    assert [v for v in narrow["k"] if v == 7] == [7] * 1000
 
 
 def test_the_ab_arm_disables_pruning_entirely():
@@ -500,3 +518,225 @@ def test_a_chunk_that_does_not_split_gets_no_index():
         _, md = _rugo_fixture(tmp, page_index=True, max_page_bytes=10_000_000)
         assert not any(md.row_group(0).column(c).has_column_index
                        for c in range(md.num_columns))
+
+
+# ── range conjuncts (kind 6): three-valued page verdicts ─────────────────────
+#
+# Gt/GtEq/Lt/LtEq on an integer column are intersected into one inclusive range
+# per column and tested against every page's [min, max]: wholly outside FAILS
+# (pruned), wholly inside with no NULL PASSES (counted in
+# page_index_rows_all_pass — not yet used), anything else is MIXED. The oracle
+# is plain Python over the fixture's own generator, not a parquet reader.
+
+
+def _fixture_columns():
+    x = list(range(N))
+    n = [None if i % 7 == 0 else (i // 1000) % 13 for i in range(N)]
+    return x, n
+
+
+def test_int_range_prunes_pages_and_keeps_every_match():
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _rugo_fixture(tmp)
+        # Inside one row group ([20_000, 40_000)) and several 2 048-row x pages
+        # wide, so pages fall wholly inside (PASS) as well as outside (FAIL).
+        lo, hi = 25_100, 33_900
+        out, _, diag = _scan(path, ["x", "n"], [("x", "GtEq", lo), ("x", "Lt", hi)])
+    x, n = _fixture_columns()
+    keep = [lo <= v < hi for v in out["x"]]
+    assert _survivors(out["x"], keep) == [v for v in x if lo <= v < hi]
+    assert _survivors(out["n"], keep) == [n[v] for v in x if lo <= v < hi]
+    assert diag["page_index_pages_pruned"] > 0
+    assert len(out["x"]) < ROW_GROUP_SIZE
+    # x is unique, sorted and never NULL: pages wholly inside [lo, hi) settle PASS.
+    assert diag["page_index_rows_all_pass"] > 0
+
+
+def test_int_range_on_a_nullable_column_never_keeps_nulls_as_matches():
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _rugo_fixture(tmp)
+        out, _, diag = _scan(path, ["x", "n"], [("n", "Gt", 5), ("n", "LtEq", 7)])
+    x, n = _fixture_columns()
+    keep = [v is not None and 5 < v <= 7 for v in out["n"]]
+    assert _survivors(out["x"], keep) == [i for i in x if n[i] is not None and 5 < n[i] <= 7]
+    assert diag["page_index_pages_pruned"] > 0
+    # Every page of n holds a NULL (one row in seven): none can settle PASS.
+    assert diag["page_index_rows_all_pass"] == 0
+
+
+def test_contradictory_range_prunes_every_page_of_the_surviving_row_group():
+    """x > 50 AND x < 10: row-group stats test each conjunct alone, so row group
+    0 survives them; the intersected range is empty and fails every page."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _rugo_fixture(tmp)
+        out, _, diag = _scan(path, ["x", "s"], [("x", "Gt", 50), ("x", "Lt", 10)])
+    assert out["x"] == []
+    assert diag["page_index_row_groups_pruned"] >= 1
+
+
+def test_non_int_literal_registers_no_range():
+    """A float literal is not an int range: page pruning stays off, rows intact."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _rugo_fixture(tmp)
+        out, _, diag = _scan(path, ["x"], [("x", "Gt", 79_000.5)])
+    assert [v for v in out["x"] if v > 79_000.5] == list(range(79_001, N))
+    assert diag["page_index_pages_pruned"] == 0
+    assert diag["page_index_fetches"] == 0
+
+
+@pytest.mark.parametrize(
+    "where, pred, prunes",
+    [
+        ("x BETWEEN 30100 AND 30399", lambda v: 30_100 <= v <= 30_399, True),
+        ("x > 59990 AND x <= 60010", lambda v: 59_990 < v <= 60_010, True),
+        ("x >= 79000", lambda v: v >= 79_000, True),
+        ("x < 15", lambda v: v < 15, True),
+        # Settled before the scan reads anything (0 bytes fetched): no pages to prune.
+        ("x > 50 AND x < 10", lambda v: False, False),
+    ],
+)
+def test_sql_range_answer_through_the_native_scan(where, pred, prunes):
+    """End to end through the planner's pushdown and the native scan source."""
+    import opteryx
+    from draken.morsels.morsel import Morsel
+    from opteryx.connectors import DiskConnector
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "pirange", "t")
+        os.makedirs(data_dir)
+        _rugo_fixture(data_dir)
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            opteryx.register_workspace("pirange", DiskConnector)
+            sql = f"SELECT COUNT(*) AS c, SUM(x) AS s, COUNT(n) AS cn FROM pirange.t WHERE {where}"
+            session = opteryx.session()
+            morsel = Morsel.combine(list(session.execute_to_morsels(sql)))
+            diags = session.telemetry.get("io_scan_diagnostics") or []
+        finally:
+            os.chdir(cwd)
+    # The range reached the native scan's pipeline and pruned pages there.
+    if prunes:
+        assert sum(d["page_index_pages_pruned"] for d in diags) > 0, diags
+    got = {(c.decode() if isinstance(c, bytes) else c): morsel.column(c).to_pylist()[0]
+           for c in morsel.column_names}
+    x, n = _fixture_columns()
+    rows = [i for i in x if pred(i)]
+    assert got["c"] == len(rows)
+    assert got["s"] == (sum(rows) if rows else None)
+    assert got["cn"] == sum(1 for i in rows if n[i] is not None)
+
+
+# ── range settlement: ALL-PASS row groups / pages skip the predicate column ───
+#
+# When the pushed predicate is EXACTLY int range conjuncts over columns nothing
+# downstream reads, a row group (footer min/max/null_count) or page (ColumnIndex)
+# every range proves ALL-PASS is emitted without decoding or evaluating the
+# predicate column (`settled_rows` counts those rows). Everything else must keep
+# the ordinary prefilter — and every answer must be exact either way.
+
+
+def _sql_rows(sql):
+    """Run `sql` over the rugo fixture as `pirange.t`; return (rows, diags)."""
+    import opteryx
+    from opteryx.connectors import DiskConnector
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "pirange", "t")
+        os.makedirs(data_dir)
+        _rugo_fixture(data_dir)
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            opteryx.register_workspace("pirange", DiskConnector)
+            session = opteryx.session()
+            rows = []
+            for m in session.execute_to_morsels(sql):
+                cols = [m.column(c).to_pylist() for c in m.column_names]
+                rows.extend(zip(*cols))
+            diags = session.telemetry.get("io_scan_diagnostics") or []
+        finally:
+            os.chdir(cwd)
+    return rows, sum(d.get("settled_rows", 0) for d in diags)
+
+
+def _nulls_last(v):
+    return (v is None, v if v is not None else 0)
+
+
+def _fixture_s():
+    return [f"k{(i // 500) % 40:02d}" for i in range(N)]
+
+
+def _ordered(rows):
+    return sorted(rows, key=lambda r: tuple(_nulls_last(v) for v in r))
+
+
+@pytest.mark.parametrize(
+    "where, pred",
+    [
+        # Two whole row groups inside, plus partial pages at both ends.
+        ("x BETWEEN 15000 AND 61999", lambda i: 15_000 <= i <= 61_999),
+        # Inside one row group, several whole pages inside.
+        ("x >= 25100 AND x < 33900", lambda i: 25_100 <= i < 33_900),
+        # Every row passes: every row group settles outright.
+        ("x >= 0", lambda i: i >= 0),
+        # The optimizer rewrites a fractional bound on an int column to an int
+        # one (x > 14999.5 -> x >= 15000): an int range, so it settles.
+        ("x > 14999.5 AND x < 62000", lambda i: 15_000 <= i < 62_000),
+    ],
+)
+def test_settled_scan_answers_exactly(where, pred):
+    rows, settled = _sql_rows(f"SELECT n, s FROM pirange.t WHERE {where}")
+    x, n = _fixture_columns()
+    s = _fixture_s()
+    assert _ordered(rows) == _ordered((n[i], s[i]) for i in x if pred(i))
+    assert settled > 0
+
+
+@pytest.mark.parametrize(
+    "select, where, pred",
+    [
+        # The range column is projected: it must be decoded, so no settlement.
+        ("x, n", "x BETWEEN 15000 AND 61999", lambda i, n, s: 15_000 <= i <= 61_999),
+        # A non-range conjunct rides along: the ranges are not the whole predicate.
+        ("n", "x BETWEEN 15000 AND 61999 AND s = 'k07'",
+         lambda i, n, s: 15_000 <= i <= 61_999 and s == "k07"),
+        # Not `identifier op literal`: extract_predicate_stats leaves it out.
+        ("n", "x + 1 > 15001 AND x < 62000", lambda i, n, s: 15_000 < i < 62_000),
+        # Both conjuncts are ranges, but n holds a NULL in every page and row
+        # group, so no row can be proven to pass BOTH.
+        ("x", "x BETWEEN 15000 AND 61999 AND n >= 0", lambda i, n, s: 15_000 <= i <= 61_999
+         and n is not None and n >= 0),
+    ],
+)
+def test_settlement_stays_off_where_it_cannot_prove_a_pass(select, where, pred):
+    rows, settled = _sql_rows(f"SELECT {select} FROM pirange.t WHERE {where}")
+    x, n = _fixture_columns()
+    s = _fixture_s()
+    cols = {"x": x, "n": n, "s": s}
+    want = [tuple(cols[c.strip()][i] for c in select.split(",")) for i in x if pred(i, n[i], s[i])]
+    assert _ordered(rows) == _ordered(want)
+    assert settled == 0
+
+
+def test_out_of_int64_closed_bound_is_not_settled():
+    """`x > 2**70` matches nothing in an int64 column; whatever the planner does
+    with it (it declines the pushdown today), nothing may settle and no row
+    returns. range_conjuncts_exact pins the pipeline-side refusal below."""
+    rows, settled = _sql_rows("SELECT n FROM pirange.t WHERE x > 1180591620717411303424")
+    assert rows == []
+    assert settled == 0
+
+
+def test_range_conjuncts_exact():
+    from opteryx.connectors.parquet_io.pool_reader import range_conjuncts_exact
+
+    assert range_conjuncts_exact([("x", "GtEq", 1), ("x", "Lt", 9), ("y", "LtEq", 3)]) == {"x", "y"}
+    assert range_conjuncts_exact([("x", "GtEq", 1), ("x", "Eq", 5)]) is None
+    assert range_conjuncts_exact([("x", "Gt", 1.5)]) is None
+    assert range_conjuncts_exact([("x", "Gt", True)]) is None
+    assert range_conjuncts_exact([("x", "Gt", 2 ** 70)]) is None        # closed side past int64
+    assert range_conjuncts_exact([("x", "Lt", -(2 ** 70))]) is None
+    assert range_conjuncts_exact([("x", "Lt", 2 ** 70)]) == {"x"}         # open side clamps
+    assert range_conjuncts_exact([]) is None

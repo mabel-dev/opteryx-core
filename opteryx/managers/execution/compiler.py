@@ -1027,6 +1027,10 @@ class _Compiler:
         # need_select). Built per execute() and discarded with the compiler — no
         # cross-query shared state.
         self._relocated_scan_filters: dict = {}
+        # Range settlement: per native scan identity, the columns whose kind-6 int
+        # ranges ARE the whole pushed predicate (range_conjuncts_exact), else
+        # absent. _native_scan_plan -> _arm_scan_prefilter.
+        self._range_settle_cols: dict = {}
         # Row identity ($file / $ordinal, constants/row_identity.py) for a scan admitted
         # natively: its identity columns' (schema column, kind), appended by the Source
         # after the read set. _native_scan_plan -> _compile_scan, like the above.
@@ -3933,6 +3937,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
         from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+        from opteryx.connectors.parquet_io.pool_reader import range_conjuncts_exact
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.operators._operators import resolve_scan_filesystem
         from opteryx.operators._operators import scan_footer_bytes_cache
@@ -4155,6 +4160,15 @@ class _Compiler:
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
         pruning = extract_predicate_stats(predicates) if predicates else None
+        if predicates:
+            # Range settlement's plan-time proof, node by node: every pushed node
+            # must extract to int range triples (a node extract_predicate_stats
+            # drops, or one that extracts to anything else, ends it).
+            per_node = [extract_predicate_stats([node]) for node in predicates]
+            if all(per_node):
+                settle_cols = range_conjuncts_exact([t for ts in per_node for t in ts])
+                if settle_cols:
+                    self._range_settle_cols[scan.identity] = settle_cols
         # LC_DATE (3, native_parquet_scan_source.hpp) only re-TAGS the stored int32
         # day count as DATE32 - the value is the footer's. Every other retag moves
         # the value (timestamp units, DECIMAL scale) or carries a descriptor.
@@ -4320,7 +4334,8 @@ class _Compiler:
         request = [(identity, operand_type) for identity, _need, _name, operand_type in wanted]
         return (terms, needs, [name for name, _type in keys]), request
 
-    def _arm_scan_prefilter(self, p, splan, filter_bc, read_layout, read_scs) -> bool:
+    def _arm_scan_prefilter(self, p, splan, filter_bc, read_layout, read_scs,
+                            scan_identity, emit_indices) -> bool:
         """Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): make the
         native parquet scan apply its pushed predicate on the decode workers —
         predicate columns decode first, the others only for survivors — instead
@@ -4350,6 +4365,13 @@ class _Compiler:
         pred_names = set(resolver.col_names)
         is_pred = [sc.name in pred_names for sc in read_scs]
         self.nplan.set_native_scan_prefilter(p, filter_bc, read_layout, is_pred)
+        # Range settlement: the predicate IS the int ranges over exactly these
+        # columns (_native_scan_plan), and none of them is emitted — so a row
+        # group / page the statistics prove ALL-PASS needs neither decoded.
+        emitted = set(emit_indices)
+        if (self._range_settle_cols.get(scan_identity) == pred_names
+                and not any(is_pred[k] and k in emitted for k in range(len(read_scs)))):
+            splan.set_range_settle()
         return True
 
     def _latmat_scan_plan(self, scan):
@@ -4934,7 +4956,8 @@ class _Compiler:
             # Deletes decode through row masks the same way, so they keep the
             # ExprFilter too.
             if (_vector_search or _scan_has_deletes
-                    or not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs)):
+                    or not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs,
+                                                    scan.identity, emit_indices)):
                 self.nplan.add_expr_filter(p, filter_bc, read_layout)
             if need_select:
                 self.nplan.add_select(p, emit_indices, emit_ids)

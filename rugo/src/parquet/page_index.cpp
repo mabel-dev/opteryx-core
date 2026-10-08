@@ -241,3 +241,80 @@ size_t EvaluatePagePredicate(const ColumnIndexData &ci, size_t num_pages,
   }
   return pruned;
 }
+
+namespace {
+// `int8`..`int64` / `uint8`..`uint64` — the logical spellings metadata.cpp gives
+// a plain integer column (a bare physical `int32`/`int64` included).
+bool IsPlainIntegerLogical(const std::string &lt) {
+  const size_t s = (!lt.empty() && lt[0] == 'u') ? 1 : 0;
+  if (lt.compare(s, 3, "int") != 0) return false;
+  const std::string w = lt.substr(s + 3);
+  return w == "8" || w == "16" || w == "32" || w == "64";
+}
+}  // namespace
+
+size_t EvaluatePageRange(const ColumnIndexData &ci, size_t num_pages,
+                         int64_t lo, int64_t hi,
+                         const std::string &physical_type,
+                         const std::string &logical_type,
+                         std::vector<uint8_t> &verdict) {
+  verdict.assign(num_pages, kPageMixed);
+  size_t failed = 0;
+
+  // Null pages match no comparison, whatever its bounds.
+  const bool have_null_pages = ci.null_pages.size() == num_pages;
+  if (have_null_pages) {
+    for (size_t p = 0; p < num_pages; ++p)
+      if (ci.null_pages[p]) { verdict[p] = kPageAllFail; ++failed; }
+  }
+  const bool have_bounds = ci.min_values.size() == num_pages && ci.max_values.size() == num_pages;
+  if (!have_bounds) return failed;
+  if (physical_type != "int32" && physical_type != "int64") return failed;
+  if (!IsPlainIntegerLogical(logical_type)) return failed;
+  const bool is_unsigned = logical_type[0] == 'u';
+  const bool have_null_counts = ci.null_counts.size() == num_pages;
+
+  // Contradictory conjuncts (x > 5 AND x < 3): no value of any page matches.
+  if (lo > hi) {
+    for (size_t p = 0; p < num_pages; ++p)
+      if (verdict[p] != kPageAllFail) { verdict[p] = kPageAllFail; ++failed; }
+    return failed;
+  }
+
+  for (size_t p = 0; p < num_pages; ++p) {
+    if (verdict[p] == kPageAllFail) continue;
+    if (ci.min_values[p].empty() || ci.max_values[p].empty()) continue;
+    int64_t pmin, pmax;
+    bool min_ovf, max_ovf;
+    if (!DecodeIntBound(ci.min_values[p], physical_type, is_unsigned, pmin, min_ovf) ||
+        !DecodeIntBound(ci.max_values[p], physical_type, is_unsigned, pmax, max_ovf))
+      continue;  // malformed bound width → MIXED
+    if (min_ovf || max_ovf) continue;
+    if (pmax < lo || pmin > hi) {
+      verdict[p] = kPageAllFail;
+      ++failed;
+    } else if (have_null_counts &&
+               RangeBoundsAllPass(ci.min_values[p], ci.max_values[p], ci.null_counts[p], lo, hi,
+                                  physical_type, logical_type)) {
+      verdict[p] = kPageAllPass;
+    }
+  }
+  return failed;
+}
+
+bool RangeBoundsAllPass(const std::string &min_raw, const std::string &max_raw,
+                        int64_t null_count, int64_t lo, int64_t hi,
+                        const std::string &physical_type,
+                        const std::string &logical_type) {
+  if (null_count != 0 || lo > hi) return false;
+  if (physical_type != "int32" && physical_type != "int64") return false;
+  if (!IsPlainIntegerLogical(logical_type)) return false;
+  const bool is_unsigned = logical_type[0] == 'u';
+  int64_t vmin, vmax;
+  bool min_ovf, max_ovf;
+  if (!DecodeIntBound(min_raw, physical_type, is_unsigned, vmin, min_ovf) ||
+      !DecodeIntBound(max_raw, physical_type, is_unsigned, vmax, max_ovf))
+    return false;
+  if (min_ovf || max_ovf) return false;
+  return vmin >= lo && vmax <= hi;
+}

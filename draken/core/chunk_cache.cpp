@@ -141,8 +141,10 @@ void drop(Shard& sh, DrakenChunkEntry* e) {
     if ((prev & kPinMask) == 0) destroy(e);
 }
 
-// Free one entry from one shard. Returns 1 evicted, 0 nothing here.
-int evict_one(Shard& sh, Why why, int64_t* freed) {
+// Free one entry from one shard. Returns 1 evicted, 0 nothing here. `patient`:
+// sweep MAIN one lap only, so a shard whose residents all still have lives
+// yields to the other shards before it spends them.
+int evict_one(Shard& sh, Why why, bool patient, int64_t* freed) {
     std::lock_guard<std::mutex> lk(sh.mu);
     const int64_t probation_cap = draken_mem_cache_limit() * kProbationPercent / 100;
     // Probation first while it is over its share (or MAIN is empty).
@@ -164,10 +166,16 @@ int evict_one(Shard& sh, Why why, int64_t* freed) {
         drop(sh, e);
         return 1;
     }
+    // Probation is over its share but this shard's part is gone: the next
+    // victim is on another shard's probation, not in this shard's MAIN.
+    if (why != Why::kFlush && !sh.ring.empty() &&
+        g_probation_bytes.load(std::memory_order_relaxed) > probation_cap)
+        return 0;
     // MAIN: CLOCK. A set ref bit becomes `weight` extra sweeps; each sweep
     // spends one. Bounded: every entry is evictable within kMaxWeight + 2 laps.
     const size_t n = sh.ring.size();
-    for (size_t step = 0; step < (kMaxWeight + 2) * n && !sh.ring.empty(); ++step) {
+    const size_t laps = patient ? 1 : kMaxWeight + 2;
+    for (size_t step = 0; step < laps * n && !sh.ring.empty(); ++step) {
         if (sh.hand >= sh.ring.size()) sh.hand = 0;
         DrakenChunkEntry* e = sh.ring[sh.hand];
         if (why != Why::kFlush) {
@@ -193,17 +201,25 @@ int evict_one(Shard& sh, Why why, int64_t* freed) {
 }
 
 // Evict until the cache holds at most `target` bytes. False when the shards
-// hold nothing more to evict (everything left is pinned or gone).
+// hold nothing more to evict (everything left is pinned or gone). Each victim
+// is looked for patiently (one lap per shard) across every shard before any
+// shard sweeps until something goes: a cold cheap chunk on one shard goes
+// before an expensive one on another.
 bool make_room(int64_t target, Why why) {
     size_t idle = 0;
+    bool patient = true;
     while (draken_mem_cache_bytes() > target) {
         Shard& sh = g_shards[g_next_shard.fetch_add(1, std::memory_order_relaxed) % kShards];
         int64_t freed = 0;
-        if (evict_one(sh, why, &freed) == 0) {
-            if (++idle >= kShards) return draken_mem_cache_bytes() <= target;
+        if (evict_one(sh, why, patient, &freed) == 0) {
+            if (++idle < kShards) continue;
+            if (!patient) return draken_mem_cache_bytes() <= target;
+            patient = false;
+            idle = 0;
             continue;
         }
         idle = 0;
+        patient = true;
         if (why == Why::kGiveWay) g_give_way.fetch_add(freed, std::memory_order_relaxed);
         else if (why == Why::kAdmit) g_evictions.fetch_add(1, std::memory_order_relaxed);
     }

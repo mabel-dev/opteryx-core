@@ -77,7 +77,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # derived timeout floor). Set once at plan time, by value — see
         # HttpTuning's comment in http_client.hpp for why this is never stored
         # on the (thread_local, process-lifetime) HttpClient itself.
-        void set_coalesce_tuning(double waste_ratio, int64_t max_bytes)
+        void set_coalesce_tuning(double waste_ratio, int64_t max_bytes, int64_t gap_bytes)
         # Fetch-ahead depth (0 = off): dedicated GET-only pool so concurrent
         # fetches are decoupled from the decode thread count. Plan-time, once,
         # before any submit — see set_fetch_ahead in io_pipeline.hpp.
@@ -117,8 +117,11 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         vector[int32_t] infer_fetch_blocks(const FileStats& fs, const vector[string]& column_names) nogil
         void add_int_needles(const string& column, const vector[int64_t]& needles) nogil
         void add_str_pred(const string& column, int kind, const vector[string]& vals) nogil
+        void add_int_range(const string& column, int64_t lo, int64_t hi) nogil
         void set_pass1_predicate(void* fn, void* ctx, const vector[string]& cols) nogil
         void set_prefilter(bint on) nogil
+        void set_range_settle(bint on) except + nogil
+        uint64_t settled_rows() nogil
         uint64_t prefilter_rows_in() nogil
         uint64_t prefilter_rows_out() nogil
         void clear_eq_needles() nogil
@@ -137,6 +140,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t page_index_pages_pruned() nogil
         uint64_t page_index_bytes_pruned() nogil
         uint64_t page_index_row_groups_pruned() nogil
+        uint64_t page_index_rows_all_pass() nogil
         uint64_t page_index_fetches() nogil
         uint64_t page_index_bytes_fetched() nogil
         uint64_t page_index_gate_declines() nogil

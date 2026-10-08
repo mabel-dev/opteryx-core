@@ -64,6 +64,7 @@ PER_SCAN_VARIABLES = frozenset({
     "http_min_bandwidth_mbps",
     "http_pipewait",
     "http_request_timeout_floor_ms",
+    "parquet_io_coalesce_gap_bytes",
     "parquet_io_coalesce_max_bytes",
     "parquet_io_coalesce_waste_ratio",
     "parquet_io_fetch_ahead",
@@ -117,7 +118,7 @@ def resolve_http_tuning(variables, overrides=None) -> tuple:
 
 
 def resolve_coalesce_tuning(variables, overrides=None) -> tuple:
-    """(waste_ratio, max_bytes) for remote range coalescing — see
+    """(waste_ratio, max_bytes, gap_bytes) for remote range coalescing — see
     `ParquetIOPipeline::set_coalesce_tuning` for what each bound protects."""
     return (
         _value(
@@ -126,6 +127,9 @@ def resolve_coalesce_tuning(variables, overrides=None) -> tuple:
         _value(
             "parquet_io_coalesce_max_bytes", variables, config.PARQUET_IO_COALESCE_MAX_BYTES, overrides
         ),
+        int(_value(
+            "parquet_io_coalesce_gap_bytes", variables, config.PARQUET_IO_COALESCE_GAP_BYTES, overrides
+        )),
     )
 
 

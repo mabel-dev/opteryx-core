@@ -97,9 +97,10 @@ def test_http_tuning_shape_matches_set_http_tuning():
 
 
 def test_coalesce_tuning_shape():
-    waste_ratio, max_bytes = io_tuning.resolve_coalesce_tuning(None)
+    waste_ratio, max_bytes, gap_bytes = io_tuning.resolve_coalesce_tuning(None)
     assert isinstance(waste_ratio, float)
     assert isinstance(max_bytes, int) and max_bytes > 0
+    assert isinstance(gap_bytes, int) and gap_bytes >= 0
 
 
 def test_in_flight_limit_default_is_auto_sentinel():

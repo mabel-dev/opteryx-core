@@ -302,6 +302,13 @@ struct MorselRef {
     // applicable → the consumer evaluates on the main thread (fallback). std::vector,
     // freed automatically — NOT a draken buffer, so NOT touched by free_fn below.
     std::vector<uint8_t> survivor_mask;
+    // Range settlement (ParquetIOPipeline::set_range_settle): the worker applied the
+    // whole predicate itself — rows proven ALL-PASS without evaluating, the rest
+    // evaluated — so every non-predicate column already holds exactly the
+    // `settled_rows` survivors and the predicate columns are EMPTY (never decoded,
+    // or released). survivor_mask is empty. The consumer must not build them.
+    bool settled = false;
+    int64_t settled_rows = 0;
     // Memory admission (ParquetIOPipeline::set_memory_budget): the decoded-bytes
     // estimate this result holds on the pipeline's ledger, released by the
     // consumer's pop (try_get_result / wait_and_get_result). 0 = budget off.
@@ -1708,6 +1715,11 @@ class ParquetIOPipeline {
         std::vector<std::vector<std::pair<int64_t, int64_t>>> extents;
         int64_t pages_pruned = 0;   // across every projected column
         int64_t bytes_pruned = 0;   // header+payload bytes of those pages
+        // Range settlement (set_range_settle): one byte per row group row, 1 = the
+        // row lies in a page every range conjunct proved ALL-PASS. Filled only when
+        // settlement is armed and at least one such row exists; independent of
+        // `active` (pages can all pass while none is pruned).
+        std::vector<uint8_t> pass_rows;
     };
 
     // ── Remote fetch plan ────────────────────────────────────────────────────
@@ -1990,6 +2002,13 @@ class ParquetIOPipeline {
     // scan — predicate columns decode first, the rest decode for survivors only
     // (see the worker). Off for latmat pass 1, which wants full columns + a mask.
     bool prefilter_ = false;
+    // Range settlement (set_range_settle): the prefilter's predicate is EXACTLY
+    // the AND of the kind-6 int ranges, over columns nothing downstream reads.
+    // A row group / page proven ALL-PASS then skips decoding and evaluating the
+    // predicate columns; the consumer gets `settled` results with those columns
+    // empty. Planner-proven (compiler._arm_scan_prefilter); never inferred here.
+    bool range_settle_ = false;
+    std::atomic<uint64_t> settled_rows_{0};
     // Row identity: record each result's kept rows (MorselRef::kept_rows).
     bool report_kept_rows_ = false;
     std::atomic<uint64_t> prefilter_rows_in_{0};
@@ -2009,12 +2028,19 @@ class ParquetIOPipeline {
         std::shared_ptr<const std::vector<uint8_t>> bytes;
     };
     std::unordered_map<std::string, std::shared_ptr<PageIndexEntry>> page_index_cache_;
+    // Each file's WHOLE PageIndex region [lo, hi), when the caller knows it from the
+    // footer (set_page_index_extent). Without it the region is grown per row group:
+    // rugo lays out every ColumnIndex then every OffsetIndex, so row group k's span
+    // ends further into the OffsetIndex block than k-1's and each one widened — and
+    // re-read — the cached union (O(row groups^2) bytes, a serial GET each remotely).
+    std::unordered_map<std::string, std::pair<int64_t, int64_t>> page_index_extent_;
     std::mutex page_index_mutex_;
     std::atomic<uint64_t> page_index_fetches_{0};
     std::atomic<uint64_t> page_index_bytes_fetched_{0};
     std::atomic<uint64_t> page_index_pages_pruned_{0};
     std::atomic<uint64_t> page_index_bytes_pruned_{0};
     std::atomic<uint64_t> page_index_row_groups_pruned_{0};
+    std::atomic<uint64_t> page_index_rows_all_pass_{0};
     std::atomic<uint64_t> page_index_gate_declines_{0};
 
     // See the cost gate in compute_page_prune for the measurements behind it.
@@ -2038,8 +2064,19 @@ class ParquetIOPipeline {
             region_lo = entry->lo;
             return entry->bytes;
         }
-        const int64_t nlo = entry->bytes ? std::min(entry->lo, lo) : lo;
-        const int64_t nhi = entry->bytes ? std::max(entry->hi, hi) : hi;
+        int64_t nlo = entry->bytes ? std::min(entry->lo, lo) : lo;
+        int64_t nhi = entry->bytes ? std::max(entry->hi, hi) : hi;
+        {
+            std::lock_guard<std::mutex> lk2(page_index_mutex_);
+            auto xit = page_index_extent_.find(path);
+            // The whole file's region, read once — when it covers the request
+            // (it always should; a footer that disagrees keeps the narrow read).
+            if (xit != page_index_extent_.end() && xit->second.first <= nlo &&
+                nhi <= xit->second.second) {
+                nlo = xit->second.first;
+                nhi = xit->second.second;
+            }
+        }
         auto [bytes, ns] = read_range(path, nlo, nhi - nlo);
         (void)ns;
         page_index_fetches_.fetch_add(1, std::memory_order_relaxed);
@@ -2272,11 +2309,20 @@ class ParquetIOPipeline {
         // bytes it might remove, against an upside of nearly all of them. It
         // NEVER changes the answer — only whether we spend on the index — so
         // no correctness argument rides on the value.
+        //
+        // LOCAL files are exempt: the gate prices a serial ROUND TRIP, and a
+        // local index read is a pread of bytes the footer read already pulled
+        // toward the page cache — there is no round trip to price.
         const int64_t index_bytes = hi - lo;
         int64_t projected_bytes = 0;
         for (const auto& cs : item.column_stats)
             if (cs.total_compressed_size > 0) projected_bytes += cs.total_compressed_size;
-        if (index_bytes > 0 &&
+        // A/B arm: RUGO_PAGE_INDEX_LOCAL_GATE=1 applies the gate to local files too.
+        static const bool gate_local = []() {
+            const char* v = getenv("RUGO_PAGE_INDEX_LOCAL_GATE");
+            return v != nullptr && v[0] == '1' && v[1] == '\0';
+        }();
+        if ((gate_local || !path_is_local(item.path)) && index_bytes > 0 &&
             static_cast<double>(index_bytes) >
                 kPageIndexMaxCostRatio * static_cast<double>(projected_bytes)) {
             page_index_gate_declines_.fetch_add(1, std::memory_order_relaxed);
@@ -2346,6 +2392,12 @@ class ParquetIOPipeline {
         std::vector<uint8_t> mask(static_cast<size_t>(num_rows), 1);
         bool any_pruned = false;
         std::vector<uint8_t> keep;
+        // Range settlement: a row is proven to pass when EVERY range column's
+        // page holding it is ALL-PASS. Starts all-1 and is ANDed per range
+        // column; a range column without an index can prove nothing (all-0).
+        std::vector<uint8_t> pass;
+        size_t range_cols_seen = 0;
+        if (range_settle_) pass.assign(static_cast<size_t>(num_rows), 1);
         for (size_t i = 0; i < ncols; ++i) {
             if (!has_oi[i]) continue;
             const ColumnStats& cs = item.column_stats[i];
@@ -2355,10 +2407,31 @@ class ParquetIOPipeline {
                 at(cs.column_index_offset, cs.column_index_length),
                 static_cast<size_t>(cs.column_index_length));
             const auto& locs = oi[i].page_locations;
-            const size_t pruned = EvaluatePagePredicate(
-                ci, locs.size(), pit->second.kind, &pit->second.int_vals,
-                &pit->second.str_vals, cs.physical_type,
-                StatsLogicalIsUnsigned(cs.logical_type), keep);
+            size_t pruned;
+            if (pit->second.kind == 6) {
+                // Range conjunct: three-valued per page. FAIL pages prune below;
+                // PASS pages are only counted — nothing downstream can yet take
+                // "every row of this page passes" in place of evaluating it.
+                pruned = EvaluatePageRange(ci, locs.size(), pit->second.int_vals[0],
+                                           pit->second.int_vals[1], cs.physical_type,
+                                           cs.logical_type, keep);
+                int64_t pass_rows = 0;
+                for (size_t p = 0; p < locs.size(); ++p) {
+                    const int64_t r0 = locs[p].first_row_index;
+                    const int64_t r1 = (p + 1 < locs.size()) ? locs[p + 1].first_row_index : num_rows;
+                    if (keep[p] == kPageAllPass) pass_rows += r1 - r0;
+                    else if (range_settle_)
+                        std::fill(pass.begin() + r0, pass.begin() + r1, uint8_t{0});
+                }
+                ++range_cols_seen;
+                page_index_rows_all_pass_.fetch_add(static_cast<uint64_t>(pass_rows),
+                                                    std::memory_order_relaxed);
+            } else {
+                pruned = EvaluatePagePredicate(
+                    ci, locs.size(), pit->second.kind, &pit->second.int_vals,
+                    &pit->second.str_vals, cs.physical_type,
+                    StatsLogicalIsUnsigned(cs.logical_type), keep);
+            }
             if (pruned == 0) continue;
             any_pruned = true;
             for (size_t p = 0; p < locs.size(); ++p) {
@@ -2367,6 +2440,18 @@ class ParquetIOPipeline {
                 const int64_t r1 = (p + 1 < locs.size()) ? locs[p + 1].first_row_index : num_rows;
                 std::fill(mask.begin() + r0, mask.begin() + r1, 0);
             }
+        }
+        // Every range conjunct must have spoken for a row to be proven: a range
+        // column this row group could not test (no index) leaves nothing proven.
+        if (range_settle_) {
+            size_t range_cols = 0;
+            for (const auto& pc : pass1_pred_.cols) {
+                auto vit = value_preds_.find(pc);
+                if (vit != value_preds_.end() && vit->second.kind == 6) ++range_cols;
+            }
+            if (range_cols_seen == range_cols &&
+                std::find(pass.begin(), pass.end(), uint8_t{1}) != pass.end())
+                pp.pass_rows = std::move(pass);
         }
         if (!any_pruned) return;
 
@@ -2487,9 +2572,11 @@ class ParquetIOPipeline {
                 const int64_t nspan   = ne - g.start;
                 const int64_t nuseful = g.useful + len;
                 const int64_t nwaste  = nspan - nuseful;
+                const int64_t gap     = st > g.end ? st - g.end : 0;
                 if (nspan <= max_bytes &&
-                    static_cast<double>(nwaste) <=
-                        coalesce_waste_ratio_ * static_cast<double>(nuseful)) {
+                    (gap <= coalesce_gap_bytes_ ||
+                     static_cast<double>(nwaste) <=
+                         coalesce_waste_ratio_ * static_cast<double>(nuseful))) {
                     g.end = ne; g.useful = nuseful; g.extents.push_back(x);
                     merged = true;
                 }
@@ -3408,7 +3495,9 @@ class ParquetIOPipeline {
                 const ValuePredicate* skip_ptr = nullptr;
                 if (ng == nullptr && item.row_mask.empty() && !value_preds_.empty()) {
                     auto nit = value_preds_.find(col_stats.name);
-                    if (nit != value_preds_.end()) {
+                    // A range (kind 6) is a page-index-only predicate: the
+                    // decoder has no range test, so it never sees one.
+                    if (nit != value_preds_.end() && nit->second.kind != 6) {
                         skip.kind = nit->second.kind;
                         skip.int_vals = &nit->second.int_vals;
                         skip.str_vals = &nit->second.str_vals;
@@ -3619,56 +3708,189 @@ class ParquetIOPipeline {
                 for (size_t i = 0; i < ncols_total; ++i)
                     for (const auto& pc : pass1_pred_.cols)
                         if (item.column_stats[i].name == pc) { is_pred[i] = 1; break; }
-                // p_mask: the rows the predicate columns hold — the page-prune mask,
-                // narrowed by the page search when it dropped any.
-                const uint8_t* p_mask = mask_ptr;
-                bool ok = true;
-                if (search_i != SIZE_MAX) ok = decode_search_col(mask_ptr, p_mask);
-                const size_t p_mask_rows =
-                    p_mask == search_out.row_mask.data() ? search_out.row_mask.size() : mask_rows;
-                for (size_t i = 0; i < ncols_total && ok; ++i)
-                    if (is_pred[i] && i != search_i) ok = decode_col(i, p_mask);
-                if (ok && !result.empty_filtered) {
-                    pass1_run_predicate(result, pass1_pred_);
-                    std::vector<uint8_t> d_mask;
-                    const uint8_t* d_mask_ptr = p_mask;
-                    if (!result.survivor_mask.empty()) {
-                        // Predicate-column length: the rows p_mask selects when one
-                        // is active, else the row group.
-                        uint32_t np = 0;
-                        for (size_t i = 0; i < ncols_total; ++i)
-                            if (is_pred[i]) { np = result.columns[i].length; break; }
-                        const uint8_t* sm = result.survivor_mask.data();
-                        uint32_t kept = 0;
-                        for (uint32_t r = 0; r < np; ++r) kept += (sm[r >> 3] >> (r & 7)) & 1u;
-                        prefilter_rows_in_.fetch_add(np, std::memory_order_relaxed);
-                        prefilter_rows_out_.fetch_add(kept, std::memory_order_relaxed);
-                        if (kept == 0) {
-                            result.empty_filtered = true;
-                            result.empty_rows = np;
-                        } else if (kept < np || p_mask != nullptr) {
-                            // Row-group-row mask for the other columns: the survivor
-                            // bit of each row that reached the predicate columns.
-                            const size_t rg_rows = p_mask != nullptr
-                                ? p_mask_rows : static_cast<size_t>(np);
-                            d_mask.assign(rg_rows, 0);
-                            uint32_t rank = 0;
-                            for (size_t r = 0; r < rg_rows; ++r) {
-                                if (p_mask != nullptr && !p_mask[r]) continue;
-                                d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
-                                ++rank;
+
+                // ── Range settlement (set_range_settle) ──────────────────────
+                // Rayforce-style three-valued zone maps. The predicate is exactly
+                // the AND of the kind-6 ranges (planner-proven), so a row whose
+                // row group (footer min/max/null_count) or page (ColumnIndex)
+                // every range proves ALL-PASS passes without being decoded or
+                // evaluated; only the remaining (MIXED) rows run the predicate.
+                // The predicate columns are filter-only, so they are returned
+                // EMPTY and the result is `settled`. When no row is proven, or
+                // the predicate VM declines, the ordinary prefilter below runs.
+                bool settled_done = false;
+                if (range_settle_ && search_i == SIZE_MAX && !result.empty_filtered) {
+                    int64_t rg_rows = -1;
+                    bool rg_pass = true;
+                    for (const auto& pc : pass1_pred_.cols) {
+                        const ColumnStats* cs = nullptr;
+                        for (const auto& c : item.column_stats)
+                            if (c.name == pc) { cs = &c; break; }
+                        if (cs == nullptr || cs->max_repetition_level != 0 || cs->num_values < 0) {
+                            rg_rows = -1;
+                            break;
+                        }
+                        if (rg_rows >= 0 && rg_rows != cs->num_values)
+                            throw std::logic_error("range settlement: predicate columns disagree "
+                                                   "on the row group's row count");
+                        rg_rows = cs->num_values;
+                        const auto& rv = value_preds_.find(pc)->second;   // kind 6 (set_range_settle)
+                        if (!(cs->has_min && cs->has_max) ||
+                            !RangeBoundsAllPass(cs->min, cs->max, cs->null_count, rv.int_vals[0],
+                                                rv.int_vals[1], cs->physical_type, cs->logical_type))
+                            rg_pass = false;
+                    }
+                    const uint8_t* pass = (!rg_pass && !pp.pass_rows.empty()) ? pp.pass_rows.data()
+                                                                              : nullptr;
+                    if (rg_rows > 0 && (rg_pass || pass != nullptr)) {
+                        const size_t n = static_cast<size_t>(rg_rows);
+                        if ((mask_ptr != nullptr && mask_rows != n) ||
+                            (pass != nullptr && pp.pass_rows.size() != n))
+                            throw std::logic_error("range settlement: page masks and the row "
+                                                   "group's row count disagree");
+                        // e_mask: rows to evaluate (in the page mask, not proven).
+                        std::vector<uint8_t> e_mask;
+                        size_t n_eval = 0, n_pass = 0;
+                        if (pass != nullptr) {
+                            e_mask.assign(n, 0);
+                            for (size_t r = 0; r < n; ++r) {
+                                if (mask_ptr != nullptr && !mask_ptr[r]) continue;
+                                if (pass[r]) ++n_pass;
+                                else { e_mask[r] = 1; ++n_eval; }
                             }
-                            if (rank != np)
-                                throw std::logic_error("scan prefilter: page mask and predicate "
-                                                       "column length disagree");
-                            d_mask_ptr = d_mask.data();
+                        } else {
+                            n_pass = n;
+                            if (mask_ptr != nullptr)
+                                n_pass = static_cast<size_t>(std::count(mask_ptr, mask_ptr + n, uint8_t{1}));
+                        }
+                        auto release_col = [&](size_t i) {
+                            ColumnOut& c = result.columns[i];
+                            if (result.free_fn) {
+                                if (c.data) result.free_fn(c.data);
+                                if (c.validity) result.free_fn(c.validity);
+                                if (c.arena) result.free_fn(c.arena);
+                                if (c.codes) result.free_fn(c.codes);
+                                if (c.keyhash) result.free_fn(c.keyhash);
+                            }
+                            c = ColumnOut{};
+                        };
+                        std::vector<uint8_t> d_mask;
+                        const uint8_t* d_ptr = mask_ptr;
+                        size_t survivors = n_pass;
+                        bool ok = true, declined = false;
+                        if (n_eval > 0) {
+                            for (size_t i = 0; i < ncols_total && ok; ++i)
+                                if (is_pred[i]) ok = decode_col(i, e_mask.data());
+                            // Kind 6 never reaches the decoder, so nothing in it can
+                            // drop the chunk; an empty result here would settle rows
+                            // that were never evaluated.
+                            if (ok && result.empty_filtered)
+                                throw std::logic_error("range settlement: a predicate column "
+                                                       "decode came back empty_filtered");
+                            if (ok) {
+                                pass1_run_predicate(result, pass1_pred_);
+                                if (!result.success) {
+                                    ok = false;
+                                } else if (result.survivor_mask.empty()) {
+                                    declined = true;
+                                } else {
+                                    const uint8_t* sm = result.survivor_mask.data();
+                                    d_mask.assign(n, 0);
+                                    size_t rank = 0, kept = 0;
+                                    for (size_t r = 0; r < n; ++r) {
+                                        if (mask_ptr != nullptr && !mask_ptr[r]) continue;
+                                        if (pass[r]) { d_mask[r] = 1; continue; }
+                                        const uint8_t bit = (sm[rank >> 3] >> (rank & 7)) & 1u;
+                                        d_mask[r] = bit;
+                                        kept += bit;
+                                        ++rank;
+                                    }
+                                    if (rank != n_eval)
+                                        throw std::logic_error("range settlement: evaluated rows "
+                                                               "and survivor mask disagree");
+                                    prefilter_rows_in_.fetch_add(n_eval, std::memory_order_relaxed);
+                                    prefilter_rows_out_.fetch_add(kept, std::memory_order_relaxed);
+                                    survivors += kept;
+                                    d_ptr = d_mask.data();
+                                    result.survivor_mask.clear();
+                                }
+                            }
+                            // The predicate columns hold the MIXED rows only: never emitted.
+                            for (size_t i = 0; i < ncols_total; ++i)
+                                if (is_pred[i]) release_col(i);
+                        }
+                        if (!ok) {
+                            settled_done = true;   // decode / kernel error: the result says so
+                        } else if (!declined) {
+                            settled_done = true;
+                            settled_rows_.fetch_add(n_pass, std::memory_order_relaxed);
+                            if (survivors == 0) {
+                                result.empty_filtered = true;
+                                result.empty_rows = static_cast<int64_t>(n_pass + n_eval);
+                            } else {
+                                // Every row survives and no page mask: decode unmasked.
+                                if (survivors == n && mask_ptr == nullptr) d_ptr = nullptr;
+                                for (size_t i = 0; i < ncols_total && ok; ++i)
+                                    if (!is_pred[i]) ok = decode_col(i, d_ptr);
+                                result.settled = true;
+                                result.settled_rows = static_cast<int64_t>(survivors);
+                                record_kept(d_ptr, n);
+                            }
                         }
                     }
-                    if (!result.empty_filtered)
-                        for (size_t i = 0; i < ncols_total; ++i)
-                            if (!is_pred[i] && i != search_i && !decode_col(i, d_mask_ptr)) break;
-                    record_kept(d_mask_ptr, d_mask_ptr == d_mask.data() ? d_mask.size()
-                                                                        : p_mask_rows);
+                }
+                if (!settled_done) {
+                    // p_mask: the rows the predicate columns hold — the page-prune mask,
+                    // narrowed by the page search when it dropped any.
+                    const uint8_t* p_mask = mask_ptr;
+                    bool ok = true;
+                    if (search_i != SIZE_MAX) ok = decode_search_col(mask_ptr, p_mask);
+                    const size_t p_mask_rows =
+                        p_mask == search_out.row_mask.data() ? search_out.row_mask.size() : mask_rows;
+                    for (size_t i = 0; i < ncols_total && ok; ++i)
+                        if (is_pred[i] && i != search_i) ok = decode_col(i, p_mask);
+                    if (ok && !result.empty_filtered) {
+                        pass1_run_predicate(result, pass1_pred_);
+                        std::vector<uint8_t> d_mask;
+                        const uint8_t* d_mask_ptr = p_mask;
+                        if (!result.survivor_mask.empty()) {
+                            // Predicate-column length: the rows p_mask selects when one
+                            // is active, else the row group.
+                            uint32_t np = 0;
+                            for (size_t i = 0; i < ncols_total; ++i)
+                                if (is_pred[i]) { np = result.columns[i].length; break; }
+                            const uint8_t* sm = result.survivor_mask.data();
+                            uint32_t kept = 0;
+                            for (uint32_t r = 0; r < np; ++r) kept += (sm[r >> 3] >> (r & 7)) & 1u;
+                            prefilter_rows_in_.fetch_add(np, std::memory_order_relaxed);
+                            prefilter_rows_out_.fetch_add(kept, std::memory_order_relaxed);
+                            if (kept == 0) {
+                                result.empty_filtered = true;
+                                result.empty_rows = np;
+                            } else if (kept < np || p_mask != nullptr) {
+                                // Row-group-row mask for the other columns: the survivor
+                                // bit of each row that reached the predicate columns.
+                                const size_t rg_rows = p_mask != nullptr
+                                    ? p_mask_rows : static_cast<size_t>(np);
+                                d_mask.assign(rg_rows, 0);
+                                uint32_t rank = 0;
+                                for (size_t r = 0; r < rg_rows; ++r) {
+                                    if (p_mask != nullptr && !p_mask[r]) continue;
+                                    d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
+                                    ++rank;
+                                }
+                                if (rank != np)
+                                    throw std::logic_error("scan prefilter: page mask and predicate "
+                                                           "column length disagree");
+                                d_mask_ptr = d_mask.data();
+                            }
+                        }
+                        if (!result.empty_filtered)
+                            for (size_t i = 0; i < ncols_total; ++i)
+                                if (!is_pred[i] && i != search_i && !decode_col(i, d_mask_ptr)) break;
+                        record_kept(d_mask_ptr, d_mask_ptr == d_mask.data() ? d_mask.size()
+                                                                            : p_mask_rows);
+                    }
                 }
             }
         } catch (const std::exception& e) {
@@ -3943,9 +4165,17 @@ class ParquetIOPipeline {
     //     0 = unbounded.
     double  coalesce_waste_ratio_ = 0.10;
     int64_t coalesce_max_bytes_   = 0;
-    void set_coalesce_tuning(double waste_ratio, int64_t max_bytes) {
+    int64_t coalesce_gap_bytes_   = 0;
+    //   gap_bytes: merge across any gap of at most this many bytes whatever
+    //     the waste ratio says (still under max_bytes). The ratio prices waste
+    //     against USEFUL bytes, never against a GET: page pruning's holes look
+    //     like huge waste next to a few kept pages, so every pruned column split
+    //     into two GETs. 0 = off (the ratio alone).
+    void set_coalesce_tuning(double waste_ratio, int64_t max_bytes, int64_t gap_bytes) {
+        if (gap_bytes < 0) throw std::invalid_argument("set_coalesce_tuning: gap_bytes < 0");
         coalesce_waste_ratio_ = waste_ratio;
         coalesce_max_bytes_   = max_bytes;
+        coalesce_gap_bytes_   = gap_bytes;
     }
 
     // Standalone path (unchanged behaviour): self-constructs an exclusive pool.
@@ -4017,6 +4247,13 @@ class ParquetIOPipeline {
             std::find(search_cols_.begin(), search_cols_.end(), column) == search_cols_.end())
             search_cols_.push_back(column);
     }
+    // Inclusive int64 range conjunct (kind 6), PageIndex pruning only. A column
+    // already carrying a predicate keeps it — one predicate per column.
+    void add_int_range(const std::string& column, int64_t lo, int64_t hi) {
+        if (value_preds_.count(column) != 0) return;
+        ColValuePred& p = value_preds_[column];
+        p.kind = 6; p.int_vals = {lo, hi};
+    }
     void clear_eq_needles() { value_preds_.clear(); search_cols_.clear(); }
 
     // Q24 latmat: register the pushed pass-1 predicate. `fn`/`ctx` are opaque
@@ -4031,6 +4268,51 @@ class ParquetIOPipeline {
     // Make the registered pass-1 predicate this scan's filter (scan prefilter).
     // Set once before submit; requires set_pass1_predicate.
     void set_prefilter(bool on) { prefilter_ = on; }
+    // Arm range settlement. Call after set_prefilter / set_pass1_predicate and the
+    // value predicates. Refuses (logic_error) a predicate column without a kind-6
+    // range: the planner's proof and the pipeline's state disagree, and settling
+    // on half a predicate would emit rows the rest of it rejects.
+    // Record `path`'s whole PageIndex region from its footer (every indexed column
+    // chunk of every row group), so the first index read covers the file. Call
+    // before any submit; a file without a page index records nothing.
+    void set_page_index_extent(const std::string& path, const FileStats& fs) {
+        int64_t lo = std::numeric_limits<int64_t>::max(), hi = -1;
+        for (const auto& rg : fs.row_groups)
+            for (const auto& cs : rg.columns) {
+                if (cs.column_index_offset >= 0 && cs.column_index_length > 0) {
+                    lo = std::min(lo, cs.column_index_offset);
+                    hi = std::max(hi, cs.column_index_offset + cs.column_index_length);
+                }
+                if (cs.offset_index_offset >= 0 && cs.offset_index_length > 0) {
+                    lo = std::min(lo, cs.offset_index_offset);
+                    hi = std::max(hi, cs.offset_index_offset + cs.offset_index_length);
+                }
+            }
+        if (hi < 0) return;
+        std::lock_guard<std::mutex> lk(page_index_mutex_);
+        page_index_extent_[path] = {lo, hi};
+    }
+
+    void set_range_settle(bool on) {
+        if (on) {
+            if (!prefilter_ || pass1_pred_.fn == nullptr || pass1_pred_.cols.empty())
+                throw std::logic_error("set_range_settle: needs the scan prefilter armed first");
+            for (const auto& pc : pass1_pred_.cols) {
+                auto vit = value_preds_.find(pc);
+                if (vit == value_preds_.end() || vit->second.kind != 6)
+                    throw std::logic_error("set_range_settle: predicate column '" + pc +
+                                           "' carries no int range conjunct");
+            }
+        }
+        // A/B arm, same convention as RUGO_PAGE_INDEX_PRUNE: RUGO_RANGE_SETTLE=0
+        // validates but never settles, so both arms run one binary. Default on.
+        static const bool settle_enabled = []() {
+            const char* v = getenv("RUGO_RANGE_SETTLE");
+            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        }();
+        range_settle_ = on && settle_enabled;
+    }
+    uint64_t settled_rows() const { return settled_rows_.load(std::memory_order_relaxed); }
     bool prefilter() const { return prefilter_; }
     // Row identity: report which row-group rows each result holds (MorselRef::kept_rows).
     // Set once before submit.
@@ -4334,6 +4616,11 @@ class ParquetIOPipeline {
     }
     uint64_t page_index_bytes_pruned() const {
         return page_index_bytes_pruned_.load(std::memory_order_relaxed);
+    }
+    // Rows of pages a range conjunct proved ALL-PASS, summed per range column —
+    // what three-valued settlement could skip evaluating (counted, not used).
+    uint64_t page_index_rows_all_pass() const {
+        return page_index_rows_all_pass_.load(std::memory_order_relaxed);
     }
     uint64_t page_index_row_groups_pruned() const {
         return page_index_row_groups_pruned_.load(std::memory_order_relaxed);
