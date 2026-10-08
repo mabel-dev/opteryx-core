@@ -97,11 +97,18 @@ VecResult codec_kernel(const DrakenVector* v, MaxOutFn max_out_fn, CodecFn codec
     const auto*    sa = static_cast<const DrakenStringArena*>(v->data);
     const uint32_t k  = v->data_length;   // physical unique count
 
+    // A decoder FAILS on malformed input, so a physical slot no valid row reads
+    // (a null row's placeholder, a dictionary entry the filter dropped) must not
+    // be decoded at all — see kernel_live_slots. Dead slots become empty slots.
+    std::vector<uint8_t> live;
+    const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+
     // Pass 1: upper-bound scratch size + worst-case arena capacity. Empty
     // values need neither (they short-circuit to an empty slot in pass 2).
     size_t max_out   = 0u;
     size_t arena_cap = 0u;
     for (uint32_t j = 0; j < k; ++j) {
+        if (live_map != nullptr && !live_map[j]) continue;
         const uint32_t in_len = str_length(&sa->slots[j]);
         if (in_len == 0u) continue;
         const size_t out_max = max_out_fn(in_len);
@@ -146,7 +153,7 @@ VecResult codec_kernel(const DrakenVector* v, MaxOutFn max_out_fn, CodecFn codec
         const uint8_t*          src    = str_data(slot, sa->arena);
         const uint32_t          in_len = str_length(slot);
 
-        if (in_len == 0u) {
+        if (in_len == 0u || (live_map != nullptr && !live_map[j])) {
             str_init_inline(&slots[j], nullptr, 0u);
             continue;
         }

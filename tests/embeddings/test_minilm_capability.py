@@ -22,8 +22,9 @@ def _run(body: str) -> str:
         "from opteryx.types.vectors.embedding_capability import install_minilm_capability\n"
         "cap = install_minilm_capability()\n"
         "import opteryx\n"
+        "from draken.morsels.morsel import Morsel\n"
         "def one(sql):\n"
-        "    return list(opteryx.session().execute_to_morsels(sql))[0]\n" + body
+        "    return Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))\n" + body
     )
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stderr   # includes a clean process exit

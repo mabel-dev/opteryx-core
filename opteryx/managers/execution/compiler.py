@@ -7271,7 +7271,8 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                 # Chunk cache (C7), process-lifetime counters as of this query's end.
                 _cc = chunk_cache_stats()
                 for _k in ("bytes", "entries", "hits", "misses", "inserts", "refused",
-                           "evictions", "give_way_bytes", "limit"):
+                           "evictions", "give_way_bytes", "probation_bytes", "promotions",
+                           "remembered_hits", "limit"):
                     telemetry._reading[f"chunk_cache_{_k}"] = _cc[_k]
                 # Per-join build-side consolidation decisions. Same harvest point and
                 # the same reason as the scan diagnostics below: a native decision made

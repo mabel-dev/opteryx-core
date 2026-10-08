@@ -98,49 +98,49 @@ def resolve_dataset_path(dataset: Dataset) -> str:
 # fmt:off
 STATEMENTS = [
 
-        ("/* 01 */ SELECT COUNT(*) FROM {DATASET};", None),
-        ("/* 02 */ SELECT COUNT(*) FROM {DATASET} WHERE AdvEngineID <> 0;", None),
-        ("/* 03 */ SELECT SUM(AdvEngineID), COUNT(*), AVG(ResolutionWidth) FROM {DATASET};", None),
-        ("/* 04 */ SELECT AVG(UserID) FROM {DATASET};", None),
-        ("/* 05 */ SELECT COUNT(DISTINCT UserID) FROM {DATASET};", None),
-        ("/* 06 */ SELECT COUNT(DISTINCT SearchPhrase) FROM {DATASET};", None),
-        ("/* 07 */ SELECT MIN(EventDate), MAX(EventDate) FROM {DATASET};", None),
-        ("/* 08 */ SELECT AdvEngineID, COUNT(*) FROM {DATASET} WHERE AdvEngineID <> 0 GROUP BY AdvEngineID ORDER BY COUNT(*) DESC;", None),
-        ("/* 09 */ SELECT RegionID, COUNT(DISTINCT UserID) AS u FROM {DATASET} GROUP BY RegionID ORDER BY u DESC LIMIT 10;", None),
-        ("/* 10 */ SELECT RegionID, SUM(AdvEngineID), COUNT(*) AS c, AVG(ResolutionWidth), COUNT(DISTINCT UserID) FROM {DATASET} GROUP BY RegionID ORDER BY c DESC LIMIT 10;", None),
-        ("/* 11 */ SELECT MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE MobilePhoneModel <> '' GROUP BY MobilePhoneModel ORDER BY u DESC LIMIT 10;", None),
-        ("/* 12 */ SELECT MobilePhone, MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE MobilePhoneModel <> '' GROUP BY MobilePhone, MobilePhoneModel ORDER BY u DESC LIMIT 10;", None),
-        ("/* 13 */ SELECT SearchPhrase, COUNT(*) AS c FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
-        ("/* 14 */ SELECT SearchPhrase, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY u DESC LIMIT 10;", None),
-        ("/* 15 */ SELECT SearchEngineID, SearchPhrase, COUNT(*) AS c FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchEngineID, SearchPhrase ORDER BY c DESC LIMIT 10;", None),
-        ("/* 16 */ SELECT UserID, COUNT(*) FROM {DATASET} GROUP BY UserID ORDER BY COUNT(*) DESC LIMIT 10;", None),
-        ("/* 17 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;", None),
-        ("/* 18 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase LIMIT 10;", None),
-        ("/* 19 */ SELECT UserID, extract(minute FROM EventTime::TIMESTAMP[s]) AS m, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, extract(minute FROM EventTime::TIMESTAMP[s]), SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;", None),
-        ("/* 20 */ SELECT UserID FROM {DATASET} WHERE UserID = 435090932899640449;", None),
-        ("/* 21 */ SELECT COUNT(*) FROM {DATASET} WHERE URL LIKE '%google%';", None),
-        ("/* 22 */ SELECT SearchPhrase, MIN(URL), COUNT(*) AS c FROM {DATASET} WHERE URL LIKE '%google%' AND SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
-        ("/* 23 */ SELECT SearchPhrase, MIN(URL), MIN(Title), COUNT(*) AS c, COUNT(DISTINCT UserID) FROM {DATASET} WHERE Title LIKE '%Google%' AND URL NOT LIKE '%.google.%' AND SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
-        ("/* 24 */ SELECT * FROM {DATASET} WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10;", None),
-        ("/* 25 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY EventTime LIMIT 10;", None),
-        ("/* 26 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY SearchPhrase LIMIT 10;", None),
-        ("/* 27 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY EventTime, SearchPhrase LIMIT 10;", None),
-        ("/* 28 */ SELECT CounterID, AVG(length(URL)) AS l, COUNT(*) AS c FROM {DATASET} WHERE URL <> '' GROUP BY CounterID HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;", None),
-        ("/* 29 */ SELECT REGEXP_REPLACE(Referer, b'^https?://(?:www\\.)?([^/]+)/.*$', r'\\1') AS k, AVG(length(Referer)) AS l, COUNT(*) AS c, MIN(Referer) FROM {DATASET} WHERE Referer <> '' GROUP BY REGEXP_REPLACE(Referer, b'^https?://(?:www\\.)?([^/]+)/.*$', r'\\1') HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;", None),
-        ("/* 30 */ SELECT SUM(ResolutionWidth), SUM(ResolutionWidth + 1), SUM(ResolutionWidth + 2), SUM(ResolutionWidth + 3), SUM(ResolutionWidth + 4), SUM(ResolutionWidth + 5), SUM(ResolutionWidth + 6), SUM(ResolutionWidth + 7), SUM(ResolutionWidth + 8), SUM(ResolutionWidth + 9), SUM(ResolutionWidth + 10), SUM(ResolutionWidth + 11), SUM(ResolutionWidth + 12), SUM(ResolutionWidth + 13), SUM(ResolutionWidth + 14), SUM(ResolutionWidth + 15), SUM(ResolutionWidth + 16), SUM(ResolutionWidth + 17), SUM(ResolutionWidth + 18), SUM(ResolutionWidth + 19), SUM(ResolutionWidth + 20), SUM(ResolutionWidth + 21), SUM(ResolutionWidth + 22), SUM(ResolutionWidth + 23), SUM(ResolutionWidth + 24), SUM(ResolutionWidth + 25), SUM(ResolutionWidth + 26), SUM(ResolutionWidth + 27), SUM(ResolutionWidth + 28), SUM(ResolutionWidth + 29), SUM(ResolutionWidth + 30), SUM(ResolutionWidth + 31), SUM(ResolutionWidth + 32), SUM(ResolutionWidth + 33), SUM(ResolutionWidth + 34), SUM(ResolutionWidth + 35), SUM(ResolutionWidth + 36), SUM(ResolutionWidth + 37), SUM(ResolutionWidth + 38), SUM(ResolutionWidth + 39), SUM(ResolutionWidth + 40), SUM(ResolutionWidth + 41), SUM(ResolutionWidth + 42), SUM(ResolutionWidth + 43), SUM(ResolutionWidth + 44), SUM(ResolutionWidth + 45), SUM(ResolutionWidth + 46), SUM(ResolutionWidth + 47), SUM(ResolutionWidth + 48), SUM(ResolutionWidth + 49), SUM(ResolutionWidth + 50), SUM(ResolutionWidth + 51), SUM(ResolutionWidth + 52), SUM(ResolutionWidth + 53), SUM(ResolutionWidth + 54), SUM(ResolutionWidth + 55), SUM(ResolutionWidth + 56), SUM(ResolutionWidth + 57), SUM(ResolutionWidth + 58), SUM(ResolutionWidth + 59), SUM(ResolutionWidth + 60), SUM(ResolutionWidth + 61), SUM(ResolutionWidth + 62), SUM(ResolutionWidth + 63), SUM(ResolutionWidth + 64), SUM(ResolutionWidth + 65), SUM(ResolutionWidth + 66), SUM(ResolutionWidth + 67), SUM(ResolutionWidth + 68), SUM(ResolutionWidth + 69), SUM(ResolutionWidth + 70), SUM(ResolutionWidth + 71), SUM(ResolutionWidth + 72), SUM(ResolutionWidth + 73), SUM(ResolutionWidth + 74), SUM(ResolutionWidth + 75), SUM(ResolutionWidth + 76), SUM(ResolutionWidth + 77), SUM(ResolutionWidth + 78), SUM(ResolutionWidth + 79), SUM(ResolutionWidth + 80), SUM(ResolutionWidth + 81), SUM(ResolutionWidth + 82), SUM(ResolutionWidth + 83), SUM(ResolutionWidth + 84), SUM(ResolutionWidth + 85), SUM(ResolutionWidth + 86), SUM(ResolutionWidth + 87), SUM(ResolutionWidth + 88), SUM(ResolutionWidth + 89) FROM {DATASET};", None),
-        ("/* 31 */ SELECT SearchEngineID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchEngineID, ClientIP ORDER BY c DESC LIMIT 10;", None),
-        ("/* 32 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;", None),
-        ("/* 33 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;", None),
-        ("/* 34 */ SELECT URL, COUNT(*) AS c FROM {DATASET} GROUP BY URL ORDER BY c DESC LIMIT 10;", None),
-        ("/* 35 */ SELECT 1, URL, COUNT(*) AS c FROM {DATASET} GROUP BY 1, URL ORDER BY c DESC LIMIT 10;", None),
-        ("/* 36 */ SELECT ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3, COUNT(*) AS c FROM {DATASET} GROUP BY ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3 ORDER BY c DESC LIMIT 10;", None),
-        ("/* 37 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND DontCountHits = 0 AND IsRefresh = 0 AND URL <> '' GROUP BY URL ORDER BY PageViews DESC LIMIT 10;", None),
-        ("/* 38 */ SELECT Title, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND DontCountHits = 0 AND IsRefresh = 0 AND Title <> '' GROUP BY Title ORDER BY PageViews DESC LIMIT 10;", None),
-        ("/* 39 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND IsLink <> 0 AND IsDownload = 0 GROUP BY URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;", None),
-        ("/* 40 */ SELECT TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END AS Src, URL AS Dst, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 GROUP BY TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END, URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;", None),
-        ("/* 41 */ SELECT URLHash, EventDate, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND TraficSourceID IN (-1, 6) AND RefererHash = 3594120000172545465 GROUP BY URLHash, EventDate ORDER BY PageViews DESC LIMIT 10 OFFSET 100;", None),
-        ("/* 42 */ SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND DontCountHits = 0 AND URLHash = 2868770270353813622 GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000;", None),
-        ("/* 43 */ SELECT TRUNC(EventTime::TIMESTAMP[s], 'minute') AS M, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-14'::DATE AND EventDate::DATE <= '2013-07-15'::DATE AND IsRefresh = 0 AND DontCountHits = 0 GROUP BY TRUNC(EventTime::TIMESTAMP[s], 'minute') ORDER BY M LIMIT 10 OFFSET 1000;", None),
+        ("/* 00 */ SELECT COUNT(*) FROM {DATASET};", None),
+        ("/* 01 */ SELECT COUNT(*) FROM {DATASET} WHERE AdvEngineID <> 0;", None),
+        ("/* 02 */ SELECT SUM(AdvEngineID), COUNT(*), AVG(ResolutionWidth) FROM {DATASET};", None),
+        ("/* 03 */ SELECT AVG(UserID) FROM {DATASET};", None),
+        ("/* 04 */ SELECT COUNT(DISTINCT UserID) FROM {DATASET};", None),
+        ("/* 05 */ SELECT COUNT(DISTINCT SearchPhrase) FROM {DATASET};", None),
+        ("/* 06 */ SELECT MIN(EventDate), MAX(EventDate) FROM {DATASET};", None),
+        ("/* 07 */ SELECT AdvEngineID, COUNT(*) FROM {DATASET} WHERE AdvEngineID <> 0 GROUP BY AdvEngineID ORDER BY COUNT(*) DESC;", None),
+        ("/* 08 */ SELECT RegionID, COUNT(DISTINCT UserID) AS u FROM {DATASET} GROUP BY RegionID ORDER BY u DESC LIMIT 10;", None),
+        ("/* 09 */ SELECT RegionID, SUM(AdvEngineID), COUNT(*) AS c, AVG(ResolutionWidth), COUNT(DISTINCT UserID) FROM {DATASET} GROUP BY RegionID ORDER BY c DESC LIMIT 10;", None),
+        ("/* 10 */ SELECT MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE MobilePhoneModel <> '' GROUP BY MobilePhoneModel ORDER BY u DESC LIMIT 10;", None),
+        ("/* 11 */ SELECT MobilePhone, MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE MobilePhoneModel <> '' GROUP BY MobilePhone, MobilePhoneModel ORDER BY u DESC LIMIT 10;", None),
+        ("/* 12 */ SELECT SearchPhrase, COUNT(*) AS c FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
+        ("/* 13 */ SELECT SearchPhrase, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY u DESC LIMIT 10;", None),
+        ("/* 14 */ SELECT SearchEngineID, SearchPhrase, COUNT(*) AS c FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchEngineID, SearchPhrase ORDER BY c DESC LIMIT 10;", None),
+        ("/* 15 */ SELECT UserID, COUNT(*) FROM {DATASET} GROUP BY UserID ORDER BY COUNT(*) DESC LIMIT 10;", None),
+        ("/* 16 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;", None),
+        ("/* 17 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase LIMIT 10;", None),
+        ("/* 18 */ SELECT UserID, extract(minute FROM EventTime::TIMESTAMP[s]) AS m, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, extract(minute FROM EventTime::TIMESTAMP[s]), SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;", None),
+        ("/* 19 */ SELECT UserID FROM {DATASET} WHERE UserID = 435090932899640449;", None),
+        ("/* 20 */ SELECT COUNT(*) FROM {DATASET} WHERE URL LIKE '%google%';", None),
+        ("/* 21 */ SELECT SearchPhrase, MIN(URL), COUNT(*) AS c FROM {DATASET} WHERE URL LIKE '%google%' AND SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
+        ("/* 22 */ SELECT SearchPhrase, MIN(URL), MIN(Title), COUNT(*) AS c, COUNT(DISTINCT UserID) FROM {DATASET} WHERE Title LIKE '%Google%' AND URL NOT LIKE '%.google.%' AND SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
+        ("/* 23 */ SELECT * FROM {DATASET} WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10;", None),
+        ("/* 24 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY EventTime LIMIT 10;", None),
+        ("/* 25 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY SearchPhrase LIMIT 10;", None),
+        ("/* 26 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY EventTime, SearchPhrase LIMIT 10;", None),
+        ("/* 27 */ SELECT CounterID, AVG(length(URL)) AS l, COUNT(*) AS c FROM {DATASET} WHERE URL <> '' GROUP BY CounterID HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;", None),
+        ("/* 28 */ SELECT REGEXP_REPLACE(Referer, b'^https?://(?:www\\.)?([^/]+)/.*$', r'\\1') AS k, AVG(length(Referer)) AS l, COUNT(*) AS c, MIN(Referer) FROM {DATASET} WHERE Referer <> '' GROUP BY REGEXP_REPLACE(Referer, b'^https?://(?:www\\.)?([^/]+)/.*$', r'\\1') HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;", None),
+        ("/* 29 */ SELECT SUM(ResolutionWidth), SUM(ResolutionWidth + 1), SUM(ResolutionWidth + 2), SUM(ResolutionWidth + 3), SUM(ResolutionWidth + 4), SUM(ResolutionWidth + 5), SUM(ResolutionWidth + 6), SUM(ResolutionWidth + 7), SUM(ResolutionWidth + 8), SUM(ResolutionWidth + 9), SUM(ResolutionWidth + 10), SUM(ResolutionWidth + 11), SUM(ResolutionWidth + 12), SUM(ResolutionWidth + 13), SUM(ResolutionWidth + 14), SUM(ResolutionWidth + 15), SUM(ResolutionWidth + 16), SUM(ResolutionWidth + 17), SUM(ResolutionWidth + 18), SUM(ResolutionWidth + 19), SUM(ResolutionWidth + 20), SUM(ResolutionWidth + 21), SUM(ResolutionWidth + 22), SUM(ResolutionWidth + 23), SUM(ResolutionWidth + 24), SUM(ResolutionWidth + 25), SUM(ResolutionWidth + 26), SUM(ResolutionWidth + 27), SUM(ResolutionWidth + 28), SUM(ResolutionWidth + 29), SUM(ResolutionWidth + 30), SUM(ResolutionWidth + 31), SUM(ResolutionWidth + 32), SUM(ResolutionWidth + 33), SUM(ResolutionWidth + 34), SUM(ResolutionWidth + 35), SUM(ResolutionWidth + 36), SUM(ResolutionWidth + 37), SUM(ResolutionWidth + 38), SUM(ResolutionWidth + 39), SUM(ResolutionWidth + 40), SUM(ResolutionWidth + 41), SUM(ResolutionWidth + 42), SUM(ResolutionWidth + 43), SUM(ResolutionWidth + 44), SUM(ResolutionWidth + 45), SUM(ResolutionWidth + 46), SUM(ResolutionWidth + 47), SUM(ResolutionWidth + 48), SUM(ResolutionWidth + 49), SUM(ResolutionWidth + 50), SUM(ResolutionWidth + 51), SUM(ResolutionWidth + 52), SUM(ResolutionWidth + 53), SUM(ResolutionWidth + 54), SUM(ResolutionWidth + 55), SUM(ResolutionWidth + 56), SUM(ResolutionWidth + 57), SUM(ResolutionWidth + 58), SUM(ResolutionWidth + 59), SUM(ResolutionWidth + 60), SUM(ResolutionWidth + 61), SUM(ResolutionWidth + 62), SUM(ResolutionWidth + 63), SUM(ResolutionWidth + 64), SUM(ResolutionWidth + 65), SUM(ResolutionWidth + 66), SUM(ResolutionWidth + 67), SUM(ResolutionWidth + 68), SUM(ResolutionWidth + 69), SUM(ResolutionWidth + 70), SUM(ResolutionWidth + 71), SUM(ResolutionWidth + 72), SUM(ResolutionWidth + 73), SUM(ResolutionWidth + 74), SUM(ResolutionWidth + 75), SUM(ResolutionWidth + 76), SUM(ResolutionWidth + 77), SUM(ResolutionWidth + 78), SUM(ResolutionWidth + 79), SUM(ResolutionWidth + 80), SUM(ResolutionWidth + 81), SUM(ResolutionWidth + 82), SUM(ResolutionWidth + 83), SUM(ResolutionWidth + 84), SUM(ResolutionWidth + 85), SUM(ResolutionWidth + 86), SUM(ResolutionWidth + 87), SUM(ResolutionWidth + 88), SUM(ResolutionWidth + 89) FROM {DATASET};", None),
+        ("/* 30 */ SELECT SearchEngineID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchEngineID, ClientIP ORDER BY c DESC LIMIT 10;", None),
+        ("/* 31 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;", None),
+        ("/* 32 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;", None),
+        ("/* 33 */ SELECT URL, COUNT(*) AS c FROM {DATASET} GROUP BY URL ORDER BY c DESC LIMIT 10;", None),
+        ("/* 34 */ SELECT 1, URL, COUNT(*) AS c FROM {DATASET} GROUP BY 1, URL ORDER BY c DESC LIMIT 10;", None),
+        ("/* 35 */ SELECT ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3, COUNT(*) AS c FROM {DATASET} GROUP BY ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3 ORDER BY c DESC LIMIT 10;", None),
+        ("/* 36 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND DontCountHits = 0 AND IsRefresh = 0 AND URL <> '' GROUP BY URL ORDER BY PageViews DESC LIMIT 10;", None),
+        ("/* 37 */ SELECT Title, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND DontCountHits = 0 AND IsRefresh = 0 AND Title <> '' GROUP BY Title ORDER BY PageViews DESC LIMIT 10;", None),
+        ("/* 38 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND IsLink <> 0 AND IsDownload = 0 GROUP BY URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;", None),
+        ("/* 39 */ SELECT TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END AS Src, URL AS Dst, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 GROUP BY TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END, URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;", None),
+        ("/* 40 */ SELECT URLHash, EventDate, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND TraficSourceID IN (-1, 6) AND RefererHash = 3594120000172545465 GROUP BY URLHash, EventDate ORDER BY PageViews DESC LIMIT 10 OFFSET 100;", None),
+        ("/* 41 */ SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND DontCountHits = 0 AND URLHash = 2868770270353813622 GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000;", None),
+        ("/* 42 */ SELECT TRUNC(EventTime::TIMESTAMP[s], 'minute') AS M, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-14'::DATE AND EventDate::DATE <= '2013-07-15'::DATE AND IsRefresh = 0 AND DontCountHits = 0 GROUP BY TRUNC(EventTime::TIMESTAMP[s], 'minute') ORDER BY M LIMIT 10 OFFSET 1000;", None),
 ]
 # fmt:on
 
@@ -188,6 +188,7 @@ if __name__ == "__main__":  # pragma: no cover
     import json
     import statistics
     import subprocess
+    import tempfile
     import time
 
     # Shared with the JOB/TPC-H runners so one analysis tool reads every history.
@@ -201,7 +202,13 @@ if __name__ == "__main__":  # pragma: no cover
         "--iterations",
         type=int,
         default=5,
-        help="Rounds of the full battery (default: 5)",
+        help="Runs of each query, all in that query's own process (default: 5)",
+    )
+    parser.add_argument(
+        "--query-index",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,  # internal: run ONE query as a child process (see below)
     )
     parser.add_argument(
         "--json",
@@ -248,6 +255,45 @@ if __name__ == "__main__":  # pragma: no cover
         # cannot locate.
         dataset_path = resolve_dataset_path(DATASET)
         dataset_entries = len(os.listdir(dataset_path))
+
+    if args.query_index is not None:
+        # Child: one query in its own process, the shape ClickBench's own driver
+        # and wrenchy-bench use (fresh process per query, repeats in that
+        # process). Process-scoped state — the footer/schema caches, the chunk
+        # cache — therefore only ever holds THIS query's working set; one process
+        # running the whole battery measures cross-query cache churn instead.
+        # One "RESULT <json>" line per run; a failing run ends the child.
+        statement = STATEMENTS[args.query_index][0].replace("{DATASET}", f"{DATASET.value}")
+        warm_session = opteryx.session()
+        try:
+            for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET.value};"):
+                pass
+        finally:
+            warm_session.close()
+        for _run in range(args.iterations):
+            gc.collect()
+            session = opteryx.session()
+            start = time.monotonic_ns()
+            try:
+                for _ in session.execute_to_morsels(statement):
+                    pass
+                print("RESULT " + json.dumps({"ms": (time.monotonic_ns() - start) / 1e6}), flush=True)
+            except Exception as error:
+                print(
+                    "RESULT "
+                    + json.dumps(
+                        {
+                            "ms": (time.monotonic_ns() - start) / 1e6,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    ),
+                    flush=True,
+                )
+                break
+            finally:
+                session.close()
+        sys.exit(0)
+
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../..")
     )
@@ -277,7 +323,7 @@ if __name__ == "__main__":  # pragma: no cover
     def format_ratio(opteryx_ms: float, duckdb_ms: float) -> str:
         """Format ratio with color coding based on performance."""
         # DuckDB records seconds to the millisecond, and answers some queries
-        # (Q01's COUNT(*)) from metadata in under 1ms - a 0.0 baseline. There is
+        # (Q00's COUNT(*)) from metadata in under 1ms - a 0.0 baseline. There is
         # no ratio to a time below the baseline's resolution.
         if duckdb_ms <= 0:
             return "[n/a]"
@@ -325,6 +371,7 @@ if __name__ == "__main__":  # pragma: no cover
         "dataset_path": dataset_path,
         "dataset_entries": dataset_entries,
         "rounds": args.iterations,
+        "process": "one per query",
         "preload": os.environ.get("DYLD_INSERT_LIBRARIES") or os.environ.get("LD_PRELOAD") or "none",
         "env_lto": os.environ.get("OPTERYX_ENABLE_LTO", "unset"),
         "env_pgo": os.environ.get("OPTERYX_ENABLE_PGO", "unset"),
@@ -365,11 +412,12 @@ if __name__ == "__main__":  # pragma: no cover
     finally:
         warm_session.close()
 
-    # Round-robin over the battery rather than all rounds of Q1, then all of Q2.
-    # Thermal drift over a suite this long is real; running each query once per
-    # round spreads it across every query instead of concentrating it on
-    # whichever queries happened to run during the machine's ramp.
-    print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES × {args.iterations} ROUNDS\n")
+    # Each query runs in its own child process (see the --query-index branch
+    # above), all of its runs back to back. This is query-major, so it gives up
+    # the round-robin that used to spread thermal drift across every query: a
+    # query that lands on the machine's ramp takes the ramp. An A/B of two builds
+    # must still interleave the builds (ABBA), as before.
+    print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES × {args.iterations} RUNS (one process per query)\n")
     timings: dict = {index: [] for index in range(len(STATEMENTS))}
     dead: set = set()
 
@@ -406,48 +454,74 @@ if __name__ == "__main__":  # pragma: no cover
         )
         csv_handle.flush()
 
-    for round_no in range(args.iterations):
-        round_start = time.monotonic_ns()
-        for index, (statement, _err) in enumerate(STATEMENTS):
-            if index in dead:
-                continue
-            statement = statement.replace("{DATASET}", f"{DATASET.value}")
-            query_num = f"Q{(index + 1):02d}"
-
-            gc.collect()
-            # Session construction is NOT engine work and is NOT on the clock.
-            # It stays per-query so query isolation is unchanged from before.
-            session = opteryx.session()
-            try:
-                start = time.monotonic_ns()
-                for _ in session.execute_to_morsels(statement):
-                    pass
-                elapsed_ms = (time.monotonic_ns() - start) / 1e6
-                timings[index].append(elapsed_ms)
-                record(query_num, round_no + 1, "ok", elapsed_ms, index, "")
-            except Exception as error:
-                # A query that cannot run is a failure with its error attached,
-                # never a skip and never a fast time. Drop it from later rounds
-                # so one broken query does not cost three rounds of noise.
-                dead.add(index)
-                timings[index] = []
-                failures.append((statement, error))
-                failed += 1
-                record(
-                    query_num,
-                    round_no + 1,
-                    "error",
-                    (time.monotonic_ns() - start) / 1e6,
-                    index,
-                    f"{type(error).__name__}: {error}",
-                )
-                print(f"  {query_num} FAILED (round {round_no + 1}): {type(error).__name__}: {str(error)[:70]}")
-            finally:
-                session.close()
-        print(
-            f"  round {round_no + 1}/{args.iterations} complete "
-            f"({(time.monotonic_ns() - round_start) / 1e9:.2f}s)"
-        )
+    child_argv = [
+        sys.executable,
+        os.path.abspath(__file__),
+        "--variant",
+        args.variant,
+        "--iterations",
+        str(args.iterations),
+        "--query-index",
+    ]
+    for index, (statement, _err) in enumerate(STATEMENTS):
+        statement = statement.replace("{DATASET}", f"{DATASET.value}")
+        query_num = f"Q{index:02d}"
+        # Stream the child's RESULT lines so each run's time is printed as it
+        # lands; the finished line is then rewritten in place (CR) with colour.
+        # stderr goes to a file, not a pipe, so a chatty child cannot fill the
+        # pipe and deadlock against the stdout read.
+        print(f"  {query_num} {args.iterations} runs (", end="", flush=True)
+        error = ""
+        with tempfile.TemporaryFile(mode="w+") as stderr_file:
+            proc = subprocess.Popen(child_argv + [str(index)], stdout=subprocess.PIPE, stderr=stderr_file, text=True)
+            for line in proc.stdout:
+                if not line.startswith("RESULT "):
+                    continue
+                result = json.loads(line[len("RESULT "):])
+                run_ix = len(timings[index]) + 1
+                if "error" in result:
+                    error = result["error"]
+                    record(query_num, run_ix, "error", result["ms"], index, error)
+                    break
+                timings[index].append(result["ms"])
+                record(query_num, run_ix, "ok", result["ms"], index, "")
+                print(f"{', ' if run_ix > 1 else ''}{result['ms'] / 1000:5.2f}", end="", flush=True)
+            proc.stdout.close()
+            proc.wait()
+            stderr_file.seek(0)
+            stderr_text = stderr_file.read()
+        if not error and (proc.returncode != 0 or len(timings[index]) != args.iterations):
+            # The child died (or the warm-up query raised): its traceback is the error.
+            stderr_tail = stderr_text.strip().splitlines()
+            error = (
+                f"child exited {proc.returncode} after {len(timings[index])}/{args.iterations} runs: "
+                f"{stderr_tail[-1] if stderr_tail else 'no stderr'}"
+            )
+            record(query_num, len(timings[index]) + 1, "error", 0.0, index, error)
+        if error:
+            # A query that cannot run is a failure with its error attached,
+            # never a skip and never a fast time.
+            dead.add(index)
+            timings[index] = []
+            failures.append((statement, error))
+            failed += 1
+            print(f"\r\033[K  {query_num} FAILED: {error[:90]}")
+            continue
+        runs = timings[index]
+        fastest = runs.index(min(runs))
+        slowest = runs.index(max(runs))
+        cells = []
+        for run_ix, run_ms in enumerate(runs):
+            cell = f"{run_ms / 1000:5.2f}"
+            if run_ix == fastest:
+                cell = f"\033[38;2;34;197;94m{cell}\033[0m"
+            elif run_ix == slowest:
+                cell = f"\033[38;2;255;69;69m{cell}\033[0m"
+            cells.append(cell)
+        line = f"\r\033[K  {query_num} {len(runs)} runs ({', '.join(cells)})"
+        if duckdb_results and index < len(duckdb_results):
+            line += f" {format_ratio(min(runs), duckdb_results[index] * 1000)}"
+        print(line)
 
     csv_handle.close()
 
@@ -461,7 +535,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     unstable = []
     for index in range(len(STATEMENTS)):
-        query_num = f"Q{(index + 1):02d}"
+        query_num = f"Q{index:02d}"
         times = timings[index]
         if not times:
             print(f"{query_num:<7} {'FAILED':>11}")
@@ -540,7 +614,7 @@ if __name__ == "__main__":  # pragma: no cover
 
         for index, (statement, _err) in enumerate(STATEMENTS):
             statement = statement.replace("{DATASET}", f"{DATASET.value}")
-            query_num = f"Q{(index + 1):02d}"
+            query_num = f"Q{index:02d}"
             gc.collect()
             session = None
             reset_groupby_telemetry()
@@ -669,7 +743,7 @@ if __name__ == "__main__":  # pragma: no cover
             "unstable_spread_threshold": UNSTABLE_SPREAD,
             "queries": [
                 {
-                    "query": f"Q{(index + 1):02d}",
+                    "query": f"Q{index:02d}",
                     "times_ms": timings[index],
                     "failed": index in dead,
                 }

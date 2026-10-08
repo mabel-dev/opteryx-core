@@ -400,6 +400,7 @@ struct ChunkCacheRequest {
   size_t      path_len;
   int64_t     chunk_offset;  // absolute file offset of the chunk's first byte
   bool        admit;         // false: use hits, never fill (compaction)
+  bool        remote;        // fetched over the network: a refill pays a re-fetch
 };
 
 void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,

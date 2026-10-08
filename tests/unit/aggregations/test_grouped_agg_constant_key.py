@@ -29,7 +29,7 @@ def _rows(sql):
             (n.decode() if isinstance(n, bytes) else n): m.column(n).to_pylist()
             for n in m.column_names
         }
-        out = [dict(zip(cols.keys(), vals)) for vals in zip(*cols.values())]
+        out.extend(dict(zip(cols.keys(), vals)) for vals in zip(*cols.values()))
     s.close()
     return out
 

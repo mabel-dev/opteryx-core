@@ -56,8 +56,10 @@ void draken_cc_unpin(const DrakenChunkEntry* entry);
 // charged as query memory. draken_cc_insert takes ownership in every case:
 // admitted, it becomes the entry; refused, it is freed. `page_index` is
 // 3 * npages int64s: (body_offset, start_in_buffer, length) per page.
-// `cost_ns` is the measured decompression time of the chunk (admission ranks
-// entries by cost per byte). Returns 1 admitted, 0 refused.
+// `cost_ns` is the chunk's cost to rebuild: its measured decompression time plus,
+// for a remote chunk, a modelled re-fetch. Per byte it sets how many extra CLOCK
+// sweeps a hit buys (chunk_cache.cpp). A new chunk goes on probation, or straight
+// to MAIN if it was evicted from probation recently. Returns 1 admitted, 0 refused.
 uint8_t* draken_cc_fill_alloc(int64_t bytes);
 void     draken_cc_fill_discard(uint8_t* buffer);
 int      draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
@@ -75,8 +77,11 @@ typedef struct {
     int64_t misses;
     int64_t inserts;
     int64_t refused;        // fills offered but not admitted
-    int64_t evictions;      // entries dropped by CLOCK to make room
+    int64_t evictions;      // entries dropped to make room for a fill
     int64_t give_way_bytes; // bytes released because query memory grew
+    int64_t probation_bytes;  // currently held on probation
+    int64_t promotions;       // probation -> MAIN (hit while on probation)
+    int64_t remembered_hits;  // fills that skipped probation (recently evicted)
 } DrakenChunkCacheStats;
 DrakenChunkCacheStats draken_cc_stats(void);
 

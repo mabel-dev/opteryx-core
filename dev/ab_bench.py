@@ -69,7 +69,7 @@ def _worker_load_clickbench(tree: str, dataset: str | None) -> list[tuple[str, s
     ds = dataset or mod.DATASET.value
     out = []
     for index, (statement, _err) in enumerate(mod.STATEMENTS):
-        out.append((f"Q{index + 1:02d}", statement.replace("{DATASET}", ds)))
+        out.append((f"Q{index:02d}", statement.replace("{DATASET}", ds)))
     return out
 
 

@@ -29,6 +29,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from draken.morsels.morsel import Morsel
 
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
@@ -78,7 +79,7 @@ def test_pure_dict_membership_skip_still_prunes():
         # Low cardinality -> rugo emits a single RLE_DICTIONARY data page.
         vals = ["aa", "bb", "cc"] * 40  # min='aa', max='cc'
         sql = "SELECT * FROM (VALUES " + ",".join("('%s')" % v for v in vals) + ") AS t(s)"
-        morsel = list(opteryx.session().execute_to_morsels(sql))[0]
+        morsel = Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
         with open(os.path.join(folder, "p.parquet"), "wb") as fh:
             fh.write(write_parquet(morsel, dictionary=True))
         # 'ab' is absent but inside [min,max] -> only a dictionary-membership

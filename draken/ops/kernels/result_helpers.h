@@ -93,12 +93,45 @@ VecResult vecresult_from_string_block(
 #include "core/vector_alloc.h"   // draken_identity_sel / draken_zero_sel
 #include <cstring>
 #include <new>
+#include <vector>   // kernel_live_slots
 
 // Logical-row null test under the unified access model. validity is indexed by
 // logical row i (bit set = valid); NULL validity means all-valid.
 static inline bool kernel_row_is_null(const DrakenVector* dv, uint32_t i) noexcept {
     if (!dv->validity) return false;
     return ((dv->validity[i >> 3] >> (i & 7u)) & 1u) == 0u;
+}
+
+// Which PHYSICAL slots [0, data_length) at least one VALID logical row reads,
+// via the uniform selection mapping (CLAUDE.md §11). This is THE liveness test
+// for every shape-preserving kernel that can FAIL on a value (a range-checked
+// cast, a codec decode): a slot no valid row reads may hold anything — a null
+// row's placeholder, a dictionary entry the filter dropped — and must be
+// skipped, never range-checked or parsed. A slot any valid row reads is always
+// converted.
+//
+// Returns nullptr when every slot is provably live, in which case `live` is
+// left empty and nothing is allocated; otherwise fills `live` (one byte per
+// slot) and returns its data. The shortcut is proven by flags alone, never by
+// shape: DICT_CODES_DENSE says every slot is referenced by a valid row, and a
+// no-validity vector whose selection is a known identity/permutation references
+// every one of its data_length == length slots. "No validity" on its own is NOT
+// enough — a lazily filtered column (data BORROWED, selection = the survivors'
+// codes, data_length > length) carries no validity yet references only the
+// surviving slots, and treating it as all-live raised on filtered-out values
+// (CAST(x AS UINT16) ... WHERE x < 7000 failed on a row the WHERE removed).
+// A missing flag costs this pass and never a wrong answer.
+static inline const uint8_t* kernel_live_slots(const DrakenVector* v, std::vector<uint8_t>& live) {
+    const bool proven_all_live =
+        (v->flags & DRAKEN_DICT_CODES_DENSE) != 0u ||
+        (v->validity == nullptr &&
+         (v->flags & (DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION)) != 0u &&
+         v->data_length == v->length);
+    if (proven_all_live) return nullptr;
+    live.assign(v->data_length > 0u ? v->data_length : 1u, 0u);
+    for (uint32_t i = 0u; i < v->length; ++i)
+        if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+    return live.data();
 }
 
 // Copy a logical-row-indexed validity bitmap into a fresh draken_malloc buffer.

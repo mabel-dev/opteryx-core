@@ -473,6 +473,11 @@ int32_t PreScanPages(
 // Otherwise (no request, uncompressed column, cache off): the scratch path,
 // exactly as before.
 namespace {
+// Modelled cost of re-fetching a remote chunk (ChunkPageSource): a rough form,
+// not a measurement — 30 ms per GET plus 60 MB/s.
+constexpr int64_t kRemoteFetchFixedNs = 30000000;
+constexpr int64_t kRemoteFetchBytesPerSec = 60000000;
+
 class ChunkPageSource {
  public:
   // `skips_pages`: the decode is masked or follows a page jump plan, so it skips
@@ -489,6 +494,15 @@ class ChunkPageSource {
         col->total_uncompressed_size > 0) {
       cap_ = static_cast<size_t>(col->total_uncompressed_size);
       fill_ = draken_cc_fill_alloc(static_cast<int64_t>(cap_));
+      // A remote chunk's refill also pays a re-fetch. Modelled, not measured
+      // (ruling 2026-10-08): a GET's fixed latency plus transfer of the
+      // compressed bytes. A local chunk's fetch is 0 — its page faults already
+      // land inside the measured decompress.
+      if (req->remote && col->total_compressed_size > 0) {
+        cost_ns_.store(kRemoteFetchFixedNs +
+                           col->total_compressed_size * 1000000000LL / kRemoteFetchBytesPerSec,
+                       std::memory_order_relaxed);
+      }
     }
   }
   ~ChunkPageSource() {

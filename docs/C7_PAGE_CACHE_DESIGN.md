@@ -809,7 +809,8 @@ exhaustion failures; needs A/B with failure telemetry); (3) back-pressure
   copy: skene/Makefile, and the Makefile's `DRAKEN_KERNEL_SRCS`, JSON bench,
   `decoded-column-reset-test`, `rle-dict-test`.
 - `draken/core/alloc.h`: malloc/calloc/realloc/aligned/free charge ≥ 64 KiB by
-  usable size. TEMPORARY A/B switch `DRAKEN_MEM_ACCOUNT=0` (remove when banked).
+  usable size. (The temporary `DRAKEN_MEM_ACCOUNT=0` A/B switch was removed
+  2026-10-08.)
 - `draken/core/tracked_allocator.h`: `TrackedAllocator` (value-init, std
   semantics) for GROUP BY partition/lane arrays + key validity;
   `TrackedUninitAllocator` for carchar `slots_` (was uninitialized_allocator).
@@ -866,7 +867,7 @@ Outstanding (needs a stable machine; NOT done):
 2. Churn under pressure: with a tight limit, heavy GROUP BYs keep filling and
    giving away (15.8 GiB given away for 67 hits) — admission should not evict
    residents to admit while query memory is near the limit.
-3. Remove the temporary `DRAKEN_MEM_ACCOUNT=0` switch once Phase A is banked.
+3. ~~Remove the temporary `DRAKEN_MEM_ACCOUNT=0` switch~~ — removed 2026-10-08.
 4. The compaction job must `SET chunk_cache_admit = false` (outside this repo).
 
 **Phase B follow-ups (2026-10-07):**
@@ -914,8 +915,8 @@ Per query (4/4 rounds, ranges separate): Q23 0.433, Q39 0.673, Q22 0.683, Q21
 0.877, Q31 0.889, Q13 0.891, Q35 0.892. No query > 1.05.
 The decompress-free ceiling (§15, Mac canon) was 0.916: the cache delivers it.
 Hot path only — run-1 fill cost not in this table (indicative +16%, §24).
-Still outstanding: x86 A/B, admission leave-one-out, removing the
-DRAKEN_MEM_ACCOUNT switch.
+Still outstanding: x86 A/B, admission leave-one-out. (DRAKEN_MEM_ACCOUNT
+switch removed 2026-10-08.)
 
 ## 26. Give-way to the OPERATING SYSTEM's memory — REVERTED 2026-10-07
 

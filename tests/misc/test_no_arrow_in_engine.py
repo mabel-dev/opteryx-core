@@ -21,6 +21,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _WORKLOAD = r"""
 import sys
 import opteryx
+from draken.morsels.morsel import Morsel
 from rugo.parquet import write_parquet
 
 session = opteryx.session()
@@ -35,7 +36,7 @@ for sql in (
         pass
 
 # native write path (no pyarrow)
-morsel = next(iter(session.execute_to_morsels("SELECT id, name, gravity FROM $planets")))
+morsel = Morsel.combine(list(session.execute_to_morsels("SELECT id, name, gravity FROM $planets")))
 write_parquet(morsel)
 
 leaked = sorted(m for m in ("pyarrow", "numpy") if m in sys.modules)

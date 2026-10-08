@@ -3347,7 +3347,8 @@ class ParquetIOPipeline {
                 // to the '?', so that is the key.
                 const size_t cc_key_len = std::min(item.path.find('?'), item.path.size());
                 const ChunkCacheRequest cc_req{item.path.data(), cc_key_len,
-                                               base_offset, chunk_cache_admit_};
+                                               base_offset, chunk_cache_admit_,
+                                               !path_is_local(item.path)};
 
                 // prefer_dict: keep the dictionary (compressed/Dict shape) for
                 // plain int32/int64 dict columns when not masking. Masked (pass-2)

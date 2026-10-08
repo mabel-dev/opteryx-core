@@ -783,11 +783,91 @@ CxxMorsel cxx_slice(const CxxMorsel& m, uint32_t start, uint32_t length) {
     return out;
 }
 
+// LAZY FILTER (PoC): carry the selection forward instead of gathering the payload.
+//
+// The survivor list composes with the column's own selection — codes[j] =
+// selection[idx[j]] — and the result BORROWS the source payload, kept alive by
+// VectorOwner::data_source, exactly the shape native_join2.hpp's emit_build_dict
+// already hands every downstream operator. Per column the filter now writes 4
+// bytes/row of codes (+1 bit/row of validity when the source has nulls) instead of
+// the value itself, and for strings no slot/arena copy at all.
+//
+// data_length stays the SOURCE's, so a filtered dense column has data_length >
+// length: none of the four shape predicates holds and every reader takes the
+// uniform data[selection[i]] path (§11). Flags: the payload is untouched, so a
+// sorted dictionary stays sorted; survivors keep their order, so ROW_SORTED carries.
+// DICT_CODES_DENSE does not (filtered-out values are now dead entries).
+//
+// Returns false for a type that cannot be expressed this way (bool's bit-packed
+// payload, ARRAY's offsets + child, FP16's descriptor-width rows, NULL) — the
+// caller gathers those as before.
+static bool lazy_select_column(const CxxColumn& col, const int32_t* idx, uint32_t n,
+                               CxxColumn& out) {
+    const VectorOwner& src = *col.own;
+    const DrakenVector& sv = src.vec;
+    if (draken_type_fixed_itemsize(sv.type) == 0u && !draken_type_is_string_storage(sv.type))
+        return false;
+
+    uint32_t* codes = static_cast<uint32_t*>(
+        draken_malloc((n > 0u ? static_cast<size_t>(n) : 1u) * sizeof(uint32_t)));
+    if (codes == nullptr) throw std::bad_alloc();
+    OwnedBuffer<void> codes_buf(codes);
+    const uint32_t* ssel = sv.selection;
+    for (uint32_t j = 0; j < n; ++j) codes[j] = ssel[idx[j]];
+
+    // Validity is per LOGICAL row, so it is the one thing that must be re-projected.
+    // Padded to whole 8-byte words like every other producer (word-wise readers).
+    OwnedBuffer<uint8_t> validity_buf;
+    uint8_t* vbits = nullptr;
+    if (sv.validity != nullptr) {
+        const size_t bm = (static_cast<size_t>(n) + 7u) / 8u;
+        const size_t padded = std::max<size_t>(8u, (bm + 7u) & ~static_cast<size_t>(7u));
+        vbits = static_cast<uint8_t*>(draken_malloc(padded));
+        if (vbits == nullptr) throw std::bad_alloc();
+        std::memset(vbits, 0, padded);
+        bool any_null = false;
+        for (uint32_t j = 0; j < n; ++j) {
+            if (row_is_valid(sv, static_cast<uint32_t>(idx[j])))
+                vbits[j >> 3] |= static_cast<uint8_t>(1u << (j & 7u));
+            else
+                any_null = true;
+        }
+        if (any_null) {
+            validity_buf.reset(vbits);
+        } else {
+            draken_free(vbits);
+            vbits = nullptr;
+        }
+    }
+
+    DrakenVector v;
+    v.data        = sv.data;            // BORROWED — see data_source below
+    v.selection   = codes;
+    v.data_length = sv.data_length;
+    v.length      = n;
+    v.validity    = vbits;
+    v.type        = sv.type;
+    v.flags       = static_cast<uint8_t>(sv.flags & (DRAKEN_DICT_KEYS_SORTED |
+                                                     DRAKEN_ROW_SORTED |
+                                                     DRAKEN_ROW_SORTED_DESC));
+    out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(nullptr),
+                                            std::move(validity_buf), std::move(codes_buf));
+    out.own->logical_type = src.logical_type;
+    // Keep the ROOT payload owner alive, not the intermediate view: a column that
+    // is itself borrowed (an earlier filter, a join build dict) points at its own
+    // data_source, so chained filters never chain owners.
+    out.own->data_source = src.data_source ? src.data_source : col.own;
+    out.view = out.own->vec;
+    return true;
+}
+
 // S1: filter every column by a DRAKEN_BOOL mask (keep rows valid AND true).
-// Derives the surviving-row indices ONCE, then type-takes each column via the
-// same vector_take_impl cxx_take uses. nogil — no PyObject, shared-owner result.
-// Zero-column morsels carry the surviving row count (== mask count_true), which
-// matches the PyObject filter_mask path.
+// Derives the surviving-row indices ONCE, then emits each column as a lazy
+// selection over its source (lazy_select_column), gathering only the types that
+// cannot be borrowed. A mask that keeps every row shares the columns unchanged.
+// nogil — no PyObject, shared-owner result. Zero-column morsels carry the
+// surviving row count (== mask count_true), which matches the PyObject
+// filter_mask path.
 CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
     CxxMorsel out;
     out.names = m.names;
@@ -795,8 +875,14 @@ CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
     const uint32_t n = static_cast<uint32_t>(idx_vec.size());
     if (m.columns.empty()) { out.zero_col_rows = n; return out; }
     out.columns.reserve(m.columns.size());
+    const bool keeps_all = n == m.columns[0].own->vec.length;
     for (const CxxColumn& col : m.columns) {
+        if (keeps_all) { out.columns.push_back(col); continue; }
         CxxColumn nc;
+        if (lazy_select_column(col, idx_vec.data(), n, nc)) {
+            out.columns.push_back(std::move(nc));
+            continue;
+        }
         nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, idx_vec.data(), n));
         // mask_indices() is strictly increasing (a filter never reorders
         // survivors) — carry ROW_SORTED through, same reasoning as
@@ -925,6 +1011,9 @@ static CxxMorsel cxx_mask_with_consts(const CxxMorsel& m, const DrakenVector& ma
         std::shared_ptr<VectorOwner> cloned;
         if (scalar != nullptr && clone_scalar_constant(*scalar, n, cloned)) {
             nc.own = std::move(cloned);
+        } else if (lazy_select_column(m.columns[ci], idx_vec.data(), n, nc)) {
+            out.columns.push_back(std::move(nc));
+            continue;
         } else {
             nc.own = std::make_shared<VectorOwner>(
                 vector_take_impl(*m.columns[ci].own, idx_vec.data(), n));

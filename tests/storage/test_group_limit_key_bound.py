@@ -27,6 +27,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from opteryx import config
 from opteryx.planner.optimizer.strategies.group_limit_key_bound import _increment
 from opteryx.planner.optimizer.strategies.group_limit_key_bound import _integer_window
@@ -166,7 +167,7 @@ def dataset():
             f"CONCAT('n{i:02d}_', CAST((g % {KEYS_PER_FILE}) AS VARCHAR)) AS name, "
             f"g AS payload FROM GENERATE_SERIES(0, {KEYS_PER_FILE * ROWS_PER_KEY - 1}) AS g"
         )
-        morsel = list(session.execute_to_morsels(sql))[0]
+        morsel = Morsel.combine(list(session.execute_to_morsels(sql)))
         with open(ds_dir / f"part-{i}.parquet", "wb") as f:
             f.write(write_parquet(morsel))
     name = "testdata.group_limit_key_bound"

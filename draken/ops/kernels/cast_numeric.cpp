@@ -603,24 +603,18 @@ VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* v) {
     });
 }
 
-// Which PHYSICAL slots (0 .. data_length) at least one VALID logical row reads,
-// via the uniform `selection` mapping (CLAUDE.md §11). Empty = no validity, every
-// slot live. The range-checked casts below convert data_length physical values,
-// but validity is one bit per LOGICAL row: reading `validity[j]` for physical
-// slot j is only right when selection is the identity. On a dict-shaped vector it
-// skipped the dictionary value whose index happened to match a NULL row - so
-// CAST(x AS INT32) over a dictionary-encoded column with a NULL in row 1 turned
-// every row holding dictionary value 1 into 0 (and the widening a catalog-declared
-// type needs did the same to ClickBench's uint16 EventDate). A slot no valid row
-// reads may hold anything (a null row's placeholder), so it is still skipped
-// rather than range-checked; a slot any valid row reads is always converted.
+// Liveness for the range-checked casts below (one byte per physical slot;
+// EMPTY = every slot provably live). The rule and its history are on
+// kernel_live_slots (result_helpers.h). Validity is one bit per LOGICAL row, so
+// reading `validity[j]` for physical slot j is only right under an identity
+// selection — on a dict-shaped vector that skipped the dictionary value whose
+// index matched a NULL row (CAST over a dict column with a NULL in row 1 zeroed
+// every row holding dictionary value 1). And "no validity" is not "all live":
+// a lazily filtered column has no validity yet references only the surviving
+// slots, and range-checking the rest raised on values the WHERE had removed.
 static inline std::vector<uint8_t> cast_live_slots(const DrakenVector* v) {
     std::vector<uint8_t> live;
-    if (v->validity == nullptr) return live;
-    live.assign(v->data_length > 0u ? v->data_length : 1u, 0u);
-    for (uint32_t i = 0u; i < v->length; ++i)
-        if ((v->validity[i >> 3] >> (i & 7u)) & 1u)
-            live[v->selection[i]] = 1u;
+    kernel_live_slots(v, live);
     return live;
 }
 

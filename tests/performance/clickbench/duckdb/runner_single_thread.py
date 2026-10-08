@@ -48,7 +48,7 @@ def run_benchmark(parquet_glob: str) -> list:
     results = []
     total = len(QUERIES)
 
-    for idx, query in enumerate(QUERIES, start=1):
+    for idx, query in enumerate(QUERIES):
         times = []
         print(f"  Q{idx:02d}/{total} ", end="", flush=True)
         for attempt in range(TRIES):

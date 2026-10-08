@@ -60,7 +60,7 @@ def main() -> int:
     golden = {}
     written, errored = [], []
 
-    for idx, query in enumerate(QUERIES, start=1):
+    for idx, query in enumerate(QUERIES):
         qid = f"q{idx:02d}"
         try:
             rows = con.execute(query).fetchall()

@@ -24,6 +24,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from rugo.parquet import write_parquet
 
 
@@ -193,13 +194,13 @@ def test_bloom_can_be_disabled():
 
 
 def _morsel_write(sql, **kw):
-    m = list(opteryx.session().execute_to_morsels(sql))[0]
+    m = Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
     return write_parquet(m, compression="none", **kw)
 
 
 def test_bad_compression_fails_loud():
     sql = "SELECT i FROM (VALUES (1),(2)) AS t(i)"
-    morsel = list(opteryx.session().execute_to_morsels(sql))[0]
+    morsel = Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
     with pytest.raises(ValueError, match="compression must be"):
         write_parquet(morsel, compression="snappy")
 

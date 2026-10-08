@@ -112,16 +112,16 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
         int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         const bool is_safe = kernel_cast_is_safe(ctx);
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
         bool any_bad = false;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) { out[j] = 0; continue; }
+            if (live_map != nullptr && !live_map[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* sdata = str_data(slot, sa->arena);
             const uint32_t slen  = str_length(slot);
@@ -244,16 +244,16 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
         uint64_t* out = static_cast<uint64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(uint64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         const bool is_safe = kernel_cast_is_safe(ctx);
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
         bool any_bad = false;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) { out[j] = 0; continue; }
+            if (live_map != nullptr && !live_map[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* sdata = str_data(slot, sa->arena);
             const uint32_t slen  = str_length(slot);
@@ -324,16 +324,16 @@ VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
         if (!out) return draken_error_sentinel("Allocation failed");
         std::memset(out, 0, nbytes);
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         const bool is_safe = kernel_cast_is_safe(ctx);
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
         bool any_bad = false;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) continue;
+            if (live_map != nullptr && !live_map[j]) continue;
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* s = str_data(slot, sa->arena);
             const uint32_t slen = str_length(slot);
@@ -415,9 +415,9 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         int32_t* out = static_cast<int32_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int32_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         // TRY_CAST rides format_ctx.safe here, not binary_op_ctx — this kernel
         // needs the format pattern, so it takes that ctx.
@@ -426,7 +426,7 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         bool any_bad = false;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) { out[j] = 0; continue; }
+            if (live_map != nullptr && !live_map[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
             const uint32_t len = str_length(slot);
@@ -507,22 +507,13 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
             draken_malloc((k > 0u ? k : 1u) * sizeof(uint32_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        // A dense vector with no validity mask references every physical slot
-        // through selection[i] == i, so the liveness pass would mark all k slots
-        // live and can be skipped along with its zeroed allocation. This is a
-        // provable shortcut, NOT a shape-dependent answer: both paths treat
-        // exactly the same set of slots as live, so a missing layout hint (flags
-        // == 0 means "don't know") costs a pass and never a wrong result.
-        const bool all_live = (v->validity == nullptr)
-                           && ((v->flags & DRAKEN_SEL_IDENTITY) != 0u)
-                           && (k == n);
+        // Liveness pass skipped (no allocation) only when the flags PROVE every
+        // slot is referenced — see kernel_live_slots. Both paths treat exactly
+        // the same set of slots as live, so a missing layout hint (flags == 0
+        // means "don't know") costs a pass and never a wrong result.
         std::vector<uint8_t> live;
-        if (!all_live) {
-            live.assign(k > 0u ? k : 1u, 0u);
-            for (uint32_t i = 0u; i < n; ++i)
-                if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
-        }
-        const uint8_t* live_map = all_live ? nullptr : live.data();
+        const uint8_t* live_map = kernel_live_slots(v, live);
+        (void)n;
 
         // `bad` records rows to NULL afterwards, which only TRY_CAST ever does —
         // a plain CAST returns on the first unparseable value, so it can never
@@ -709,12 +700,12 @@ VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* v) {
         const uint32_t k = v->data_length;
         const uint32_t n = v->length;
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) continue;
+            if (live_map != nullptr && !live_map[j]) continue;
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint32_t len = str_length(slot);
             const uint8_t* bytes = str_data(slot, sa->arena);
@@ -788,9 +779,9 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
         uint8_t* out = static_cast<uint8_t*>(draken_malloc((k > 0u ? k : 1u) * es));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         const bool is_safe = kernel_cast_is_safe(ctx);
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
@@ -798,7 +789,7 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
 
         for (uint32_t j = 0u; j < k; ++j) {
             uint8_t* dst = out + static_cast<size_t>(j) * es;
-            if (!live[j]) { std::memset(dst, 0, es); continue; }
+            if (live_map != nullptr && !live_map[j]) { std::memset(dst, 0, es); continue; }
 
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* sdata = str_data(slot, sa->arena);

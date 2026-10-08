@@ -22,12 +22,13 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from tests.helpers import execute_and_get_rowcount
 
 
 def _explain_details(sql):
     """Return the `details` column values for an EXPLAIN of `sql`."""
-    morsel = list(opteryx.session().execute_to_morsels("EXPLAIN " + sql))[0]
+    morsel = Morsel.combine(list(opteryx.session().execute_to_morsels("EXPLAIN " + sql)))
     names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
     data = {n: morsel.column(morsel.column_names[i]).to_pylist() for i, n in enumerate(names)}
     return data["details"]

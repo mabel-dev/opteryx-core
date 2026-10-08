@@ -6,6 +6,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import pyarrow
 
 import opteryx
+from draken.morsels.morsel import Morsel
 
 
 def test_decimal_column_empty_and_take_empty():
@@ -19,7 +20,7 @@ def test_decimal_column_empty_and_take_empty():
     reach a zero-row morsel.
     """
     session = opteryx.session()
-    morsel = next(iter(session.execute_to_morsels("SELECT CAST(gravity AS DECIMAL(30,4)) AS d FROM $planets")))
+    morsel = Morsel.combine(list(session.execute_to_morsels("SELECT CAST(gravity AS DECIMAL(30,4)) AS d FROM $planets")))
     assert morsel.num_rows == 9
 
     empty = morsel.take([])

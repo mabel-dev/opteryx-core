@@ -23,11 +23,12 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from rugo.parquet import write_parquet
 
 
 def _morsel(sql):
-    return list(opteryx.session().execute_to_morsels(sql))[0]
+    return Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
 
 
 def _scan_one(tmp_dir, sql, write_sql):
@@ -37,7 +38,7 @@ def _scan_one(tmp_dir, sql, write_sql):
         buf = write_parquet(_morsel(write_sql))
         with open(os.path.join(tmp_dir, "data.parquet"), "wb") as f:
             f.write(buf)
-        return list(opteryx.session().execute_to_morsels(sql))[0]
+        return Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

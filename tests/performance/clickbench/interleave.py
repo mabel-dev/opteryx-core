@@ -107,7 +107,7 @@ def main() -> int:
     parser.add_argument("--data", default="scratch/hits_rugo_262k",
                         help="Directory of parquet files both engines read (default: scratch/hits_rugo_262k)")
     parser.add_argument("--queries", default="",
-                        help="Comma-separated 1-based query numbers to run (default: all)")
+                        help="Comma-separated zero-based query numbers to run (default: all)")
     args = parser.parse_args()
 
     if args.loops < 2 or args.loops % 2:
@@ -125,7 +125,7 @@ def main() -> int:
 
     selected = list(range(len(statements)))
     if args.queries:
-        selected = [int(q) - 1 for q in args.queries.split(",")]
+        selected = [int(q) for q in args.queries.split(",")]
 
     data_dir = args.data if os.path.isabs(args.data) else os.path.join(REPO_ROOT, args.data)
     if not os.path.isdir(data_dir):
@@ -199,7 +199,7 @@ def main() -> int:
             except Exception as error:
                 errors.append((index, engine_key, error))
                 failure = f"{engine_key}: {error!r}"
-        label = f"Q{index + 1:02d}"
+        label = f"Q{index:02d}"
         if failure:
             writer.writerow([loop, label, pair_no, order[0], "", "", "error", failure])
         else:
@@ -215,7 +215,7 @@ def main() -> int:
             measure(loop, index, 2, forward[::-1])
             time.sleep(args.gap)
             ratios = [o / d for _f, o, d in pairs[index][-2:]]
-            print(f"  loop {loop}/{args.loops} Q{index + 1:02d}  pair ratios O/D: "
+            print(f"  loop {loop}/{args.loops} Q{index:02d}  pair ratios O/D: "
                   + "  ".join(f"{r:5.2f}" for r in ratios), flush=True)
     handle.close()
 
@@ -229,7 +229,7 @@ def main() -> int:
     for index in selected:
         rows = pairs[index]
         if len(rows) != pairs_per_query:
-            print(f"Q{index + 1:02d}   INCOMPLETE  {len(rows)}/{pairs_per_query} pairs")
+            print(f"Q{index:02d}   INCOMPLETE  {len(rows)}/{pairs_per_query} pairs")
             continue
         ratios = [o / d for _f, o, d in rows]
         pair_ratios[index] = ratios
@@ -252,13 +252,13 @@ def main() -> int:
             verdict, losses = "duckdb", losses + 1
         else:
             verdict, ties = "tie", ties + 1
-        print(f"Q{index + 1:02d}  {o_med:10.1f}{d_med:10.1f}{ratio:8.2f}{o_first:8.1f}{o_second:8.1f}  "
+        print(f"Q{index:02d}  {o_med:10.1f}{d_med:10.1f}{ratio:8.2f}{o_first:8.1f}{o_second:8.1f}  "
               f"{below}/{len(ratios)}       {verdict}")
 
     print("-" * 96)
     failed = False
     for index, engine_key, error in errors:
-        print(f"ERROR Q{index + 1:02d} {engine_key}: {error!r}")
+        print(f"ERROR Q{index:02d} {engine_key}: {error!r}")
         failed = True
     if len(pair_ratios) != len(selected):
         print(f"FAIL: only {len(pair_ratios)}/{len(selected)} queries produced a full pair set")

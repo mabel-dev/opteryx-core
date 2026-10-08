@@ -41,24 +41,14 @@ extern "C" {
 // DRAKEN_MEM_ACCOUNT_MIN usable bytes are charged when allocated and
 // uncharged when freed. Both sides use the allocator's usable size, so the
 // pair is exact without the free side knowing the request.
-// TEMPORARY A/B switch (C7 Phase A): DRAKEN_MEM_ACCOUNT=0 disables charging
-// for the whole process (read once). Removed once the A/B is banked.
-static inline int draken_mem_account_enabled(void) {
-    static const int on = []() {
-        const char* v = getenv("DRAKEN_MEM_ACCOUNT");
-        return (v && v[0] == '0') ? 0 : 1;
-    }();
-    return on;
-}
-
 static inline void draken_mem_note_alloc(void* p) {
-    if (p == nullptr || !draken_mem_account_enabled()) return;
+    if (p == nullptr) return;
     const int64_t n = (int64_t)DRAKEN_USABLE_SIZE(p);
     if (n >= DRAKEN_MEM_ACCOUNT_MIN) draken_mem_charge(n);
 }
 
 static inline void draken_mem_note_free(void* p) {
-    if (p == nullptr || !draken_mem_account_enabled()) return;
+    if (p == nullptr) return;
     const int64_t n = (int64_t)DRAKEN_USABLE_SIZE(p);
     if (n >= DRAKEN_MEM_ACCOUNT_MIN) draken_mem_uncharge(n);
 }

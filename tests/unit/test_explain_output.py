@@ -32,12 +32,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
 
 
 def _explain(sql):
     """Return (column_names, {col: [values]}) for the first EXPLAIN morsel."""
-    morsel = list(opteryx.session().execute_to_morsels(sql))[0]
+    morsel = Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
     names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
     data = {
         n: [v.decode() if isinstance(v, bytes) else v for v in morsel.column(morsel.column_names[i]).to_pylist()]

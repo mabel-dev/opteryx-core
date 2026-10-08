@@ -407,9 +407,9 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
         int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         // TRY_CAST rides format_ctx.safe (this kernel takes that ctx for the
         // pattern), the same field the string->DATE twin reads.
@@ -418,7 +418,7 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
         bool any_bad = false;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) { out[j] = 0; continue; }
+            if (live_map != nullptr && !live_map[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* s = str_data(slot, sa->arena);
             const uint32_t len = str_length(slot);
@@ -627,12 +627,12 @@ VecResult draken_cast_string_to_time64(void* ctx, const DrakenVector* v) {
         int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);   // nullptr = every slot live
+        (void)n;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) { out[j] = 0; continue; }
+            if (live_map != nullptr && !live_map[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
             const uint32_t len = str_length(slot);

@@ -28,6 +28,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from draken.morsels.morsel import Morsel
 import rugo
 from rugo.parquet import write_parquet
 
@@ -46,7 +47,7 @@ def _created_by(buf: bytes) -> str:
 
 
 def _write_a_file() -> bytes:
-    morsel = list(opteryx.session().execute_to_morsels("SELECT 1 AS a"))[0]
+    morsel = Morsel.combine(list(opteryx.session().execute_to_morsels("SELECT 1 AS a")))
     return write_parquet(morsel)
 
 

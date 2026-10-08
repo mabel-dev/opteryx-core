@@ -1,6 +1,6 @@
 #include "memory_pool.hpp"
 
-#include "core/alloc.h"   // draken_mem_account_enabled + the process memory account (mem_account.h)
+#include "core/alloc.h"   // the process memory account (mem_account.h)
 
 namespace opteryx {
 
@@ -27,7 +27,7 @@ MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t
 }
 
 MemoryPool::~MemoryPool() {
-    if (used_size_ > 0 && draken_mem_account_enabled()) draken_mem_uncharge(used_size_);
+    if (used_size_ > 0) draken_mem_uncharge(used_size_);
     if (pool_) {
         free(pool_);
         pool_ = nullptr;
@@ -280,7 +280,7 @@ int64_t MemoryPool::commit(const void* data, int64_t length) {
     metadata_[ref_id] = {seg_key, block_len, 0, length};
     used_size_ += block_len;
     if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
-    if (draken_mem_account_enabled()) draken_mem_charge(block_len);
+    draken_mem_charge(block_len);
     commits_++;
 
     return ref_id;
@@ -343,7 +343,7 @@ void MemoryPool::release(int64_t ref_id) {
 
     it->second.is_free = true;
     used_size_ -= it->second.length;
-    if (draken_mem_account_enabled()) draken_mem_uncharge(it->second.length);
+    draken_mem_uncharge(it->second.length);
 
     // Coalesce right neighbor
     auto right = std::next(it);
@@ -417,7 +417,7 @@ ReserveResult MemoryPool::reserve_for_write(int64_t size) {
     metadata_[ref_id] = {seg_key, block_len, 1, 0};
     used_size_ += block_len;
     if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
-    if (draken_mem_account_enabled()) draken_mem_charge(block_len);
+    draken_mem_charge(block_len);
     commits_++;
     read_locks_++;
 
@@ -441,7 +441,7 @@ void MemoryPool::clear() {
 
     segments_.clear();
     metadata_.clear();
-    if (used_size_ > 0 && draken_mem_account_enabled()) draken_mem_uncharge(used_size_);
+    if (used_size_ > 0) draken_mem_uncharge(used_size_);
     used_size_    = 0;
     next_ref_id_  = 1;
     commits_      = 0;

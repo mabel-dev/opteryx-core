@@ -265,6 +265,9 @@ cdef extern from "core/chunk_cache.h" nogil:
         int64_t refused
         int64_t evictions
         int64_t give_way_bytes
+        int64_t probation_bytes
+        int64_t promotions
+        int64_t remembered_hits
     DrakenChunkCacheStats draken_cc_stats()
     void draken_cc_flush()
 
@@ -310,6 +313,9 @@ def chunk_cache_stats() -> dict:
         "refused": s.refused,
         "evictions": s.evictions,
         "give_way_bytes": s.give_way_bytes,
+        "probation_bytes": s.probation_bytes,
+        "promotions": s.promotions,
+        "remembered_hits": s.remembered_hits,
         "budget": draken_mem_cache_budget(),
         "limit": draken_mem_cache_limit(),
         "container": draken_mem_container(),

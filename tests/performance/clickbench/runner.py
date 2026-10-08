@@ -60,7 +60,7 @@ def _load_clickbench_baseline(path: str) -> tuple[dict[str, float], str | None]:
     """Load the positional ClickBench DuckDB baseline.
 
     The upstream format is `{"result": [[run1, run2, run3], ...]}` indexed by
-    query position; we map it to `Q01`..`QNN` so the comparison logic matches
+    query position; we map it to `Q00`..`QNN` (zero-based, matching upstream ClickBench) so the comparison logic matches
     the named TPC-H/JOB/H2O baselines.
 
     Times in the JSON are in seconds; we return ms.
@@ -75,7 +75,7 @@ def _load_clickbench_baseline(path: str) -> tuple[dict[str, float], str | None]:
     except Exception:
         return {}, None
     by_name: dict[str, float] = {}
-    for ix, runs in enumerate(data.get("result", []), start=1):
+    for ix, runs in enumerate(data.get("result", [])):
         if not runs:
             continue
         # Use warm2 (second warm) to match the existing ClickBench convention.
@@ -180,9 +180,9 @@ def main() -> int:
     compared = 0
 
     try:
-        for index, (statement_template, _expected_err) in enumerate(STATEMENTS, start=1):
+        for index, (statement_template, _expected_err) in enumerate(STATEMENTS):
             name = f"Q{index:02d}"
-            # Skip commented-out statements (e.g. `--/* 34 */ ...`)
+            # Skip commented-out statements (e.g. `--/* 33 */ ...`)
             if statement_template.lstrip().startswith("--"):
                 skipped += 1
                 csv_writer.writerow(

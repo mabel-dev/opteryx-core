@@ -26,6 +26,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from opteryx.exceptions import DataError
 from opteryx.exceptions import SqlError
 
@@ -163,7 +164,7 @@ def test_folded_literal_failure_names_a_type_the_dialect_accepts():
 def test_cast_column_name_uses_a_type_the_dialect_accepts(query, expected_name):
     session = opteryx.session()
     try:
-        morsel = next(iter(session.execute_to_morsels(query)))
+        morsel = Morsel.combine(list(session.execute_to_morsels(query)))
         names = [
             n.decode("utf-8") if isinstance(n, (bytes, bytearray)) else n
             for n in morsel.column_names

@@ -21,12 +21,13 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from rugo.jsonl import write_jsonl
 import rugo.parquet
 
 
 def _morsel(sql):
-    return list(opteryx.session().execute_to_morsels(sql))[0]
+    return Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
 
 
 def _morsel_from_arrow(table):

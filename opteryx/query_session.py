@@ -677,11 +677,13 @@ class Session(DataFrame):
     ):
         """Execute a SQL operation and stream Draken Morsels.
 
-        This method merges adjacent morsels and splits large morsels such that each
-        yielded morsel contains at most ``max_size`` rows. The 65,536 default is the
-        empirical sweet spot on ARM: join build cost plateaus there and hash /
-        group-by are flat across chunk sizes. (This is the *output*-boundary row
-        target; execution-internal morsels are still row-group sized.)
+        Each yielded morsel holds at most ``max_size`` rows. Morsels are yielded as
+        the engine produced them and split only when larger - never merged. The
+        engine already sizes its morsels (64k rows is the measured sweet spot for
+        the join / group-by internals), so re-batching at this boundary bought the
+        caller nothing and cost a slice plus a concat of every row: 2.2 s of a
+        2.3 s wide SELECT, single-threaded, after the engine had finished. The
+        cap exists for callers that need a smaller bound, not as a target.
 
         This is a *Draken-native* API: it avoids converting morsels to Arrow (or
         any other intermediate format) except when absolutely required.
@@ -716,7 +718,6 @@ class Session(DataFrame):
     ):
         """The generator behind `execute_to_morsels` - see it for the contract."""
         from draken.morsels.morsel import Morsel
-        from draken.morsels.morsel import MorselBatcher
 
         from opteryx.types.logical_type import column_type_from_vector
 
@@ -781,11 +782,19 @@ class Session(DataFrame):
                 raise ResultTooLargeError(rows=delivered_rows, limit=row_budget)
             yield morsel
 
-        # Batching policy lives in ONE place (draken MorselBatcher): merge small
-        # morsels up to `max_size`, split oversized ones, and bound the combined
-        # string arena so the concat cannot overflow its uint32 offsets. This
-        # loop used to hand-roll the row half of that and had no byte half.
-        batcher = MorselBatcher(max_size)
+        # Cap only, no merge (see execute_to_morsels). MorselBatcher's merging
+        # belongs to the write path, where a batch IS a row group; here a morsel
+        # that fits passes through untouched and one that doesn't is split.
+        def _capped(morsel: Morsel):
+            n = morsel.num_rows
+            if n <= max_size:
+                yield morsel
+                return
+            offset = 0
+            while offset < n:
+                take = min(max_size, n - offset)
+                yield morsel.slice(offset, take)
+                offset += take
 
         last_empty_morsel = None
         saw_nonzero_rows = False
@@ -810,14 +819,10 @@ class Session(DataFrame):
                     last_empty_morsel = morsel
                     continue
                 saw_nonzero_rows = True
-                for batch in batcher.push(morsel):
-                    yield from _yield_morsel(batch)
+                for piece in _capped(morsel):
+                    yield from _yield_morsel(piece)
 
-        tail = batcher.finish()
-        if tail:
-            for batch in tail:
-                yield from _yield_morsel(batch)
-        elif not saw_nonzero_rows and last_empty_morsel is not None:
+        if not saw_nonzero_rows and last_empty_morsel is not None:
             yield from _yield_morsel(last_empty_morsel)
 
         # The result has been delivered in full, so the rows counted for the

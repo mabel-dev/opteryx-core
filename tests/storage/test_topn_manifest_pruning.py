@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from draken.morsels.morsel import Morsel
 from opteryx import config
 from rugo.parquet import write_parquet
 
@@ -47,7 +48,7 @@ def _write_dataset(dir_name, file_batches):
     ds_dir.mkdir(parents=True)
     session = opteryx.session()
     for i, sql in enumerate(file_batches):
-        morsel = list(session.execute_to_morsels(sql))[0]
+        morsel = Morsel.combine(list(session.execute_to_morsels(sql)))
         with open(ds_dir / f"part-{i}.parquet", "wb") as f:
             f.write(write_parquet(morsel))
     dataset = f"testdata.{dir_name}"

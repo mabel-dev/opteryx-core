@@ -28,7 +28,7 @@ from opteryx.connectors.parquet_io.parquet_writer import open_data_file_writer
 
 
 def _morsel(sql: str) -> Morsel:
-    return list(opteryx.session().execute_to_morsels(sql))[0]
+    return Morsel.combine(list(opteryx.session().execute_to_morsels(sql)))
 
 
 def _write(relation_dir, *morsels):

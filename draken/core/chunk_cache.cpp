@@ -1,9 +1,21 @@
 // Process-wide decompressed column-chunk cache — see chunk_cache.h.
 // Compiled into draken_native ONLY (build_common.py).
 //
-// Structure: 16 shards by key hash, each with its own mutex, map and CLOCK
-// ring. Eviction (CLOCK, ref bit per entry) and admission (cost per byte)
-// happen one shard lock at a time; no path holds two shard locks.
+// Structure: 16 shards by key hash, each with its own mutex, map, PROBATION
+// FIFO, MAIN CLOCK ring and a key-only memory of recent probation evictions.
+// Every eviction happens one shard lock at a time; no path holds two.
+//
+// Policy (rulings 2026-10-08, docs/C7_PAGE_CACHE_DESIGN.md §27):
+// - Admission is S3-FIFO's: a new chunk enters PROBATION. While the cache has
+//   room nothing is evicted, so an empty cache fills completely. Once full,
+//   probation is evicted first while it holds more than kProbationPercent of
+//   the limit: a chunk hit while on probation moves to MAIN, one that was not
+//   is evicted and its key remembered (the last kRemembered of them).
+//   A remembered chunk that is filled again skips probation.
+// - Eviction from MAIN is CLOCK, cost weighted: a hit gives the chunk
+//   `weight` extra sweeps (0..kMaxWeight) on top of the ref bit, from its cost
+//   to rebuild per byte, so an expensive chunk outlives a cheap one while both
+//   are going cold. weight 0 is plain CLOCK.
 //
 // Lifetime: an entry's `state` word holds its reader pin count plus an
 // EVICTED bit. Eviction sets the bit; whoever observes pins == 0 with the bit
@@ -17,8 +29,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -33,7 +47,9 @@ struct DrakenChunkEntry {
     uint8_t* buffer = nullptr;
     int64_t bytes = 0;
     std::vector<int64_t> index;   // (body_offset, start, length) triples, sorted by body_offset
-    double cost_per_byte = 0.0;   // decompression ns per cached byte
+    uint8_t weight = 0;           // extra CLOCK sweeps a hit buys (cost per byte)
+    uint8_t lives = 0;            // extra sweeps left (MAIN only)
+    bool main = false;            // false: on probation
     std::atomic<uint32_t> state{0};
     std::atomic<uint8_t> ref{0};
 };
@@ -43,6 +59,14 @@ namespace {
 constexpr uint32_t kEvicted = 0x80000000u;
 constexpr uint32_t kPinMask = 0x7fffffffu;
 constexpr size_t kShards = 16;
+
+// Probation's share of the cache limit (S3-FIFO's small queue).
+constexpr int64_t kProbationPercent = 10;
+// Recent probation evictions remembered (keys only), split across the shards.
+constexpr size_t kRemembered = 2048;
+constexpr size_t kRememberedPerShard = kRemembered / kShards;
+// Extra sweeps a hit can buy: 8 lives in all with the ref bit's own sweep.
+constexpr uint8_t kMaxWeight = 7;
 
 struct Key {
     std::string path;
@@ -65,77 +89,128 @@ struct Shard {
     std::mutex mu;
     std::unordered_map<Key, DrakenChunkEntry*, KeyHash> map;
     std::unordered_set<Key, KeyHash> incomplete;
-    std::vector<DrakenChunkEntry*> ring;
+    std::deque<DrakenChunkEntry*> probation;    // FIFO, oldest at the front
+    std::vector<DrakenChunkEntry*> ring;        // MAIN
     size_t hand = 0;
+    std::deque<Key> remembered;                 // oldest at the front
+    std::unordered_set<Key, KeyHash> remembered_set;
 };
 
 Shard g_shards[kShards];
 std::atomic<size_t> g_next_shard{0};
 
 std::atomic<int64_t> g_entries{0}, g_hits{0}, g_misses{0}, g_inserts{0}, g_refused{0},
-    g_evictions{0}, g_give_way{0};
+    g_evictions{0}, g_give_way{0}, g_probation_bytes{0}, g_promotions{0},
+    g_remembered_hits{0};
+
+// Why an eviction is happening. Only an ADMIT eviction from probation is a
+// verdict on the chunk ("filled, not used again"), so only it is remembered.
+enum class Why { kAdmit, kGiveWay, kFlush };
+
+// Extra sweeps for a chunk costing `cost_ns` to rebuild: floor(log2(ns per
+// byte)), clamped to [0, kMaxWeight]. Under 2 ns/byte (a local decompress) is
+// plain CLOCK; a remote fetch's fixed latency makes small chunks heavy.
+uint8_t weight_for(int64_t cost_ns, int64_t bytes) {
+    const double per_byte = static_cast<double>(cost_ns) / static_cast<double>(bytes);
+    if (!(per_byte >= 2.0)) return 0;
+    const double w = std::floor(std::log2(per_byte));
+    return w >= kMaxWeight ? kMaxWeight : static_cast<uint8_t>(w);
+}
 
 void destroy(DrakenChunkEntry* e) {
     std::free(e->buffer);
     delete e;
 }
 
-// Under the shard lock: drop ring[i].
-void evict_at(Shard& sh, size_t i) {
-    DrakenChunkEntry* e = sh.ring[i];
+void remember(Shard& sh, const Key& k) {
+    if (!sh.remembered_set.insert(k).second) return;
+    sh.remembered.push_back(k);
+    if (sh.remembered.size() > kRememberedPerShard) {
+        sh.remembered_set.erase(sh.remembered.front());
+        sh.remembered.pop_front();
+    }
+}
+
+// Under the shard lock, after `e` has left its queue: drop it from the cache.
+void drop(Shard& sh, DrakenChunkEntry* e) {
     sh.map.erase(Key{e->path, e->offset});
-    sh.ring[i] = sh.ring.back();
-    sh.ring.pop_back();
-    if (sh.hand >= sh.ring.size()) sh.hand = 0;
+    if (!e->main) g_probation_bytes.fetch_sub(e->bytes, std::memory_order_relaxed);
     draken_mem_cache_sub(e->bytes);
     g_entries.fetch_sub(1, std::memory_order_relaxed);
     const uint32_t prev = e->state.fetch_or(kEvicted, std::memory_order_acq_rel);
     if ((prev & kPinMask) == 0) destroy(e);
 }
 
-// Free one entry from one shard. `respect_cost`: refuse to evict an entry that
-// is more expensive per byte than `incoming_cost` (admission). Returns
-// 1 evicted, 0 nothing evictable here, -1 admission says keep the residents.
-int evict_one(Shard& sh, bool respect_cost, double incoming_cost, int64_t* freed) {
+// Free one entry from one shard. Returns 1 evicted, 0 nothing here.
+int evict_one(Shard& sh, Why why, int64_t* freed) {
     std::lock_guard<std::mutex> lk(sh.mu);
-    const size_t n = sh.ring.size();
-    for (size_t step = 0; step < 2 * n && !sh.ring.empty(); ++step) {
-        if (sh.hand >= sh.ring.size()) sh.hand = 0;
-        DrakenChunkEntry* e = sh.ring[sh.hand];
-        if (e->ref.exchange(0, std::memory_order_relaxed) != 0) {
-            ++sh.hand;
+    const int64_t probation_cap = draken_mem_cache_limit() * kProbationPercent / 100;
+    // Probation first while it is over its share (or MAIN is empty).
+    while (!sh.probation.empty() &&
+           (why == Why::kFlush || sh.ring.empty() ||
+            g_probation_bytes.load(std::memory_order_relaxed) > probation_cap)) {
+        DrakenChunkEntry* e = sh.probation.front();
+        sh.probation.pop_front();
+        if (why != Why::kFlush && e->ref.exchange(0, std::memory_order_relaxed) != 0) {
+            e->main = true;   // used while on probation: promote
+            e->lives = e->weight;
+            g_probation_bytes.fetch_sub(e->bytes, std::memory_order_relaxed);
+            sh.ring.push_back(e);
+            g_promotions.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
-        if (respect_cost && e->cost_per_byte > incoming_cost) return -1;
+        if (why == Why::kAdmit) remember(sh, Key{e->path, e->offset});
         *freed = e->bytes;
-        evict_at(sh, sh.hand);
+        drop(sh, e);
+        return 1;
+    }
+    // MAIN: CLOCK. A set ref bit becomes `weight` extra sweeps; each sweep
+    // spends one. Bounded: every entry is evictable within kMaxWeight + 2 laps.
+    const size_t n = sh.ring.size();
+    for (size_t step = 0; step < (kMaxWeight + 2) * n && !sh.ring.empty(); ++step) {
+        if (sh.hand >= sh.ring.size()) sh.hand = 0;
+        DrakenChunkEntry* e = sh.ring[sh.hand];
+        if (why != Why::kFlush) {
+            if (e->ref.exchange(0, std::memory_order_relaxed) != 0) {
+                e->lives = e->weight;
+                ++sh.hand;
+                continue;
+            }
+            if (e->lives > 0) {
+                --e->lives;
+                ++sh.hand;
+                continue;
+            }
+        }
+        sh.ring[sh.hand] = sh.ring.back();
+        sh.ring.pop_back();
+        if (sh.hand >= sh.ring.size()) sh.hand = 0;
+        *freed = e->bytes;
+        drop(sh, e);
         return 1;
     }
     return 0;
 }
 
-// Evict until the cache holds at most `target` bytes. With `respect_cost`,
-// stop (return false) at the first resident worth more per byte than the
-// incoming entry.
-bool make_room(int64_t target, bool respect_cost, double incoming_cost, bool give_way) {
+// Evict until the cache holds at most `target` bytes. False when the shards
+// hold nothing more to evict (everything left is pinned or gone).
+bool make_room(int64_t target, Why why) {
     size_t idle = 0;
     while (draken_mem_cache_bytes() > target) {
         Shard& sh = g_shards[g_next_shard.fetch_add(1, std::memory_order_relaxed) % kShards];
         int64_t freed = 0;
-        const int r = evict_one(sh, respect_cost, incoming_cost, &freed);
-        if (r < 0) return false;
-        if (r == 0) {
+        if (evict_one(sh, why, &freed) == 0) {
             if (++idle >= kShards) return draken_mem_cache_bytes() <= target;
             continue;
         }
         idle = 0;
-        if (give_way) g_give_way.fetch_add(freed, std::memory_order_relaxed);
-        else g_evictions.fetch_add(1, std::memory_order_relaxed);
+        if (why == Why::kGiveWay) g_give_way.fetch_add(freed, std::memory_order_relaxed);
+        else if (why == Why::kAdmit) g_evictions.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
 }
 
-void shrink_to(int64_t target) { make_room(target, false, 0.0, true); }
+void shrink_to(int64_t target) { make_room(target, Why::kGiveWay); }
 
 Shard& shard_for(const Key& k) { return g_shards[KeyHash{}(k) % kShards]; }
 
@@ -212,7 +287,6 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
         g_refused.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
-    const double cost = static_cast<double>(cost_ns) / static_cast<double>(buffer_bytes);
     const int64_t limit = draken_mem_cache_limit();
     // Under query-memory pressure (the limit is below the budget) an insert may
     // only use free room: evicting residents to admit would refill the cache the
@@ -220,7 +294,7 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
     const bool pressure = limit < budget;
     const bool fits_free = draken_mem_cache_bytes() + buffer_bytes <= limit;
     if (buffer_bytes > limit || (pressure && !fits_free) ||
-        (!fits_free && !make_room(limit - buffer_bytes, true, cost, false))) {
+        (!fits_free && !make_room(limit - buffer_bytes, Why::kAdmit))) {
         std::free(buffer);
         g_refused.fetch_add(1, std::memory_order_relaxed);
         return 0;
@@ -231,7 +305,7 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
     e->offset = chunk_offset;
     e->buffer = buffer;
     e->bytes = buffer_bytes;
-    e->cost_per_byte = cost;
+    e->weight = weight_for(cost_ns, buffer_bytes);
     e->index.reserve(static_cast<size_t>(npages) * 3);
     std::vector<size_t> order(static_cast<size_t>(npages));
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -252,8 +326,18 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
             g_refused.fetch_add(1, std::memory_order_relaxed);
             return 0;
         }
+        if (sh.remembered_set.erase(k) != 0) {
+            // Evicted from probation recently and wanted again: straight to MAIN.
+            sh.remembered.erase(std::find(sh.remembered.begin(), sh.remembered.end(), k));
+            e->main = true;
+            e->lives = e->weight;
+            sh.ring.push_back(e);
+            g_remembered_hits.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            sh.probation.push_back(e);
+            g_probation_bytes.fetch_add(buffer_bytes, std::memory_order_relaxed);
+        }
         sh.map.emplace(std::move(k), e);
-        sh.ring.push_back(e);
         draken_mem_cache_add(buffer_bytes);
     }
     g_entries.fetch_add(1, std::memory_order_relaxed);
@@ -261,7 +345,14 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
     return 1;
 }
 
-void draken_cc_flush(void) { make_room(0, false, 0.0, false); }
+void draken_cc_flush(void) {
+    make_room(0, Why::kFlush);
+    for (Shard& sh : g_shards) {
+        std::lock_guard<std::mutex> lk(sh.mu);
+        sh.remembered.clear();
+        sh.remembered_set.clear();
+    }
+}
 
 DrakenChunkCacheStats draken_cc_stats(void) {
     DrakenChunkCacheStats s;
@@ -273,6 +364,9 @@ DrakenChunkCacheStats draken_cc_stats(void) {
     s.refused = g_refused.load(std::memory_order_relaxed);
     s.evictions = g_evictions.load(std::memory_order_relaxed);
     s.give_way_bytes = g_give_way.load(std::memory_order_relaxed);
+    s.probation_bytes = g_probation_bytes.load(std::memory_order_relaxed);
+    s.promotions = g_promotions.load(std::memory_order_relaxed);
+    s.remembered_hits = g_remembered_hits.load(std::memory_order_relaxed);
     return s;
 }
 

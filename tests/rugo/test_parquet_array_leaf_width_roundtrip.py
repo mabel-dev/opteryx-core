@@ -156,7 +156,7 @@ def test_array_agg_over_a_narrow_column_roundtrips_at_its_width():
             ("f32", dn.FLOAT32, "float"),
         ):
             sql = f"SELECT k, ARRAY_AGG({column}) AS a FROM '{data_dir}' GROUP BY k"
-            morsel = next(iter(session.execute_to_morsels(sql)))
+            morsel = Morsel.combine(list(session.execute_to_morsels(sql)))
             assert morsel.column(b"a")._nb.array_child_type == element_type
 
             buf = rp.write_parquet(morsel, compression="none")
@@ -196,7 +196,7 @@ def test_opteryx_scan_binds_and_produces_the_same_leaf_width(
     assert str(declared["a"]) == f"ARRAY<{element_type.name}>", declared
 
     session = opteryx.session()
-    morsel = next(iter(session.execute_to_morsels(f"SELECT * FROM '{data_dir}'")))
+    morsel = Morsel.combine(list(session.execute_to_morsels(f"SELECT * FROM '{data_dir}'")))
     column = morsel.column(b"a")
     assert column._nb.array_child_type == element_type
     assert column.to_pylist() == rows

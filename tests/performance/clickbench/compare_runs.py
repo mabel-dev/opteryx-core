@@ -90,7 +90,7 @@ def main():
     regressions = []
     improvements = []
     
-    for i, (t_base, t_comp) in enumerate(zip(baseline_times, comparison_times), 1):
+    for i, (t_base, t_comp) in enumerate(zip(baseline_times, comparison_times)):
         if t_base is None or t_comp is None:
             delta_str = 'N/A'
             change_str = 'N/A'

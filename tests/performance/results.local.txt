@@ -1,20 +1,20 @@
 make clickbench-rugo    5.54s     (07-OCT) [0.52x]
 make clickbench-skene   6.75s     (06-OCT) [0.63x]
-make clickbench-canon   7.68s     (06-OCT) [0.72x] [8.65s post caching change]
-make tpch-sf1           402.4ms   (07-OCT) [1.16x]
-make tpch-sf10          2664.9ms  (01-OCT) [0.64x]
+make clickbench-canon   6.93s     (07-OCT) [0.65x]
+make tpch-sf1           396.9ms   (08-OCT) [1.14x]
+make tpch-sf10          2655.5ms  (08-OCT) [0.64x]
 make tpch-sf100         29065.8ms (30-SEP) [0.95x]
 make tpcds-sf1          20.7s     (06-OCT) [1 fails (Q51)]
 make tpcds-sf001        17.2s     (06-OCT) [1 fails (Q51)]
 make ssb-sf1            201.9ms   (06-OCT) [1.77x]
 make ssb-sf10           1403.4ms  (06-OCT) [1.62x]
 make ssb-sf100          15216.6ms (06-OCT) [1.73x]
-make medicare1          202.6ms   (26-SEP) [1.17x]
-make job                5946.2ms  (29-SEP) [0.88x]
+make medicare1          172.3ms   (08-OCT) [0.99x]
+make job                5890.0ms  (08-OCT) [0.87x]
 make h2o (medium)       30.3s     (06-OCT)
 make jsonbench-10-jsonl 926.4ms   (06-OCT) [0.36x]
 make jsonbench-10-zstd  1769.6ms  (05-OCT) [0.68x]
-make dash               120.7ms   (06-OCT) [1.33x]
+make dash               102.2ms   (08-OCT) [1.13x]
 make signals            0.5s      (03-OCT)
 
 make tpch-sf10-aistor - 151426.7ms - 36.28x
