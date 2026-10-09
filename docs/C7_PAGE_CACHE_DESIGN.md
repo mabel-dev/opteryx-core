@@ -997,3 +997,44 @@ decompress, fetch 0 for local files; extra sweeps capped.
   32 GiB box 15.2 GiB; c6a.4xlarge ≈ 14.5 GiB).
 - Outstanding: leave-one-out (probation, remembered keys, cost weighting);
   one-process x86 A/B at the new budget.
+
+## 28. Measured at 60% − 4 GiB; rulings 2026-10-09
+
+**c6a.4xlarge, official ClickBench shape** (commit 79cdd20c; each query in a
+fresh process, 3 tries back to back; arms on/off/on/off; canon 100 files):
+
+| | Hot (Σ best of tries 2–3) | Cold (Σ try 1) |
+|---|---|---|
+| 60% on / off | **0.903** (pairs 0.903 / 0.902) | 0.999 (pairs 0.936 / 1.070 — the two off arms differed 13%) |
+| 70% on / off (§25 era) | 0.896 | 1.064 |
+
+Peak cache 7.74 GiB, 0 evictions: in this shape the budget never binds, so the
+result cannot separate 60% from 70% (any budget ≥ ~7.74 GiB answers the same).
+Hot best Q21 0.65, Q23 0.66, Q22 0.68, Q28 0.79; worst Q39 1.04 (63 → 66 ms).
+Cold worst Q21 1.51, Q22 1.39, Q28 1.26 (fill cost).
+
+The one-process round-robin suite (43 queries × 5 rounds in one process) is the
+cache's worst case — the whole working set cycles before any reuse — and is not
+a production workload. At 60% on the c6a it ran 2.1–2.35× slower: the OS page
+cache fell from 17.6 GB to 1–3 GB (IO pressure ~84%) because the limit
+(container − reserve − charged) leaves only the 4 GiB reserve for memory
+outside the account. Recorded as a fact, not a defect to fix.
+
+**Rulings 2026-10-09:**
+- Budget default **60% − 4 GiB** stands. Production: worker (ad hoc) 16 GiB →
+  5.6 GiB; **odata** 10 GiB runs `CHUNK_CACHE_MEMORY_PERCENT=80` (no joins, small
+  query memory) → 4 GiB (at 60% it sat exactly on the 2 GiB floor). Done.
+- Kept as built: lives = floor(log2(ns/byte)) capped at 7 extra sweeps; only
+  ADMIT evictions from probation are remembered; patient pass across shards.
+- `make chunk-cache-test` runs as part of `make q`.
+- Data-file compaction must not cache. Compaction is `OPTIMIZE TABLE` in this
+  engine (it moved from opteryx-catalog's DatasetCompactor): the serial engine's
+  CompactionCommit branch calls `execute_native(..., admit_to_chunk_cache=False)`,
+  the same effect as `SET chunk_cache_admit = false` (flush, admit nothing) with
+  no caller involvement. MERGE, which shares that branch, caches normally.
+  Test: tests/integration/test_optimize_local.py::test_optimize_never_fills_the_chunk_cache
+  (fails with the change reverted).
+- Leave-one-out: TEMPORARY switch `DRAKEN_CC_ABLATE` (comma list of
+  `probation`, `remember`, `cost`; unknown name aborts), read once per process.
+  Each switch verified to break exactly its own policy test. Remove after the
+  runs are banked.

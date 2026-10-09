@@ -6981,10 +6981,15 @@ def compile_to_native(plan, pool=None):
             compiler.footer_fetch_ns, compiler.runtime_bounds_wired)
 
 
-def execute_native(plan, telemetry=None, trace_sink=None):
+def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=True):
     """THE data executor: compile to the native pipeline graph and run it. Returns the
     ``(generator, ResultType)`` contract the cursor consumes. The generator drains the
     engine's output queue; the engine runs on its own native driver + worker pool.
+
+    ``admit_to_chunk_cache``: False for a statement whose scans must never fill the
+    cross-query chunk cache whatever the session says - OPTIMIZE (data-file
+    compaction) reads every row of the files it is about to replace. Same effect as
+    ``SET chunk_cache_admit = false``: the cache is flushed and nothing is admitted.
 
     ``trace_sink``: an optional opteryx.models.trace_bundle.TraceBundle. When
     tracing is armed (config.OPTERYX_TRACE), the drained span blob and symbol
@@ -7120,7 +7125,9 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         # Chunk cache (C7): `chunk_cache_admit = false` (compaction-style jobs) flushes
         # the cache and keeps this statement's scans from filling it. Set on every
         # scan plan before the engine submits a single row group.
-        _chunk_cache_admit = bool(_resolve_var("chunk_cache_admit", _query_variables, True))
+        _chunk_cache_admit = admit_to_chunk_cache and bool(
+            _resolve_var("chunk_cache_admit", _query_variables, True)
+        )
         if not _chunk_cache_admit:
             flush_chunk_cache()
         for _sp in nplan.scan_plans:

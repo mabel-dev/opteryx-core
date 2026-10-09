@@ -138,7 +138,13 @@ def execute(
             )
         from opteryx.managers.execution.compiler import execute_native
 
-        generator, _ = execute_native(subplan, telemetry=telemetry)
+        # Compaction never fills the chunk cache (ruling 2026-10-09): it reads
+        # every row of files it is about to replace, once. MERGE caches normally.
+        generator, _ = execute_native(
+            subplan,
+            telemetry=telemetry,
+            admit_to_chunk_cache=not isinstance(head_node, CompactionCommitNode),
+        )
         for morsel in generator:
             head_node._push_impl(morsel)
         head_node._push_impl(EOS)

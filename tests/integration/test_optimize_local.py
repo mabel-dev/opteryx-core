@@ -213,3 +213,41 @@ def test_optimize_writes_one_file_of_many_row_groups_and_never_reads_it_back(opt
     # A second pass has nothing left to do: one file, no delete debt.
     list(opteryx.session(user="tester").execute_to_morsels(f"OPTIMIZE TABLE {TARGET}"))
     assert target.snapshot(None).snapshot_id == snap.snapshot_id
+
+
+def test_optimize_never_fills_the_chunk_cache(optimize_env):
+    """Compaction reads every row of files it is about to replace, once: it must
+    not fill the cross-query chunk cache (ruling 2026-10-09). A plain SELECT over
+    the same files does fill it, so the scan itself is cacheable."""
+    from opteryx import config
+    from opteryx.compiled.platform import cgroup_memory_limit_bytes, physical_memory_total_bytes
+    from opteryx.compiled.structures.memory_pool import (
+        chunk_cache_stats,
+        configure_chunk_cache,
+        flush_chunk_cache,
+    )
+
+    container = cgroup_memory_limit_bytes() or physical_memory_total_bytes()
+    configure_chunk_cache(12 << 30, 100, 4 << 30)
+    try:
+        flush_chunk_cache()
+        before = chunk_cache_stats()["inserts"]
+        assert _scalar(f"SELECT COUNT(*) FROM {TARGET} WHERE k % 7 = 3") > 0
+        filled = chunk_cache_stats()["inserts"]
+        assert filled > before, "a plain SELECT over the seed files filled nothing"
+
+        # Empty again, so OPTIMIZE's reads are misses that a caching scan would fill.
+        flush_chunk_cache()
+        list(opteryx.session(user="tester").execute_to_morsels(f"OPTIMIZE TABLE {TARGET}"))
+        after = chunk_cache_stats()
+        assert after["inserts"] == filled, "OPTIMIZE filled the chunk cache"
+        assert after["bytes"] == 0
+        assert target_snapshot_is_compaction(optimize_env)
+    finally:
+        flush_chunk_cache()
+        configure_chunk_cache(container, config.CHUNK_CACHE_MEMORY_PERCENT, config.CHUNK_CACHE_RESERVE_BYTES)
+
+
+def target_snapshot_is_compaction(env):
+    target, _ = env
+    return target.snapshot(None).operation_type == "compact"

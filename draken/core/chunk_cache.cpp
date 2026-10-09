@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -103,6 +104,42 @@ std::atomic<int64_t> g_entries{0}, g_hits{0}, g_misses{0}, g_inserts{0}, g_refus
     g_evictions{0}, g_give_way{0}, g_probation_bytes{0}, g_promotions{0},
     g_remembered_hits{0};
 
+// TEMPORARY leave-one-out switch (C7 §27, ruling: every policy part is kept
+// only if turning it off measures slower). DRAKEN_CC_ABLATE is a comma list of
+// parts to turn OFF, read once per process:
+//   probation  new chunks go straight to MAIN (no S3-FIFO admission)
+//   remember   probation evictions are not remembered
+//   cost       every chunk gets weight 0 (plain CLOCK)
+// An unknown name aborts. Removed once the leave-one-out runs are banked.
+struct Ablate {
+    bool probation = false, remember = false, cost = false;
+};
+
+const Ablate& ablate() {
+    static const Ablate a = []() {
+        Ablate r;
+        const char* v = std::getenv("DRAKEN_CC_ABLATE");
+        std::string s = v ? v : "";
+        size_t start = 0;
+        while (start < s.size()) {
+            size_t end = s.find(',', start);
+            if (end == std::string::npos) end = s.size();
+            const std::string part = s.substr(start, end - start);
+            if (part == "probation") r.probation = true;
+            else if (part == "remember") r.remember = true;
+            else if (part == "cost") r.cost = true;
+            else if (!part.empty()) {
+                std::fprintf(stderr, "DRAKEN_CC_ABLATE: unknown part '%s' (probation, remember, cost)\n",
+                             part.c_str());
+                std::abort();
+            }
+            start = end + 1;
+        }
+        return r;
+    }();
+    return a;
+}
+
 // Why an eviction is happening. Only an ADMIT eviction from probation is a
 // verdict on the chunk ("filled, not used again"), so only it is remembered.
 enum class Why { kAdmit, kGiveWay, kFlush };
@@ -111,6 +148,7 @@ enum class Why { kAdmit, kGiveWay, kFlush };
 // byte)), clamped to [0, kMaxWeight]. Under 2 ns/byte (a local decompress) is
 // plain CLOCK; a remote fetch's fixed latency makes small chunks heavy.
 uint8_t weight_for(int64_t cost_ns, int64_t bytes) {
+    if (ablate().cost) return 0;
     const double per_byte = static_cast<double>(cost_ns) / static_cast<double>(bytes);
     if (!(per_byte >= 2.0)) return 0;
     const double w = std::floor(std::log2(per_byte));
@@ -123,6 +161,7 @@ void destroy(DrakenChunkEntry* e) {
 }
 
 void remember(Shard& sh, const Key& k) {
+    if (ablate().remember) return;
     if (!sh.remembered_set.insert(k).second) return;
     sh.remembered.push_back(k);
     if (sh.remembered.size() > kRememberedPerShard) {
@@ -342,7 +381,11 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
             g_refused.fetch_add(1, std::memory_order_relaxed);
             return 0;
         }
-        if (sh.remembered_set.erase(k) != 0) {
+        if (ablate().probation) {
+            e->main = true;
+            e->lives = e->weight;
+            sh.ring.push_back(e);
+        } else if (sh.remembered_set.erase(k) != 0) {
             // Evicted from probation recently and wanted again: straight to MAIN.
             sh.remembered.erase(std::find(sh.remembered.begin(), sh.remembered.end(), k));
             e->main = true;

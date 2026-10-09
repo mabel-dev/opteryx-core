@@ -216,6 +216,7 @@ q:
 	@$(PYTEST) tests/integration/sql_battery/test_is_json.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
 	@$(PYTEST) tests/integration/test_row_identity_native_scan_local.py -q
+	@$(MAKE) --no-print-directory chunk-cache-test
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
