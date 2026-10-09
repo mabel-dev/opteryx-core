@@ -3343,6 +3343,7 @@ struct GroupByLocal : LocalSinkState {
     // DISTINCT operand: the shapes the dict code pass and the direct array cover.
     bool row_kinds_only = false;
     bool codepass_on = true;          // OPTERYX_GB_CODEPASS (read per query)
+    bool dict_first_on = true;        // OPTERYX_GB_DICTFIRST (read per query)
     // DIRECT-ARRAY state (see GBDirectArray notes above gb_da_key_pass). Groups are
     // slots: `da` holds grows (always — it is the occupancy) and one lane set per
     // spec, indexed by slot id. Never indexed, never hashed; spilled into `parts`.
@@ -3511,6 +3512,8 @@ struct GroupBySink : Sink {
             if (v != nullptr && v[0] == '0' && v[1] == '\0') l->da_mode = -1;
             const char* c = getenv("OPTERYX_GB_CODEPASS");
             l->codepass_on = !(c != nullptr && c[0] == '0' && c[1] == '\0');
+            const char* f = getenv("OPTERYX_GB_DICTFIRST");
+            l->dict_first_on = !(f != nullptr && f[0] == '0' && f[1] == '\0');
         }
         if (low_card) {
             for (auto& P : l->parts) P.use_parvi = true;
@@ -4195,16 +4198,47 @@ struct GroupBySink : Sink {
             return SinkResult::CONTINUE;
         }
 
+        static const bool gb_dict_on = []() {
+            const char* v = getenv("OPTERYX_GB_DICT");
+            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        }();
+        static const uint32_t kGBDictMaxDistinct = 1u << 14;  // 16,384
+        static const uint32_t kGBDictMinRatio = 2;            // distinct*2 <= rows
+
         // DIRECT ARRAY: no hash, no probe — see gb_da_key_pass. A morsel outside this
         // worker's layout spills the slot state into the partitions and is hashed
         // below, as is every later morsel of this worker.
-        if (l.da_mode == 0) da_arm(l, in);
-        if (l.da_mode == 1) {
-            if (da_sink(l, in, err)) return SinkResult::CONTINUE;
-            if (err.code != 0) return SinkResult::CONTINUE;
-            groupby_tel::da_fallbacks.fetch_add(1, std::memory_order_relaxed);
-            da_spill(g_, l, err);
-            if (err.code != 0) return SinkResult::CONTINUE;
+        //
+        // DICTIONARY FIRST (architect, 2026-10-09): a single key that arrives
+        // dictionary-shaped, clears the dict path's gate, and will be aggregated by
+        // the code pass goes to the dict path instead — measured faster there
+        // (CounterID 0.93 vs 0.97, RegionID 0.92 vs 0.96 of baseline). Decided per
+        // morsel from the key vector's canonical shape predicate; the dict path's
+        // groups and the slots meet by hash identity when the slots spill at combine.
+        // Arming waits for the first morsel the direct array actually takes, so a
+        // worker that only ever sees dictionary morsels never allocates slots.
+        // OPTERYX_GB_DICTFIRST=0 disables (read per query).
+        if (l.da_mode >= 0) {
+            bool dict_first = false;
+            if (l.dict_first_on && l.codepass_on && gb_dict_on && key_idx.size() == 1) {
+                const DrakenVector& kv = in->columns[key_idx[0]].view;
+                dict_first = draken_is_compressed(&kv)
+                    && kv.data_length <= kGBDictMaxDistinct
+                    && static_cast<uint64_t>(kv.data_length) * kGBDictMinRatio
+                           <= static_cast<uint64_t>(rows);
+            }
+            if (dict_first) {
+                groupby_tel::da_dict_first.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                if (l.da_mode == 0) da_arm(l, in);
+                if (l.da_mode == 1) {
+                    if (da_sink(l, in, err)) return SinkResult::CONTINUE;
+                    if (err.code != 0) return SinkResult::CONTINUE;
+                    groupby_tel::da_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                    da_spill(g_, l, err);
+                    if (err.code != 0) return SinkResult::CONTINUE;
+                }
+            }
         }
 
         // Pass A: draken owns the key hash for the whole morsel (cxx_hash_c is
@@ -4227,13 +4261,8 @@ struct GroupBySink : Sink {
         // must actually be compressed, and must clear a compression ratio so we
         // never pay the side-array setup for a near-unique column (UserID at ~50k
         // distinct per 65k-row morsel correctly falls through to the dense path).
-        // OPTERYX_GB_DICT=0 disables, for A/B from one binary.
-        static const bool gb_dict_on = []() {
-            const char* v = getenv("OPTERYX_GB_DICT");
-            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
-        }();
-        static const uint32_t kGBDictMaxDistinct = 1u << 14;  // 16,384
-        static const uint32_t kGBDictMinRatio = 2;            // distinct*2 <= rows
+        // OPTERYX_GB_DICT=0 disables, for A/B from one binary. (Gate constants are
+        // declared above the direct-array dispatch, which reads them too.)
 
         // The dict path itself is kind-agnostic (probe once per distinct value). What
         // differs is pass C: all-COUNT(*) and the row kinds (row_kinds_only) run

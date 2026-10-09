@@ -45,6 +45,7 @@ inline std::atomic<long long> da_layouts_stats {0};    // direct-array layouts f
 inline std::atomic<long long> da_layouts_prescan {0};  // ...fixed from a first-morsel prescan
 inline std::atomic<long long> da_rejects {0};          // layout over the slot budget: worker hashes
 inline std::atomic<long long> da_fallbacks {0};        // key outside the layout: state spilled to hashing
+inline std::atomic<long long> da_dict_first {0};       // morsels routed to the dict path ahead of the direct array
 inline std::atomic<long long> dict_codepass {0};       // dict-path morsels aggregated through codes
 
 inline void reset() {
@@ -66,6 +67,7 @@ inline void reset() {
     da_layouts_prescan.store(0, std::memory_order_relaxed);
     da_rejects.store(0, std::memory_order_relaxed);
     da_fallbacks.store(0, std::memory_order_relaxed);
+    da_dict_first.store(0, std::memory_order_relaxed);
     dict_codepass.store(0, std::memory_order_relaxed);
 }
 
@@ -97,6 +99,7 @@ inline long long da_layouts_stats_count()   { return da_layouts_stats.load(std::
 inline long long da_layouts_prescan_count() { return da_layouts_prescan.load(std::memory_order_relaxed); }
 inline long long da_rejects_count()         { return da_rejects.load(std::memory_order_relaxed); }
 inline long long da_fallbacks_count()       { return da_fallbacks.load(std::memory_order_relaxed); }
+inline long long da_dict_first_count()      { return da_dict_first.load(std::memory_order_relaxed); }
 inline long long dict_codepass_count()      { return dict_codepass.load(std::memory_order_relaxed); }
 
 }  // namespace opteryx::engine::groupby_tel
