@@ -926,8 +926,15 @@ SELECT COUNT(DISTINCT id) FROM $planets; -- INTEGER
 statement ok
 SELECT COUNT(DISTINCT gravity) FROM $planets; -- DECIMAL
 
-statement ok
+# COUNT(DISTINCT <ARRAY>) and APPROX_COUNT_DISTINCT(<ARRAY>) are refused at bind
+# time: there is no ARRAY value hash. The COUNT(DISTINCT) entry was `statement ok`
+# while the worker's exception was swallowed and the query silently returned an
+# empty result.
+statement error NotSupportedError
 SELECT COUNT(DISTINCT alma_mater) AS AM FROM testdata.astronauts; -- LIST<VARCHAR>
+
+statement error NotSupportedError
+SELECT APPROX_COUNT_DISTINCT(alma_mater) FROM testdata.astronauts; -- LIST<VARCHAR>
 
 statement ok
 SELECT COUNT(DISTINCT birth_place) FROM testdata.astronauts; -- JSONB/STRUCT

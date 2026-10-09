@@ -51,6 +51,7 @@
 #include <string>
 #include <vector>
 
+#include "fork_join.hpp"   // fork_join — exception-safe fan-out
 #include "logical_type.h"
 #include "native_group_sinks.hpp"   // agg2_read_raw, agg2_read_i128, agg2_operand_supported
 #include "native_sort.hpp"          // SortKeySpec, build_sort_keys, sort_perm, win_keys_equal,
@@ -502,11 +503,7 @@ struct FramedWindowSink : Sink, EmitSubset {
                 chunk_out[ci] = std::move(m);
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(nt > 0 ? nt - 1 : 0);
-        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
-        worker(0);
-        for (std::thread& t : threads) t.join();
+        fork_join(nt, worker);
         for (ErrCtx& e : errs) {
             if (e.code != 0) { err = e; return; }
         }

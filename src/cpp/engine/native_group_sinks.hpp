@@ -66,6 +66,7 @@
 #include "core/append_buffer.h"   // draken::AppendBuffer — key-store raw/arena
 #include "core/tracked_allocator.h"   // draken::tracked_vector — partition arrays charged to the memory account
 
+#include "fork_join.hpp"   // fork_join — exception-safe fan-out
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
 #include "groupby_tel.hpp"       // diagnostic hash/probe/apply phase timing (GroupBySink::sink)
@@ -2579,11 +2580,7 @@ struct UngroupedAggSink : Sink {
                         if (specs[sp].distinct_operand) item_sets[it] = std::move(merged);
                     }
                 };
-                std::vector<std::thread> threads;
-                threads.reserve(nt - 1);
-                for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
-                worker(0);
-                for (auto& th : threads) th.join();
+                fork_join(nt, worker);
             }
         }
         // Fold each distinct_operand spec's merged sets into its cell, in (spec,
@@ -2782,6 +2779,207 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             L.td.resize(n);
             return;
     }
+}
+
+// ---- row-kind pass C, shared by every keying path -----------------------------------
+// The per-row update of the plain numeric kinds is the same arithmetic whichever way
+// a row found its group: the hash path (partition of mk_hash[i], mk_ent[i]), the
+// dictionary path (partition and group of the row's CODE) or the direct-array path
+// (the row's slot). `at(i)` resolves row i to its lane set and group; the kind is
+// dispatched once, the loop is tight, and the resolver inlines.
+inline bool gb_kind_row_resolvable(GBKind k) {
+    switch (k) {
+        case GBKind::Valid: case GBKind::SumI: case GBKind::AvgI:
+        case GBKind::SumF: case GBKind::AvgF: case GBKind::MinMaxNum:
+            return true;
+        default:
+            return false;
+    }
+}
+
+struct GBRowLane {
+    GBLanes* L;
+    uint32_t e;
+};
+
+template <class Resolve>
+inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const DrakenVector& v,
+                              uint32_t rows, Resolve&& at, ErrCtx& err) {
+    const DrakenType   vtype  = v.type;
+    const void*        vdata  = v.data;
+    const uint32_t*    vsel   = v.selection;
+    const uint8_t*     vvalid = v.validity;   // nullptr ⟹ all rows valid
+    const bool         is_u64 = vtype == DRAKEN_UINT64;
+    auto row_ok = [vvalid](uint32_t i) -> bool {
+        return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
+    };
+    switch (kind) {
+        case GBKind::Valid:
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                const GBRowLane r = at(i);
+                r.L->valid[r.e] += 1;
+            }
+            return true;
+        case GBKind::SumI:
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                const GBRowLane r = at(i);
+                int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, false);
+                if (!agg2_sum_i64_add(r.L->i64[r.e], raw, is_u64)) {
+                    err.code = 1;
+                    err.msg = "SUM overflow: exact integer sum exceeds INT64 "
+                              "— fail loud, never a wrapped answer";
+                    return false;
+                }
+                r.L->valid[r.e] += 1;
+            }
+            return true;
+        case GBKind::AvgI:
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                const GBRowLane r = at(i);
+                r.L->i128[r.e] += agg2_raw_as_i128(
+                    agg2_read_raw_at(vtype, vdata, vsel, i, false), is_u64);
+                r.L->valid[r.e] += 1;
+            }
+            return true;
+        case GBKind::SumF:
+        case GBKind::AvgF:
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                const GBRowLane r = at(i);
+                int64_t bits = agg2_read_raw_at(vtype, vdata, vsel, i, true);
+                double d;
+                std::memcpy(&d, &bits, sizeof(d));
+                r.L->f64[r.e] += d;
+                r.L->valid[r.e] += 1;
+            }
+            return true;
+        case GBKind::MinMaxNum:
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                const GBRowLane r = at(i);
+                GBLanes& L = *r.L;
+                const uint32_t e = r.e;
+                uint64_t kk = sort_num_key(v, i);
+                if (L.valid[e] == 0 || (want_max ? kk > L.mkey[e] : kk < L.mkey[e])) {
+                    L.mkey[e] = kk;
+                    L.i64[e] = agg2_read_raw(v, i, is_f);
+                }
+                L.valid[e] += 1;
+            }
+            return true;
+        default:
+            err.code = 1;
+            err.msg = "gb_apply_row_kind: aggregate kind has no row-kind update — "
+                      "eligibility gate and dispatch disagree, fail loud";
+            return false;
+    }
+}
+
+// ---- DIRECT-ARRAY GROUP BY (PoC 2026-10-09, after Rayforce's "DA" path) ------------
+// Integer keys whose combined value range fits a slot budget need no hash and no
+// probe: each key maps to a digit (value - min, with one extra digit for NULL) and the
+// digits combine mixed-radix into one dense slot id, gid = Σ digit_k * stride_k. A
+// worker accumulates into arrays indexed by slot — only the lanes its specs need —
+// and at combine (or when a morsel falls outside the layout) its occupied slots are
+// turned into ordinary groups of the hash partitions, so the merge, top-k cut, seed
+// and emit downstream are the hash path's, unchanged.
+//
+// Layout: the planner's manifest bounds when every key has them, else a prescan of
+// the worker's first morsel. A key value outside the layout is never "handled" — the
+// worker spills what it has into the hash partitions and hashes from then on.
+// OPTERYX_GB_DA=0 disables (read per query, for A/B from one binary).
+constexpr size_t   kGBDAMaxKeys = 8;
+constexpr uint64_t kGBDAMinSlots = 262144;               // Rayforce: max(n/8, 262144)
+// Per-WORKER cap (architect, 2026-10-09). Rayforce's n/8 is a whole-column budget;
+// here every worker holds its own arrays, so n/8 alone grows with the table and the
+// DOP (100M rows x 16 workers ≈ GBs per aggregate). 2^20 bounds a worker at 8 MB of
+// occupancy plus 16-24 MB per aggregate lane, independent of n.
+constexpr uint64_t kGBDAMaxSlots = uint64_t(1) << 20;
+
+inline bool gb_da_key_type_ok(DrakenType t) {
+    switch (t) {
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32:
+        case DRAKEN_DATE32:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Static dispatch on the key's physical type, once per key per morsel.
+template <class F>
+inline void gb_da_with_type(DrakenType t, F&& f) {
+    switch (t) {
+        case DRAKEN_INT8:   f(int8_t{});   return;
+        case DRAKEN_INT16:  f(int16_t{});  return;
+        case DRAKEN_INT32:
+        case DRAKEN_DATE32: f(int32_t{});  return;
+        case DRAKEN_INT64:  f(int64_t{});  return;
+        case DRAKEN_UINT8:  f(uint8_t{});  return;
+        case DRAKEN_UINT16: f(uint16_t{}); return;
+        case DRAKEN_UINT32: f(uint32_t{}); return;
+        default:            return;   // unreachable: gb_da_key_type_ok gates capture
+    }
+}
+
+// Min/max of one key over the morsel's non-NULL rows. Returns false as soon as the
+// range alone exceeds `budget` (checked every 4096 rows — Rayforce's early abort).
+// any = false when every row is NULL.
+template <typename T>
+inline bool gb_da_prescan(const DrakenVector& v, uint32_t rows, uint64_t budget,
+                          int64_t& mn, int64_t& mx, bool& any) {
+    const T* d = static_cast<const T*>(v.data);
+    const uint32_t* sel = v.selection;
+    const uint8_t* val = v.validity;
+    int64_t lo = INT64_MAX, hi = INT64_MIN;
+    for (uint32_t base = 0; base < rows; base += 4096) {
+        const uint32_t end = rows - base < 4096 ? rows : base + 4096;
+        for (uint32_t i = base; i < end; ++i) {
+            if (val != nullptr && ((val[i >> 3] >> (i & 7)) & 1u) == 0) continue;
+            const int64_t x = static_cast<int64_t>(d[sel[i]]);
+            lo = x < lo ? x : lo;
+            hi = x > hi ? x : hi;
+        }
+        if (lo <= hi && static_cast<unsigned __int128>(
+                static_cast<__int128>(hi) - lo + 2) > budget)
+            return false;
+    }
+    any = lo <= hi;
+    mn = any ? lo : 0;
+    mx = any ? hi : 0;
+    return true;
+}
+
+// gid[i] += digit(row i) * stride. digit = value - min, NULL -> nullslot (the key's
+// last digit). Returns false when any non-NULL value falls outside [min, min+nullslot)
+// — the caller then discards gid, so the wrapped products of a bad row are harmless.
+template <typename T>
+inline bool gb_da_key_pass(const DrakenVector& v, int64_t mn, uint64_t nullslot,
+                           uint64_t stride, uint32_t* gid, uint32_t rows) {
+    const T* d = static_cast<const T*>(v.data);
+    const uint32_t* sel = v.selection;
+    const uint8_t* val = v.validity;
+    uint64_t bad = 0;
+    if (val == nullptr) {
+        for (uint32_t i = 0; i < rows; ++i) {
+            const uint64_t dg = static_cast<uint64_t>(static_cast<int64_t>(d[sel[i]]) - mn);
+            bad |= static_cast<uint64_t>(dg >= nullslot);
+            gid[i] += static_cast<uint32_t>(dg * stride);
+        }
+    } else {
+        for (uint32_t i = 0; i < rows; ++i) {
+            const bool ok = (val[i >> 3] >> (i & 7)) & 1u;
+            const uint64_t raw = static_cast<uint64_t>(static_cast<int64_t>(d[sel[i]]) - mn);
+            bad |= static_cast<uint64_t>(ok & (raw >= nullslot));
+            const uint64_t dg = ok ? raw : nullslot;
+            gid[i] += static_cast<uint32_t>(dg * stride);
+        }
+    }
+    return bad == 0;
 }
 
 // AggSpec2::distinct_operand, grouped: fold a merged partition's distinct
@@ -3141,6 +3339,20 @@ struct GroupByLocal : LocalSinkState {
     std::vector<GBXBatch> xstage;     // one per owner worker; moved out per morsel
     std::vector<int64_t>  xcnt;       // dict path: rows per distinct code this morsel
     std::vector<uint32_t> xrep;       // dict path: representative row per code
+    // Every spec is COUNT(*) or a row-kind (gb_kind_row_resolvable) without a
+    // DISTINCT operand: the shapes the dict code pass and the direct array cover.
+    bool row_kinds_only = false;
+    bool codepass_on = true;          // OPTERYX_GB_CODEPASS (read per query)
+    // DIRECT-ARRAY state (see GBDirectArray notes above gb_da_key_pass). Groups are
+    // slots: `da` holds grows (always — it is the occupancy) and one lane set per
+    // spec, indexed by slot id. Never indexed, never hashed; spilled into `parts`.
+    int8_t da_mode = 0;               // 0 = undecided, 1 = armed, -1 = off for this worker
+    std::vector<int64_t>  da_min;     // per key
+    std::vector<uint64_t> da_dom;     // per key: value range + 1 NULL digit
+    std::vector<uint64_t> da_stride;  // per key: mixed-radix weight
+    uint64_t da_slots = 0;
+    GBPartition da;
+    std::vector<uint32_t> da_gid;     // per-row slot scratch
 };
 struct GroupByGlobal : GlobalSinkState {
     std::mutex mtx;
@@ -3215,6 +3427,12 @@ struct GroupBySink : Sink {
     // treat those groups exactly as sunk ones. groups == 0: none.
     GroupSeed seed;
 
+    // The planner's manifest bounds per key (direct-array layout hint) and the
+    // scans' total rows (slot budget). Empty = none given.
+    std::vector<int64_t> da_lo, da_hi;
+    std::vector<uint8_t> da_known;
+    int64_t da_rows = -1;
+
     // `kemit` has one entry per key (invariant enforced at the binding, which is the
     // only construction site and can raise) — false = hash the key, never store it.
     GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
@@ -3265,11 +3483,35 @@ struct GroupBySink : Sink {
         seed = std::move(s);
     }
 
+    // Plan-time (compiler, single-threaded).
+    void set_key_ranges(std::vector<int64_t> lo, std::vector<int64_t> hi,
+                        std::vector<uint8_t> known, int64_t rows) {
+        if (lo.size() != key_idx.size() || hi.size() != key_idx.size()
+                || known.size() != key_idx.size()) {
+            throw std::runtime_error("GROUP BY key ranges do not match the sink's keys");
+        }
+        for (size_t k = 0; k < known.size(); ++k) {
+            if (known[k] && lo[k] > hi[k])
+                throw std::runtime_error("GROUP BY key range has min > max");
+        }
+        da_lo = std::move(lo);
+        da_hi = std::move(hi);
+        da_known = std::move(known);
+        da_rows = rows;
+    }
+
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GroupByGlobal>();
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState& gs) override {
         auto l = std::make_unique<GroupByLocal>();
+        // Read per QUERY (FROZENcfg trap, see the routed flag below).
+        {
+            const char* v = getenv("OPTERYX_GB_DA");
+            if (v != nullptr && v[0] == '0' && v[1] == '\0') l->da_mode = -1;
+            const char* c = getenv("OPTERYX_GB_CODEPASS");
+            l->codepass_on = !(c != nullptr && c[0] == '0' && c[1] == '\0');
+        }
         if (low_card) {
             for (auto& P : l->parts) P.use_parvi = true;
             groupby_tel::parvi_sinks.fetch_add(1, std::memory_order_relaxed);
@@ -3518,7 +3760,191 @@ struct GroupBySink : Sink {
             l.meta[s].captured = true;
             l.kinds[s] = gb_kind_of(specs[s], l.meta[s]);
         }
+        l.row_kinds_only = true;
+        for (size_t s = 0; s < specs.size() && l.row_kinds_only; ++s) {
+            if (l.kinds[s] == GBKind::Rows) continue;
+            if (specs[s].distinct_operand || !gb_kind_row_resolvable(l.kinds[s]))
+                l.row_kinds_only = false;
+        }
+        bool da_ok = l.row_kinds_only && !key_idx.empty() && key_idx.size() <= kGBDAMaxKeys;
+        for (size_t k = 0; k < key_idx.size() && da_ok; ++k)
+            if (!gb_da_key_type_ok(l.key_meta[k].type)) da_ok = false;
+        if (!da_ok) l.da_mode = -1;
         return true;
+    }
+
+    // ---- direct-array path ----------------------------------------------------------
+    // Fix this worker's layout, from the planner's bounds when every key has one, else
+    // from this (its first) morsel. Leaves da_mode 1 (armed) or -1 (layout over the
+    // slot budget — this worker hashes).
+    void da_arm(GroupByLocal& l, const MorselPtr& in) {
+        const size_t K = key_idx.size();
+        uint64_t budget = kGBDAMinSlots;
+        if (da_rows > 0 && static_cast<uint64_t>(da_rows) / 8 > budget)
+            budget = static_cast<uint64_t>(da_rows) / 8;
+        if (budget > kGBDAMaxSlots) budget = kGBDAMaxSlots;
+        bool from_stats = da_known.size() == K;
+        for (size_t k = 0; k < K && from_stats; ++k)
+            if (!da_known[k]) from_stats = false;
+        l.da_min.assign(K, 0);
+        l.da_dom.assign(K, 0);
+        l.da_stride.assign(K, 0);
+        const uint32_t rows = in->num_rows();
+        unsigned __int128 slots = 1;
+        for (size_t k = 0; k < K; ++k) {
+            int64_t mn = 0, mx = 0;
+            if (from_stats) {
+                mn = da_lo[k];
+                mx = da_hi[k];
+            } else {
+                const DrakenVector& v = in->columns[key_idx[k]].view;
+                bool fits = true, any = false;
+                gb_da_with_type(v.type, [&](auto tag) {
+                    using T = decltype(tag);
+                    fits = gb_da_prescan<T>(v, rows, budget, mn, mx, any);
+                });
+                if (!fits) {
+                    l.da_mode = -1;
+                    groupby_tel::da_rejects.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+            }
+            const unsigned __int128 dom =
+                static_cast<unsigned __int128>(static_cast<__int128>(mx) - mn + 2);
+            l.da_min[k] = mn;
+            l.da_stride[k] = static_cast<uint64_t>(slots);
+            slots *= dom;
+            if (slots > budget) {
+                l.da_mode = -1;
+                groupby_tel::da_rejects.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            l.da_dom[k] = static_cast<uint64_t>(dom);
+        }
+        l.da_slots = static_cast<uint64_t>(slots);
+        l.da.grows.assign(l.da_slots, 0);
+        l.da.lanes.resize(specs.size());
+        for (size_t s = 0; s < specs.size(); ++s)
+            gb_lanes_resize(l.da.lanes[s], l.kinds[s], l.da_slots);
+        l.da_mode = 1;
+        (from_stats ? groupby_tel::da_layouts_stats : groupby_tel::da_layouts_prescan)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Aggregate one morsel into the slot arrays. Returns false with err clear when a
+    // key falls outside the layout (nothing was accumulated), false with err set on
+    // a real error.
+    bool da_sink(GroupByLocal& l, const MorselPtr& in, ErrCtx& err) {
+        const uint32_t rows = in->num_rows();
+        GROUPBY_TEL_START(_daA_t0);
+        l.da_gid.assign(rows, 0);
+        uint32_t* gid = l.da_gid.data();
+        for (size_t k = 0; k < key_idx.size(); ++k) {
+            const DrakenVector& v = in->columns[key_idx[k]].view;
+            bool ok = true;
+            const int64_t mn = l.da_min[k];
+            const uint64_t nullslot = l.da_dom[k] - 1;
+            const uint64_t stride = l.da_stride[k];
+            gb_da_with_type(v.type, [&](auto tag) {
+                using T = decltype(tag);
+                ok = gb_da_key_pass<T>(v, mn, nullslot, stride, gid, rows);
+            });
+            if (!ok) return false;
+        }
+        GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _daA_t0);
+        GROUPBY_TEL_START(_daC_t0);
+        int64_t* grows = l.da.grows.data();
+        for (uint32_t i = 0; i < rows; ++i) grows[gid[i]] += 1;
+        for (size_t s = 0; s < specs.size(); ++s) {
+            const GBKind kind = l.kinds[s];
+            if (kind == GBKind::Rows) continue;
+            GBLanes* L = &l.da.lanes[s];
+            if (!gb_apply_row_kind(kind, specs[s].fn == AggFn::Max, l.meta[s].is_float,
+                                   in->columns[static_cast<size_t>(specs[s].col_idx)].view,
+                                   rows, [L, gid](uint32_t i) { return GBRowLane{L, gid[i]}; },
+                                   err))
+                return false;
+        }
+        GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _daC_t0);
+        groupby_tel::da_morsels.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    // Turn every occupied slot into a group of the hash partitions — the key values
+    // are rebuilt from the slot id into a small key morsel and hashed by draken
+    // exactly as a sunk morsel's keys are, so the groups meet the hash path's (this
+    // worker's earlier ones, other workers', the seed's) by hash identity. The slot
+    // lanes then fold in through the merge's own combine arms. Leaves da_mode -1.
+    void da_spill(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
+        {
+            std::lock_guard<std::mutex> lk(g.mtx);
+            publish_meta(g, l);
+        }
+        const size_t K = key_idx.size();
+        std::vector<uint32_t> occ;
+        for (uint64_t s = 0; s < l.da_slots; ++s)
+            if (l.da.grows[s] != 0) occ.push_back(static_cast<uint32_t>(s));
+        const uint32_t n = static_cast<uint32_t>(occ.size());
+        if (n > 0) {
+            auto km = std::make_shared<CxxMorsel>();
+            std::vector<int64_t> raws(n);
+            std::vector<uint8_t> valid(n);
+            std::vector<size_t> kidx(K);
+            for (size_t k = 0; k < K; ++k) {
+                const uint64_t nullslot = l.da_dom[k] - 1;
+                for (uint32_t j = 0; j < n; ++j) {
+                    const uint64_t dg = (occ[j] / l.da_stride[k]) % l.da_dom[k];
+                    valid[j] = dg != nullslot;
+                    raws[j] = valid[j] ? l.da_min[k] + static_cast<int64_t>(dg) : 0;
+                }
+                km->columns.push_back(emit_fixed_column(raws.data(), valid.data(), n,
+                                                        l.key_meta[k].type,
+                                                        l.key_meta[k].logical, err));
+                if (err.code != 0) return;
+                km->names.push_back("k");
+                kidx[k] = k;
+            }
+            if (!compute_row_hashes(km, kidx, l.mk_hash, err)) return;
+            std::vector<uint32_t> ge(l.da_slots);
+            std::array<std::vector<uint32_t>, kGBParts> psel;
+            for (uint32_t j = 0; j < n; ++j) {
+                const uint64_t h = l.mk_hash[j];
+                const size_t pi = gb_part(h);
+                GBPartition& P = l.parts[pi];
+                int64_t gid = static_cast<int64_t>(P.hashes.size());
+                const bool is_new = l.raw || P.find_or_insert_group(h, gid, gid);
+                if (is_new) {
+                    P.hashes.push_back(h);
+                    for (size_t jj = 0; jj < store_key_pos.size(); ++jj) {
+                        P.keycols[jj].append_row(km->columns[store_key_pos[jj]].view, j,
+                                                 err, "GROUP BY key value");
+                        if (err.code != 0) return;
+                    }
+                }
+                ge[occ[j]] = static_cast<uint32_t>(gid);
+                psel[pi].push_back(occ[j]);
+            }
+            const size_t nspecs = specs.size();
+            for (size_t p = 0; p < kGBParts; ++p) {
+                if (psel[p].empty()) continue;
+                GBPartition& P = l.parts[p];
+                const size_t nn = P.size();
+                if (l.has_rows) P.grows.resize(nn);
+                if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
+                if (P.cd.size() != nspecs) init_cd(l, p, nspecs);
+                for (size_t s = 0; s < nspecs; ++s)
+                    gb_lanes_resize(P.lanes[s], l.kinds[s], nn);
+                if (!combine_into<true>(g, P, l.da, ge.data(), psel[p].data(),
+                                        static_cast<uint32_t>(psel[p].size()), nullptr, err))
+                    return;
+            }
+        }
+        l.da = GBPartition();
+        l.da_gid = std::vector<uint32_t>();
+        l.da_slots = 0;
+        l.da_mode = -1;
+        l.entries_total = 0;
+        for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
     }
 
     // Size a local partition's COUNT(DISTINCT) stores, reserving each pair set to
@@ -3537,15 +3963,19 @@ struct GroupBySink : Sink {
 
     // Queue every non-empty local partition for the parallel merge and reset
     // the local state (adaptive flush + the combine path share this).
+    // First worker to get here publishes the captured key/spec metadata. g.mtx held.
+    static void publish_meta(GroupByGlobal& g, const GroupByLocal& l) {
+        if (g.init) return;
+        g.meta = l.meta;
+        g.kinds = l.kinds;
+        g.key_meta = l.key_meta;
+        g.has_rows = l.has_rows;
+        g.init = true;
+    }
+
     void flush_locals(GroupByGlobal& g, GroupByLocal& l) {
         std::lock_guard<std::mutex> lk(g.mtx);
-        if (!g.init) {
-            g.meta = l.meta;
-            g.kinds = l.kinds;
-            g.key_meta = l.key_meta;
-            g.has_rows = l.has_rows;
-            g.init = true;
-        }
+        publish_meta(g, l);
         for (size_t p = 0; p < kGBParts; ++p) {
             if (l.parts[p].size() > 0) {
                 // The merge probes pending partitions' CarcharIndex directly —
@@ -3765,6 +4195,18 @@ struct GroupBySink : Sink {
             return SinkResult::CONTINUE;
         }
 
+        // DIRECT ARRAY: no hash, no probe — see gb_da_key_pass. A morsel outside this
+        // worker's layout spills the slot state into the partitions and is hashed
+        // below, as is every later morsel of this worker.
+        if (l.da_mode == 0) da_arm(l, in);
+        if (l.da_mode == 1) {
+            if (da_sink(l, in, err)) return SinkResult::CONTINUE;
+            if (err.code != 0) return SinkResult::CONTINUE;
+            groupby_tel::da_fallbacks.fetch_add(1, std::memory_order_relaxed);
+            da_spill(g_, l, err);
+            if (err.code != 0) return SinkResult::CONTINUE;
+        }
+
         // Pass A: draken owns the key hash for the whole morsel (cxx_hash_c is
         // shape-preserving for a single key — it hashes each distinct value once).
         // H20 (2026-08-14): probe once per DISTINCT key, not once per row.
@@ -3793,9 +4235,10 @@ struct GroupBySink : Sink {
         static const uint32_t kGBDictMaxDistinct = 1u << 14;  // 16,384
         static const uint32_t kGBDictMinRatio = 2;            // distinct*2 <= rows
 
-        // Only the all-Rows shape (plain COUNT(*) GROUP BY) takes the dict path:
-        // every other spec kind has a per-row loop further down that indexes the
-        // dense mk_hash/mk_ent, and making those range/code-aware is separate work.
+        // The dict path itself is kind-agnostic (probe once per distinct value). What
+        // differs is pass C: all-COUNT(*) and the row kinds (row_kinds_only) run
+        // through the codes; every other shape fills mk_hash/mk_ent from the codes
+        // and runs the generic pass C.
         bool gb_rows_only = l.has_rows;
         for (size_t s = 0; s < nspecs && gb_rows_only; ++s)
             if (l.kinds[s] != GBKind::Rows) gb_rows_only = false;
@@ -3887,6 +4330,44 @@ struct GroupBySink : Sink {
                     l.parts[l.dict_part[c]].grows[l.dict_gid[c]] += 1;
                 }
                 GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
+                l.entries_total = 0;
+                for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
+                maybe_flush(static_cast<GroupByGlobal&>(gs), l);
+                return SinkResult::CONTINUE;
+            }
+            if (l.row_kinds_only && l.codepass_on) {
+                // Pass C through the codes for COUNT/SUM/AVG/numeric MIN/MAX: each row
+                // resolves (partition, group) from dict_part/dict_gid by its code —
+                // no mk_hash/mk_ent fill, no per-row gb_part.
+                GROUPBY_TEL_START(_gbC_t0);
+                const uint32_t* codes = skh.codes;
+                const uint8_t* dpart = l.dict_part.data();
+                const uint32_t* dgid = l.dict_gid.data();
+                if (l.has_rows) {
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        const uint32_t c = codes[i];
+                        l.parts[dpart[c]].grows[dgid[c]] += 1;
+                    }
+                }
+                for (size_t s = 0; s < nspecs; ++s) {
+                    const GBKind kind = l.kinds[s];
+                    if (kind == GBKind::Rows) continue;
+                    GBLanes* lp[kGBParts];
+                    for (size_t p = 0; p < kGBParts; ++p)
+                        lp[p] = (l.parts[p].lanes.size() == nspecs) ? &l.parts[p].lanes[s]
+                                                                    : nullptr;
+                    if (!gb_apply_row_kind(
+                            kind, specs[s].fn == AggFn::Max, l.meta[s].is_float,
+                            in->columns[static_cast<size_t>(specs[s].col_idx)].view, rows,
+                            [&lp, codes, dpart, dgid](uint32_t i) {
+                                const uint32_t c = codes[i];
+                                return GBRowLane{lp[dpart[c]], dgid[c]};
+                            },
+                            err))
+                        return SinkResult::CONTINUE;
+                }
+                GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
+                groupby_tel::dict_codepass.fetch_add(1, std::memory_order_relaxed);
                 l.entries_total = 0;
                 for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
                 maybe_flush(static_cast<GroupByGlobal&>(gs), l);
@@ -4071,49 +4552,20 @@ struct GroupBySink : Sink {
 
             switch (kind) {
                 case GBKind::Valid:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        lp[gb_part(l.mk_hash[i])]->valid[l.mk_ent[i]] += 1;
-                    }
-                    break;
                 case GBKind::SumI:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        int64_t r = agg2_read_raw_at(vtype, vdata, vsel, i, false);
-                        if (!agg2_sum_i64_add(L.i64[e], r, is_u64)) {
-                            err.code = 1;
-                            err.msg = "SUM overflow: exact integer sum exceeds INT64 "
-                                      "— fail loud, never a wrapped answer";
-                            return SinkResult::CONTINUE;
-                        }
-                        L.valid[e] += 1;
-                    }
-                    break;
                 case GBKind::AvgI:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        L.i128[e] += agg2_raw_as_i128(
-                            agg2_read_raw_at(vtype, vdata, vsel, i, false), is_u64);
-                        L.valid[e] += 1;
-                    }
-                    break;
                 case GBKind::SumF:
-                case GBKind::AvgF:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        int64_t bits = agg2_read_raw_at(vtype, vdata, vsel, i, true);
-                        double d;
-                        std::memcpy(&d, &bits, sizeof(d));
-                        L.f64[e] += d;
-                        L.valid[e] += 1;
-                    }
+                case GBKind::AvgF: {
+                    const uint64_t* mkh = l.mk_hash.data();
+                    const uint32_t* mke = l.mk_ent.data();
+                    if (!gb_apply_row_kind(kind, want_max, is_f, v, rows,
+                                           [&lp, mkh, mke](uint32_t i) {
+                                               return GBRowLane{lp[gb_part(mkh[i])], mke[i]};
+                                           },
+                                           err))
+                        return SinkResult::CONTINUE;
                     break;
+                }
                 case GBKind::Stddev:
                 case GBKind::StddevSamp:
                 case GBKind::VarPop:
@@ -4184,20 +4636,17 @@ struct GroupBySink : Sink {
                         L.valid[e] += 1;
                     }
                     break;
-                case GBKind::MinMaxNum:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        uint64_t kk = sort_num_key(v, i);
-                        if (L.valid[e] == 0
-                                || (want_max ? kk > L.mkey[e] : kk < L.mkey[e])) {
-                            L.mkey[e] = kk;
-                            L.i64[e] = agg2_read_raw(v, i, l.meta[s].is_float);
-                        }
-                        L.valid[e] += 1;
-                    }
+                case GBKind::MinMaxNum: {
+                    const uint64_t* mkh = l.mk_hash.data();
+                    const uint32_t* mke = l.mk_ent.data();
+                    if (!gb_apply_row_kind(kind, want_max, is_f, v, rows,
+                                           [&lp, mkh, mke](uint32_t i) {
+                                               return GBRowLane{lp[gb_part(mkh[i])], mke[i]};
+                                           },
+                                           err))
+                        return SinkResult::CONTINUE;
                     break;
+                }
                 case GBKind::MinMaxD128:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
@@ -4364,6 +4813,10 @@ struct GroupBySink : Sink {
             return;
         }
         if (!l.init) return;
+        if (l.da_mode == 1) {
+            da_spill(g, l, err);
+            if (err.code != 0) return;
+        }
         flush_locals(g, l);
     }
 
@@ -5283,11 +5736,7 @@ struct GroupBySink : Sink {
             auto w = [&](unsigned t) {
                 for (size_t i; (i = next.fetch_add(1)) < n;) fn(t, i);
             };
-            std::vector<std::thread> th;
-            th.reserve(nt - 1);
-            for (unsigned t = 1; t < nt; ++t) th.emplace_back(w, t);
-            w(0);
-            for (auto& t : th) t.join();
+            fork_join(nt, w);
         };
         struct Scat {
             std::vector<uint64_t> key;
@@ -5434,11 +5883,7 @@ struct GroupBySink : Sink {
                 }
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(nt > 0 ? nt - 1 : 0);
-        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
-        worker(0);
-        for (auto& th : threads) th.join();
+        fork_join(nt, worker);
         for (unsigned t = 0; t < nt; ++t) {
             if (errs[t].code != 0) { err = errs[t]; return; }
         }
@@ -5675,11 +6120,7 @@ struct DistinctSink : Sink {
                 }
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(nt > 0 ? nt - 1 : 0);
-        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
-        worker(0);
-        for (std::thread& t : threads) t.join();
+        fork_join(nt, worker);
         for (unsigned t = 0; t < nt; ++t) {
             if (errs[t].code != 0) { err = errs[t]; return; }
         }
@@ -5902,11 +6343,7 @@ struct WindowTopKSink : Sink {
                     list.shrink_to_fit();
                 }
             };
-            std::vector<std::thread> mthreads;
-            mthreads.reserve(mnt > 0 ? mnt - 1 : 0);
-            for (unsigned t = 1; t < mnt; ++t) mthreads.emplace_back(merge_worker, t);
-            merge_worker(0);
-            for (std::thread& t : mthreads) t.join();
+            fork_join(mnt, merge_worker);
         }
         std::vector<uint32_t> row_m, row_r;
         std::vector<int64_t> rn;
@@ -5962,11 +6399,7 @@ struct WindowTopKSink : Sink {
                 chunk_out[ci] = std::move(m);
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(nt > 0 ? nt - 1 : 0);
-        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
-        worker(0);
-        for (std::thread& t : threads) t.join();
+        fork_join(nt, worker);
         for (ErrCtx& e : errs) {
             if (e.code != 0) { err = e; return; }
         }

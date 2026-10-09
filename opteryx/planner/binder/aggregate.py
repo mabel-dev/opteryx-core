@@ -10,7 +10,12 @@ from draken.draken_native import DrakenType
 from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import compose
+from opteryx.exceptions import md_code
+from opteryx.exceptions import md_column
+from opteryx.exceptions import md_syntax
 from opteryx.exceptions import VariantKeyError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -37,6 +42,45 @@ def _reject_variant_key(what: str, expr) -> None:
         raise VariantKeyError(what, name)
 
 
+def _reject_array_count_distinct(agg) -> None:
+    """Fail fast, at bind time, on COUNT(DISTINCT <ARRAY>) and
+    APPROX_COUNT_DISTINCT(<ARRAY>). Both dedup on draken's value hash, and
+    hash_shaped has no ARRAY form — the query used to die inside a pipeline worker
+    as an internal fault (and, before the executor converted worker exceptions,
+    silently returned an empty result). Refused here, in the same words the native
+    compiler uses for a DISTINCT / GROUP BY / COUNT(DISTINCT *) on an ARRAY, until
+    ARRAY value hashing exists."""
+    if agg.value == "COUNT":
+        if type(agg) not in expressions_with("duplicate_treatment"):
+            return
+        if agg.duplicate_treatment != "Distinct":
+            return
+        what = "COUNT(DISTINCT)"
+    elif agg.value == "APPROX_COUNT_DISTINCT":
+        what = "APPROX_COUNT_DISTINCT"
+    else:
+        return
+    if not agg.parameters:
+        return
+    operand = agg.parameters[0]
+    if operand.node_type == NodeType.WILDCARD:
+        return
+    sc = operand.schema_column
+    ct = sc.column_type if sc is not None else None
+    if ct is not None and ct.physical == DrakenType.ARRAY:
+        from opteryx.expression import format_expression
+
+        name = sc.name or format_expression(operand)
+        raise NotSupportedError(
+            compose(
+                f"{md_syntax(what)} on {md_column(name)} (type "
+                f"{md_code('ARRAY')}) is not supported",
+                "This query cannot run as written - it will need rewriting to avoid "
+                "that construct",
+            )
+        )
+
+
 def visit_aggregate_and_group(
     self, node: PlanStep, context: BindingContext
 ) -> Tuple[PlanStep, BindingContext]:
@@ -61,6 +105,8 @@ def visit_aggregate_and_group(
         tmp_aggregates, _ = zip(
             *(inner_binder(aggregate, context) for aggregate in node.aggregates)
         )
+        for aggregate in tmp_aggregates:
+            _reject_array_count_distinct(aggregate)
         # Deduplicate aggregates by schema_column.identity
         aggregates_by_identity = {
             agg.schema_column.identity: agg

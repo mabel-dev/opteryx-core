@@ -35,11 +35,11 @@
 #include <atomic>
 #include <memory>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <ankerl/unordered_dense.h>
 
+#include "engine/fork_join.hpp"                   // fork_join — exception-safe fan-out
 #include "engine/native_parquet_scan_source.hpp"   // RowAdmission
 #include "engine/vector_index_search.hpp"         // search_index_file, embed_query
 
@@ -167,12 +167,16 @@ class VectorIndexAdmission final : public RowAdmission {
                 }
             };
             const uint32_t threads = static_cast<uint32_t>(std::min<size_t>(kSearchThreads, todo.size()));
-            if (threads <= 1u) {
-                work();
-            } else {
-                std::vector<std::thread> pool;
-                for (uint32_t t = 0; t < threads; ++t) pool.emplace_back(work);
-                for (auto& th : pool) th.join();
+            // fork_join rethrows a C++ exception from any search thread here; this
+            // function reports through `*err`, so convert it rather than let it escape.
+            try {
+                fork_join(std::max(threads, 1u), [&](unsigned) { work(); });
+            } catch (const std::exception& ex) {
+                *err = std::string("vector index search: ") + ex.what();
+                return false;
+            } catch (...) {
+                *err = "vector index search: a search thread raised a non-standard C++ exception";
+                return false;
             }
             for (size_t i : todo)
                 if (!prepared[i].err.empty()) { *err = prepared[i].err; return false; }

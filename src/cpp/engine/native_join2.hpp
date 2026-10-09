@@ -32,10 +32,10 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>      // finalize pool-let for the parallel CSR build
 #include <unordered_map>
 #include <vector>
 
+#include "fork_join.hpp"   // fork_join — exception-safe fan-out
 #include "operator.hpp"
 #include "native_expression.hpp"    // ExprProgram/ExprEvalFn — SEMI/ANTI residual
 #include "native_group_sinks.hpp"   // shared engine helpers
@@ -268,6 +268,72 @@ struct JoinCsr {
     }
 };
 
+// Builds of at least this many rows take the radix-partitioned table below instead of
+// JoinCsr. 1M is NOT swept (2026-10-09): builds of ~700K rows still pay
+// ~6ms in build_join_csr's atomic histogram, so the right gate is probably lower.
+inline constexpr uint64_t kRadixMinBuildRows = 1u << 20;
+// Target bytes per partition table — the partition count is derived from it.
+inline constexpr size_t kRadixPartBytes = 256u << 10;
+
+// ---- the radix-partitioned build table (large builds) -------------------------------
+// The build's entries are partitioned on the TOP `bits` of the 64-bit key hash, and
+// each partition gets its own CSR sized to stay cache-resident (kRadixPartBytes).
+// What this buys is the BUILD: build_radix_table() needs no atomics and no shared
+// array, where build_join_csr()'s histogram is relaxed fetch_adds over one
+// bucket-sized array that got SLOWER past 4 threads. Measured (M5, 2026-10-09):
+// 32M rows 163 -> 41ms, TPC-H SF10 Q9 50 -> 10ms, Q21 45 -> 12ms.
+//
+// Probing in partition order (Rayforce's radix join) was built and measured against
+// this and did NOT pay — 0.974 vs 0.965 TPC-H SF10 total for the plain per-morsel
+// probe, and it lost on every uniform-key synthetic join; it won only on a
+// duplicate-heavy build. A per-partition open-addressing directory lost too (0.996;
+// 1.06 on SEMI/ANTI). Both were deleted.
+//
+// Match semantics are IDENTICAL to JoinCsr: equality is 64-bit hash identity, so
+// every entry stores the FULL hash. (A 32-bit stored hash, as in designs that verify
+// the real key afterwards, would be a wrong answer here — nothing verifies the key.)
+//
+// Inside a partition, entries are grouped by bucket (the hash's LOW bits — disjoint
+// from the partition bits) and SORTED BY HASH within a bucket, so all build rows of
+// one key form one contiguous run: a lookup yields [start, start+count) into
+// `rows`, whatever the key's multiplicity. That is what makes skew a non-event — a
+// key with a million duplicates is one run, not a million probe steps for its
+// neighbours — and lets the probe read a whole key's rows as one range.
+struct RadixJoinTable {
+    unsigned shift = 64;               // partition = hash >> shift
+    uint32_t nparts = 0;
+    std::vector<uint32_t> part_off;    // size nparts+1: partition p's entry range
+    // The three bulk arrays are allocated UNinitialised (every element is written by
+    // the build) — a std::vector would zero-fill them serially inside finalize().
+    std::unique_ptr<uint64_t[]> hashes;   // entries: partition-major, bucket, then hash
+    std::unique_ptr<uint32_t[]> rows;     // parallel to `hashes`: build row ids
+    std::vector<uint32_t> pmask;       // per partition: bucket mask
+    std::vector<size_t> poff;          // per partition: base of its segment in `off`
+    std::unique_ptr<uint32_t[]> off;   // bucket offsets, (nbuckets+1) per partition
+    bool built = false;
+
+    uint32_t part_of(uint64_t h) const {
+        return static_cast<uint32_t>(h >> shift);
+    }
+
+    // The run of entries whose stored hash == h, inside partition p. count 0 = absent.
+    void find(uint64_t h, uint32_t p, uint32_t& start, uint32_t& count) const {
+        count = 0;
+        const uint32_t* o = off.get() + poff[p];
+        const uint32_t b = static_cast<uint32_t>(h) & pmask[p];
+        const uint32_t hi = o[b + 1];
+        for (uint32_t i = o[b]; i < hi; ++i) {
+            if (hashes[i] == h) {
+                uint32_t e = i + 1;
+                while (e < hi && hashes[e] == h) ++e;
+                start = i;
+                count = e - i;
+                return;
+            }
+        }
+    }
+};
+
 struct Join2BuildGlobal : GlobalSinkState {
     std::mutex mtx;
     // Global build table, keyed on the 64-bit draken hash → build-row-list. Built in
@@ -327,6 +393,10 @@ struct Join2BuildGlobal : GlobalSinkState {
     JoinCsr csr;
     std::vector<std::vector<uint64_t>> hash_chunks;   // per-worker hashes, queued O(1)
     bool csr_active = false;
+    // Large builds (kRadixMinBuildRows) build `radix` INSTEAD of `csr`; finalize()
+    // decides once, and every lookup below routes on this flag.
+    RadixJoinTable radix;
+    bool radix_active = false;
 
 
     // FULL OUTER (track_matches) state, allocated/appended in finalize():
@@ -368,21 +438,20 @@ struct Join2BuildGlobal : GlobalSinkState {
         csr.append_probe_matches(key, probe_row, build_out, probe_out);
     }
     size_t probe_row_count(uint64_t key) const { return csr.row_count_for(key); }
+    // The same fan-out over the radix table. The per-row probes never choose between
+    // the two per row: the choice is made once per morsel (DeferredJoin2Probe,
+    // Join2MarkSink), because `radix_active` is fixed before any probe runs.
+    void radix_probe_append(uint64_t key, uint32_t probe_row,
+                            std::vector<uint32_t>& build_out,
+                            std::vector<uint32_t>& probe_out) const {
+        uint32_t s = 0, c = 0;
+        radix.find(key, radix.part_of(key), s, c);
+        for (uint32_t i = s, e = s + c; i < e; ++i) {
+            build_out.push_back(radix.rows[i]);
+            probe_out.push_back(probe_row);
+        }
+    }
 };
-
-// Runs `fn(0..nt-1)`, the calling thread taking tid 0, and joins. finalize() is
-// called once, on the executor's driver thread, with every pipeline worker already
-// retired — so the sink's own parallel phases have to raise their own threads. A
-// template, not a std::function: these bodies are the per-bucket sweeps below and
-// must inline.
-template <typename F>
-inline void join_finalize_parallel(unsigned nt, F&& fn) {
-    std::vector<std::thread> th;
-    th.reserve(nt > 1 ? nt - 1 : 0);
-    for (unsigned t = 1; t < nt; ++t) th.emplace_back([&fn, t]() { fn(t); });
-    fn(0);
-    for (auto& x : th) x.join();
-}
 
 // The width a Join2 finalize phase runs at: the QUERY's authorised width, not a
 // second one derived from the hardware behind its back.
@@ -471,7 +540,7 @@ inline void merge_build_rows(Join2BuildGlobal& g) {
             if (n != 0) std::memcpy(dst_r, src_r.data(), n * sizeof(uint32_t));
         }
     };
-    join_finalize_parallel(nt, work);
+    fork_join(nt, work);
 
     // Release the per-worker buffers now rather than holding a second copy of the
     // whole build address space alive until the sink is destroyed.
@@ -530,7 +599,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     std::unique_ptr<uint32_t[]> slot(new uint32_t[n]);
 
     std::atomic<size_t> zero_next{0};
-    join_finalize_parallel(nt, [&](unsigned) {
+    fork_join(nt, [&](unsigned) {
         // Zero-fill, block-claimed. memset per block, not a per-element store loop.
         for (;;) {
             const size_t bi = zero_next.fetch_add(1);
@@ -544,7 +613,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     // distribution cannot leave a thread idle.
     {
         std::atomic<size_t> next{0};
-        join_finalize_parallel(nt, [&](unsigned) {
+        fork_join(nt, [&](unsigned) {
             for (;;) {
                 size_t ci = next.fetch_add(1);
                 if (ci >= nchunks) break;
@@ -564,7 +633,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
         std::vector<uint32_t> block_total(bb.nblocks, 0);
         {
             std::atomic<size_t> next{0};
-            join_finalize_parallel(nt, [&](unsigned) {
+            fork_join(nt, [&](unsigned) {
                 for (;;) {
                     const size_t bi = next.fetch_add(1);
                     if (bi >= bb.nblocks) break;
@@ -582,7 +651,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
         }
         {
             std::atomic<size_t> next{0};
-            join_finalize_parallel(nt, [&](unsigned) {
+            fork_join(nt, [&](unsigned) {
                 for (;;) {
                     const size_t bi = next.fetch_add(1);
                     if (bi >= bb.nblocks) break;
@@ -603,7 +672,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     // other writer can receive, so the passes need no merge and no per-key allocation.
     {
         std::atomic<size_t> next{0};
-        join_finalize_parallel(nt, [&](unsigned) {
+        fork_join(nt, [&](unsigned) {
             for (;;) {
                 size_t ci = next.fetch_add(1);
                 if (ci >= nchunks) break;
@@ -623,6 +692,185 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     c.built = true;
     g.hash_chunks.clear();
     g.hash_chunks.shrink_to_fit();
+}
+
+// Radix-partitioned build of RadixJoinTable — taken instead of build_join_csr() for
+// large builds (see finalize()). Same input (the queued per-worker hash chunks; global
+// row id = chunk base + index) and the same one-shot finalize-time parallelism.
+//
+//   PARTITION — the hash chunks are cut into blocks; each block counts its own
+//   per-partition histogram (private: no atomics, P counters that stay in L1/L2),
+//   one serial scan over (partition, block) turns the counts into write cursors, and
+//   each block scatters its {hash, row} entries into partition order. This is the
+//   radix pre-partition the atomic CSR histogram lacked: that one is 8M relaxed
+//   fetch_adds over a 33MB array and gets SLOWER past 4 threads (2026-09-22).
+//
+//   BUILD — partitions are claimed atomically; each is grouped by bucket and sorted by
+//   hash within a bucket (so a key's rows are one run). Every write lands in the
+//   partition's own range: no sharing, no atomics.
+inline void build_radix_table(Join2BuildGlobal& g) {
+    const size_t total = g.total_rows;
+    RadixJoinTable& t = g.radix;
+    // ~16 bytes per build row: 8 hash + 4 row id + ~4 of bucket offsets.
+    const size_t rows_per_part = kRadixPartBytes / 16;
+    unsigned bits = 2;
+    while (bits < 14 && (total >> bits) > rows_per_part) ++bits;
+    t.shift = 64 - bits;
+    const uint32_t P = 1u << bits;
+    t.nparts = P;
+
+    const size_t nchunks = g.hash_chunks.size();
+    const unsigned nt = join_finalize_width(g, total);
+
+    struct Blk { uint32_t chunk, lo, hi, gbase; };
+    const size_t want_blocks = static_cast<size_t>(nt) * 4;
+    const size_t blk = std::max<size_t>(16384, (total + want_blocks - 1) / want_blocks);
+    std::vector<Blk> blocks;
+    {
+        size_t running = 0;
+        for (size_t ci = 0; ci < nchunks; ++ci) {
+            const size_t n = g.hash_chunks[ci].size();
+            for (size_t lo = 0; lo < n; lo += blk) {
+                const size_t hi = std::min(n, lo + blk);
+                blocks.push_back({static_cast<uint32_t>(ci), static_cast<uint32_t>(lo),
+                                  static_cast<uint32_t>(hi),
+                                  static_cast<uint32_t>(running + lo)});
+            }
+            running += n;
+        }
+    }
+    const size_t nblk = blocks.size();
+    std::unique_ptr<uint32_t[]> hist(new uint32_t[nblk * P]);
+    const unsigned shift = t.shift;
+
+    {   // Pass 1: private per-block histograms.
+        std::atomic<size_t> next{0};
+        fork_join(nt, [&](unsigned) {
+            for (;;) {
+                const size_t bi = next.fetch_add(1);
+                if (bi >= nblk) break;
+                uint32_t* hrow = hist.get() + bi * P;
+                std::memset(hrow, 0, P * sizeof(uint32_t));
+                const Blk& b = blocks[bi];
+                const uint64_t* h = g.hash_chunks[b.chunk].data();
+                for (uint32_t r = b.lo; r < b.hi; ++r) ++hrow[h[r] >> shift];
+            }
+        });
+    }
+    // Partition-major exclusive scan: block bi's cursor for partition p.
+    t.part_off.assign(P + 1, 0);
+    {
+        uint32_t run = 0;
+        for (uint32_t p = 0; p < P; ++p) {
+            t.part_off[p] = run;
+            for (size_t bi = 0; bi < nblk; ++bi) {
+                uint32_t& c = hist[bi * P + p];
+                const uint32_t cnt = c;
+                c = run;
+                run += cnt;
+            }
+        }
+        t.part_off[P] = run;
+    }
+    std::unique_ptr<uint64_t[]> stage_h(new uint64_t[total]);
+    std::unique_ptr<uint32_t[]> stage_r(new uint32_t[total]);
+    {   // Pass 2: scatter into partition order.
+        std::atomic<size_t> next{0};
+        fork_join(nt, [&](unsigned) {
+            for (;;) {
+                const size_t bi = next.fetch_add(1);
+                if (bi >= nblk) break;
+                uint32_t* cur = hist.get() + bi * P;
+                const Blk& b = blocks[bi];
+                const uint64_t* h = g.hash_chunks[b.chunk].data();
+                for (uint32_t r = b.lo; r < b.hi; ++r) {
+                    const uint32_t i = cur[h[r] >> shift]++;
+                    stage_h[i] = h[r];
+                    stage_r[i] = b.gbase + (r - b.lo);
+                }
+            }
+        });
+    }
+    hist.reset();
+    g.hash_chunks.clear();
+    g.hash_chunks.shrink_to_fit();
+
+    // Per-partition bucket counts are known now, so every partition's segment of
+    // `off` can be placed before the parallel build.
+    t.pmask.assign(P, 0);
+    t.poff.assign(P, 0);
+    size_t off_total = 0;
+    for (uint32_t p = 0; p < P; ++p) {
+        const uint32_t c = t.part_off[p + 1] - t.part_off[p];
+        uint32_t nbk = 1;
+        while (nbk < c) nbk <<= 1;
+        t.pmask[p] = nbk - 1;
+        t.poff[p] = off_total;
+        off_total += static_cast<size_t>(nbk) + 1;
+    }
+    t.off.reset(new uint32_t[off_total]);
+    t.hashes.reset(new uint64_t[total]);
+    t.rows.reset(new uint32_t[total]);
+
+    std::atomic<uint32_t> next_p{0};
+    fork_join(nt, [&](unsigned) {
+        std::vector<uint32_t> cur;
+        std::vector<std::pair<uint64_t, uint32_t>> sortbuf;
+        for (;;) {
+            const uint32_t p = next_p.fetch_add(1);
+            if (p >= P) break;
+            const uint32_t ps = t.part_off[p], pe = t.part_off[p + 1];
+            const uint32_t mask = t.pmask[p];
+            const uint32_t nbk = mask + 1;
+            uint32_t* o = t.off.get() + t.poff[p];
+            std::memset(o, 0, (static_cast<size_t>(nbk) + 1) * sizeof(uint32_t));
+            for (uint32_t i = ps; i < pe; ++i) ++o[static_cast<uint32_t>(stage_h[i]) & mask];
+            uint32_t run = ps;
+            for (uint32_t b = 0; b < nbk; ++b) {
+                const uint32_t cnt = o[b];
+                o[b] = run;
+                run += cnt;
+            }
+            o[nbk] = run;
+            cur.assign(o, o + nbk);
+            for (uint32_t i = ps; i < pe; ++i) {
+                const uint64_t h = stage_h[i];
+                const uint32_t j = cur[static_cast<uint32_t>(h) & mask]++;
+                t.hashes[j] = h;
+                t.rows[j] = stage_r[i];
+            }
+            // Hash-sort each bucket so every key is one contiguous run.
+            for (uint32_t b = 0; b < nbk; ++b) {
+                const uint32_t lo = o[b], hi = o[b + 1];
+                if (hi - lo < 2) continue;
+                if (hi - lo <= 16) {
+                    for (uint32_t i = lo + 1; i < hi; ++i) {
+                        const uint64_t hk = t.hashes[i];
+                        const uint32_t rk = t.rows[i];
+                        uint32_t j = i;
+                        while (j > lo && t.hashes[j - 1] > hk) {
+                            t.hashes[j] = t.hashes[j - 1];
+                            t.rows[j] = t.rows[j - 1];
+                            --j;
+                        }
+                        t.hashes[j] = hk;
+                        t.rows[j] = rk;
+                    }
+                } else {
+                    sortbuf.clear();
+                    for (uint32_t i = lo; i < hi; ++i)
+                        sortbuf.emplace_back(t.hashes[i], t.rows[i]);
+                    std::sort(sortbuf.begin(), sortbuf.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+                    for (uint32_t i = lo; i < hi; ++i) {
+                        t.hashes[i] = sortbuf[i - lo].first;
+                        t.rows[i] = sortbuf[i - lo].second;
+                    }
+                }
+            }
+        }
+    });
+    t.built = true;
 }
 
 // Why the build side did (or did not) consolidate — see
@@ -1079,7 +1327,14 @@ struct Join2BuildSink : Sink {
         // else). Nothing may touch the build address space before this returns.
         merge_build_rows(g);
         // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
-        if (g.csr_active) build_join_csr(g);
+        if (g.csr_active) {
+            if (g.total_rows >= kRadixMinBuildRows) {
+                build_radix_table(g);
+                g.radix_active = true;
+            } else {
+                build_join_csr(g);
+            }
+        }
         if (track_matches) {
             // The keyed row space [0, total_rows) is sealed (the CSR above was
             // built over it); NULL-keyed rows go on the END of row_m/row_r so
@@ -1873,9 +2128,12 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
     // The probe columns are SHARED, not gathered: every input row is emitted, in
     // order, so the output column IS the input column (CxxColumn copies the 40-byte
     // view and shares the owner — see cxx_morsel.h). Only the flag is allocated.
-    OpResult emit_flag(const MorselPtr& in, const Join2BuildGlobal& g,
-                       const std::vector<uint64_t>& rowh,
-                       const std::vector<uint8_t>& matched, bool keys_nullable,
+    // `found_of(i)` is row i's existence verdict (asked only for a row whose key is
+    // not NULL). A template so the per-row probe's verdict expression inlines here
+    // exactly as it was written inline before, and the radix probe supplies its own.
+    template <class FoundOf>
+    OpResult emit_flag(const MorselPtr& in, const Join2BuildGlobal& g, FoundOf found_of,
+                       bool keys_nullable,
                        bool build_empty, uint32_t n, MorselPtr& out, ErrCtx& err) {
         const size_t bytes = (static_cast<size_t>(n) + 7) / 8;
         uint8_t* bits = static_cast<uint8_t*>(draken_malloc(bytes == 0 ? 1 : bytes));
@@ -1901,11 +2159,7 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
             }
             // Same existence verdict as the filter path: a NULL probe key never
             // equi-matches, so it simply finds nothing.
-            const bool found = any_null
-                                   ? false
-                                   : (residual_fn != nullptr
-                                          ? (matched[i] != 0)
-                                          : (!build_empty && g.probe_row_count(rowh[i]) > 0));
+            const bool found = any_null ? false : found_of(i);
             // UNKNOWN, for a projected IN/NOT IN only. An EMPTY build is never
             // unknown: `x IN ()` is FALSE and `x NOT IN ()` is TRUE even for a NULL
             // x, so the rules below are gated on there being something to compare to.
@@ -2048,9 +2302,22 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
             }
         }
 
-        if (emit_existence) return emit_flag(in, g, rowh, matched, keys_nullable,
+        // Existence: per-pair residual verdict when there is one, else 64-bit
+        // hash identity (const, thread-safe probe).
+        auto found_of = [&](uint32_t i) {
+            return residual_fn != nullptr
+                       ? (matched[i] != 0)
+                       : (!build_empty && g.probe_row_count(rowh[i]) > 0);
+        };
+        if (emit_existence) return emit_flag(in, g, found_of, keys_nullable,
                                              build_empty, n, out, err);
+        return emit_survivors(in, found_of, keys_nullable, build_empty, n, out, err);
+    }
 
+    // FILTER emit: the probe rows whose verdict survives (see emit_flag for found_of).
+    template <class FoundOf>
+    OpResult emit_survivors(const MorselPtr& in, FoundOf found_of, bool keys_nullable,
+                            bool build_empty, uint32_t n, MorselPtr& out, ErrCtx& err) {
         std::vector<uint32_t> survivors;
         survivors.reserve(n);
         for (uint32_t i = 0; i < n; ++i) {
@@ -2068,11 +2335,7 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
                 if (anti && (!null_aware || build_empty)) survivors.push_back(i);
                 continue;
             }
-            // Existence: per-pair residual verdict when there is one, else 64-bit
-            // hash identity (const, thread-safe probe).
-            bool found = residual_fn != nullptr
-                             ? (matched[i] != 0)
-                             : (!build_empty && g.probe_row_count(rowh[i]) > 0);
+            const bool found = found_of(i);
             if (found != anti) survivors.push_back(i);
         }
         if (survivors.empty()) return OpResult::NEED_INPUT;
@@ -2085,6 +2348,159 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
         out = gather_rows(ms, survivors, 0, survivors.size(), row_m, row_r, in->names,
                           err, emit_ptr());
         return (err.code != 0 || out == nullptr) ? OpResult::NEED_INPUT : OpResult::EMIT;
+    }
+};
+
+// ---- per-morsel probe over the radix table -------------------------------------------
+// Taken only when the build side built a RadixJoinTable (kRadixMinBuildRows). Each
+// probe morsel is hashed, every row's matching run is looked up in one pass, and only
+// then is the morsel emitted — by the per-row operators' own emit code, reading each
+// row's matches from its run. The output gather is therefore exactly what the per-row
+// operator does; what differs is the table and that lookups are a pass of their own.
+struct RadixMorselRuns {
+    std::vector<uint64_t> h;             // per row: the key hash
+    std::vector<uint8_t> live;           // per row: 1 = key not NULL
+    std::vector<uint32_t> start, count;  // per row: its run in radix.rows (count 0 = none)
+
+    bool compute(const MorselPtr& in, const std::vector<size_t>& key_idx, bool null_equal,
+                 const RadixJoinTable& t, ErrCtx& err) {
+        if (!compute_row_hashes(in, key_idx, h, err)) return false;
+        const uint32_t n = in->num_rows();
+        live.assign(n, 1);
+        if (!null_equal && probe_keys_nullable(in, key_idx)) {
+            for (uint32_t i = 0; i < n; ++i)
+                for (size_t k : key_idx)
+                    if (!sort_row_valid(in->columns[k].view, i)) { live[i] = 0; break; }
+        }
+        start.resize(n);
+        count.assign(n, 0);
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!live[i]) continue;
+            uint32_t s = 0, c = 0;
+            t.find(h[i], t.part_of(h[i]), s, c);
+            start[i] = s;
+            count[i] = c;
+        }
+        return true;
+    }
+};
+
+struct RadixJoin2ProbeState : OperatorState {
+    RadixMorselRuns runs;
+    MorselPtr pending_in;
+    uint32_t row = 0;
+};
+
+struct RadixJoin2ProbeOperator : Join2ProbeOperator {
+    using Join2ProbeOperator::Join2ProbeOperator;
+
+    std::unique_ptr<OperatorState> make_state() override {
+        return std::make_unique<RadixJoin2ProbeState>();
+    }
+
+    // Join2ProbeOperator::execute's emit, reading each row's matches from its run.
+    OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                     ErrCtx& err) override {
+        if (in->num_rows() == 0) return OpResult::NEED_INPUT;
+        auto& st = static_cast<RadixJoin2ProbeState&>(st_);
+        const Join2BuildGlobal& g = *ref->g;
+        if (st.pending_in != in) {
+            st.pending_in = in;
+            st.row = 0;
+            if (!st.runs.compute(in, probe_key_idx, null_equal, g.radix, err))
+                return OpResult::NEED_INPUT;
+        }
+        const RadixMorselRuns& r = st.runs;
+        const uint32_t* trows = g.radix.rows.get();
+        const uint32_t n = in->num_rows();
+        std::vector<uint32_t> build_rows, probe_rows;
+        build_rows.reserve(kBatch);
+        probe_rows.reserve(kBatch);
+        while (st.row < n) {
+            const uint32_t row = st.row;
+            const uint32_t c = r.count[row];
+            if (c != 0) {
+                const uint32_t s = r.start[row];
+                for (uint32_t k = 0; k < c; ++k) {
+                    build_rows.push_back(trows[s + k]);
+                    probe_rows.push_back(row);
+                }
+                if (track_matches) {
+                    std::atomic<uint8_t>* m = g.matched.get();
+                    for (uint32_t k = 0; k < c; ++k)
+                        m[static_cast<size_t>(trows[s + k])].store(
+                            1, std::memory_order_relaxed);
+                }
+            } else if (left_outer) {   // NULL key or no match: NULL build half
+                build_rows.push_back(kNoBuildRow);
+                probe_rows.push_back(row);
+            }
+            ++st.row;
+            // Flush a batch after a full probe row (a single high-fan-out row may push
+            // slightly past kBatch — correct, just a larger morsel).
+            if (build_rows.size() >= kBatch) {
+                out = build_output(in, build_rows, probe_rows, err);
+                return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::HAVE_MORE;
+            }
+        }
+        if (!build_rows.empty()) {
+            out = build_output(in, build_rows, probe_rows, err);
+            return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::EMIT;
+        }
+        return OpResult::NEED_INPUT;
+    }
+};
+
+struct RadixSemiAntiProbeOperator : SemiAntiProbeOperator {
+    using SemiAntiProbeOperator::SemiAntiProbeOperator;
+
+    // SemiAntiProbeOperator::execute's verdict + emit, reading each row's matches from
+    // its run. Stateless per morsel, like the per-row operator.
+    OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                     ErrCtx& err) override {
+        const Join2BuildGlobal& g = *ref->g;
+        const uint32_t n = in->num_rows();
+        if (n == 0) return OpResult::NEED_INPUT;
+        // Morsel-independent outcomes need no lookup: NOT IN against a build holding a
+        // NULL drops every row, and an EMPTY build is decided by the per-row operator
+        // without a single probe.
+        if (anti && null_aware && g.saw_null_key && !emit_existence)
+            return OpResult::NEED_INPUT;
+        if (g.total_rows == 0 && !g.saw_null_key)
+            return SemiAntiProbeOperator::execute(in, st_, out, err);
+
+        RadixMorselRuns r;
+        if (!r.compute(in, probe_key_idx, null_equal, g.radix, err))
+            return OpResult::NEED_INPUT;
+        const uint32_t* trows = g.radix.rows.get();
+        std::vector<uint8_t> matched(n, 0);
+        if (residual_fn != nullptr) {
+            std::vector<uint32_t> build_rows, probe_rows;
+            build_rows.reserve(kBatch);
+            probe_rows.reserve(kBatch);
+            for (uint32_t i = 0; i < n; ++i) {
+                const uint32_t s = r.start[i], c = r.count[i];
+                for (uint32_t k = 0; k < c; ++k) {
+                    build_rows.push_back(trows[s + k]);
+                    probe_rows.push_back(i);
+                }
+                // Bound the pair batch after a COMPLETE probe row (see the per-row op).
+                if (build_rows.size() >= kBatch
+                    && !resolve_pairs(in, build_rows, probe_rows, matched, err))
+                    return OpResult::NEED_INPUT;
+            }
+            if (!resolve_pairs(in, build_rows, probe_rows, matched, err))
+                return OpResult::NEED_INPUT;
+        } else {
+            for (uint32_t i = 0; i < n; ++i) matched[i] = r.count[i] != 0;
+        }
+        const bool keys_nullable = !null_equal && probe_keys_nullable(in, probe_key_idx);
+        auto found_of = [&](uint32_t i) { return matched[i] != 0; };
+        return emit_existence
+                   ? emit_flag(in, g, found_of, keys_nullable, /*build_empty=*/false, n,
+                               out, err)
+                   : emit_survivors(in, found_of, keys_nullable, /*build_empty=*/false, n,
+                                    out, err);
     }
 };
 
@@ -2422,30 +2838,39 @@ struct Join2MarkSink : Sink {
         probe_rows.reserve(Join2ProbeOperator::kBatch);
         std::atomic<uint8_t>* marks = g.matched.get();
 
-        for (uint32_t i = 0; i < n; ++i) {
-            if (keys_nullable) {
-                bool any_null = false;
-                for (size_t k : pair.probe_key_idx) {
-                    if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+        // The build table is chosen once per morsel, never per row.
+        auto scan = [&](auto append) {
+            for (uint32_t i = 0; i < n; ++i) {
+                if (keys_nullable) {
+                    bool any_null = false;
+                    for (size_t k : pair.probe_key_idx) {
+                        if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                    }
+                    if (any_null) continue;   // NULL key never equi-matches
                 }
-                if (any_null) continue;   // NULL key never equi-matches
+                size_t before = build_rows.size();
+                append(rowh[i], i, build_rows, probe_rows);
+                if (residual_fn == nullptr) {
+                    // No residual: a key match IS the existence proof. Mark and drop the
+                    // pairs immediately rather than accumulating a batch nothing reads.
+                    for (size_t bi = before; bi < build_rows.size(); ++bi)
+                        marks[static_cast<size_t>(build_rows[bi])].store(
+                            1, std::memory_order_relaxed);
+                    build_rows.clear();
+                    probe_rows.clear();
+                } else if (build_rows.size() >= Join2ProbeOperator::kBatch
+                           && !resolve_pairs(in, build_rows, probe_rows, err)) {
+                    return;
+                }
             }
-            size_t before = build_rows.size();
-            g.probe_append(rowh[i], i, build_rows, probe_rows);
-            if (residual_fn == nullptr) {
-                // No residual: a key match IS the existence proof. Mark and drop the
-                // pairs immediately rather than accumulating a batch nothing reads.
-                for (size_t bi = before; bi < build_rows.size(); ++bi)
-                    marks[static_cast<size_t>(build_rows[bi])].store(
-                        1, std::memory_order_relaxed);
-                build_rows.clear();
-                probe_rows.clear();
-            } else if (build_rows.size() >= Join2ProbeOperator::kBatch
-                       && !resolve_pairs(in, build_rows, probe_rows, err)) {
-                return SinkResult::CONTINUE;
-            }
-        }
-        if (residual_fn != nullptr) resolve_pairs(in, build_rows, probe_rows, err);
+            if (residual_fn != nullptr) resolve_pairs(in, build_rows, probe_rows, err);
+        };
+        if (g.radix_active)
+            scan([&](uint64_t k, uint32_t r, std::vector<uint32_t>& bo,
+                     std::vector<uint32_t>& po) { g.radix_probe_append(k, r, bo, po); });
+        else
+            scan([&](uint64_t k, uint32_t r, std::vector<uint32_t>& bo,
+                     std::vector<uint32_t>& po) { g.probe_append(k, r, bo, po); });
         return SinkResult::CONTINUE;
     }
 
@@ -2484,6 +2909,7 @@ struct DeferredJoin2Probe : Operator {
     std::string existence_name;
     std::once_flag once;
     std::unique_ptr<Operator> inner;
+    std::unique_ptr<Operator> radix_inner;   // null for ASOF/BAND (never radix — no CSR)
 
     DeferredJoin2Probe(std::vector<size_t> keys, std::vector<size_t> payload,
                        const Join2Ref* r, JoinMode m,
@@ -2519,6 +2945,11 @@ struct DeferredJoin2Probe : Operator {
                        || mode == JoinMode::AntiNotDistinct) {
                 const bool is_anti = mode != JoinMode::Semi
                                      && mode != JoinMode::SemiNotDistinct;
+                radix_inner = std::make_unique<RadixSemiAntiProbeOperator>(
+                    key_idx, payload_idx, ref, is_anti,
+                    mode == JoinMode::AntiNullAware, residual, residual_fn,
+                    emit_prune, emit_cols, join_mode_null_equal(mode),
+                    emit_existence, existence_three_valued, existence_name);
                 inner = std::make_unique<SemiAntiProbeOperator>(
                     key_idx, payload_idx, ref, is_anti,
                     mode == JoinMode::AntiNullAware, residual, residual_fn,
@@ -2539,15 +2970,24 @@ struct DeferredJoin2Probe : Operator {
                                              || mode == JoinMode::FullOuter;
                 const bool build_preserved = mode == JoinMode::FullOuter
                                              || mode == JoinMode::RightOuter;
+                radix_inner = std::make_unique<RadixJoin2ProbeOperator>(
+                    key_idx, payload_idx, ref, probe_preserved, build_preserved);
                 inner = std::make_unique<Join2ProbeOperator>(
                     key_idx, payload_idx, ref, probe_preserved, build_preserved);
             }
         });
-        return inner->make_state();
+        return active()->make_state();
+    }
+    // Which inner probes THIS run: the radix operator over a radix build table, the
+    // per-row one otherwise. `radix_active` is fixed before the probe pipeline starts,
+    // so make_state() and every execute() of one run agree; a pipeline that
+    // re-runs (LoopSpan) re-decides with its fresh build. One branch per morsel.
+    Operator* active() const {
+        return ref->g->radix_active ? radix_inner.get() : inner.get();
     }
     OpResult execute(const MorselPtr& in, OperatorState& st, MorselPtr& out,
                      ErrCtx& err) override {
-        return inner->execute(in, st, out, err);
+        return active()->execute(in, st, out, err);
     }
 };
 

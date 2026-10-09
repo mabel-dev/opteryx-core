@@ -214,13 +214,11 @@ def _bench_preload_env() -> dict[str, str]:
     """Replicate the Makefile's BENCH_PRELOAD allocator setup for this platform."""
     env: dict[str, str] = {}
     if platform.system() == "Darwin":
-        for cand in ("/opt/homebrew/lib/libjemalloc.dylib", "/usr/local/lib/libjemalloc.dylib"):
-            if os.path.exists(cand):
-                env["DYLD_INSERT_LIBRARIES"] = cand
-                break
-        else:
-            raise RuntimeError("jemalloc not found (brew install jemalloc) — refusing to "
-                               "benchmark without the production-like allocator")
+        # No preload: the system allocator. MEASURED 2026-10-09 (M5, full
+        # ClickBench, 6 interleaved rounds): system malloc 0.921x jemalloc,
+        # faster in 6/6 rounds. mimalloc via DYLD_INSERT_LIBRARIES is invalid
+        # on macOS (system libraries free its pointers at thread exit → SIGTRAP).
+        pass
     else:
         proc = subprocess.run(
             [sys.executable, "-c", "import draken; print(draken.preload_library_path() or '')"],

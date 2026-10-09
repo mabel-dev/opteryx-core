@@ -1479,6 +1479,18 @@ public:
         }
         it->second->set_seed(std::move(seed));
     }
+    // The planner's manifest bounds for the GROUP BY keys (direct-array GROUP BY):
+    // one (lo, hi, known) per key, plus the scans' total rows (-1 = unknown) that
+    // size the slot budget. Plan-time only; a layout hint, never trusted for results.
+    void set_groupby_key_ranges(size_t p, std::vector<int64_t> lo, std::vector<int64_t> hi,
+                                std::vector<uint8_t> known, int64_t rows) {
+        auto it = groupby_sinks_.find(p);
+        if (it == groupby_sinks_.end() || pipelines[p]->sink.get() != it->second) {
+            throw std::runtime_error(
+                "set_groupby_key_ranges: pipeline does not sink into a GROUP BY");
+        }
+        it->second->set_key_ranges(std::move(lo), std::move(hi), std::move(known), rows);
+    }
     // GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md):
     // arm the GroupBySink that pipeline `p` sinks into. `keys` index the sink's
     // aggregate specs (col_idx = spec position), in ORDER BY order; `ties` = the

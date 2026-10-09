@@ -29,9 +29,9 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <vector>
 
+#include "fork_join.hpp"   // fork_join — exception-safe fan-out
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
 #include "morsels/sort.hpp"      // THE sort (build: -Idraken)
@@ -734,11 +734,7 @@ struct WindowSink : Sink, EmitSubset {
                 chunk_out[ci] = std::move(m);
             }
         };
-        std::vector<std::thread> threads;
-        threads.reserve(nt > 0 ? nt - 1 : 0);
-        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
-        worker(0);
-        for (std::thread& t : threads) t.join();
+        fork_join(nt, worker);
         for (ErrCtx& e : errs) {
             if (e.code != 0) { err = e; return; }
         }

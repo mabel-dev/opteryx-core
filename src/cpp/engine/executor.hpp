@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <ctime>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
@@ -132,8 +133,9 @@ struct PipelineSkew {
 
 // One worker's full body: claim disjoint morsels from the source (dynamic assignment =
 // load balance), push each through the operator chain, sink into thread-LOCAL state
-// (lock-free), combine local into shared global once at the end.
-inline void run_worker(WorkerCtx* ctx) {
+// (lock-free), combine local into shared global once at the end. Callers enter
+// through run_worker below, never this directly.
+inline void run_worker_body(WorkerCtx* ctx) {
     Pipeline& p = *ctx->p;
     ErrCtx& e = (*ctx->errs)[static_cast<size_t>(ctx->w)];
     // RAII, not a plain assignment before the final combine: run_worker returns
@@ -281,6 +283,31 @@ inline void run_worker(WorkerCtx* ctx) {
     }
 }
 
+// The worker entry for BOTH backends. A C++ exception thrown anywhere in the worker
+// (make_local, an operator, sink(), combine() -- e.g. CarcharIndex::find_slot's
+// "probe exhausted table capacity") must become this worker's ErrCtx. Uncaught, it is
+// LOST: BS::thread_pool's worker loop runs every detached task inside
+// `try { task(); } catch (...) {}` (third_party/bshoshany/BS_thread_pool.hpp), so the
+// worker's ErrCtx stayed 0, the driver saw no error, and the query returned an empty
+// or partial result (proven 2026-10-09 with a throw in GBPartition::promote_*: GROUP
+// BY returned 0 rows, no exception). On the std::thread backend it would terminate.
+// The unwind has already run WorkerErrLatch, so err_text is free to hold this text.
+inline void run_worker(WorkerCtx* ctx) {
+    ErrCtx& e = (*ctx->errs)[static_cast<size_t>(ctx->w)];
+    try {
+        run_worker_body(ctx);
+    } catch (const std::exception& ex) {
+        ctx->err_text.assign("unhandled C++ exception in pipeline worker: ");
+        ctx->err_text.append(ex.what());
+        e.code = 1;
+        e.msg = ctx->err_text.c_str();
+    } catch (...) {
+        ctx->err_text.assign("unhandled non-standard C++ exception in pipeline worker");
+        e.code = 1;
+        e.msg = ctx->err_text.c_str();
+    }
+}
+
 // Native-task entry matching BSThreadPoolBridge::submit_native's `void(*)(void*)` shape.
 inline void run_worker_task(void* raw) {
     run_worker(static_cast<WorkerCtx*>(raw));
@@ -366,12 +393,27 @@ run_pipeline_impl(Pipeline& p, int dop, int query_dop, ErrCtx& err, DispatchFn&&
         OpStats& fs = p.sink->stats;
         TraceHandle fh = trace_begin(TC_FINALIZE, fs.node_id, 0, 0xFFFFFFFFu, 0);
         uint64_t ft0 = telem_now_ns();
-        p.sink->finalize(*gsink, err);
+        // finalize() runs on the DRIVER thread, whose caller (Engine::run, reached
+        // from a noexcept Cython driver) cannot carry a C++ exception -- convert it
+        // here, as run_worker does for the workers.
+        std::string fin_text;
+        try {
+            p.sink->finalize(*gsink, err);
+        } catch (const std::exception& ex) {
+            fin_text.assign("unhandled C++ exception in pipeline finalize: ");
+            fin_text.append(ex.what());
+            err.code = 1;
+            err.msg = fin_text.c_str();
+        } catch (...) {
+            fin_text.assign("unhandled non-standard C++ exception in pipeline finalize");
+            err.code = 1;
+            err.msg = fin_text.c_str();
+        }
+        // finalize() may also raise with text owned by gsink, which dies on return.
+        latch_err_msg(err);
         fs.finalize_ns.fetch_add(telem_now_ns() - ft0, std::memory_order_relaxed);
         trace_end(fh, 0, 0);
     }
-    // finalize() may raise with text owned by gsink, which dies on return.
-    latch_err_msg(err);
     return gsink;
 }
 

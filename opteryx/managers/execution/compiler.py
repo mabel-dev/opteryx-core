@@ -2664,6 +2664,18 @@ class _Compiler:
             self.nplan.set_groupby_sink(
                 p, key_idx, group_cols, key_emit, specs, buf,
                 _estimate_to_int64(ndv_estimate, "group-count estimate for GROUP BY"))
+            if node.group_key_ranges is not None and not set_masks:
+                # Manifest bounds per key: the sink's direct-array layout hint (it
+                # range-checks every morsel, so a bound is never trusted for results).
+                bounds, total_rows = node.group_key_ranges
+                by_identity = {
+                    grp.schema_column.identity: bound
+                    for grp, bound in zip(step.groups, bounds)
+                    if grp.schema_column is not None
+                }
+                self.nplan.set_groupby_key_ranges(
+                    p, [by_identity.get(identity) for identity in group_cols],
+                    -1 if total_rows is None else int(total_rows))
             if covered is not None:
                 request, groups = covered
                 seeded = []

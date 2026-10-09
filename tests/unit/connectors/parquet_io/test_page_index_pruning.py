@@ -277,19 +277,13 @@ def _wide_narrow_fixture(tmp):
 
 
 def test_gate_declines_when_the_index_cannot_repay_itself():
-    """On a REMOTE path the index is read only when it costs at most a tenth of
-    the bytes it could remove. Narrow projection: declined, and NOT read. Wide:
-    read and used. Either way the rows are the same — the gate never changes the
-    answer."""
+    """The index is read only when it costs at most a tenth of the bytes it could
+    remove. Narrow projection: declined, and NOT read. Wide: read and used.
+    Either way the rows are the same — the gate never changes the answer."""
     with tempfile.TemporaryDirectory() as tmp:
         path = _wide_narrow_fixture(tmp)
-        proc, port = _server(tmp)
-        try:
-            url = f"http://127.0.0.1:{port}/{os.path.basename(path)}"
-            narrow, _, d_narrow = _scan(url, ["k"], [("k", "Eq", 7)])
-            wide, _, d_wide = _scan(url, ["k", "fat1", "fat2"], [("k", "Eq", 7)])
-        finally:
-            proc.kill(); proc.wait()
+        narrow, _, d_narrow = _scan(path, ["k"], [("k", "Eq", 7)])
+        wide, _, d_wide = _scan(path, ["k", "fat1", "fat2"], [("k", "Eq", 7)])
 
     # Declined: nothing fetched, nothing pruned, the decline is COUNTED so a
     # reader can tell "chose not to look" from "there was nothing to look at".
@@ -305,18 +299,6 @@ def test_gate_declines_when_the_index_cannot_repay_itself():
 
     # Same answer through both paths.
     assert [v for v in narrow["k"] if v == 7] == [v for v in wide["k"] if v == 7] == [7] * 1000
-
-
-def test_local_files_are_exempt_from_the_gate():
-    """The gate prices a serial round trip; a local index read has none, so the
-    narrow projection the remote gate declines reads the index and prunes."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _wide_narrow_fixture(tmp)
-        narrow, _, d = _scan(path, ["k"], [("k", "Eq", 7)])
-    assert d["page_index_gate_declines"] == 0
-    assert d["page_index_fetches"] >= 1
-    assert d["page_index_pages_pruned"] > 0
-    assert [v for v in narrow["k"] if v == 7] == [7] * 1000
 
 
 def test_the_ab_arm_disables_pruning_entirely():

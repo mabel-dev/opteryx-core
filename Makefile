@@ -24,13 +24,16 @@ COVERAGE := $(PYTHON) -m coverage
 # climbs across queries (and OOMs on Linux prod). Preload a fragmentation-aware
 # allocator so local/CI benchmarks match production behaviour. Platform-split:
 #   Linux → vendored mimalloc via LD_PRELOAD (draken.preload_library_path()).
-#   macOS → jemalloc via DYLD_INSERT_LIBRARIES — mimalloc SIGTRAPs on macOS 3.14t
-#           because it clashes with the interpreter's own bundled mimalloc; jemalloc
-#           does not (see mimalloc_preload_mac_crash memory). `brew install jemalloc`.
-# Empty (allocator not found) => no preload; the target still runs.
+#   macOS → no preload: the system allocator. MEASURED 2026-10-09 (M5, full
+#           ClickBench, 6 interleaved rounds): system malloc 0.921x jemalloc,
+#           faster in 6/6 rounds. mimalloc via DYLD_INSERT_LIBRARIES is invalid on
+#           macOS (system libraries free its pointers at thread exit → SIGTRAP).
+#           ⛔ Any future DYLD_* preload must exec the REAL interpreter
+#           (sys.executable), not a pyenv shim: the shim is a bash script and SIP
+#           strips DYLD_* when launching /bin/bash, so the jemalloc preload this
+#           replaced never reached the engine through `make`.
 ifeq ($(shell uname),Darwin)
-  _BENCH_JE := $(firstword $(wildcard /opt/homebrew/lib/libjemalloc.dylib /usr/local/lib/libjemalloc.dylib))
-  BENCH_PRELOAD := $(if $(_BENCH_JE),DYLD_INSERT_LIBRARIES=$(_BENCH_JE),)
+  BENCH_PRELOAD :=
 else
   BENCH_PRELOAD = LD_PRELOAD=$(shell $(PYTHON) -c 'import draken; print(draken.preload_library_path() or "")' 2>/dev/null) MIMALLOC_PURGE_DELAY=100
 endif
@@ -62,7 +65,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test bench-is-null
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test bench-is-null
 
 # Default target
 .DEFAULT_GOAL := help
@@ -199,6 +202,7 @@ test: ## Run full test suite with compiled extensions
 	@$(PIP) install --upgrade pytest pytest-xdist
 	@clear || true
 	@$(MAKE) --no-print-directory err-latch-test
+	@$(MAKE) --no-print-directory worker-exception-test
 	@MANUAL_TEST=1 VALIDATE_OPTIMIZER_PLANS=1 $(PYTEST) -n auto --color=yes
 
 
@@ -267,9 +271,32 @@ err-latch-test: ## Build (ASan) and run the executor ErrCtx message-lifetime tes
 	    -I$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_paths()['include'])") \
 	    $(CURDIR)/src/cpp/engine/test_err_latch.cpp \
 	    $(CURDIR)/draken/core/trace_bridge.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
 	    -o test_err_latch
 	@/tmp/opteryx-tests/test_err_latch
 	$(call print_green,"✓ Executor error-latch test passed")
+
+worker-exception-test: ## Build (ASan) and run the executor worker C++-exception -> ErrCtx test
+	$(call print_blue,"Building and running executor worker-exception test under ASan...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O1 -g -fsanitize=address -fno-omit-frame-pointer -pthread \
+	    -I$(CURDIR) \
+	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/third_party/ankerl \
+	    -I$(CURDIR)/third_party/bshoshany \
+	    -I$(CURDIR)/draken/core \
+	    -I$(CURDIR)/src/cpp \
+	    -I$(CURDIR)/src/cpp/engine \
+	    -I$(CURDIR)/third_party/cyan4973 \
+	    -I$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_paths()['include'])") \
+	    $(CURDIR)/src/cpp/engine/test_worker_exception.cpp \
+	    $(CURDIR)/opteryx/compiled/thread_pool_bridge.cpp \
+	    $(CURDIR)/draken/core/trace_bridge.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
+	    -o test_worker_exception
+	@/tmp/opteryx-tests/test_worker_exception
+	$(call print_green,"✓ Executor worker-exception test passed")
 
 medius-test: ## Build and run the Medius bounded middle-tier tests
 	$(call print_blue,"Building and running Medius tests...")

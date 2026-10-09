@@ -40,6 +40,12 @@ inline std::atomic<long long> merge_bucketed {0};   // partitions merged through
 inline std::atomic<long long> merge_buckets {0};    // buckets those partitions were split into
 // GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md):
 inline std::atomic<long long> topk_pruned {0};      // merged partitions/buckets cut to their top k
+inline std::atomic<long long> da_morsels {0};          // morsels aggregated by the direct-array path
+inline std::atomic<long long> da_layouts_stats {0};    // direct-array layouts fixed from planner bounds
+inline std::atomic<long long> da_layouts_prescan {0};  // ...fixed from a first-morsel prescan
+inline std::atomic<long long> da_rejects {0};          // layout over the slot budget: worker hashes
+inline std::atomic<long long> da_fallbacks {0};        // key outside the layout: state spilled to hashing
+inline std::atomic<long long> dict_codepass {0};       // dict-path morsels aggregated through codes
 
 inline void reset() {
     hash_ns.store(0, std::memory_order_relaxed);
@@ -55,6 +61,12 @@ inline void reset() {
     merge_bucketed.store(0, std::memory_order_relaxed);
     merge_buckets.store(0, std::memory_order_relaxed);
     topk_pruned.store(0, std::memory_order_relaxed);
+    da_morsels.store(0, std::memory_order_relaxed);
+    da_layouts_stats.store(0, std::memory_order_relaxed);
+    da_layouts_prescan.store(0, std::memory_order_relaxed);
+    da_rejects.store(0, std::memory_order_relaxed);
+    da_fallbacks.store(0, std::memory_order_relaxed);
+    dict_codepass.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -80,6 +92,12 @@ inline long long raw_switches_count()   { return raw_switches.load(std::memory_o
 inline long long merge_bucketed_count() { return merge_bucketed.load(std::memory_order_relaxed); }
 inline long long merge_buckets_count()  { return merge_buckets.load(std::memory_order_relaxed); }
 inline long long topk_pruned_count()    { return topk_pruned.load(std::memory_order_relaxed); }
+inline long long da_morsels_count()         { return da_morsels.load(std::memory_order_relaxed); }
+inline long long da_layouts_stats_count()   { return da_layouts_stats.load(std::memory_order_relaxed); }
+inline long long da_layouts_prescan_count() { return da_layouts_prescan.load(std::memory_order_relaxed); }
+inline long long da_rejects_count()         { return da_rejects.load(std::memory_order_relaxed); }
+inline long long da_fallbacks_count()       { return da_fallbacks.load(std::memory_order_relaxed); }
+inline long long dict_codepass_count()      { return dict_codepass.load(std::memory_order_relaxed); }
 
 }  // namespace opteryx::engine::groupby_tel
 

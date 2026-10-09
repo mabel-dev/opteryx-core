@@ -25,6 +25,9 @@ what only the physical planner decides:
                              build sink (None = unknown).
   group_count_estimate       the planner's group / distinct-count estimate for
                              a GROUP BY or DISTINCT sink (None = unknown).
+  group_key_ranges           a GROUP BY's manifest key bounds for the sink's
+                             direct-array layout: ([(min, max) or None per key],
+                             total rows or None), or None when not derived.
 
 Everything the compiler derives from the step (key identities, window function
 codes, constant replacements) is derived by the compiler, from the step.
@@ -167,6 +170,7 @@ cdef class PhysicalStep(BasePlanNode):
     cdef readonly object join_type
     cdef readonly object join_output_rows_estimate
     cdef readonly object group_count_estimate
+    cdef readonly object group_key_ranges
 
     def __init__(
         self,
@@ -179,6 +183,7 @@ cdef class PhysicalStep(BasePlanNode):
         join_type=None,
         join_output_rows_estimate=None,
         group_count_estimate=None,
+        group_key_ranges=None,
     ):
         if kind not in _NAMES:
             raise InvalidInternalStateError(f"'{kind}' is not a physical step kind")
@@ -187,6 +192,7 @@ cdef class PhysicalStep(BasePlanNode):
         self.join_type = join_type
         self.join_output_rows_estimate = join_output_rows_estimate
         self.group_count_estimate = group_count_estimate
+        self.group_key_ranges = group_key_ranges
         BasePlanNode.__init__(self, properties, step, columns, pre_update_columns)
 
     @property

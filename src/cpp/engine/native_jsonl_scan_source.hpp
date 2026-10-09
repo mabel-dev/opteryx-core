@@ -354,7 +354,7 @@ public:
         NativeJsonlScanGlobal* gp = g.get();
         g->workers.reserve(static_cast<size_t>(n));
         for (int i = 0; i < n; ++i)
-            g->workers.emplace_back([this, gp]() { decode_loop(*gp); });
+            g->workers.emplace_back([this, gp]() { decode_worker(*gp); });
         return g;
     }
     std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
@@ -562,6 +562,29 @@ private:
             if (g.files[i].status == jsonl_detail::FileStatus::READY && !g.files[i].busy)
                 return true;
         return false;
+    }
+
+    // A decode thread's body. decode() already reports std::exception through the
+    // query-ending message, but anything else that escapes decode_loop (claim()'s
+    // allocations and locks, a non-standard exception from decode) would leave a
+    // std::thread body and std::terminate. Route it through fail() instead, the
+    // scan's one error channel — get_morsel raises it — and retire this worker
+    // exactly as decode_loop's normal exit does, so no waiter counts it as live.
+    void decode_worker(NativeJsonlScanGlobal& g) {
+        try {
+            decode_loop(g);
+            return;
+        } catch (const std::exception& e) {
+            fail(g, std::string("READ_JSONL: unhandled C++ exception in a decode worker: ") +
+                        e.what());
+        } catch (...) {
+            fail(g, "READ_JSONL: unhandled non-standard C++ exception in a decode worker");
+        }
+        {
+            std::lock_guard<std::mutex> lock(g.mtx);
+            g.live_workers -= 1;
+        }
+        g.cv_ready.notify_all();
     }
 
     void decode_loop(NativeJsonlScanGlobal& g) {

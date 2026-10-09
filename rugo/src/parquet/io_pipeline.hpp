@@ -2310,19 +2310,16 @@ class ParquetIOPipeline {
         // NEVER changes the answer — only whether we spend on the index — so
         // no correctness argument rides on the value.
         //
-        // LOCAL files are exempt: the gate prices a serial ROUND TRIP, and a
-        // local index read is a pread of bytes the footer read already pulled
-        // toward the page cache — there is no round trip to price.
+        // It applies to LOCAL files too. Exempting them (a local index read has
+        // no round trip to price) was measured 2026-10-09 and lost: reading and
+        // applying the index on narrow local projections was slower than the
+        // decode it saved (hot, 20 ClickBench files: 3.9 -> 4.2 ms, 4.3 -> 4.6,
+        // 6.8 -> 7.4, 7.9 -> 8.3 on the four queries it changed).
         const int64_t index_bytes = hi - lo;
         int64_t projected_bytes = 0;
         for (const auto& cs : item.column_stats)
             if (cs.total_compressed_size > 0) projected_bytes += cs.total_compressed_size;
-        // A/B arm: RUGO_PAGE_INDEX_LOCAL_GATE=1 applies the gate to local files too.
-        static const bool gate_local = []() {
-            const char* v = getenv("RUGO_PAGE_INDEX_LOCAL_GATE");
-            return v != nullptr && v[0] == '1' && v[1] == '\0';
-        }();
-        if ((gate_local || !path_is_local(item.path)) && index_bytes > 0 &&
+        if (index_bytes > 0 &&
             static_cast<double>(index_bytes) >
                 kPageIndexMaxCostRatio * static_cast<double>(projected_bytes)) {
             page_index_gate_declines_.fetch_add(1, std::memory_order_relaxed);

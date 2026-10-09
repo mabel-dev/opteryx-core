@@ -112,7 +112,8 @@ def _register_http_workspace(name, local_dir, port, subdir):
 def _run(sql):
     import opteryx
 
-    session = opteryx.session()
+    # platform_admin: the gap-pinned cases set a RESTRICTED IO knob by scan hint.
+    session = opteryx.session(entitlements=["platform_admin"])
     rows = []
     for m in session.execute_to_morsels(sql):
         rows.extend(zip(*[m.column(n).to_pylist() for n in m.column_names]))
@@ -163,10 +164,13 @@ def _local(sql_template, served, arm):
     ("SELECT a, f FROM {rel}", 2 * 2, N_RG * 2),
 ])
 def test_grouped_file_costs_one_get_per_column_per_block(served, sql, grouped_gets, rowmajor_gets):
+    # Pinned to the waste ratio alone (gap rule off): these chunks are a few KB,
+    # so the default absolute gap merges every run — see the test below.
     expected = sorted(_local(sql, served, "grouped"))
     assert sorted(_local(sql, served, "rowmajor")) == expected
-    rows_g, gets_g, ops_g = _run(sql.format(rel="fb_grouped.grouped"))
-    rows_r, gets_r, ops_r = _run(sql.format(rel="fb_rowmajor.rowmajor"))
+    gap0 = " WITH(parquet_io_coalesce_gap_bytes=0)"
+    rows_g, gets_g, ops_g = _run(sql.format(rel="fb_grouped.grouped" + gap0))
+    rows_r, gets_r, ops_r = _run(sql.format(rel="fb_rowmajor.rowmajor" + gap0))
     assert sorted(rows_g) == expected
     assert sorted(rows_r) == expected
     assert gets_g == grouped_gets, (gets_g, ops_g)
@@ -182,12 +186,29 @@ def test_pruned_block_is_fetched_partially_as_one(served):
     sql = "SELECT a, s FROM {rel} WHERE a = 9000"
     expected = _local(sql, served, "grouped")
     assert expected == [(9000, f"v{9000 % 97}")]
-    rows, gets, ops = _run(sql.format(rel="fb_grouped.grouped"))
+    rows, gets, ops = _run(sql.format(rel="fb_grouped.grouped WITH(parquet_io_coalesce_gap_bytes=0)"))
     assert rows == expected
     assert ops == 1
     # a and s are adjacent in a one-member block only through the block's other
-    # members' chunks (3 x a between rg4.a and rg4.s), so two ranges.
+    # members' chunks (3 x a between rg4.a and rg4.s), so two ranges under the
+    # waste ratio alone ...
     assert gets == 2
+    # ... and one under the default absolute gap: 3 small chunks cost less to
+    # fetch than a second GET does.
+    rows, gets, ops = _run(sql.format(rel="fb_grouped.grouped"))
+    assert rows == expected
+    assert (ops, gets) == (1, 1)
+
+
+def test_default_gap_merges_small_skipped_columns(served):
+    """PARQUET_IO_COALESCE_GAP_BYTES: a skipped column smaller than the gap is
+    fetched rather than paid for with another GET — a and f, apart under the
+    waste ratio, become one run per block."""
+    sql = "SELECT a, f FROM {rel}"
+    expected = sorted(_local(sql, served, "grouped"))
+    rows, gets, ops = _run(sql.format(rel="fb_grouped.grouped"))
+    assert sorted(rows) == expected
+    assert (ops, gets) == (2, 2)
 
 
 def test_range_predicate_keeps_a_whole_block_as_one_fetch(served):

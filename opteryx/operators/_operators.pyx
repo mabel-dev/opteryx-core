@@ -214,6 +214,12 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_merge_bucketed "opteryx::engine::groupby_tel::merge_bucketed_count" ()
     long long gb_tel_merge_buckets "opteryx::engine::groupby_tel::merge_buckets_count" ()
     long long gb_tel_topk_pruned "opteryx::engine::groupby_tel::topk_pruned_count" ()
+    long long gb_tel_da_morsels "opteryx::engine::groupby_tel::da_morsels_count" ()
+    long long gb_tel_da_layouts_stats "opteryx::engine::groupby_tel::da_layouts_stats_count" ()
+    long long gb_tel_da_layouts_prescan "opteryx::engine::groupby_tel::da_layouts_prescan_count" ()
+    long long gb_tel_da_rejects "opteryx::engine::groupby_tel::da_rejects_count" ()
+    long long gb_tel_da_fallbacks "opteryx::engine::groupby_tel::da_fallbacks_count" ()
+    long long gb_tel_dict_codepass "opteryx::engine::groupby_tel::dict_codepass_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
 cdef extern from "engine/scan_tel.hpp" namespace "opteryx::engine::scan_tel" nogil:
@@ -638,6 +644,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_groupby_topk(size_t p, cppvector[SortKeySpec] keys, size_t k,
                               bint ties) except +
         void set_groupby_seed(size_t p, GroupSeed seed) except +
+        void set_groupby_key_ranges(size_t p, cppvector[int64_t] lo, cppvector[int64_t] hi,
+                                    cppvector[uint8_t] known, int64_t rows) except +
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf,
                                int64_t ndv_estimate)
         void set_buffer_append_sink(size_t p, size_t buf)
@@ -850,6 +858,12 @@ def get_groupby_telemetry():
         "merge_bucketed": gb_tel_merge_bucketed(),
         "merge_buckets":  gb_tel_merge_buckets(),
         "topk_pruned":    gb_tel_topk_pruned(),
+        "da_morsels":         gb_tel_da_morsels(),
+        "da_layouts_stats":   gb_tel_da_layouts_stats(),
+        "da_layouts_prescan": gb_tel_da_layouts_prescan(),
+        "da_rejects":         gb_tel_da_rejects(),
+        "da_fallbacks":       gb_tel_da_fallbacks(),
+        "dict_codepass":      gb_tel_dict_codepass(),
     }
 
 
@@ -3153,6 +3167,26 @@ cdef class NativePlan:
                     <bint>any_extreme, <int64_t?>low, <int64_t?>high,
                     0 if operand_type is None else <int?>operand_type))
         self._e.set_groupby_seed(p, group_seed_make(len(groups), ktypes, kvals, kok, partials))
+
+    def set_groupby_key_ranges(self, size_t p, list ranges, int64_t rows):
+        """The planner's manifest bounds for the GROUP BY keys of the sink on pipeline
+        ``p`` (direct-array GROUP BY, native_group_sinks.hpp GBDirectArray): one entry per
+        key, ``(min, max)`` or None when unknown; ``rows`` = the scans' total record
+        count (-1 = unknown), which sizes the slot budget. Bounds are a layout hint
+        only — the sink range-checks every morsel and falls back to hashing."""
+        cdef cppvector[int64_t] lo
+        cdef cppvector[int64_t] hi
+        cdef cppvector[uint8_t] known
+        for entry in ranges:
+            if entry is None:
+                lo.push_back(0)
+                hi.push_back(0)
+                known.push_back(0)
+            else:
+                lo.push_back(<int64_t?>entry[0])
+                hi.push_back(<int64_t?>entry[1])
+                known.push_back(1)
+        self._e.set_groupby_key_ranges(p, lo, hi, known, rows)
 
     def set_groupby_topk(self, size_t p, list keys, size_t k, bint ties):
         """Arm the GROUP BY sink on pipeline ``p`` to emit only each hash partition's

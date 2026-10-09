@@ -52,6 +52,7 @@ from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.physical_planner.execution_estimates import group_count_estimate
+from opteryx.planner.physical_planner.execution_estimates import group_key_ranges
 from opteryx.planner.physical_planner.execution_estimates import join_output_rows_estimate
 from opteryx.planner.plan_context import PlanContext
 from opteryx.compiled.structures.plan_steps import steps_with
@@ -203,7 +204,9 @@ def _create_aggregate_node(logical_node, query_properties, registry):
     return registry.create_step("Aggregate", query_properties, logical_node)
 
 
-def _create_aggregate_and_group_node(logical_node, query_properties, registry, group_count_estimate):
+def _create_aggregate_and_group_node(
+    logical_node, query_properties, registry, group_count_estimate, key_ranges
+):
     # pre_update_columns: a GROUP BY key that nothing above reads still has to be
     # HASHED to separate the groups, but its values never have to be stored — the
     # grouping contract is 64-bit hash identity. Carrying the set here is what lets
@@ -214,6 +217,7 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry, g
         logical_node,
         pre_update_columns=logical_node.pre_update_columns,
         group_count_estimate=group_count_estimate,
+        group_key_ranges=key_ranges,
     )
 
 
@@ -1005,7 +1009,15 @@ def _physical_plan_of(logical_plan, query_properties, plan_context: PlanContext)
                 registry,
                 join_output_rows_estimate(nid, logical_node, plan_context),
             )
-        elif node_type in (LogicalPlanStepType.AggregateAndGroup, LogicalPlanStepType.Distinct):
+        elif node_type == LogicalPlanStepType.AggregateAndGroup:
+            node = creator(
+                logical_node,
+                query_properties,
+                registry,
+                group_count_estimate(logical_plan, nid, logical_node),
+                group_key_ranges(logical_plan, nid, logical_node),
+            )
+        elif node_type == LogicalPlanStepType.Distinct:
             node = creator(
                 logical_node,
                 query_properties,

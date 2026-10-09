@@ -84,7 +84,7 @@
         "settable": false,
         "requires_entitlement": null,
         "set_by": "not settable via SQL",
-        "default": 43808666419,
+        "default": 36936718745,
         "default_source": "literal"
     },
     "chunk_cache_memory_percent": {
@@ -554,6 +554,18 @@
         "default": null,
         "default_source": "environment",
         "environment_key": "PARQUET_GCS_IO_WORKERS"
+    },
+    "parquet_io_coalesce_gap_bytes": {
+        "name": "parquet_io_coalesce_gap_bytes",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "PARQUET_IO_COALESCE_GAP_BYTES"
     },
     "parquet_io_coalesce_max_bytes": {
         "name": "parquet_io_coalesce_max_bytes",

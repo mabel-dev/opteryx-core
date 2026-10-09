@@ -15,6 +15,8 @@ Three native sinks size themselves from a planner estimate:
     when the join emits more rows than its build side holds.
   * GroupBySink and DistinctSink read the expected distinct-group count to arm
     their fixed-capacity parvi front maps (kGBParviGateNDV / kDistinctParviGateNDV).
+  * GroupBySink also takes its integer keys' manifest bounds and the scans' row
+    count to lay out its direct-array path (group_key_ranges).
 
 Each is a pure function of the final logical plan, its PlanContext statistics
 and the scans' manifests, so it is computed here, at the one place that hands it
@@ -34,6 +36,7 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
+from opteryx.types.logical_type import LogicalCategory
 
 # The highest group count any consumer compares against (the native GroupBySink's
 # gate). The NDV product below stops multiplying once past it: a larger number is
@@ -96,6 +99,46 @@ def group_count_estimate(plan: LogicalPlan, nid: str, node: PlanStep) -> Optiona
     if ndv_product is not None:
         estimate = ndv_product if estimate is None else min(estimate, ndv_product)
     return estimate
+
+
+def group_key_ranges(plan: LogicalPlan, nid: str, node: PlanStep) -> Optional[tuple]:
+    """Manifest bounds for a GROUP BY's keys, for the native sink's direct-array
+    layout: ``([(min, max) or None per key], total_rows or None)``, or None when no
+    scan is upstream.
+
+    A key gets bounds only when it is a plain INTEGER column every upstream scan's
+    manifest bounds in every file; the bounds are the union over files and scans.
+    They are a layout HINT: the sink range-checks every morsel and hashes whatever
+    falls outside, so a loose or stale bound costs speed, never an answer.
+    """
+    scans = [
+        plan[source]
+        for source, _target, _relation in plan.breadth_first_search(nid, reverse=True)
+        if plan[source].node_type == LogicalPlanStepType.Scan
+    ]
+    if not scans:
+        return None
+    return [_column_int_range(column, scans) for column in node.groups or []], _total_record_count(scans)
+
+
+def _column_int_range(column, scans: list) -> Optional[tuple]:
+    name = _source_column_name(column)
+    if name is None or column.schema_column.column_type.category != LogicalCategory.INTEGER:
+        return None
+    lo = hi = None
+    for scan in scans:
+        manifest = scan.manifest
+        if manifest is None:
+            return None
+        bounds = manifest.file_value_bounds(name)
+        if not bounds:
+            return None
+        for low, high in bounds:
+            if low[0] != "int" or high[0] != "int":
+                return None
+            lo = low[1] if lo is None else min(lo, low[1])
+            hi = high[1] if hi is None else max(hi, high[1])
+    return lo, hi
 
 
 def _total_record_count(scans: list) -> Optional[int]:

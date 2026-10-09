@@ -23,6 +23,8 @@
 #define BS_POOL_BRIDGE_HPP
 
 #include <Python.h>
+#include <cstdio>
+#include <exception>
 #include <thread>
 #include <queue>
 #include <memory>
@@ -216,8 +218,13 @@ public:
      * Acquires the GIL for all Python work, then releases it.  Python object
      * refs are nulled before the GIL is released so the destructor (which runs
      * without the GIL) touches no Python state.
+     *
+     * noexcept: the only C++ throw site is ResultContainer's std::mutex lock
+     * (std::system_error). Escaping, it would reach BS::thread_pool's
+     * `catch (...) {}`, the Future would never resolve and its waiter would hang
+     * forever — so it terminates the process instead, as submit_native does.
      */
-    void operator()() {
+    void operator()() noexcept {
         PyGILState_STATE gstate = PyGILState_Ensure();
 
         // --- Run the callable --------------------------------------------------
@@ -326,9 +333,31 @@ public:
      * submit N tasks, then `wait_native()` (or `shutdown`) to barrier. This is the
      * native-worker-drive path — the per-morsel drive runs without a Python
      * callable bouncing through `ResultContainer`/`TaskWrapper`.
+     *
+     * A native task must report its own failures (run_worker_task converts every
+     * exception to the pipeline's ErrCtx). One that lets an exception escape has
+     * nowhere to report it: BS::thread_pool's worker loop wraps every detached task
+     * in `catch (...) {}`, which once turned a GROUP BY's thrown error into a
+     * silently empty result. So an escaping exception terminates the process here,
+     * naming the exception, rather than reaching that catch.
      */
     void submit_native(void (*fn)(void*), void* arg, BS::priority_t priority = BS::pr::normal) {
-        pool_->detach_task([fn, arg]() { fn(arg); }, priority);
+        pool_->detach_task([fn, arg]() {
+            try {
+                fn(arg);
+            } catch (const std::exception& ex) {
+                std::fprintf(stderr,
+                             "fatal: uncaught C++ exception in native pool task: %s\n",
+                             ex.what());
+                std::fflush(stderr);
+                std::terminate();
+            } catch (...) {
+                std::fprintf(stderr,
+                             "fatal: uncaught non-standard C++ exception in native pool task\n");
+                std::fflush(stderr);
+                std::terminate();
+            }
+        }, priority);
     }
 
     /**

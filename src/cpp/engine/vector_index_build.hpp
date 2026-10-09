@@ -40,11 +40,11 @@
 #include <cstring>
 #include <memory>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "engine/fork_join.hpp"               // fork_join — exception-safe fan-out
 #include "io_pipeline.hpp"                    // rugo::ParquetIOPipeline, MorselRef
 #include "filesystem.hpp"                     // rugo::FetchParquetFooter (local or remote)
 #include "metadata.hpp"                       // rugo FileStats / ReadParquetMetadataFromBuffer
@@ -175,12 +175,16 @@ inline bool embed_rows(const VectorIndexBuildSpec& spec, const DrakenVector& tex
             }
         }
     };
-    if (threads == 1u) {
-        work(0);
-    } else {
-        std::vector<std::thread> pool;
-        for (uint32_t t = 0; t < threads; ++t) pool.emplace_back(work, t);
-        for (auto& th : pool) th.join();
+    // fork_join rethrows a C++ exception from any embedding thread here; this
+    // function reports through `*err`, so convert it rather than let it escape.
+    try {
+        fork_join(threads, work);
+    } catch (const std::exception& ex) {
+        *err = std::string("vector index build: ") + ex.what();
+        return false;
+    } catch (...) {
+        *err = "vector index build: an embedding thread raised a non-standard C++ exception";
+        return false;
     }
     for (const auto& e : errors)
         if (!e.empty()) { *err = "vector index build: " + e; return false; }
