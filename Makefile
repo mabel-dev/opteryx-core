@@ -35,7 +35,9 @@ COVERAGE := $(PYTHON) -m coverage
 ifeq ($(shell uname),Darwin)
   BENCH_PRELOAD :=
 else
-  BENCH_PRELOAD = LD_PRELOAD=$(shell $(PYTHON) -c 'import draken; print(draken.preload_library_path() or "")' 2>/dev/null) MIMALLOC_PURGE_DELAY=100
+  # PURGE_DELAY=1000, not 100: 100 measured ~10% slower on the full ClickBench hot
+  # suite (x86, 2026-08-14); dev/ab_bench.py uses 1000 for the same reason.
+  BENCH_PRELOAD = LD_PRELOAD=$(shell $(PYTHON) -c 'import draken; print(draken.preload_library_path() or "")' 2>/dev/null) MIMALLOC_PURGE_DELAY=1000
 endif
 MYPY := $(PYTHON) -m mypy
 
