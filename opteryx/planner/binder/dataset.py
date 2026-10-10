@@ -99,6 +99,8 @@ _READ_CSV_OPTIONS = (
 # READ_PARQUET reads its schema from the file and has nothing to configure; its one
 # option names the stored secret to read a private bucket with.
 _READ_PARQUET_OPTIONS = ("credentials",)
+# READ_AVRO, likewise: the schema is in the file's header.
+_READ_AVRO_OPTIONS = ("credentials",)
 
 
 def _is_glob_pattern(path: str) -> bool:
@@ -901,6 +903,128 @@ def visit_function_dataset(
             # filesystem from the path's scheme. Not `.filesystem`: that names a
             # catalog connector's, whose remote files the reader refuses.
             node.connector.credentialed_filesystem = filesystem
+    elif node.function == "READ_AVRO":
+        from opteryx.connectors.avro_io import header_schema
+        from opteryx.connectors.io_systems import create_filesystem
+        from opteryx.exceptions import DatasetNotFoundError
+        from opteryx.exceptions import DatasetReadError
+        from opteryx.exceptions import NotSupportedError
+
+        path_arg = node.args[0] if node.args else None
+        if path_arg is not None and path_arg.node_type == NodeType.NESTED:
+            path_arg = path_arg.centre
+        if (
+            path_arg is None
+            or path_arg.node_type != NodeType.LITERAL
+            or type(path_arg.value) is not bytes
+        ):
+            raise InvalidFunctionParameterError(
+                "READ_AVRO requires a single string literal path, e.g. READ_AVRO('file.avro')."
+            )
+        path = path_arg.text()
+        named_args = node.named_args or {}
+        _validate_reader_options("READ_AVRO", node.args, named_args, _READ_AVRO_OPTIONS)
+
+        protocol = path.split("://")[0] if "://" in path else ""
+        is_glob = _is_glob_pattern(path)
+        # The READ_JSONL scheme rules, for the same reasons (see that branch).
+        if protocol == "gcs":
+            raise InvalidFunctionParameterError(
+                f"READ_AVRO('{path}'): 'gcs://' is not a supported scheme; use 'gs://'."
+            )
+        if protocol == "file":
+            raise InvalidFunctionParameterError(
+                f"READ_AVRO('{path}'): 'file://' is not a supported scheme; use the local path."
+            )
+
+        # SECURITY: as READ_JSONL — a bare dataset function never reads a user-supplied
+        # gs:// / s3:// path with this process's own credentials. Without `credentials`
+        # it reads anonymously (the store's ACL decides) and a glob is refused, since
+        # listing is not assumed to be granted anonymously.
+        credential = _read_credential("READ_AVRO", path, protocol, named_args, context)
+        if credential is not None:
+            filesystem = _credentialed_filesystem(credential, protocol)
+        elif protocol == "gs":
+            if is_glob:
+                raise NotSupportedError(
+                    f"READ_AVRO('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly."
+                )
+            from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
+                anonymous_gcs_filesystem,
+            )
+
+            filesystem = anonymous_gcs_filesystem()
+        elif protocol == "s3":
+            if is_glob:
+                raise NotSupportedError(
+                    f"READ_AVRO('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly."
+                )
+            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                anonymous_s3_filesystem,
+            )
+
+            filesystem = anonymous_s3_filesystem()
+        else:
+            filesystem = create_filesystem(protocol)
+
+        if is_glob:
+            avro_files = _resolve_glob_files(path, filesystem)
+            if not avro_files:
+                raise DatasetNotFoundError(connector="READ_AVRO", dataset=path)
+        else:
+            avro_files = [path]
+        _check_credential_scope("READ_AVRO", credential, avro_files)
+
+        # The relation schema is the FIRST file's (matches sorted by path), read from its
+        # header alone. Every file is then read with that schema as its READER schema,
+        # so a file whose schema evolved resolves onto it — a field it lacks is NULL or
+        # its default, an int widens to a long — and one that cannot fails the query
+        # naming the file (docs/AVRO_READER_DESIGN.md §19.3). Unlike JSONL, an Avro file
+        # with no records still states its schema, so no file is skipped.
+        file_obj = filesystem.open_input_file(avro_files[0])
+        try:
+            reader_schema, columns = header_schema(file_obj.memoryview)
+        except RuntimeError as err:
+            raise DatasetReadError(
+                f"The Avro file {md_code(avro_files[0])} could not be read. {md_cause(err)}"
+            ) from err
+        finally:
+            file_obj.close()
+
+        if node.column_aliases:
+            raise NotSupportedError(
+                f"READ_AVRO('{path}') AS alias(...) is not supported -- only AS alias "
+                "(renaming the relation, not its columns) is. Use a **SELECT** ... AS "
+                "new_name wrapper to rename individual columns."
+            )
+
+        relation_name = node.alias or f"$read_avro-{random_string()}"
+        schema_columns = [
+            context.plan_context.columns.relation_column(
+                relation_name, name, column_type=column_type, origin=[relation_name]
+            )
+            for name, column_type in columns
+        ]
+        schema = RelationSchema(name=relation_name, columns=schema_columns)
+        context.schemas[relation_name] = schema
+
+        node.alias = relation_name
+        # node.columns is left unset, as for READ_JSONL: projection pushdown fills it.
+        node.schema = schema
+        node.dataset = path
+        node.avro_files = avro_files
+        node.avro_physical_columns = [name for name, _ in columns]
+        node.avro_physical_by_identity = {
+            schema_column.identity: name
+            for (name, _), schema_column in zip(columns, schema_columns)
+        }
+        node.avro_reader_schema = reader_schema
+        # With `credentials`, the reader signs each file's URL with this filesystem
+        # (AvroReadNode.native_file_locations); otherwise it re-derives the anonymous
+        # one from the path's scheme.
+        node.avro_credentialed_filesystem = filesystem if credential is not None else None
+        # No predicate is pushed into the reader (Avro has no statistics), so no
+        # connector: every predicate stays a Filter above the scan.
     elif node.function == "READ_PARQUET":
         from opteryx.connectors._rugo_schema import rugo_to_relation_schema
         from opteryx.connectors.filesystem_connector import FileSystemTable

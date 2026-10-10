@@ -39,6 +39,7 @@
 #include "native_skene_latmat_scan_source.hpp"  // NativeSkeneLatmatScanSource (two-pass skene)
 #include "native_postgres_scan_source.hpp"    // NativePostgresScanSource (zero-Python Postgres)
 #include "native_jsonl_scan_source.hpp"       // NativeJsonlScanSource (zero-Python READ_JSONL)
+#include "native_avro_scan_source.hpp"        // NativeAvroScanSource (zero-Python READ_AVRO)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "native_window_frame.hpp"  // FramedWindowSink — SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE ...)
@@ -1021,6 +1022,14 @@ public:
     // NativePlan holds that object for the driver's lifetime.
     void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec) {
         set_source_(p, std::make_unique<NativeJsonlScanSource>(spec));
+    }
+
+    // Source = a native Avro scan (NativeAvroScanSource): its own decode pool claims
+    // whole files and streams their batches through rugo's C++ Avro reader. The spec
+    // is BORROWED: the Cython AvroScanPlan owns it and NativePlan holds that object
+    // for the driver's lifetime.
+    void set_native_avro_scan_source(size_t p, const AvroScanSpec* spec) {
+        set_source_(p, std::make_unique<NativeAvroScanSource>(spec));
     }
 
     void set_skene_latmat_scan_source(size_t p,

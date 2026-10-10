@@ -341,7 +341,7 @@ CLAUSE_DEFINITIONS = {
             "REGION, SCOPE) and http_endpoint (URL, optional HEADER_AUTHORIZATION, "
             "HEADER_X_API_KEY, HEADER_X_AUTH_TOKEN). Each value is a :name parameter or a "
             "string literal; a literal is lifted out of the statement before it is stored "
-            "or logged. Use the secret with READ_PARQUET / READ_JSONL / READ_CSV "
+            "or logged. Use the secret with READ_PARQUET / READ_JSONL / READ_CSV / READ_AVRO "
             "credentials => 'workspace.secret_name'."
         ),
         "notes": (

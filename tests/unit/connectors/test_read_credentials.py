@@ -1,4 +1,4 @@
-"""READ_PARQUET / READ_JSONL / READ_CSV with `credentials => '<workspace>.<name>'`.
+"""READ_PARQUET / READ_JSONL / READ_CSV / READ_AVRO with `credentials => '<workspace>.<name>'`.
 
 jobs.opteryx docs/design/secrets.md §8.2 (SEC-14). The engine resolves a NAMED
 stored secret through the deployment's registered resolver and reads with that
@@ -161,7 +161,7 @@ def test_credentials_only_apply_to_object_stores(resolver):
 
 
 def test_every_reader_accepts_the_option_and_nothing_new():
-    for function in ("READ_PARQUET", "READ_JSONL", "READ_CSV"):
+    for function in ("READ_PARQUET", "READ_JSONL", "READ_CSV", "READ_AVRO"):
         with pytest.raises(InvalidFunctionParameterError):
             _rows(f"SELECT * FROM {function}('{SCOPE}a', credential => 'analytics.reader')")
 
@@ -186,6 +186,11 @@ def test_globs_work_and_every_file_is_scope_checked(resolver):
 def test_a_literal_path_outside_scope_is_refused(resolver):
     with pytest.raises(PermissionError, match="outside the SCOPE of secret analytics.reader"):
         _rows("SELECT * FROM READ_CSV('gs://acme_bkt/private/c.csv', credentials => 'analytics.reader')")
+
+
+def test_read_avro_literal_path_outside_scope_is_refused(resolver):
+    with pytest.raises(PermissionError, match="outside the SCOPE"):
+        _rows("SELECT * FROM READ_AVRO('gs://acme_bkt/private/c.avro', credentials => 'analytics.reader')")
 
 
 def test_a_glob_expanding_outside_scope_is_refused(resolver):
@@ -345,7 +350,7 @@ def s3_canary(monkeypatch):
     register_secret_resolver(None)
 
 
-@pytest.mark.parametrize("function", ["READ_PARQUET", "READ_CSV", "READ_JSONL"])
+@pytest.mark.parametrize("function", ["READ_PARQUET", "READ_CSV", "READ_JSONL", "READ_AVRO"])
 def test_the_canary_key_appears_in_no_sink(s3_canary, caplog, capfd, function):
     import logging
 

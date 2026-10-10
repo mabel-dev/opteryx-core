@@ -795,13 +795,40 @@ private:
         auto text = [&](DrakenType dt, const std::string& v) {
             cs.kind = OutKind::ConstString; cs.type = dt; cs.const_value = v;
         };
-        if (t->logical == Logical::TimeMillis || t->logical == Logical::TimeMicros ||
-            t->logical == Logical::TimestampMillis || t->logical == Logical::TimestampMicros ||
-            t->logical == Logical::Decimal)
-            fail("column '" + name + "' is not in the file, and a constant " +
-                 (t->logical == Logical::Decimal ? std::string("DECIMAL") : std::string("TIME/TIMESTAMP")) +
-                 " column has no draken producer that carries its logical type (docs §19.4)");
         if (t->logical == Logical::Uuid) fail("column '" + name + "' is a uuid, which is not supported (as for parquet)");
+        // TIME / TIMESTAMP (microseconds) and DECIMAL constants carry their logical type
+        // on the column. The engine attaches it natively; the Python edge has no
+        // producer that does, and refuses them (docs §19.4).
+        if (t->logical == Logical::TimeMillis || t->logical == Logical::TimeMicros ||
+            t->logical == Logical::TimestampMillis || t->logical == Logical::TimestampMicros) {
+            const bool ts = t->logical == Logical::TimestampMillis || t->logical == Logical::TimestampMicros;
+            int64_t v = 0;
+            if (!null) {
+                const DefaultValue d(f.default_json, name);
+                v = t->kind == Kind::Int ? d.integer(INT32_MIN, INT32_MAX) : d.integer(INT64_MIN, INT64_MAX);
+                if ((t->logical == Logical::TimestampMillis || t->logical == Logical::TimeMillis) &&
+                    __builtin_mul_overflow(v, int64_t(1000), &v))
+                    fail("column '" + name + "': its default overflows microseconds");
+            }
+            fixed(ts ? DRAKEN_TIMESTAMP64 : DRAKEN_TIME64, &v, 8);
+            return;
+        }
+        if (t->logical == Logical::Decimal) {
+            const bool wide = t->precision > 18;
+            __int128 v = 0;
+            if (!null) {
+                const std::string b = DefaultValue(f.default_json, name).bytes();
+                if (t->kind == Kind::Fixed && b.size() != t->fixed_size)
+                    fail("column '" + name + "': its default is not " + std::to_string(t->fixed_size) + " bytes");
+                v = checked_decimal(reinterpret_cast<const uint8_t*>(b.data()), b.size(), t->precision);
+            }
+            cs.precision = t->precision;
+            cs.scale = t->scale;
+            if (wide) { fixed(DRAKEN_DECIMAL128, &v, 16); return; }
+            const int64_t v64 = static_cast<int64_t>(v);
+            fixed(DRAKEN_DECIMAL, &v64, 8);
+            return;
+        }
         if (null) {
             switch (t->kind) {
                 case Kind::Boolean: { const uint8_t z = 0; fixed(DRAKEN_BOOL, &z, 1); return; }
@@ -1316,7 +1343,7 @@ private:
             }
             case OutKind::ConstRaw: {
                 // One value, positions all 0 (CLAUDE.md §11).
-                auto* v = static_cast<uint8_t*>(draken_calloc(8, 1));
+                auto* v = static_cast<uint8_t*>(draken_calloc(16, 1));
                 if (v == nullptr) throw std::bad_alloc();
                 std::memcpy(v, cs.const_value.data(), cs.const_value.size());
                 if (cs.type == DRAKEN_BOOL) v[0] = v[0] ? 1 : 0;  // bit 0 of the packed value
@@ -1376,49 +1403,133 @@ void read_avro_header(const uint8_t* data, size_t size, AvroRead& out) {
     out.metadata = std::move(h.metadata);
 }
 
-void read_avro_buffer(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
-                      bool all_columns, const std::string& reader_schema_json, AvroRead& out) {
-    const Header h = read_header(data, size);
-    const Schema writer = Schema::parse(h.schema_json.data(), h.schema_json.size());
-    Schema reader;
-    if (!reader_schema_json.empty()) reader = Schema::parse(reader_schema_json.data(), reader_schema_json.size());
-    const Node* r = reader_schema_json.empty() ? writer.root() : reader.root();
+// ── AvroStream ──────────────────────────────────────────────────────────────
 
-    std::vector<std::string> names = columns;
+struct AvroStream::Impl {
+    const uint8_t* data;
+    size_t size;
+    Header header;
+    Schema writer;
+    Schema reader;
+    std::vector<std::string> names;
+    Program prog;
+    std::unique_ptr<Decoder> dec;
+    std::unique_ptr<BlockReader> blocks;
+    draken::AppendBuffer<uint8_t> scratch;
+    bool count_only = false;   // no columns: rows come from the block headers alone
+    uint32_t counted = 0;      // count_only: rows in the batch being built
+    Block pending;             // a block that did not fit the previous batch
+    bool has_pending = false;
+
+    uint32_t rows() const { return count_only ? counted : dec->rows(); }
+
+    AvroBatch finish() {
+        if (!count_only) {
+            AvroBatch b = dec->finish();
+            dec->begin_batch();
+            return b;
+        }
+        AvroBatch b;
+        b.rows = counted;
+        counted = 0;
+        return b;
+    }
+};
+
+AvroStream::AvroStream(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
+                       bool all_columns, const std::string& reader_schema_json)
+    : impl_(std::make_unique<Impl>()) {
+    Impl& m = *impl_;
+    m.data = data;
+    m.size = size;
+    m.header = read_header(data, size);
+    m.writer = Schema::parse(m.header.schema_json.data(), m.header.schema_json.size());
+    if (!reader_schema_json.empty()) m.reader = Schema::parse(reader_schema_json.data(), reader_schema_json.size());
+    const Node* r = reader_schema_json.empty() ? m.writer.root() : m.reader.root();
+
+    m.names = columns;
     if (all_columns) {
         if (!columns.empty()) fail("pass either columns or all_columns, not both");
         if (r->kind != Kind::Record) fail("the schema is not a record");
-        for (const Field& f : r->fields) names.push_back(f.name);
+        for (const Field& f : r->fields) m.names.push_back(f.name);
     }
+    m.count_only = m.names.empty();
 
-    Program prog;
     Req req;
-    parse_columns(names, req, prog);
-    Compiler(prog, reader_schema_json.empty() ? "the file's schema" : "the reader schema").compile_root(writer.root(), r, req);
+    parse_columns(m.names, req, m.prog);
+    Compiler(m.prog, reader_schema_json.empty() ? "the file's schema" : "the reader schema")
+        .compile_root(m.writer.root(), r, req);
+    m.dec = std::make_unique<Decoder>(m.prog);
+    m.dec->begin_batch();
+    m.blocks = std::make_unique<BlockReader>(data, size, m.header);
+}
 
-    out.schema_json = h.schema_json;
-    out.metadata = h.metadata;
-    out.column_names = names;
-    out.batches.clear();
+AvroStream::~AvroStream() = default;
 
-    Decoder dec(prog);
-    dec.begin_batch();
-    BlockReader blocks(data, size, h);
-    draken::AppendBuffer<uint8_t> scratch;
-    Block b;
-    while (blocks.next(b)) {
+const std::string& AvroStream::schema_json() const { return impl_->header.schema_json; }
+const std::vector<std::pair<std::string, std::string>>& AvroStream::metadata() const { return impl_->header.metadata; }
+const std::vector<std::string>& AvroStream::column_names() const { return impl_->names; }
+
+std::vector<AvroColumnType> AvroStream::column_types() const {
+    const Program& p = impl_->prog;
+    std::vector<AvroColumnType> out(p.n_out);
+    for (size_t i = 0; i < p.n_out; ++i) {
+        const ColSpec& cs = p.cols[i];
+        AvroColumnType& t = out[i];
+        t.type = cs.type;
+        if (cs.type == DRAKEN_TIMESTAMP64) t.logical_kind = 1;
+        else if (cs.type == DRAKEN_TIME64) t.logical_kind = 2;
+        else if (cs.type == DRAKEN_DECIMAL || cs.type == DRAKEN_DECIMAL128) {
+            t.logical_kind = 3;
+            t.precision = cs.precision;
+            t.scale = cs.scale;
+        }
+        if (cs.kind == OutKind::Array) t.child_type = p.cols[cs.child].type;
+    }
+    return out;
+}
+
+bool AvroStream::next(AvroBatch& out) {
+    Impl& m = *impl_;
+    for (;;) {
+        Block b;
+        if (m.has_pending) {
+            b = m.pending;
+            m.has_pending = false;
+        } else if (!m.blocks->next(b)) {
+            if (m.rows() == 0) return false;
+            out = m.finish();
+            return true;
+        }
         if (b.count > static_cast<int64_t>(UINT32_MAX)) fail("a block holds more than 2^32 records");
         const uint32_t count = static_cast<uint32_t>(b.count);
         if (count == 0) continue;
-        if (dec.rows() > 0 && static_cast<uint64_t>(dec.rows()) + count > kBatchRows) {
-            out.batches.push_back(dec.finish());
-            dec.begin_batch();
+        if (m.rows() > 0 && static_cast<uint64_t>(m.rows()) + count > kBatchRows) {
+            // This block starts the next batch; the one built so far is done.
+            m.pending = b;
+            m.has_pending = true;
+            out = m.finish();
+            return true;
         }
-        if (static_cast<uint64_t>(dec.rows()) + count > UINT32_MAX) fail("a batch exceeds 2^32 rows");
-        const auto payload = block_payload(b, h.codec, scratch);
-        dec.block(payload.first, payload.second, count);
+        if (static_cast<uint64_t>(m.rows()) + count > UINT32_MAX) fail("a batch exceeds 2^32 rows");
+        if (m.count_only) {
+            m.counted += count;
+            continue;
+        }
+        const auto payload = block_payload(b, m.header.codec, m.scratch);
+        m.dec->block(payload.first, payload.second, count);
     }
-    if (dec.rows() > 0) out.batches.push_back(dec.finish());
+}
+
+void read_avro_buffer(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
+                      bool all_columns, const std::string& reader_schema_json, AvroRead& out) {
+    AvroStream stream(data, size, columns, all_columns, reader_schema_json);
+    out.schema_json = stream.schema_json();
+    out.metadata = stream.metadata();
+    out.column_names = stream.column_names();
+    out.batches.clear();
+    AvroBatch batch;
+    while (stream.next(batch)) out.batches.push_back(std::move(batch));
 }
 
 }  // namespace rugo::avro

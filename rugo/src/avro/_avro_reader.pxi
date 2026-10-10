@@ -1,4 +1,5 @@
 from libc.stdint cimport uint8_t, uint32_t
+from draken.core.buffers cimport DrakenType
 from libcpp cimport bool as cbool
 from libcpp.string cimport string
 from libcpp.utility cimport pair
@@ -25,6 +26,19 @@ cdef extern from "avro/avro_reader.hpp" namespace "rugo::avro":
                           cbool all_columns, const string& reader_schema_json,
                           AvroRead& out) except + nogil
     void read_avro_header(const uint8_t* data, size_t size, AvroRead& out) except + nogil
+
+    cdef struct AvroColumnType:
+        DrakenType type
+        uint8_t logical_kind
+        uint8_t precision
+        uint8_t scale
+        DrakenType child_type
+
+    cppclass AvroStream:
+        AvroStream(const uint8_t* data, size_t size, const vector[string]& columns,
+                   cbool all_columns, const string& reader_schema_json) except +
+        vector[string] column_names()
+        vector[AvroColumnType] column_types()
 
 
 # The Python edge: kept out of avro_reader.cpp so the reader compiles without Python.h.
@@ -111,3 +125,37 @@ def read_avro_metadata(data):
     with nogil:
         read_avro_header(ptr, n, res)
     return {"schema": res.schema_json.decode("utf-8"), "metadata": _avro_metadata(res)}
+
+
+def read_avro_column_types(data, reader_schema=None):
+    """
+    What every top-level column decodes to, from the header alone (no block is read).
+
+    Returns a list of dicts, one per column in schema order: 'name', 'type' (a
+    DrakenType), 'logical_kind' (0 NONE, 1 TIMESTAMP, 2 TIME, 3 DECIMAL — TIMESTAMP
+    and TIME are microseconds, UTC), 'precision', 'scale', and 'child_type' (an
+    ARRAY's element DrakenType, else None). Types are DrakenType ordinals.
+    """
+    cdef const uint8_t[::1] buf = data
+    cdef size_t n = buf.shape[0]
+    cdef const uint8_t* ptr = &buf[0] if n > 0 else NULL
+    cdef vector[string] no_columns
+    cdef string rschema
+    if reader_schema is not None:
+        rschema = reader_schema.encode("utf-8")
+    cdef AvroStream* stream = new AvroStream(ptr, n, no_columns, True, rschema)
+    cdef vector[AvroColumnType] types = stream.column_types()
+    names = [name.decode("utf-8") for name in stream.column_names()]
+    del stream
+    out = []
+    cdef size_t i
+    for i in range(types.size()):
+        out.append({
+            "name": names[i],
+            "type": <int>types[i].type,
+            "logical_kind": types[i].logical_kind,
+            "precision": types[i].precision,
+            "scale": types[i].scale,
+            "child_type": <int>types[i].child_type if <int>types[i].type == 80 else None,
+        })
+    return out

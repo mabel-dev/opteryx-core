@@ -22,6 +22,7 @@
 // Logical types follow the FILE (the fastavro / Apache convention).
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -104,6 +105,48 @@ struct AvroRead {
 // Rows per batch: whole blocks are packed into a batch up to this many rows; a
 // block is never split (a single larger block is its own batch).
 constexpr uint32_t kBatchRows = 65536;
+
+// What a column decodes to, as the compiler decided it: the Draken type plus the
+// logical-type descriptor the column carries (draken/logical_type.h ordinals:
+// 0 NONE, 1 TIMESTAMP, 2 TIME, 3 DECIMAL; TIMESTAMP/TIME are always microseconds,
+// UTC). `child_type` is an ARRAY's element type.
+struct AvroColumnType {
+    DrakenType type = DRAKEN_INT64;
+    uint8_t    logical_kind = 0;
+    uint8_t    precision = 0;
+    uint8_t    scale = 0;
+    DrakenType child_type = DRAKEN_INT64;
+};
+
+// A whole container file decoded batch by batch, so a caller holds one batch at a
+// time rather than the decoded file. Construction parses the header and the
+// schema(s) and compiles the decode program; it throws exactly as read_avro_buffer
+// does. `data` must outlive the stream.
+//
+// With no columns (`columns` empty and not `all_columns`) nothing is decoded: each
+// batch carries only its row count, summed from the block headers (the same
+// framing checks — counts, sizes, sync markers — still run).
+class AvroStream {
+public:
+    AvroStream(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
+               bool all_columns, const std::string& reader_schema_json);
+    ~AvroStream();
+    AvroStream(const AvroStream&) = delete;
+    AvroStream& operator=(const AvroStream&) = delete;
+
+    // The next batch; false at the end of the file.
+    bool next(AvroBatch& out);
+
+    const std::string& schema_json() const;
+    const std::vector<std::pair<std::string, std::string>>& metadata() const;
+    const std::vector<std::string>& column_names() const;
+    // Parallel to column_names(); known from the header alone, before any block.
+    std::vector<AvroColumnType> column_types() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // Decode `data` (a whole container file). `columns` are dotted paths; empty with
 // `all_columns` = every top-level field (of the reader schema when one is given). Throws std::runtime_error on a corrupt

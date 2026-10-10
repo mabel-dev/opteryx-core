@@ -144,9 +144,10 @@ Datasets are read by extension, and a dataset is one format throughout — a dir
 
 - **Parquet** — the default for stored data and for interchange, read through rugo
 - **CSV** and **JSONL/NDJSON** — read through rugo
+- **Avro** — object container files, read through rugo's native Avro reader with the `read_avro()` table function; it is not a stored-dataset format
 - **`.skene`** — the draken-native format. It stores one or more row groups of draken vectors losslessly, including the things Parquet drops: an IPv4 column round-trips as a `UINT32` refined by an `IPV4` logical descriptor rather than losing the refinement, and dictionary encoding and layout hints are restored rather than re-derived. It is deliberately not portable and no foreign reader is promised, so Parquet remains the right choice for interchange; `.skene` is for cases where the draken-native round trip is what matters. See [`skene/FORMAT.md`](skene/FORMAT.md) for the specification.
 
-Parquet, CSV, and JSONL files can also be named directly with the `read_parquet()`, `read_csv()`, and `read_jsonl()` table functions. There is no `read_skene()` — skene datasets are read through a registered workspace like any other dataset.
+Parquet, CSV, JSONL, and Avro files can also be named directly with the `read_parquet()`, `read_csv()`, `read_jsonl()`, and `read_avro()` table functions. A `read_avro()` glob takes its schema from the first file, and every other file is read as that schema — a field a file lacks is NULL (or its default), an `int` widens to a `long`, and a file that cannot be read that way fails the query naming it. There is no `read_skene()` — skene datasets are read through a registered workspace like any other dataset.
 
 ## Best With Opteryx Catalog
 

@@ -32,6 +32,21 @@ PyObject* wrap_avro_column(AvroColumn& c) {
             v = draken_vector_own_time64(c.data, c.validity, c.length, "us");
             break;
         case OutKind::ConstRaw:
+            if (c.type == DRAKEN_TIMESTAMP64 || c.type == DRAKEN_TIME64 || c.type == DRAKEN_DECIMAL ||
+                c.type == DRAKEN_DECIMAL128) {
+                // The engine builds these natively with their logical type attached;
+                // no Python-edge producer takes value list + positions + a logical
+                // descriptor (docs §19.4). `c` frees its buffers when it is destroyed.
+                PyErr_SetString(PyExc_RuntimeError,
+                                c.type == DRAKEN_TIMESTAMP64 || c.type == DRAKEN_TIME64
+                                    ? "Avro: a constant TIME/TIMESTAMP column (a reader-schema field the file "
+                                      "does not hold) has no draken producer that carries its logical type at "
+                                      "the Python edge (docs §19.4)"
+                                    : "Avro: a constant DECIMAL column (a reader-schema field the file does "
+                                      "not hold) has no draken producer that carries its logical type at the "
+                                      "Python edge (docs §19.4)");
+                return nullptr;
+            }
             v = draken_vector_own_dict(c.data, 1, c.codes, c.length, c.validity, c.type);
             break;
         case OutKind::ConstString:

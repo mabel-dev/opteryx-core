@@ -239,6 +239,53 @@ def _align_decimal_domain(value, mn, mx):
     return _as_decimal(value), mn, mx
 
 
+def _temporal_stats_value(value, convert):
+    """`value` (or each member of an `in` / `not in` collection) converted by
+    `convert` into the raw physical domain the footer statistics decode to.
+
+    A bare int is taken as already raw — the compare kernel accepts the same —
+    and passes through unchanged. Anything else goes to `convert`, which raises
+    TypeError for a value that is not a datetime/date: the row-level compare
+    would refuse it too, so it fails here, before pruning, instead of being
+    read as "type mismatch — don't prune".
+    """
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_temporal_stats_value(v, convert) for v in value]
+    if isinstance(value, int):
+        return value
+    return convert(value)
+
+
+def _temporal_stats_domain(value, logical_type: str):
+    """(min/max value, bloom value) for `value` against a column whose footer
+    statistics carry `logical_type`.
+
+    TIMESTAMP and DATE statistics decode to the bare physical int (`decode_value`
+    returns epoch units / epoch days, not datetime/date), so a datetime literal
+    compared against them raised TypeError and stage 1 quietly pruned nothing —
+    every row group was decoded and only stage 2 filtered. The literal is
+    converted here with draken's own scalar conversions, the exact ones
+    `_compare_scalar` applies at stage 2, so both stages agree on the column's
+    unit and on timezone handling (aware → UTC instant, naive taken as UTC).
+
+    The bloom value is the converted instant for TIMESTAMP (physical INT64,
+    hashed over 8 bytes, which is what `_bloom_plain_encode` packs an int as).
+    DATE is physical INT32 — the writer hashes 4 bytes — so its bloom value stays
+    the original date object, which `_bloom_plain_encode` declines to encode:
+    no bloom pruning for DATE rather than an 8-byte probe that misses.
+
+    Any other logical type returns `value` unchanged for both.
+    """
+    unit = _parse_timestamp_unit(logical_type)
+    if unit is not None:
+        converted = _temporal_stats_value(
+            value, lambda v: _draken_native.timestamp_scalar_to_instant(v, unit))
+        return converted, converted
+    if _is_date_logical_type(logical_type):
+        return _temporal_stats_value(value, _draken_native.date_scalar_to_days), value
+    return value, value
+
+
 def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) -> List[int]:
     """1 = keep, 0 = prune.
 
@@ -293,13 +340,18 @@ def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) 
                 continue
 
             excl = _EXCLUDE[op]
+            # Outside the min/max `try` below: a literal that is no timestamp /
+            # date raises here, before pruning, as the row-level compare would —
+            # not swallowed as "type mismatch — don't prune".
+            stats_value, bloom_value = _temporal_stats_domain(
+                value, col_stats["logical_type"])
             # Min/max pruning
             if col_stats["min"] is not None and col_stats["max"] is not None:
                 pt = col_stats["physical_type"].encode("utf-8")
                 lt = col_stats["logical_type"].encode("utf-8")
                 mn = _native.decode_value(pt, lt, col_stats["min"], True)
                 mx = _native.decode_value(pt, lt, col_stats["max"], True)
-                bound_value, mn, mx = _align_text_domain(value, mn, mx)
+                bound_value, mn, mx = _align_text_domain(stats_value, mn, mx)
                 bound_value, mn, mx = _align_decimal_domain(bound_value, mn, mx)
                 try:
                     if excl(bound_value, mn, mx):
@@ -328,7 +380,7 @@ def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) 
                 bloom_offset = col_stats["bloom_offset"]
                 if bloom_offset >= 0:
                     bloom_length = col_stats["bloom_length"]
-                    candidates = value if op == "in" else [value]
+                    candidates = bloom_value if op == "in" else [bloom_value]
                     # Prune only if NONE of the candidates could be present
                     any_maybe = False
                     for candidate in candidates:

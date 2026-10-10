@@ -1043,6 +1043,23 @@ extensions = [
         # NativeJsonlScanSource through rugo/src/compression/stream_decompress.hpp
         # (zstd and lz4 frame decoding use the vendored TUs already listed here).
         "third_party/miniz/miniz_tinfl.cpp",
+        # NativeAvroScanSource (src/cpp/engine/native_avro_scan_source.hpp) decodes
+        # Avro files on its own worker threads through rugo's C++ Avro reader — the
+        # same argument as the JSONL core above: stateless functions over a
+        # caller-supplied buffer, its own copy here, rugo_native keeps its own. The
+        # Python edge (_avro_column_wrap.cpp) is rugo_native only. Schema JSON
+        # (yyjson), JSON-text float formatting (ryu) and base64 (mabel) resolve
+        # from draken_native at load, like every other draken symbol here.
+        "rugo/src/avro/avro_schema.cpp",
+        "rugo/src/avro/avro_container.cpp",
+        "rugo/src/avro/avro_reader.cpp",
+        # Avro's snappy block codec. Compiled in rather than left for the loader to
+        # find in pool_reader.so (the only other carrier): stateless, no cross-TU
+        # state, and an undefined symbol would surface only when a scan first met a
+        # snappy-compressed file — the ZSTD_compressBound trap below.
+        "third_party/snappy/snappy.cc",
+        "third_party/snappy/snappy-sinksource.cc",
+        "third_party/snappy/snappy-stubs-internal.cc",
         ]
         # skene's kZstd section codec, both halves. Same argument as lz4.c above,
         # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
@@ -1069,7 +1086,8 @@ extensions = [
             "third_party/lz4",           # lz4.h
             "rugo/src",                  # declared_type.hpp / predicate_literal.hpp (JSONL core)
             "rugo/src/jsonl/core",       # NativeJsonlScanSource's rugo JSONL core
-            "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip)
+            "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip; Avro deflate)
+            "third_party/snappy",        # Avro's snappy block codec
             # The vector index builder (src/cpp/engine/vector_index_build.hpp) runs
             # draken/ops/ann, which converts fp16 via <fp16/fp16.h>.
             "third_party/usearch/fp16/include",

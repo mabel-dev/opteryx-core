@@ -588,3 +588,38 @@ TIME64 / DECIMAL vectors require one (precision/scale, unit). So a reader-only f
 of those types, default or NULL, is **refused** today, naming this section. Closing it
 needs a producer that takes value list + positions + logical descriptor (the
 `own_raw_logical` counterpart for the compressed form) — a draken bridge addition.
+
+## 20. READ_AVRO in the engine (2026-10-10)
+
+Rulings: native from the start (Avro is not a primary format, but the engine is judged
+on reading it — the Python-driven READ_CSV route was refused); a glob takes the FIRST
+file's schema and reads every file with it as the reader schema ("the only viable
+option"); within-file block parallelism is a follow-up; projection pushed, no
+predicates; only the `credentials` option.
+
+Built:
+- **Binder** (`opteryx/planner/binder/dataset.py`, READ_AVRO branch): path / scheme /
+  glob / `credentials` rules as READ_JSONL; the relation schema from the first file's
+  HEADER only — `opteryx/connectors/avro_io.header_schema` asks rugo what each column
+  decodes to (`rugo_native.read_avro_column_types`, compiled exactly as the scan will)
+  and only spells it as ColumnType, so the Avro→Draken mapping lives in rugo alone.
+  Plan-step fields `avro_files`, `avro_physical_columns`, `avro_physical_by_identity`,
+  `avro_reader_schema`, `avro_credentialed_filesystem`.
+- **Planner**: alias exemption, projection pushdown, EXPLAIN rendering, physical
+  operator `AvroReadNode` ("Avro Reader", planning only), telemetry "AVRO SCAN".
+- **Execution**: `src/cpp/engine/native_avro_scan_source.hpp` — its own decode pool
+  (never wider than the file count), a whole file per claim, batches streamed through
+  `rugo::avro::AvroStream` (new: the streaming entry point; `read_avro_buffer` is built
+  on it) into `CxxMorsel`s with no Python, in-flight window `workers + 2`. A
+  zero-column scan (COUNT(*)) decodes nothing: rows are summed from block headers.
+  Local files mmap'd; remote ones fetched whole, no credentials (signed URL with
+  `credentials`). `_operators.so` compiles rugo's Avro core plus snappy; yyjson, ryu
+  and mabel base64 resolve from draken_native.
+- **§19.4 closed in the engine**: a reader-only TIMESTAMP / TIME / DECIMAL field is a
+  constant with its logical type attached natively. The Python edge still refuses it.
+- **Tests**: `tests/unit/connectors/test_read_avro.py` (25: the sample vs READ_PARQUET
+  of its source, every type × codec across >1 batch, evolved glob incl. native
+  TIMESTAMP/DECIMAL NULL constants, failure naming the file, http, argument refusals,
+  EXPLAIN); READ_AVRO added to `test_read_credentials.py`'s option and no-leak checks.
+  A credentialed READ_AVRO read is not exercised offline (the native fetch needs a
+  signed URL from a real store).

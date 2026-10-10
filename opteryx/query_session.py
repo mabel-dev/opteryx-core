@@ -67,6 +67,7 @@ _READER_KINDS = frozenset(
         "SkeneReadNode",
         "PostgresReadNode",
         "CsvReadNode",
+        "AvroReadNode",
         "FunctionDatasetNode",
     }
 )

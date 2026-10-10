@@ -4806,6 +4806,8 @@ class _Compiler:
             return self._compile_postgres_scan(scan)
         if kind == "JsonlReadNode":
             return self._compile_jsonl_scan(scan)
+        if kind == "AvroReadNode":
+            return self._compile_avro_scan(scan)
         if kind in ("FunctionDatasetNode", "ReaderNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
@@ -6468,6 +6470,51 @@ class _Compiler:
         }
         p = self.nplan.new_pipeline()
         self.nplan.set_native_jsonl_scan_source(p, plan)
+        self._remember_types(scan.columns)
+        return p, identities
+
+    def _compile_avro_scan(self, scan):
+        """READ_AVRO: an AvroScanPlan and a NativeAvroScanSource.
+
+        The Source's own decode pool streams whole files' batches through rugo's C++
+        Avro reader while execution consumes them. Fixed here, once: the files and
+        where each is read from (AvroReadNode.native_file_locations — the READ_JSONL
+        rules), the reader schema every file is read as (the first file's writer
+        schema, so evolved files resolve onto the bound relation), and the top-level
+        fields to decode — each once, though one can feed several identities. A
+        zero-column projection (COUNT(*)) decodes nothing: the row counts come from the
+        block headers."""
+        from opteryx.operators._operators import AvroScanPlan
+
+        expected = scan.columns or []
+        physical = list(scan.avro_physical_columns)
+        zero_columns = not physical
+        decode_names = list(dict.fromkeys(physical))
+        decode_index = {name: i for i, name in enumerate(decode_names)}
+        identities = [col.schema_column.identity for col in expected]
+        plan = AvroScanPlan(
+            list(scan.avro_files),
+            scan.native_file_locations(),
+            scan.avro_reader_schema,
+            decode_names,
+            identities,
+            [decode_index[name] for name in physical],
+            zero_columns,
+            # The Source's own decode pool, as the JSONL Source's: every core. It never
+            # starts more decoders than there are files (the unit of work is a file).
+            max(1, os.cpu_count() or 1),
+        )
+        plan.scan_identity = scan.identity
+        self.scan_sources[scan.identity] = "NativeAvroScanSource"
+        self.scan_facts[scan.identity] = {
+            "files_read": len(scan.avro_files),
+            "row_groups_read": 0,
+            "row_groups_pruned": 0,
+            "parquet_rows_before_filter": 0,
+            "columns_read": len(decode_names),
+        }
+        p = self.nplan.new_pipeline()
+        self.nplan.set_native_avro_scan_source(p, plan)
         self._remember_types(scan.columns)
         return p, identities
 

@@ -5411,6 +5411,11 @@ cdef class FunctionDatasetStep(PlanStep):
 
     cdef str _alias
     cdef tuple _args
+    cdef object _avro_credentialed_filesystem
+    cdef tuple _avro_files
+    cdef dict _avro_physical_by_identity
+    cdef tuple _avro_physical_columns
+    cdef str _avro_reader_schema
     cdef tuple _column_aliases
     cdef object _connector
     cdef object _csv_fail_on_error
@@ -5444,11 +5449,16 @@ cdef class FunctionDatasetStep(PlanStep):
         _row_str(self._relation, self._row.relation)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
         self.node_type = _step_types().FunctionDataset
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
         self.args = args
+        self.avro_credentialed_filesystem = avro_credentialed_filesystem
+        self.avro_files = avro_files
+        self.avro_physical_by_identity = avro_physical_by_identity
+        self.avro_physical_columns = avro_physical_columns
+        self.avro_reader_schema = avro_reader_schema
         self.column_aliases = column_aliases
         self.connector = connector
         self.csv_fail_on_error = csv_fail_on_error
@@ -5494,6 +5504,51 @@ cdef class FunctionDatasetStep(PlanStep):
     def args(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._args = _require_expression_list("FunctionDatasetStep.args", value)
+
+    @property
+    def avro_credentialed_filesystem(self):
+        return self._avro_credentialed_filesystem
+
+    @avro_credentialed_filesystem.setter
+    def avro_credentialed_filesystem(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._avro_credentialed_filesystem = value
+
+    @property
+    def avro_files(self):
+        return self._avro_files
+
+    @avro_files.setter
+    def avro_files(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._avro_files = _frozen_list("FunctionDatasetStep.avro_files", value)
+
+    @property
+    def avro_physical_by_identity(self):
+        return self._avro_physical_by_identity
+
+    @avro_physical_by_identity.setter
+    def avro_physical_by_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._avro_physical_by_identity = value
+
+    @property
+    def avro_physical_columns(self):
+        return self._avro_physical_columns
+
+    @avro_physical_columns.setter
+    def avro_physical_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._avro_physical_columns = _frozen_list("FunctionDatasetStep.avro_physical_columns", value)
+
+    @property
+    def avro_reader_schema(self):
+        return self._avro_reader_schema
+
+    @avro_reader_schema.setter
+    def avro_reader_schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._avro_reader_schema = value
 
     @property
     def column_aliases(self):
@@ -5766,6 +5821,11 @@ cdef class FunctionDatasetStep(PlanStep):
         cdef dict out = self._common_values()
         out["alias"] = self._alias
         out["args"] = self._args
+        out["avro_credentialed_filesystem"] = self._avro_credentialed_filesystem
+        out["avro_files"] = self._avro_files
+        out["avro_physical_by_identity"] = self._avro_physical_by_identity
+        out["avro_physical_columns"] = self._avro_physical_columns
+        out["avro_reader_schema"] = self._avro_reader_schema
         out["column_aliases"] = self._column_aliases
         out["connector"] = self._connector
         out["csv_fail_on_error"] = self._csv_fail_on_error
@@ -5807,6 +5867,11 @@ cdef class FunctionDatasetStep(PlanStep):
         self._copy_common_into(new, memo)
         new._alias = _copy_field(self._alias, memo)
         new._args = _copy_field(self._args, memo)
+        new._avro_credentialed_filesystem = _copy_field(self._avro_credentialed_filesystem, memo)
+        new._avro_files = _copy_field(self._avro_files, memo)
+        new._avro_physical_by_identity = _copy_field(self._avro_physical_by_identity, memo)
+        new._avro_physical_columns = _copy_field(self._avro_physical_columns, memo)
+        new._avro_reader_schema = _copy_field(self._avro_reader_schema, memo)
         new._column_aliases = _copy_field(self._column_aliases, memo)
         new._connector = _copy_field(self._connector, memo)
         new._csv_fail_on_error = _copy_field(self._csv_fail_on_error, memo)
@@ -5843,6 +5908,11 @@ cdef class FunctionDatasetStep(PlanStep):
         self._share_common_into(new)
         new._alias = self._alias
         new._args = self._args
+        new._avro_credentialed_filesystem = self._avro_credentialed_filesystem
+        new._avro_files = self._avro_files
+        new._avro_physical_by_identity = self._avro_physical_by_identity
+        new._avro_physical_columns = self._avro_physical_columns
+        new._avro_reader_schema = self._avro_reader_schema
         new._column_aliases = self._column_aliases
         new._connector = self._connector
         new._csv_fail_on_error = self._csv_fail_on_error
@@ -11027,6 +11097,11 @@ cpdef frozenset steps_with(str field):
             "analyze": frozenset({T.Explain}),
             "analyze_columns": frozenset({T.Analyze}),
             "args": frozenset({T.FunctionDataset}),
+            "avro_credentialed_filesystem": frozenset({T.FunctionDataset}),
+            "avro_files": frozenset({T.FunctionDataset}),
+            "avro_physical_by_identity": frozenset({T.FunctionDataset}),
+            "avro_physical_columns": frozenset({T.FunctionDataset}),
+            "avro_reader_schema": frozenset({T.FunctionDataset}),
             "arguments": frozenset({T.CallProcedure}),
             "asof_condition": frozenset({T.Join}),
             "asof_left_column": frozenset({T.Join}),

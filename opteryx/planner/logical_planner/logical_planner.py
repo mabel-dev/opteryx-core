@@ -3699,11 +3699,11 @@ def create_node_relation(relation: dict, *, plan_context):
         function = relation["relation"]["Table"]
         function_name = relation_name.upper()
 
-        # READ_JSONL/READ_PARQUET/READ_CSV derive their column names from the file's
+        # READ_JSONL/READ_PARQUET/READ_CSV/READ_AVRO derive their column names from the file's
         # schema at bind time (not yet implemented), so unlike UNNEST/VALUES/
         # GENERATE_SERIES they don't require an AS alias(columns) clause to name
         # their output columns.
-        requires_column_alias = function_name not in ("READ_JSONL", "READ_PARQUET", "READ_CSV")
+        requires_column_alias = function_name not in ("READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO")
 
         if function["alias"] is None and requires_column_alias:
             from opteryx.exceptions import UnnamedColumnError

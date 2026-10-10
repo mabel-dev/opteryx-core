@@ -152,6 +152,8 @@ def render_function_dataset(node: PlanStep) -> str:
         return _render_bare_reader(node, "READ_PARQUET", "$read_parquet-")
     if node.function == "READ_CSV":
         return _render_bare_reader(node, "READ_CSV", "$read_csv-")
+    if node.function == "READ_AVRO":
+        return _render_bare_reader(node, "READ_AVRO", "$read_avro-")
     return node.function
 
 

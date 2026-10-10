@@ -368,6 +368,20 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
             ],
             csv_predicates=_translate_csv_predicates(logical_node.predicates, physical_by_identity),
         )
+    if logical_node.function == "READ_AVRO":
+        # READ_AVRO is a native scan (NativeAvroScanSource). Projection only: Avro
+        # has no statistics and no predicate is pushed into the reader, so every
+        # predicate stays a Filter above it.
+        physical_by_identity = logical_node.avro_physical_by_identity or {}
+        return registry.create(
+            "Avro Reader",
+            query_properties,
+            logical_node,
+            avro_physical_columns=[
+                physical_by_identity[column.schema_column.identity]
+                for column in (logical_node.columns or [])
+            ],
+        )
     return registry.create("Function Dataset", query_properties, logical_node)
 
 

@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -339,6 +340,47 @@ inline bool aos_keys_eligible(const std::vector<SortKeyColumn>& keys) {
     return true;
 }
 
+// ---- string keys in the radix: an order-preserving 8-byte prefix + tie fix-up -----
+//
+// A string key column joins the radix as ONE AoS part: its first 8 bytes, big-endian,
+// zero-padded (string_prefix_key). That order is a COARSENING of the string order
+// (memcmp, then shorter first): a < b implies prefix(a) <= prefix(b). So after the
+// stable radix, the only rows that can still be out of order are runs of rows
+// IDENTICAL on every part — and radix_fixup_ties stable_sorts exactly those runs with
+// the full SortKeyCmp. Radix stable + fix-up stable within ties = std::stable_sort's
+// permutation. The prefix parts are NEVER compared by AoSKeyCmpN: with a string key,
+// every comparison-based stage (census, vergesort, Top-N, small n) uses SortKeyCmp.
+//
+// Measured 2026-10-10 on real columns (2M-row samples), the fix-up's comparison work
+// as a share of a full comparison sort at an 8-byte prefix: SearchPhrase 4%, h2o id1
+// 0%, h2o id3 68%, TPC-H comments 42-43%, Title 55%, Referer 67%, URL 88%. Long text
+// needs the next bytes (MSD recursion inside the fix-up) to gain much; short strings
+// are settled by the radix alone.
+inline constexpr unsigned SORT_STRING_PREFIX_BYTES = 8;
+
+inline uint64_t string_prefix_key(const uint8_t* p, uint32_t len) {
+    uint64_t k = 0;
+    const uint32_t m = len < SORT_STRING_PREFIX_BYTES ? len : SORT_STRING_PREFIX_BYTES;
+    for (uint32_t i = 0; i < m; ++i) k |= static_cast<uint64_t>(p[i]) << (56 - 8 * i);
+    return k;
+}
+
+// The radix accepts strings (as prefix parts); DECIMAL128 and 5+ columns still not.
+inline bool radix_keys_eligible(const std::vector<SortKeyColumn>& keys) {
+    if (keys.empty() || keys.size() > SORT_AOS_MAX_PARTS) return false;
+    for (const SortKeyColumn& c : keys) {
+        if (c.is_i128) return false;
+    }
+    return true;
+}
+
+inline bool keys_have_string(const std::vector<SortKeyColumn>& keys) {
+    for (const SortKeyColumn& c : keys) {
+        if (c.is_str) return true;
+    }
+    return false;
+}
+
 // Smallest TopN limit at which building the AoS keys pays for itself.
 //
 // MEASURED 2026-07-28, dev/sort_key_bench/bench_unified_sort.cpp (5M rows, 2 key
@@ -382,6 +424,45 @@ inline void build_aos_keys(const std::vector<SortKeyColumn>& keys, size_t n,
             rows_out[i].parts[k] = c.asc ? v : ~v;
         }
         masks_out[i] = mask;
+    }
+}
+
+// build_aos_keys for the string radix arm ONLY (sort_perm's DRAKEN_SORT_STR_ARM): a
+// string part is its prefix key (string_prefix_key — compared by the radix, never by
+// AoSKeyCmpN), a NULL's is 0 like c.num's. Kept apart from build_aos_keys so the
+// numeric build carries no per-row string test: folding them measured the 100M-row
+// int ORDER BY 6.6% slower end to end.
+template <int NPARTS>
+inline void build_aos_keys_with_strings(const std::vector<SortKeyColumn>& keys, size_t n,
+                                        std::vector<RowKeyN<NPARTS>>& rows_out,
+                                        std::vector<uint8_t>& masks_out,
+                                        std::array<bool, NPARTS>& nulls_first_out) {
+    rows_out.resize(n);
+    masks_out.resize(n);
+    for (int k = 0; k < NPARTS; ++k) nulls_first_out[k] = keys[k].nulls_first;
+    for (size_t i = 0; i < n; ++i) masks_out[i] = 0;
+    for (int k = 0; k < NPARTS; ++k) {   // column at a time: the string test is per column
+        const SortKeyColumn& c = keys[k];
+        const uint8_t bit = static_cast<uint8_t>(1u << k);
+        const bool asc = c.asc;
+        RowKeyN<NPARTS>* rows = rows_out.data();
+        uint8_t* masks = masks_out.data();
+        const uint8_t* valid = c.valid.data();
+        if (c.is_str) {
+            const uint8_t* const* sp = c.sptr.data();
+            const uint32_t* sl = c.slen.data();
+            for (size_t i = 0; i < n; ++i) {
+                const uint64_t v = valid[i] ? string_prefix_key(sp[i], sl[i]) : 0;
+                rows[i].parts[k] = asc ? v : ~v;
+                if (valid[i]) masks[i] |= bit;
+            }
+        } else {
+            const uint64_t* num = c.num.data();
+            for (size_t i = 0; i < n; ++i) {
+                rows[i].parts[k] = asc ? num[i] : ~num[i];
+                if (valid[i]) masks[i] |= bit;
+            }
+        }
     }
 }
 
@@ -931,6 +1012,216 @@ inline void radix_sort_perm(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
     if (cur_i != perm.data()) std::memcpy(perm.data(), cur_i, n * sizeof(uint32_t));
 }
 
+// After radix_sort_perm over AoS keys holding string prefix parts, put right the only
+// rows the radix can have misordered — MSD style: a tie is resolved by radixing its
+// NEXT 8 bytes, level by level, not by handing it to a comparison sort.
+//
+// The radix order is exact lexicographic on the parts; a string part is a COARSENING
+// of its column, and every part AFTER a string part means nothing while that string
+// is undecided. So, for a range whose parts before k0 are equal:
+//   - let s be the first string part at or after k0 (none: the range is settled);
+//   - split the range into RUNS equal on parts k0..s;
+//   - each run of 2+ rows is a task (run, s, depth=1): its column-s strings agree on
+//     their first 8*depth bytes (zero-padded), and its later parts are still in the
+//     radix's order (every step below is stable).
+// A task:
+//   - if every column-s string in it ends within 8*depth bytes: they share one length
+//     -> ONE string value, continue on the later parts (the range rule from s+1); they
+//     differ in length -> exact stable_sort (only trailing-NUL ties get here);
+//   - if it is small (< SORT_FIXUP_SMALL rows): exact stable_sort, cheaper than a pass;
+//   - otherwise: stable radix on bytes [8*depth, 8*depth+8) of the column-s strings
+//     (zero-padded; ~ under DESC, so a shorter string still sorts on its correct
+//     side), then each sub-run of 2+ rows equal on those bytes is a task at depth+1.
+// Radix stable + every step stable within its run = std::stable_sort's permutation.
+// Tasks are held on an explicit stack (long strings mean deep chains, never deep
+// recursion). Big tasks run their radix on the whole team; the rest are claimed by
+// team members, each with its own reused scratch.
+inline constexpr size_t SORT_FIXUP_SMALL = 32;
+inline constexpr size_t SORT_FIXUP_PARALLEL_MIN = 2 * SORT_TEAM_ROWS_PER_THREAD;
+
+struct RadixFixupTask {
+    size_t i, j;    // the run, positions in perm
+    int s;          // the string part being resolved
+    uint32_t depth; // 8*depth leading bytes of column s already equal across the run
+};
+
+struct RadixFixupScratch {
+    SortScratch<uint64_t> ka, kb;
+    SortScratch<uint32_t> ia, ib;
+    SortScratch<size_t> hist;
+    void reserve(size_t len, unsigned nt) {
+        if (ka.size() < len) { ka.resize(len); kb.resize(len); ia.resize(len); ib.resize(len); }
+        if (hist.size() < static_cast<size_t>(nt) * 256) hist.resize(static_cast<size_t>(nt) * 256);
+    }
+};
+
+template <int NPARTS>
+struct RadixFixup {
+    const RowKeyN<NPARTS>* rows;
+    const uint8_t* masks;
+    const std::vector<SortKeyColumn>* keys;
+
+    int first_string_from(int k0) const {
+        for (int k = k0; k < NPARTS; ++k)
+            if ((*keys)[k].is_str) return k;
+        return -1;
+    }
+    bool same(uint32_t a, uint32_t b, int k0, int s) const {
+        const uint8_t span = static_cast<uint8_t>(((1u << (s + 1)) - 1u) & ~((1u << k0) - 1u));
+        if ((masks[a] ^ masks[b]) & span) return false;
+        for (int k = k0; k <= s; ++k)
+            if (rows[a].parts[k] != rows[b].parts[k]) return false;
+        return true;
+    }
+    // Split [lo, hi) — parts before k0 equal — into tasks for the next string part.
+    template <class Push>
+    void range(const uint32_t* p, size_t lo, size_t hi, int k0, Push& push) const {
+        const int s = first_string_from(k0);
+        if (s < 0) return;
+        size_t i = lo;
+        while (i < hi) {
+            size_t j = i + 1;
+            while (j < hi && same(p[j - 1], p[j], k0, s)) ++j;
+            if (j - i > 1) push(RadixFixupTask{i, j, s, 1});
+            i = j;
+        }
+    }
+    // Every column-s string ends within `cover` bytes: 0 = no; 1 = yes, one length
+    // (one value); 2 = yes, lengths differ. A NULL column s is one value.
+    int ends_within(const uint32_t* p, size_t i, size_t j, int s, uint64_t cover) const {
+        if (!((masks[p[i]] >> s) & 1u)) return 1;
+        const SortKeyColumn& c = (*keys)[s];
+        const uint32_t l0 = c.slen[p[i]];
+        bool same_len = true;
+        for (size_t q = i; q < j; ++q) {
+            const uint32_t l = c.slen[p[q]];
+            if (l > cover) return 0;
+            same_len = same_len && l == l0;
+        }
+        return same_len ? 1 : 2;
+    }
+    uint64_t level_key(uint32_t r, int s, uint32_t depth) const {
+        const SortKeyColumn& c = (*keys)[s];
+        const uint64_t off = static_cast<uint64_t>(depth) * SORT_STRING_PREFIX_BYTES;
+        const uint32_t len = c.slen[r];
+        const uint64_t k = len > off ? string_prefix_key(c.sptr[r] + off, static_cast<uint32_t>(len - off)) : 0;
+        return c.asc ? k : ~k;
+    }
+    // One task's own step; children go to `push`. `nt` > 1 only for a big task.
+    template <class Push>
+    void step(uint32_t* p, const RadixFixupTask& t, unsigned nt, RadixFixupScratch& sc,
+              Push& push) const {
+        const size_t len = t.j - t.i;
+        const uint64_t cover = static_cast<uint64_t>(t.depth) * SORT_STRING_PREFIX_BYTES;
+        const int ends = ends_within(p, t.i, t.j, t.s, cover);
+        if (ends == 1) { range(p, t.i, t.j, t.s + 1, push); return; }
+        if (ends == 2 || len < SORT_FIXUP_SMALL) {
+            std::stable_sort(p + t.i, p + t.j, SortKeyCmp{*keys});
+            return;
+        }
+        sc.reserve(len, nt);
+        uint64_t* ka = sc.ka.data();
+        uint32_t* ia = sc.ia.data();
+        SortTeamBarrier bar(nt);
+        std::vector<uint64_t> or_part(nt, 0), and_part(nt, ~0ULL);
+        std::vector<unsigned> shifts;
+        const uint64_t* res_k = ka;
+        const uint32_t* res_i = ia;
+        sort_team_run(nt, [&](unsigned m) {
+            const size_t lo = len * m / nt, hi = len * (m + 1) / nt;
+            uint64_t o = 0, a = ~0ULL;
+            for (size_t q = lo; q < hi; ++q) {
+                const uint32_t r = p[t.i + q];
+                const uint64_t k = level_key(r, t.s, t.depth);
+                ka[q] = k;
+                ia[q] = r;
+                o |= k;
+                a &= k;
+            }
+            or_part[m] = o;
+            and_part[m] = a;
+            bar.wait();
+            if (m == 0) {
+                uint64_t oo = 0, aa = ~0ULL;
+                for (unsigned u = 0; u < nt; ++u) { oo |= or_part[u]; aa &= and_part[u]; }
+                radix_digit_shifts(oo & ~aa, 0, 64, shifts);
+            }
+            bar.wait();
+            uint64_t* sk = sc.ka.data();
+            uint64_t* dk = sc.kb.data();
+            uint32_t* si = sc.ia.data();
+            uint32_t* di = sc.ib.data();
+            for (unsigned sh : shifts) {
+                radix_team_pass<true>(m, nt, len, sh, sk, si, dk, di, sc.hist.data(), bar);
+                std::swap(sk, dk);
+                std::swap(si, di);
+            }
+            if (m == 0) { res_k = sk; res_i = si; }
+            bar.wait();
+            for (size_t q = lo; q < hi; ++q) p[t.i + q] = res_i[q];
+        });
+        // Sub-runs equal on this level's 8 bytes -> tasks one level deeper.
+        size_t q = 0;
+        while (q < len) {
+            size_t e = q + 1;
+            while (e < len && res_k[e] == res_k[q]) ++e;
+            if (e - q > 1) push(RadixFixupTask{t.i + q, t.i + e, t.s, t.depth + 1});
+            q = e;
+        }
+    }
+};
+
+template <int NPARTS>
+inline void radix_fixup_ties(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
+                             const std::vector<SortKeyColumn>& keys,
+                             std::vector<uint32_t>& perm, unsigned nthreads) {
+    const size_t n = perm.size();
+    if (n < 2) return;
+    const RadixFixup<NPARTS> fx{rows, masks, &keys};
+    uint32_t* p = perm.data();
+    // Level 0: the top-level runs (parts 0..first string part), found serially — one
+    // read-only pass over perm, no writes yet.
+    std::vector<RadixFixupTask> pending;
+    auto push_pending = [&](RadixFixupTask t) { pending.push_back(t); };
+    fx.range(p, 0, n, 0, push_pending);
+    RadixFixupScratch big_scratch;
+    while (!pending.empty()) {
+        // Big tasks: one at a time, each radix on the whole team; their children join
+        // `pending` for the next round.
+        std::vector<RadixFixupTask> small, next;
+        for (const RadixFixupTask& t : pending) {
+            if (t.j - t.i >= SORT_FIXUP_PARALLEL_MIN) {
+                auto push_next = [&](RadixFixupTask c) { next.push_back(c); };
+                fx.step(p, t, sort_team_width(t.j - t.i, nthreads), big_scratch, push_next);
+            } else {
+                small.push_back(t);
+            }
+        }
+        // Small tasks: claimed across the team, each settled to the bottom by its
+        // member on a private stack (tasks are disjoint row ranges of perm).
+        const unsigned nt = sort_team_width(n, nthreads) < small.size()
+                                ? sort_team_width(n, nthreads)
+                                : static_cast<unsigned>(small.size() ? small.size() : 1);
+        std::atomic<size_t> claim{0};
+        sort_team_run(nt, [&](unsigned) {
+            RadixFixupScratch sc;
+            std::vector<RadixFixupTask> stack;
+            auto push_local = [&](RadixFixupTask c) { stack.push_back(c); };
+            for (;;) {
+                const size_t k = claim.fetch_add(1, std::memory_order_relaxed);
+                if (k >= small.size()) return;
+                stack.push_back(small[k]);
+                while (!stack.empty()) {
+                    const RadixFixupTask t = stack.back();
+                    stack.pop_back();
+                    fx.step(p, t, 1, sc, push_local);
+                }
+            }
+        });
+        pending.swap(next);
+    }
+}
+
 // ---- the full-sort driver ------------------------------------------------------------
 
 // Full stable sort of `perm` by `cmp`: census, then vergesort (merging at most
@@ -1026,6 +1317,44 @@ inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_firs
 inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
                       size_t take_first, unsigned nthreads) {
     const size_t n = perm.size();
+    if (take_first >= n && n >= SORT_RADIX_MIN && keys_have_string(keys) &&
+        radix_keys_eligible(keys)) {
+        // String key(s), full sort: every comparison stage uses the EXACT comparator;
+        // the radix (over prefix parts) + tie fix-up is the fallback.
+        const SortKeyCmp exact{keys};
+        const uint32_t threshold = sort_vergesort_radix_threshold(sort_team_width(n, nthreads));
+        switch (keys.size()) {
+#define DRAKEN_SORT_STR_ARM(NP)                                                  \
+            case NP: {                                                           \
+                /* The prefix keys are built INSIDE the fallback: the census and */\
+                /* vergesort compare exactly and need none, and building them   */\
+                /* reads every row's bytes — measured 4x the sort phase on      */\
+                /* already-sorted strings when built up front.                  */\
+                const std::vector<SortKeyColumn>* keys_p = &keys;                \
+                sort_perm_full(exact, perm, nthreads, threshold,                 \
+                               [keys_p, n, nthreads](std::vector<uint32_t>& p) { \
+                                   std::vector<RowKeyN<NP>> rows;                \
+                                   std::vector<uint8_t> masks;                   \
+                                   std::array<bool, NP> nf{};                    \
+                                   build_aos_keys_with_strings<NP>(*keys_p, n,   \
+                                       rows, masks, nf);                         \
+                                   const RowKeyN<NP>* rows_p = rows.data();      \
+                                   const uint8_t* masks_p = masks.data();        \
+                                   radix_sort_perm<NP>(rows_p, masks_p, nf, p,   \
+                                                       nthreads);                \
+                                   radix_fixup_ties<NP>(rows_p, masks_p, *keys_p,\
+                                                        p, nthreads);            \
+                               });                                               \
+                return;                                                          \
+            }
+            DRAKEN_SORT_STR_ARM(1)
+            DRAKEN_SORT_STR_ARM(2)
+            DRAKEN_SORT_STR_ARM(3)
+            DRAKEN_SORT_STR_ARM(4)
+#undef DRAKEN_SORT_STR_ARM
+            default: break;   // unreachable — radix_keys_eligible bounds the size
+        }
+    }
     if (aos_keys_eligible(keys) && aos_build_worth_it(n, take_first)) {
         switch (keys.size()) {
 #define DRAKEN_SORT_AOS_ARM(NP)                                                  \
@@ -1594,31 +1923,67 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
         }
     }
 
-    for (size_t start = 0; start < total; start += chunk_rows) {
-        size_t count = std::min(chunk_rows, total - start);
-        MorselPtr m = gather_rows(src, perm, start, count, row_m, row_r, names, err,
-                                  emit_cols);
-        if (err.code != 0) return false;
-        // Each chunk is a contiguous slice of the globally-sorted permutation, so
-        // the PRIMARY (leading) sort key is PROVEN monotonic within it — not a
-        // hint, this operator just produced the fact. Secondary keys are only
-        // ordered within ties of the primary key, not globally, so they are not
-        // marked. Covers every caller of sort_morsels (opteryx's SortSink/TopNSink/
-        // Window operators and the standalone rugo wheel) uniformly, for free.
-        //
-        // CxxColumn.view is a hot-path-only inline COPY of own->vec (see
-        // cxx_morsel.h) — the Python-visible Vector reads own->vec via
-        // to_vectors(), so both copies must be set or the flag is invisible
-        // outside this translation unit despite compiling clean.
-        if (sorted_out_idx != SIZE_MAX && sorted_out_idx < m->columns.size()) {
-            CxxColumn& col = m->columns[sorted_out_idx];
-            uint8_t bits = DRAKEN_ROW_SORTED | (spec[0].ascending ? 0 : DRAKEN_ROW_SORTED_DESC);
-            uint8_t clear = static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
-            col.view.flags = static_cast<uint8_t>((col.view.flags & clear) | bits);
-            if (col.own)
-                col.own->vec.flags = static_cast<uint8_t>((col.own->vec.flags & clear) | bits);
+    // Each chunk is a contiguous slice of the globally-sorted permutation, so the
+    // PRIMARY (leading) sort key is PROVEN monotonic within it — not a hint, this
+    // operator just produced the fact. Secondary keys are only ordered within ties of
+    // the primary key, not globally, so they are not marked. Covers every caller of
+    // sort_morsels (opteryx's SortSink/TopNSink/Window operators and the standalone
+    // rugo wheel) uniformly, for free.
+    //
+    // CxxColumn.view is a hot-path-only inline COPY of own->vec (see cxx_morsel.h) —
+    // the Python-visible Vector reads own->vec via to_vectors(), so both copies must
+    // be set or the flag is invisible outside this translation unit despite
+    // compiling clean.
+    auto stamp_sorted = [&](CxxMorsel& m) {
+        if (sorted_out_idx == SIZE_MAX || sorted_out_idx >= m.columns.size()) return;
+        CxxColumn& col = m.columns[sorted_out_idx];
+        uint8_t bits = DRAKEN_ROW_SORTED | (spec[0].ascending ? 0 : DRAKEN_ROW_SORTED_DESC);
+        uint8_t clear = static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
+        col.view.flags = static_cast<uint8_t>((col.view.flags & clear) | bits);
+        if (col.own)
+            col.own->vec.flags = static_cast<uint8_t>((col.own->vec.flags & clear) | bits);
+    };
+
+    // The gather, PARALLEL over output chunks. Chunks are independent: each reads the
+    // immutable sources and `perm` and writes only the buffers its own gather_rows
+    // call allocates, so there is no shared write state. Chunk k lands in slot k, so
+    // the output order is the sorted order regardless of which member gathered it.
+    // Members claim chunks from an atomic counter rather than a static split, so a
+    // slower core (an efficiency core) simply takes fewer. The width follows the same
+    // rows-per-member rule as the radix team; a Top-N's handful of rows stays serial.
+    if (total == 0) return true;
+    const size_t nchunks = (total + chunk_rows - 1) / chunk_rows;
+    std::vector<MorselPtr> chunks(nchunks);
+    std::vector<ErrCtx> chunk_err(nchunks);
+    unsigned nt = sort_team_width(total, nthreads);
+    if (nt > nchunks) nt = static_cast<unsigned>(nchunks);
+    std::atomic<size_t> next_chunk{0};
+    std::atomic<bool> failed{false};
+    sort_team_run(nt, [&](unsigned) {
+        for (;;) {
+            if (failed.load(std::memory_order_relaxed)) return;
+            const size_t k = next_chunk.fetch_add(1, std::memory_order_relaxed);
+            if (k >= nchunks) return;
+            const size_t start = k * chunk_rows;
+            const size_t count = std::min(chunk_rows, total - start);
+            ErrCtx e;
+            MorselPtr m = gather_rows(src, perm, start, count, row_m, row_r, names, e,
+                                      emit_cols);
+            if (e.code != 0) {
+                chunk_err[k] = e;
+                failed.store(true, std::memory_order_relaxed);
+                return;
+            }
+            stamp_sorted(*m);
+            chunks[k] = std::move(m);
         }
-        out.push_back(std::move(m));
+    });
+    // Fail loud: the first failed chunk in output order reports (every gather error
+    // is a property of a column, not of a row range, so any chunk names the same one).
+    for (size_t k = 0; k < nchunks; ++k) {
+        if (chunk_err[k].code != 0) { err = chunk_err[k]; return false; }
     }
+    out.reserve(out.size() + nchunks);
+    for (MorselPtr& m : chunks) out.push_back(std::move(m));
     return true;
 }

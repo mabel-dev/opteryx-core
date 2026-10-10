@@ -909,6 +909,140 @@ static void test_census_runs_match_vergesort() {
     std::printf("  census runs vs vergesort: %d accepted, %d declined\n", accepted, declined);
 }
 
+// The parallel gather (sort_morsels at width 8) must emit EXACTLY what the serial one
+// (width 1) does: the same chunk boundaries, and per chunk the same rows, values,
+// validity and ROW_SORTED stamp — over fixed-width, float, inline and arena string,
+// and bool columns with NULLs, across several source morsels, many small chunks, and
+// an emit subset.
+static std::string cell_repr(const CxxColumn& c, uint32_t i) {
+    const DrakenVector& v = c.view;
+    if (!sort_row_valid(v, i)) return "N";
+    const uint32_t ph = v.selection[i];
+    if (sort_type_is_string(v.type)) {
+        const DrakenStringArena* sa = string_arena_of(v);
+        const DrakenStringSlot* sl = &sa->slots[ph];
+        return "s" + std::string(reinterpret_cast<const char*>(str_data(sl, sa->arena)), str_length(sl));
+    }
+    if (v.type == DRAKEN_BOOL)
+        return ((static_cast<const uint8_t*>(v.data)[ph >> 3] >> (ph & 7)) & 1u) ? "t" : "f";
+    const size_t es = draken_type_itemsize(v.type, c.own ? c.own->logical_type : nullptr);
+    return "b" + std::string(static_cast<const char*>(v.data) + static_cast<size_t>(ph) * es, es);
+}
+
+static void test_parallel_gather_matches_serial() {
+    std::mt19937_64 rng(808);
+    std::vector<MorselPtr> ms;
+    for (int m = 0; m < 5; ++m) {
+        const size_t n = 30000 + static_cast<size_t>(rng() % 20000);
+        std::vector<int64_t> k(n), pay(n);
+        std::vector<double> f(n);
+        std::vector<std::string> str(n);
+        std::vector<bool> vk(n, true), vf(n, true), vs(n, true);
+        for (size_t i = 0; i < n; ++i) {
+            k[i] = static_cast<int64_t>(rng() % 5000);
+            pay[i] = static_cast<int64_t>(rng());
+            f[i] = static_cast<double>(static_cast<int64_t>(rng() % 20001) - 10000) / 3.0;
+            const size_t len = rng() % 30;   // inline (<=12) and arena strings
+            for (size_t j = 0; j < len; ++j) str[i].push_back(static_cast<char>('a' + rng() % 26));
+            vk[i] = rng() % 17 != 0;
+            vf[i] = rng() % 11 != 0;
+            vs[i] = rng() % 13 != 0;
+        }
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_i64(k, vk));
+        cols.push_back(col_f64(f, vf));
+        cols.push_back(col_str(str, vs));
+        cols.push_back(col_i64(pay, std::vector<bool>(n, true)));
+        ms.push_back(make_morsel(std::move(cols)));
+    }
+    std::vector<SortKeySpec> spec{{0, true, true}, {1, false, false}};
+    const std::vector<uint32_t> subset{2, 0};
+    for (const std::vector<uint32_t>* emit : {static_cast<const std::vector<uint32_t>*>(nullptr), &subset}) {
+        for (size_t chunk_rows : {size_t(777), size_t(65536)}) {
+            std::vector<MorselPtr> serial, par;
+            ErrCtx e1, e2;
+            CHECK(sort_morsels(ms, spec, SIZE_MAX, chunk_rows, 1u, serial, e1, emit), "serial sort_morsels failed");
+            CHECK(sort_morsels(ms, spec, SIZE_MAX, chunk_rows, 8u, par, e2, emit), "parallel sort_morsels failed");
+            CHECK(serial.size() == par.size(), "parallel gather: chunk count differs");
+            for (size_t c = 0; c < serial.size(); ++c) {
+                CHECK(serial[c]->num_rows() == par[c]->num_rows(), "parallel gather: chunk size differs");
+                CHECK(serial[c]->columns.size() == par[c]->columns.size(), "parallel gather: column count differs");
+                for (size_t col = 0; col < serial[c]->columns.size(); ++col) {
+                    const CxxColumn& a = serial[c]->columns[col];
+                    const CxxColumn& b = par[c]->columns[col];
+                    CHECK(a.view.flags == b.view.flags && a.own->vec.flags == b.own->vec.flags,
+                          "parallel gather: flags (ROW_SORTED stamp) differ");
+                    for (uint32_t i = 0; i < serial[c]->num_rows(); ++i)
+                        CHECK(cell_repr(a, i) == cell_repr(b, i), "parallel gather: cell differs");
+                }
+            }
+        }
+    }
+}
+
+// String keys through the radix: prefix parts + radix_fixup_ties must land on EXACTLY
+// std::stable_sort's permutation under SortKeyCmp — mixed lengths (inline and arena),
+// shared prefixes (tie runs), embedded NULs ("ab" vs "ab\0": the zero-padded prefix
+// alone cannot tell them apart), NULLs, both directions and null placements, the
+// string as first / second / only key, two string keys, a shuffled start, and one run
+// big enough for the parallel fix-up path.
+static std::string rand_str(std::mt19937_64& rng, int style) {
+    static const char* prefixes[] = {"", "https://www.", "id0000", "ab", "abcdefgh"};
+    std::string s = prefixes[style % 5];
+    const size_t extra = rng() % (style == 2 ? 4 : 24);
+    for (size_t i = 0; i < extra; ++i) {
+        const uint64_t r = rng() % 40;
+        s.push_back(r == 0 ? '\0' : static_cast<char>('a' + r % 4));   // small alphabet + NULs
+    }
+    return s;
+}
+
+static void test_string_radix_matches_stable_sort() {
+    std::mt19937_64 rng(1234);
+    int cases = 0;
+    for (size_t n : {size_t(SORT_RADIX_MIN), size_t(70001), size_t(400000)}) {
+        for (int layout = 0; layout < 5; ++layout) {   // s | s,i | i,s | s,s | s,i,s
+            for (int trial = 0; trial < 3; ++trial) {
+                const bool big_group = n == 400000;
+                std::vector<CxxColumn> cols;
+                std::vector<SortKeySpec> spec;
+                const int nkeys = layout == 0 ? 1 : (layout == 4 ? 3 : 2);
+                for (int k = 0; k < nkeys; ++k) {
+                    const bool is_s = layout == 0 || layout == 3 || (layout == 1 && k == 0) || (layout == 2 && k == 1) || (layout == 4 && k != 1);
+                    std::vector<bool> valid(n, true);
+                    for (size_t i = 0; i < n; ++i) valid[i] = rng() % 9 != 0;
+                    if (is_s) {
+                        std::vector<std::string> v(n);
+                        for (size_t i = 0; i < n; ++i)
+                            v[i] = rand_str(rng, big_group ? 1 : static_cast<int>(rng() % 5));
+                        cols.push_back(col_str(v, valid));
+                    } else {
+                        std::vector<int64_t> v(n);
+                        for (size_t i = 0; i < n; ++i) v[i] = static_cast<int64_t>(rng() % 7);
+                        cols.push_back(col_i64(v, valid));
+                    }
+                    spec.push_back({static_cast<size_t>(k), (k + trial) % 2 == 0, (trial + k / 2) % 2 == 0});
+                }
+                std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+                auto keys = keys_of(ms, spec, n);
+                CHECK(keys_have_string(keys) && radix_keys_eligible(keys), "string radix route not taken");
+                for (int order = 0; order < 2; ++order) {
+                    std::vector<uint32_t> start(n);
+                    std::iota(start.begin(), start.end(), 0u);
+                    if (order == 1) std::shuffle(start.begin(), start.end(), rng);
+                    std::vector<uint32_t> ref = start;
+                    std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+                    std::vector<uint32_t> via = start;
+                    sort_perm(keys, via, SIZE_MAX, 8u);
+                    CHECK(via == ref, "string radix sort_perm != std::stable_sort");
+                    ++cases;
+                }
+            }
+        }
+    }
+    std::printf("  string radix vs stable_sort: %d cases\n", cases);
+}
+
 int main() {
     test_aos_matches_generic();
     test_matches_independent_reference();
@@ -928,6 +1062,8 @@ int main() {
     test_radix_scratch_is_charged();
     test_wide_team_threshold_routes();
     test_census_runs_match_vergesort();
+    test_parallel_gather_matches_serial();
+    test_string_radix_matches_stable_sort();
     std::printf("test_sort_unified: all %d checks passed\n", g_checks);
     return 0;
 }

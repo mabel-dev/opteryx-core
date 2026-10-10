@@ -8948,6 +8948,28 @@ NB_MODULE(draken_native, m) {
         "codes:  list of int (uint32 code per logical row).\n"
         "nullable: optional list of bool (True=valid); omit for all-valid.");
 
+    // Scalar temporal conversion — the SAME conversions compare_scalar applies
+    // to a datetime/date literal on a TIMESTAMP64/DATE32 vector. Exposed so a
+    // caller that compares a literal against raw stored values (e.g. parquet
+    // footer min/max, which decode to the bare physical int) lands in the exact
+    // domain the row-level compare does, rather than re-deriving it.
+    m.def("timestamp_scalar_to_instant",
+        [](nb::object value, std::string unit_str) {
+            return py_datetime_to_instant(value, str_to_unit(unit_str));
+        },
+        nb::arg("value"), nb::arg("unit"),
+        "datetime.datetime → int64 instant in `unit` (\"s\"/\"ms\"/\"us\"/\"ns\").\n"
+        "Aware datetimes are converted to UTC; naive datetimes are treated as UTC.\n"
+        "Raises TypeError for anything that is not a datetime.datetime.");
+
+    m.def("date_scalar_to_days",
+        [](nb::object value) {
+            return static_cast<int64_t>(py_date_to_days(value.ptr()));
+        },
+        nb::arg("value"),
+        "datetime.date (or datetime, date part only) → int days since 1970-01-01.\n"
+        "Raises TypeError for anything that is not a datetime.date.");
+
     // D.9 — TIME32 ingestion (unit ∈ {"s", "ms"}; mandatory logical descriptor).
     m.def("vector_time32_from_sequence",
         [](nb::list seq, std::string unit_str) {

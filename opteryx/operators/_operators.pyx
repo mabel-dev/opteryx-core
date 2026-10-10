@@ -322,6 +322,20 @@ cdef extern from "engine/native_jsonl_scan_source.hpp" namespace "opteryx::engin
         int64_t chunks_read
     void jsonl_scan_spec_set_context(JsonlScanSpec* spec, const void* context)
 
+cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass AvroScanSpec:
+        cppvector[string] files
+        cppvector[string] urls
+        string reader_schema
+        cppvector[string] decode_names
+        cppvector[string] out_identities
+        cppvector[uint32_t] emit_index
+        bint zero_columns
+        int decode_workers
+        int64_t rows_read
+        int64_t bytes_read
+        int64_t files_read
+
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
     # Source borrows it for the driver's lifetime. Counters are -1 until the scan
@@ -539,6 +553,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_sort_drop_unsearchable(size_t p) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
+        void set_native_avro_scan_source(size_t p, const AvroScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -2560,6 +2575,79 @@ cdef class JsonlScanPlan:
         return self.spec.chunks_read
 
 
+cdef class AvroScanPlan:
+    """Owns the C++ AvroScanSpec NativeAvroScanSource borrows for one READ_AVRO scan.
+
+    A plain holder, not a planner: the compiler resolved the files (and, parallel to
+    them, the URL each remote one is fetched from with no credentials — "" for a local
+    path), the reader schema every file is read as (the first file's writer schema),
+    the top-level fields to decode (each once), and the identities to emit under with
+    the decoded column each one reads. This pins them in C++ storage that outlives
+    the driver.
+    """
+
+    cdef AvroScanSpec spec
+    cdef public object scan_identity
+
+    def __init__(self, list files, list urls, str reader_schema, list decode_names,
+                 list out_identities, list emit_index, bint zero_columns, int decode_workers):
+        if len(out_identities) != len(emit_index):
+            raise ValueError("AvroScanPlan: out_identities and emit_index must be parallel")
+        if len(set(decode_names)) != len(decode_names):
+            raise ValueError("AvroScanPlan: decode_names must be unique")
+        for index in emit_index:
+            if not 0 <= index < len(decode_names):
+                raise ValueError("AvroScanPlan: emit_index out of range")
+        if zero_columns and (decode_names or out_identities):
+            raise ValueError("AvroScanPlan: a zero-column scan decodes no columns")
+        if not zero_columns and not out_identities:
+            raise ValueError("AvroScanPlan: a projected scan needs at least one column")
+        if not files:
+            raise ValueError("AvroScanPlan: no files to read")
+        if len(urls) != len(files):
+            raise ValueError("AvroScanPlan: files and urls must be parallel")
+        if not reader_schema:
+            raise ValueError("AvroScanPlan: no reader schema")
+        if decode_workers <= 0:
+            raise ValueError("AvroScanPlan: decode_workers must be positive")
+        for path in files:
+            self.spec.files.push_back((<str>path).encode("utf-8"))
+        for url in urls:
+            self.spec.urls.push_back((<str>url).encode("utf-8"))
+        self.spec.reader_schema = reader_schema.encode("utf-8")
+        for name in decode_names:
+            self.spec.decode_names.push_back((<str>name).encode("utf-8"))
+        for identity in out_identities:
+            self.spec.out_identities.push_back(<bytes>identity)
+        # A typed local, not an inline expression (see JsonlScanPlan: push_back takes
+        # `const T&` and an inline temporary becomes a dangling FakeReference).
+        cdef uint32_t emit_slot
+        for index in emit_index:
+            emit_slot = index
+            self.spec.emit_index.push_back(emit_slot)
+        self.spec.zero_columns = zero_columns
+        self.spec.decode_workers = decode_workers
+        self.spec.rows_read = -1
+        self.spec.bytes_read = -1
+        self.spec.files_read = -1
+        self.scan_identity = None
+
+    @property
+    def rows_read(self):
+        """Rows emitted; -1 until the scan has run."""
+        return self.spec.rows_read
+
+    @property
+    def bytes_read(self):
+        """File bytes loaded; -1 until the scan has run."""
+        return self.spec.bytes_read
+
+    @property
+    def files_read(self):
+        """Files decoded; -1 until the scan has run."""
+        return self.spec.files_read
+
+
 cdef class NativePlan:
     """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
     the Python references (scan plan nodes, compiled expression programs) whose
@@ -2573,6 +2661,7 @@ cdef class NativePlan:
     cdef public list skene_scan_plans
     cdef public list postgres_scan_plans  # PostgresScanPlan objects the Postgres Source borrows
     cdef public list jsonl_scan_plans  # JsonlScanPlan objects the JSONL Source borrows
+    cdef public list avro_scan_plans  # AvroScanPlan objects the Avro Source borrows
     # Top-N runtime boundaries armed on this plan: (scan identity, boundary slot).
     # Read after the run to report each scan's `row_groups_pruned_topn`; empty for
     # every plan that armed none.
@@ -2588,6 +2677,7 @@ cdef class NativePlan:
         self.skene_scan_plans = []
         self.postgres_scan_plans = []
         self.jsonl_scan_plans = []
+        self.avro_scan_plans = []
         self.topn_boundary_scans = []
         self.vector_admission_scans = []
         # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
@@ -2789,6 +2879,15 @@ cdef class NativePlan:
         lifetime."""
         self.jsonl_scan_plans.append(plan)
         self._e.set_native_jsonl_scan_source(p, &plan.spec)
+
+    def set_native_avro_scan_source(self, size_t p, AvroScanPlan plan):
+        """Source = the native Avro scan (NativeAvroScanSource): its own decode pool
+        streams whole files' batches through rugo's C++ Avro reader while execution
+        consumes them -- no GIL trampoline, no compile-time materialization. The
+        Source borrows ``plan``'s spec; this plan holds it alive for the driver's
+        lifetime."""
+        self.avro_scan_plans.append(plan)
+        self._e.set_native_avro_scan_source(p, &plan.spec)
 
     def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan,
                                      CompiledBytecode filter_bc=None,
@@ -4272,6 +4371,7 @@ include "compaction_commit/compaction_commit.pyx"
 include "vector_index_build/vector_index_build.pyx"
 include "vector_index_build/vector_index_carry.pyx"
 include "vector_index_build/vector_index_search.pyx"
+include "avro_read/avro_read.pyx"
 include "csv_read/csv_read.pyx"
 include "explain/explain.pyx"
 include "function_dataset/function_dataset.pyx"
