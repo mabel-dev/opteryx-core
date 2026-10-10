@@ -51,9 +51,9 @@ The wheel bundles everything it needs — [Draken](https://draken.dev/), the col
 
 ## Quickstart
 
-One install, three formats.
+One install, four formats.
 
-Rugo reads and writes Parquet, CSV, and JSONL. The API is the same shape across all three: pass a path or bytes, get columnar data back.
+Rugo reads and writes Parquet, CSV, and JSONL, and reads Avro. The API is the same shape across all of them: pass a path or bytes, get columnar data back.
 
 ### Installation
 
@@ -555,6 +555,54 @@ On narrow files PyArrow is faster across the board. On wide files with filtering
 - Field length is capped at 65,535 bytes (`uint16_t` index); longer fields are silently truncated.
 - Type inference is speculative from sampled values; there is no schema-override parameter — inferred types may be wrong on heterogeneous columns.
 - Predicate operator set is fixed: `==`, `!=`, `<`, `<=`, `>`, `>=`.
+
+---
+
+## Avro
+
+`rugo.avro` reads Avro object container files — the format of Kafka Connect sinks and of Iceberg's manifests. Reading only; rugo has no Avro writer. The decoder is native C++: each file's schema is compiled once into a decode program, and values are written straight into Draken columns — no Python object per value.
+
+### Quick start
+
+```python
+from rugo import avro
+
+meta = avro.read_metadata("launches.avro")       # header only: schema, codec, metadata
+print(meta.codec, meta.columns)
+
+with avro.read_avro("launches.avro", columns=["Company", "Rocket.Name"]) as reader:
+    for morsel in reader:                         # one Morsel per batch (whole blocks, <= 65,536 rows)
+        print(morsel.column(b"Rocket.Name").to_pylist())
+```
+
+### `read_avro`
+
+| Argument | Meaning |
+|---|---|
+| `source` | a filename (`str`) or `bytes`/`bytearray`/`memoryview` |
+| `columns` | names to read; a dotted name reads a field inside a record (`Rocket.Name`), NULL where a nullable record is NULL. `None` = every top-level field |
+| `reader_schema` | an Avro schema (dict or JSON text) to read the file as: fields match by `field-id` when both sides carry one (Iceberg), else by name; a field the file lacks is its default (a constant column) or NULL; `int`→`long`/`float`/`double`, `long`→`float`/`double`, `float`→`double` and `string`↔`bytes` promote; logical types follow the file, as fastavro and the Apache implementation do |
+
+Types: `boolean` BOOL · `int` INT32 · `long` INT64 · `float`/`double` FLOAT32/FLOAT64 · `string` VARCHAR · `bytes`/`fixed` VARBINARY · `enum` VARCHAR (one entry per symbol, a position per row) · `date` DATE · `time-*` TIME (µs) · `timestamp-*` TIMESTAMP (µs, UTC) · `decimal` DECIMAL / DECIMAL128 · an array of a plain scalar ARRAY · a whole record, map, or array of nested values NVARCHAR JSON text.
+
+Codecs: `null`, `deflate`, `snappy`, `zstandard`.
+
+### Performance
+
+Decoding 1,000,000 rows × 20 columns (`dev/bench_avro_readers.py`, Apple M-series, medians of interleaved rounds):
+
+| File | Columns | rugo | fastavro | Apache `avro` |
+|---|---|---|---|---|
+| uncompressed | all | 0.28 s | 5.36 s | 35.6 s |
+| uncompressed | 3 of 20 | 0.10 s | 4.05 s | 20.9 s |
+| deflate | all | 0.72 s | 5.85 s | 36.3 s |
+| zstandard | all | 0.47 s | 5.58 s | 37.2 s |
+
+rugo returns columns; fastavro and Apache return a dict per record. Converting rugo's columns to Python lists as well still leaves it 4–6× faster than fastavro on these files.
+
+### Limitations
+
+Refused, with an error naming what was refused: the `bzip2` and `xz` codecs, unions other than `["null", T]`, recursive types, `uuid`, decimal precision above 38, `timestamp-nanos`, `local-timestamp-*`, `duration`, and alias-based schema resolution. A file is decoded on one thread. At the Python edge a reader-schema field the file lacks cannot be a constant TIME/TIMESTAMP/DECIMAL column (the Opteryx engine builds those natively).
 
 ---
 

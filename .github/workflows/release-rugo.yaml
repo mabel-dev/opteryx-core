@@ -29,13 +29,16 @@ jobs:
   # marketable component): PyArrow-oracle conformance (read/write every type),
   # the notebook's advertised public API, and the CLI. A red suite blocks the
   # PyPI publish entirely (build-linux/build-macos `needs: floor`).
+  # `avro` gates the Avro reader against its two independent oracles (fastavro and
+  # Apache's reference `avro` package — PyArrow has no Avro reader) and against
+  # PyIceberg's own manifest decoder.
   floor:
     name: rugo floor (${{ matrix.suite }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        suite: [oracle, notebook, cli]
+        suite: [oracle, notebook, cli, avro]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -51,6 +54,10 @@ jobs:
           python -m pip install --upgrade pip uv
           python -m uv pip install --upgrade cython setuptools pyarrow pytest
 
+      - name: Install the Avro oracles (avro suite only)
+        if: matrix.suite == 'avro'
+        run: python -m uv pip install --upgrade fastavro avro python-snappy "pyiceberg[sql-sqlite]"
+
       - name: Compile rugo (draken + rugo only — no opteryx SQL engine, no Rust)
         run: python rugo/setup.py build_ext --inplace
 
@@ -61,6 +68,7 @@ jobs:
             oracle)   python -m pytest tests/rugo/test_oracle_conformance.py -q ;;
             notebook) python -m pytest tests/rugo/test_notebook_actions.py -q ;;
             cli)      python -m pytest tests/rugo/test_cli.py -q ;;
+            avro)     python -m pytest tests/rugo/test_avro_reader.py tests/rugo/test_avro_reader_schema.py tests/rugo/test_avro_facade.py tests/rugo/test_avro_iceberg_manifests.py -q ;;
           esac
 
   build-linux:

@@ -1043,6 +1043,39 @@ static void test_string_radix_matches_stable_sort() {
     std::printf("  string radix vs stable_sort: %d cases\n", cases);
 }
 
+// Deep MSD chains: a 100-byte shared prefix (13 levels before anything differs),
+// random tails, exact duplicates and NULLs, ASC and DESC, serial and team-sized runs.
+static void test_string_radix_deep_prefix() {
+    std::mt19937_64 rng(77);
+    const std::string common(100, 'q');
+    for (size_t n : {size_t(50000), size_t(300000)}) {
+        for (int dir = 0; dir < 2; ++dir) {
+            std::vector<std::string> v(n);
+            std::vector<bool> valid(n, true);
+            for (size_t i = 0; i < n; ++i) {
+                if (rng() % 5 == 0 && i > 0) { v[i] = v[rng() % i]; continue; }   // duplicate
+                v[i] = common;
+                const size_t extra = rng() % 12;
+                for (size_t k = 0; k < extra; ++k) v[i].push_back(static_cast<char>('a' + rng() % 3));
+                valid[i] = rng() % 23 != 0;
+            }
+            std::vector<CxxColumn> cols;
+            cols.push_back(col_str(v, valid));
+            std::vector<SortKeySpec> spec{{0, dir == 0, dir == 0}};
+            std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+            auto keys = keys_of(ms, spec, n);
+            std::vector<uint32_t> ref(n);
+            std::iota(ref.begin(), ref.end(), 0u);
+            std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+            CHECK(sort_via_dispatch(keys, n, SIZE_MAX) == ref, "deep-prefix string radix != stable_sort");
+            std::vector<uint32_t> wide(n);
+            std::iota(wide.begin(), wide.end(), 0u);
+            sort_perm(keys, wide, SIZE_MAX, 16u);
+            CHECK(wide == ref, "deep-prefix string radix (16 threads) != stable_sort");
+        }
+    }
+}
+
 int main() {
     test_aos_matches_generic();
     test_matches_independent_reference();
@@ -1064,6 +1097,7 @@ int main() {
     test_census_runs_match_vergesort();
     test_parallel_gather_matches_serial();
     test_string_radix_matches_stable_sort();
+    test_string_radix_deep_prefix();
     std::printf("test_sort_unified: all %d checks passed\n", g_checks);
     return 0;
 }

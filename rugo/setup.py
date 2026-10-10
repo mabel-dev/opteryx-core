@@ -1,7 +1,7 @@
 """
 Standalone build for the ``rugo`` wheel — the dependency-free file engine
 (draken + rugo), packaged from this same source tree *without* the Opteryx SQL
-engine, for users who want fast Parquet/CSV/JSONL I/O with zero heavy deps.
+engine, for users who want fast Parquet/CSV/JSONL/Avro I/O with zero heavy deps.
 
 This file lives in ``rugo/`` for orientation (people look for rugo's build here),
 but its build *base* is the repo root: the wheel bundles ``draken``, a sibling
@@ -112,7 +112,7 @@ setup(
     name="rugo",
     version=__version__,
     description=(
-        "Fast, dependency-free Parquet/CSV/JSONL reader and writer."
+        "Fast, dependency-free Parquet/CSV/JSONL reader and writer, and Avro reader."
     ),
     long_description=long_description,
     long_description_content_type="text/markdown",

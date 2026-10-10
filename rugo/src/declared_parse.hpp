@@ -260,12 +260,18 @@ inline bool declared_parse_into(const DeclaredType& dt, const uint8_t* p, uint32
             return true;
         }
         case DRAKEN_TIMESTAMP64: {
-            int year, month, day, hour, minute, second, usec;
+            // A zone suffix ('Z', '+HH:MM', ...) is honoured — normalised to UTC —
+            // exactly as draken_cast_string_to_timestamp does, so a declared column
+            // and CAST(... AS TIMESTAMP) agree (and rugo reads the '+00:00' its own
+            // writer emits).
+            int year, month, day, hour, minute, second, usec, offset_seconds;
             if (!draken::iso_datetime::parse_iso_timestamp(
-                    p, len, &year, &month, &day, &hour, &minute, &second, &usec))
+                    p, len, &year, &month, &day, &hour, &minute, &second, &usec,
+                    &offset_seconds))
                 return false;
             const int64_t us =
-                draken::iso_datetime::civil_to_micros(year, month, day, hour, minute, second, usec);
+                draken::iso_datetime::civil_to_micros(year, month, day, hour, minute, second, usec)
+                - static_cast<int64_t>(offset_seconds) * 1000000LL;
             int64_t scaled;
             if (!detail::micros_to_unit(us, dt.unit, &scaled)) return false;
             static_cast<int64_t*>(buffer)[index] = scaled;

@@ -153,7 +153,9 @@ def read_jsonl(
             rule disagreeing about which address a value denotes is a security bug.
           · TIMESTAMP and DATE are ISO-8601 TEXT ONLY; an epoch integer raises. Converting
             to a declared unit is exact-or-refuse, so TIMESTAMP[s] rejects a value carrying
-            sub-second precision rather than truncating it.
+            sub-second precision rather than truncating it. A TIMESTAMP zone suffix
+            ('Z', '+HH:MM', '-HHMM') is honoured and the value normalised to UTC,
+            as CAST does — so the '+00:00' write_jsonl emits reads back.
     infer_schema: whether non-declared columns appear in the returned schema dict at all
         (the underlying Draken vectors are always typed the same way regardless — this
         only gates the reported metadata). Declared (explicit_schema) columns are always

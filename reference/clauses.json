@@ -203,7 +203,7 @@
             "CREATE [OR REPLACE] SECRET [IF NOT EXISTS] secret_name IN workspace (TYPE 'secret_type', option value, ...)"
         ],
         "summary": "Store a write-only credential in a workspace.",
-        "documentation": "Recognised by the aside parser. Types: gcs_service_account (KEY, SCOPE), aws_access_key (ACCESS_KEY_ID, SECRET_ACCESS_KEY, optional SESSION_TOKEN and REGION, SCOPE) and http_endpoint (URL, optional HEADER_AUTHORIZATION, HEADER_X_API_KEY, HEADER_X_AUTH_TOKEN). Each value is a :name parameter or a string literal; a literal is lifted out of the statement before it is stored or logged. Use the secret with READ_PARQUET / READ_JSONL / READ_CSV credentials => 'workspace.secret_name'.",
+        "documentation": "Recognised by the aside parser. Types: gcs_service_account (KEY, SCOPE), aws_access_key (ACCESS_KEY_ID, SECRET_ACCESS_KEY, optional SESSION_TOKEN and REGION, SCOPE) and http_endpoint (URL, optional HEADER_AUTHORIZATION, HEADER_X_API_KEY, HEADER_X_AUTH_TOKEN). Each value is a :name parameter or a string literal; a literal is lifted out of the statement before it is stored or logged. Use the secret with READ_PARQUET / READ_JSONL / READ_CSV / READ_AVRO credentials => 'workspace.secret_name'.",
         "notes": "Write-only: no statement returns a value. Requires ALTER on the whole workspace. SCOPE is a prefix on a bucket boundary, not a glob. OR REPLACE and IF NOT EXISTS are alternatives, never combined. Must be the only statement in its request."
     },
     "create_table": {
