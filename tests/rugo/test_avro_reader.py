@@ -426,6 +426,24 @@ def test_deflate_refuses_more_than_the_zlib_trailer():
             _refuses(data, r"trailing bytes after the compressed block")
 
 
+def test_deflate_block_needing_output_growth():
+    # A block that inflates far beyond 4x its compressed size: the first output buffer
+    # is too small, so the decoder must grow it and inflate the block again.
+    recs = [{"s": "x" * 100_000} for _ in range(30)]
+    data = _write(_record([{"name": "s", "type": "string"}]), recs, "deflate", sync_interval=10_000_000)
+    _, got = _rugo_rows(data)
+    assert got["s"] == [r["s"] for r in recs]
+
+
+def test_refuses_corrupt_deflate_stream():
+    schema = b'{"type":"record","name":"r","fields":[{"name":"c","type":"long"}]}'
+    meta = (_zz(2) + _zz(11) + b"avro.schema" + _zz(len(schema)) + schema
+            + _zz(10) + b"avro.codec" + _zz(7) + b"deflate" + _zz(0))
+    body = b"\xff\xff\xff\xff\xff\xff"  # not a valid DEFLATE stream
+    sync = b"Q" * 16
+    _refuses(b"Obj\x01" + meta + sync + _zz(1) + _zz(len(body)) + body + sync, r"deflate: the compressed block is corrupt")
+
+
 # ── refusals (docs §8) ──
 
 def _refuses(data, match, columns=None):

@@ -1415,7 +1415,7 @@ struct AvroStream::Impl {
     Program prog;
     std::unique_ptr<Decoder> dec;
     std::unique_ptr<BlockReader> blocks;
-    draken::AppendBuffer<uint8_t> scratch;
+    BlockDecoder blocks_decoder;   // codec state + decompression scratch, reused per block
     bool count_only = false;   // no columns: rows come from the block headers alone
     uint32_t counted = 0;      // count_only: rows in the batch being built
     Block pending;             // a block that did not fit the previous batch
@@ -1516,7 +1516,7 @@ bool AvroStream::next(AvroBatch& out) {
             m.counted += count;
             continue;
         }
-        const auto payload = block_payload(b, m.header.codec, m.scratch);
+        const auto payload = m.blocks_decoder.payload(b, m.header.codec);
         m.dec->block(payload.first, payload.second, count);
     }
 }

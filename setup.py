@@ -1060,6 +1060,13 @@ extensions = [
         "third_party/snappy/snappy.cc",
         "third_party/snappy/snappy-sinksource.cc",
         "third_party/snappy/snappy-stubs-internal.cc",
+        # Avro's deflate block codec: libdeflate (third_party/libdeflate, upstream
+        # v1.26), decompression TUs only. Own copy, like snappy above: stateless
+        # apart from a per-.so CPU-feature cache.
+        "third_party/libdeflate/lib/deflate_decompress.c",
+        "third_party/libdeflate/lib/utils.c",
+        "third_party/libdeflate/lib/arm/cpu_features.c",
+        "third_party/libdeflate/lib/x86/cpu_features.c",
         ]
         # skene's kZstd section codec, both halves. Same argument as lz4.c above,
         # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
@@ -1086,8 +1093,9 @@ extensions = [
             "third_party/lz4",           # lz4.h
             "rugo/src",                  # declared_type.hpp / predicate_literal.hpp (JSONL core)
             "rugo/src/jsonl/core",       # NativeJsonlScanSource's rugo JSONL core
-            "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip; Avro deflate)
+            "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip)
             "third_party/snappy",        # Avro's snappy block codec
+            "third_party/libdeflate",    # Avro's deflate block codec (libdeflate.h)
             # The vector index builder (src/cpp/engine/vector_index_build.hpp) runs
             # draken/ops/ann, which converts fp16 via <fp16/fp16.h>.
             "third_party/usearch/fp16/include",

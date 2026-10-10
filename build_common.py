@@ -849,9 +849,9 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet/decode_column.cpp",
                     "rugo/src/parquet/decode.cpp",
                     "rugo/src/parquet/compression.cpp",
-                    # miniz raw-DEFLATE inflate for the parquet GZIP codec.
-                    # tinfl_decompress_mem_to_mem is self-contained in this TU
-                    # (no malloc, no other miniz object needed).
+                    # miniz raw-DEFLATE inflate (tinfl_decompress): the parquet GZIP
+                    # codec and the gzip stream decoder of the JSONL / CSV readers.
+                    # Self-contained in this TU (no malloc, no other miniz object needed).
                     "third_party/miniz/miniz_tinfl.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
                     # DecodedColumn -> owned Draken buffers (pure C++) and its
@@ -889,6 +889,14 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/avro/avro_reader.cpp",
                     # Python edge of the avro reader (wrap_avro_column); rugo_native only.
                     "rugo/src/avro/_avro_column_wrap.cpp",
+                    # libdeflate (third_party/libdeflate, upstream v1.26): raw DEFLATE
+                    # inflate for Avro's `deflate` codec — 1.65-2.37x faster than miniz
+                    # tinfl, byte-identical (LIBDEFLATE_VERSION.txt). Decompression TUs
+                    # only; C sources, compiled as C by the mixed-extension path.
+                    "third_party/libdeflate/lib/deflate_decompress.c",
+                    "third_party/libdeflate/lib/utils.c",
+                    "third_party/libdeflate/lib/arm/cpu_features.c",
+                    "third_party/libdeflate/lib/x86/cpu_features.c",
                 ]
                 + get_parquet_vendor_sources()
                 + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
@@ -909,6 +917,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/jsonl/core",
                     "rugo/src/csv/core",
                     "third_party/yyjson/src",       # avro schema parsing (symbols from draken_native)
+                    "third_party/libdeflate",       # avro deflate codec (libdeflate.h)
                     "third_party/snappy",
                     "third_party/zstd",
                     "third_party/zstd/common",

@@ -70,7 +70,7 @@ Designed so B is an extension (new output sink + edge), not a rewrite.
 | Codec | Implementation |
 |---|---|
 | `null` | none |
-| `deflate` | raw RFC 1951 (no zlib header) — miniz `tinfl` |
+| `deflate` | raw RFC 1951 (no zlib header) — libdeflate (miniz `tinfl` until §21) |
 | `snappy` | snappy raw block, then a 4-byte **big-endian CRC32 of the uncompressed bytes**; verify, mismatch = error |
 | `zstandard` | `ZSTD_decompressDCtx`, one frame per block |
 | `bzip2`, `xz`, anything else | **refused**, error names the codec |
@@ -623,3 +623,27 @@ Built:
   EXPLAIN); READ_AVRO added to `test_read_credentials.py`'s option and no-leak checks.
   A credentialed READ_AVRO read is not exercised offline (the native fetch needs a
   signed URL from a real store).
+
+## 21. Faster reads, step 1: libdeflate (2026-10-10)
+
+Profile (macOS `sample`, one file, 1M rows, single thread): deflate reads spent 61%
+(all columns) to 84% (3 columns) in miniz's `tinfl_decompress`. Uncompressed all-column
+reads split 43% memory copies (string arena appends, arena realloc growth, and — Python
+edge only — draken_vector_own_string re-consolidating slots + arena), 28% decode loop,
+18% JSON text rendering, 9% varints; uncompressed 3-column reads are 84% the skip walk.
+
+Ruled: vendor upstream libdeflate (ebiggers, v1.26 — not the ClickHouse fork, which
+records no changes of its own) and wire it into Avro. `third_party/libdeflate/`
+(LIBDEFLATE_VERSION.txt); decompression TUs compiled into rugo_native and _operators.
+`BlockDecoder` (avro_container.hpp) owns one decompressor per stream and the scratch;
+output starts at max(4x input, prior capacity) and doubles on INSUFFICIENT_SPACE; D10's
+≤4 trailing bytes are checked from libdeflate's consumed-input count.
+
+Measured: isolated inflate 1.65x (benchmark file, 16 KB blocks) to 2.37x (compressible
+64 KB blocks) faster, byte-identical. End-to-end A/B (separate processes, interleaved,
+6 rounds, Mac): deflate all-columns 0.609 → 0.461 s (−24%), deflate 3-columns 0.435 →
+0.296 s (−32%); uncompressed control unchanged within noise.
+
+Next candidates (by the profile): within-file block parallelism; per-block arena
+sizing to remove realloc copies; skip-path specialisation. Other miniz users (Parquet
+GZIP, streamed gzip JSONL/CSV) are being assessed separately.

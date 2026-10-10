@@ -1,0 +1,8 @@
+libdeflate-tag: v1.26 (2026-08-22)
+source: https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.26.tar.gz (upstream; NOT the ClickHouse fork)
+license: MIT (COPYING)
+vendored: libdeflate.h, common_defs.h, lib/ (the whole upstream lib tree, unmodified), COPYING, README.md, NEWS.md
+compiled: decompression only — lib/deflate_decompress.c, lib/utils.c, lib/arm/cpu_features.c, lib/x86/cpu_features.c
+purpose: raw DEFLATE inflate for rugo's Avro `deflate` codec (rugo/src/avro/avro_container.cpp).
+measured: 1.65x (random-ish 16 KB blocks) to 2.37x (compressible 64 KB blocks) faster than miniz tinfl on Avro deflate blocks, byte-identical output (2026-10-10, Apple M-series).
+include-path: third_party/libdeflate

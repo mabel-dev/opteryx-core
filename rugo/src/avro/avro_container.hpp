@@ -5,7 +5,7 @@
 //   { long count | long byte_size | byte_size bytes | 16-byte sync }*
 //
 // Design: docs/AVRO_READER_DESIGN.md §3.1–3.2. Pure C++.
-// Codecs: null, deflate (raw RFC 1951, miniz), snappy (+ big-endian CRC32 of the
+// Codecs: null, deflate (raw RFC 1951, libdeflate), snappy (+ big-endian CRC32 of the
 // uncompressed bytes), zstandard. Anything else is refused by name.
 
 #include <cstdint>
@@ -14,6 +14,8 @@
 #include <vector>
 
 #include "core/append_buffer.h"
+
+struct libdeflate_decompressor;  // third_party/libdeflate (C, global namespace)
 
 namespace rugo::avro {
 
@@ -53,9 +55,23 @@ private:
     size_t index_ = 0;
 };
 
-// The block's records as raw Avro binary: `b.bytes` itself for the null codec, else
-// decompressed into `scratch`. Throws on corrupt data or a CRC mismatch.
-std::pair<const uint8_t*, size_t> block_payload(const Block& b, BlockCodec codec,
-                                                draken::AppendBuffer<uint8_t>& scratch);
+// Per-stream decompression state reused across blocks: the libdeflate decompressor
+// (allocated once, not per block) and the scratch the payload is decompressed into.
+class BlockDecoder {
+public:
+    BlockDecoder();
+    ~BlockDecoder();
+    BlockDecoder(const BlockDecoder&) = delete;
+    BlockDecoder& operator=(const BlockDecoder&) = delete;
+
+    // The block's records as raw Avro binary: `b.bytes` itself for the null codec,
+    // else decompressed into this decoder's scratch (valid until the next call).
+    // Throws on corrupt data or a CRC mismatch.
+    std::pair<const uint8_t*, size_t> payload(const Block& b, BlockCodec codec);
+
+private:
+    ::libdeflate_decompressor* inflater_ = nullptr;  // created on first deflate block
+    draken::AppendBuffer<uint8_t> scratch_;
+};
 
 }  // namespace rugo::avro

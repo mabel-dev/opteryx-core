@@ -595,10 +595,10 @@ Decoding 1,000,000 rows × 20 columns (`dev/bench_avro_readers.py`, Apple M-seri
 |---|---|---|---|---|
 | uncompressed | all | 0.28 s | 5.36 s | 35.6 s |
 | uncompressed | 3 of 20 | 0.10 s | 4.05 s | 20.9 s |
-| deflate | all | 0.72 s | 5.85 s | 36.3 s |
+| deflate | all | 0.46 s | 5.85 s | 36.3 s |
 | zstandard | all | 0.47 s | 5.58 s | 37.2 s |
 
-rugo returns columns; fastavro and Apache return a dict per record. Converting rugo's columns to Python lists as well still leaves it 4–6× faster than fastavro on these files.
+The deflate row uses libdeflate (after 0.5.0; 0.72 s with miniz in 0.5.0). rugo returns columns; fastavro and Apache return a dict per record. Converting rugo's columns to Python lists as well still leaves it 4–6× faster than fastavro on these files.
 
 ### Limitations
 

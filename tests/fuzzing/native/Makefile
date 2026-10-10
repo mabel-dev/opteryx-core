@@ -118,7 +118,8 @@ CSV_SRCS   := $(filter-out %/csv_column_builder.cpp,$(wildcard $(ROOT)/rugo/src/
 AVRO_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/avro $(DRAKEN_INC) -I$(ZSTD_DIR) \
              -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
              -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/yyjson/src \
-             -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu
+             -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu \
+             -I$(ROOT)/third_party/libdeflate
 AVRO_SRCS := $(ROOT)/rugo/src/avro/avro_schema.cpp \
              $(ROOT)/rugo/src/avro/avro_container.cpp \
              $(ROOT)/rugo/src/avro/avro_reader.cpp \
@@ -130,6 +131,10 @@ AVRO_SRCS := $(ROOT)/rugo/src/avro/avro_schema.cpp \
              $(ZSTD_SRCS)
 # C sources: compiled as C (clang++ would compile a .c as C++, which these are not).
 AVRO_CSRCS := $(ROOT)/third_party/yyjson/src/yyjson.c \
+              $(ROOT)/third_party/libdeflate/lib/deflate_decompress.c \
+              $(ROOT)/third_party/libdeflate/lib/utils.c \
+              $(ROOT)/third_party/libdeflate/lib/arm/cpu_features.c \
+              $(ROOT)/third_party/libdeflate/lib/x86/cpu_features.c \
               $(wildcard $(ROOT)/third_party/mabel/base64/*.c) \
               $(ROOT)/third_party/ulfjack/ryu/d2s.c \
               $(ROOT)/third_party/ulfjack/ryu/f2s.c \
@@ -177,8 +182,8 @@ $(BUILD)/jsonl_replay: fuzz_jsonl.cpp replay_main.cpp $(JSONL_DEPS) | $(BUILD)
 $(BUILD)/csv_replay: fuzz_csv.cpp replay_main.cpp $(CSV_DEPS) | $(BUILD)
 	$(CXX) $(BASE) $(TEXT_INC) fuzz_csv.cpp replay_main.cpp $(CSV_SRCS) -o $@
 
-AVRO_COBJS = @mkdir -p $(BUILD)/avro_c && for f in $(AVRO_CSRCS); do \
-	  $(CC) -std=c11 $(OPT) -g $(SAN) -w $(AVRO_INC) -c $$f -o $(BUILD)/avro_c/$$(basename $$f .c).o || exit 1; done
+AVRO_COBJS = @rm -rf $(BUILD)/avro_c && mkdir -p $(BUILD)/avro_c && for f in $(AVRO_CSRCS); do \
+	  $(CC) -std=c11 $(OPT) -g $(SAN) -w $(AVRO_INC) -c $$f -o $(BUILD)/avro_c/$$(basename $$(dirname $$f))_$$(basename $$f .c).o || exit 1; done
 
 $(BUILD)/avro_replay: fuzz_avro.cpp replay_main.cpp $(AVRO_DEPS) | $(BUILD)
 	$(AVRO_COBJS)

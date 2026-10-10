@@ -1,12 +1,13 @@
 #include "avro_container.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
 
 #include "avro_varint.hpp"
 #include "compression/stream_decompress.hpp"  // crc32_update
-#include "miniz_tinfl.h"
+#include "libdeflate.h"
 #include "snappy.h"
 #include "zstd.h"
 
@@ -125,29 +126,29 @@ bool BlockReader::next(Block& out) {
 
 namespace {
 
-void inflate_raw(const uint8_t* src, size_t n, draken::AppendBuffer<uint8_t>& out) {
-    tinfl_decompressor d;
-    tinfl_init(&d);
+// Raw RFC 1951 inflate with libdeflate (third_party/libdeflate). Avro does not record a
+// block's uncompressed size, so `out` starts at the larger of 4x the input and the
+// capacity earlier blocks grew it to, and doubles on INSUFFICIENT_SPACE (which restarts
+// the block). D10 (a): fastavro and PyIceberg write `zlib.compress(data)[2:-1]` — the
+// raw stream followed by 3 leftover bytes of the zlib adler32 — so up to the 4 bytes of
+// that trailer are accepted after the end-of-stream marker; more is corrupt.
+void inflate_raw(libdeflate_decompressor* d, const uint8_t* src, size_t n,
+                 draken::AppendBuffer<uint8_t>& out) {
     out.clear();
-    size_t in_pos = 0;
-    size_t cap = n * 4 > 4096 ? n * 4 : 4096;
-    out.reserve(cap);
+    size_t cap = std::max<size_t>(out.capacity(), n * 4 > 4096 ? n * 4 : 4096);
     for (;;) {
-        size_t in_avail = n - in_pos;
-        size_t out_avail = out.capacity() - out.size();
-        const tinfl_status st = tinfl_decompress(
-            &d, src + in_pos, &in_avail, out.data(), out.data() + out.size(), &out_avail,
-            TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-        in_pos += in_avail;
-        out.resize_uninit(out.size() + out_avail);
-        if (st == TINFL_STATUS_DONE) break;
-        if (st != TINFL_STATUS_HAS_MORE_OUTPUT) corrupt("deflate: the compressed block is corrupt");
-        out.reserve(out.capacity() * 2);
+        out.reserve(cap);
+        size_t in_used = 0, out_used = 0;
+        const libdeflate_result r = libdeflate_deflate_decompress_ex(
+            d, src, n, out.data(), out.capacity(), &in_used, &out_used);
+        if (r == LIBDEFLATE_SUCCESS) {
+            if (n - in_used > 4) corrupt("deflate: trailing bytes after the compressed block");
+            out.resize_uninit(out_used);
+            return;
+        }
+        if (r != LIBDEFLATE_INSUFFICIENT_SPACE) corrupt("deflate: the compressed block is corrupt");
+        cap = out.capacity() * 2;
     }
-    // D10 (a): fastavro and PyIceberg write `zlib.compress(data)[2:-1]` — the raw
-    // stream followed by 3 leftover bytes of the zlib adler32. Up to the 4 bytes of
-    // that trailer are accepted after the end-of-stream marker; more is corrupt.
-    if (n - in_pos > 4) corrupt("deflate: trailing bytes after the compressed block");
 }
 
 void unzstd(const uint8_t* src, size_t n, draken::AppendBuffer<uint8_t>& out) {
@@ -189,15 +190,26 @@ void unsnappy(const uint8_t* src, size_t n, draken::AppendBuffer<uint8_t>& out) 
 
 }  // namespace
 
-std::pair<const uint8_t*, size_t> block_payload(const Block& b, BlockCodec codec,
-                                                draken::AppendBuffer<uint8_t>& scratch) {
+BlockDecoder::BlockDecoder() = default;
+
+BlockDecoder::~BlockDecoder() {
+    if (inflater_ != nullptr) libdeflate_free_decompressor(inflater_);
+}
+
+std::pair<const uint8_t*, size_t> BlockDecoder::payload(const Block& b, BlockCodec codec) {
     switch (codec) {
-        case BlockCodec::Null:      return {b.bytes, b.size};
-        case BlockCodec::Deflate:   inflate_raw(b.bytes, b.size, scratch); break;
-        case BlockCodec::Snappy:    unsnappy(b.bytes, b.size, scratch); break;
-        case BlockCodec::Zstandard: unzstd(b.bytes, b.size, scratch); break;
+        case BlockCodec::Null: return {b.bytes, b.size};
+        case BlockCodec::Deflate:
+            if (inflater_ == nullptr) {
+                inflater_ = libdeflate_alloc_decompressor();
+                if (inflater_ == nullptr) throw std::bad_alloc();
+            }
+            inflate_raw(inflater_, b.bytes, b.size, scratch_);
+            break;
+        case BlockCodec::Snappy:    unsnappy(b.bytes, b.size, scratch_); break;
+        case BlockCodec::Zstandard: unzstd(b.bytes, b.size, scratch_); break;
     }
-    return {scratch.data(), scratch.size()};
+    return {scratch_.data(), scratch_.size()};
 }
 
 }  // namespace rugo::avro

@@ -1113,7 +1113,25 @@ struct RadixFixup {
               Push& push) const {
         const size_t len = t.j - t.i;
         const uint64_t cover = static_cast<uint64_t>(t.depth) * SORT_STRING_PREFIX_BYTES;
-        const int ends = ends_within(p, t.i, t.j, t.s, cover);
+        int ends;
+        if (nt <= 1) {
+            ends = ends_within(p, t.i, t.j, t.s, cover);
+        } else {
+            // A big run's check is a full pass of random reads: on the team. Each
+            // member answers for its slice; one length across slices needs l0 agreeing.
+            std::vector<int> part(nt, 1);
+            std::vector<uint32_t> first_len(nt, 0);
+            sort_team_run(nt, [&](unsigned m) {
+                const size_t lo = t.i + len * m / nt, hi = t.i + len * (m + 1) / nt;
+                part[m] = ends_within(p, lo, hi, t.s, cover);
+                first_len[m] = (*keys)[t.s].slen[p[lo]];
+            });
+            ends = 1;
+            for (unsigned m = 0; m < nt; ++m) {
+                if (part[m] == 0) { ends = 0; break; }
+                if (part[m] == 2 || first_len[m] != first_len[0]) ends = 2;
+            }
+        }
         if (ends == 1) { range(p, t.i, t.j, t.s + 1, push); return; }
         if (ends == 2 || len < SORT_FIXUP_SMALL) {
             std::stable_sort(p + t.i, p + t.j, SortKeyCmp{*keys});
@@ -1179,11 +1197,28 @@ inline void radix_fixup_ties(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
     if (n < 2) return;
     const RadixFixup<NPARTS> fx{rows, masks, &keys};
     uint32_t* p = perm.data();
-    // Level 0: the top-level runs (parts 0..first string part), found serially — one
-    // read-only pass over perm, no writes yet.
+    // Level 0: the top-level runs (parts 0..first string part), found by the team —
+    // a read-only pass over perm with random reads of the keys; serial, it measured
+    // 0.8s of a 100M-row sort. A member owns the runs that START in its slice.
+    const int s0 = fx.first_string_from(0);
+    if (s0 < 0) return;
     std::vector<RadixFixupTask> pending;
-    auto push_pending = [&](RadixFixupTask t) { pending.push_back(t); };
-    fx.range(p, 0, n, 0, push_pending);
+    {
+        const unsigned nt0 = sort_team_width(n, nthreads);
+        std::vector<std::vector<RadixFixupTask>> found(nt0);
+        sort_team_run(nt0, [&](unsigned t) {
+            const size_t lo = n * t / nt0, hi = n * (t + 1) / nt0;
+            size_t i = lo;
+            if (i > 0) while (i < hi && fx.same(p[i - 1], p[i], 0, s0)) ++i;   // previous member's
+            while (i < hi) {
+                size_t j = i + 1;
+                while (j < n && fx.same(p[j - 1], p[j], 0, s0)) ++j;
+                if (j - i > 1) found[t].push_back(RadixFixupTask{i, j, s0, 1});
+                i = j;
+            }
+        });
+        for (auto& f : found) pending.insert(pending.end(), f.begin(), f.end());
+    }
     RadixFixupScratch big_scratch;
     while (!pending.empty()) {
         // Big tasks: one at a time, each radix on the whole team; their children join

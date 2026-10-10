@@ -8,7 +8,7 @@
 #include "snappy.h"   // third_party/snappy (on the include path)
 #include "zstd.h"           // canonical vendored copy: third_party/zstd
 #include "lz4.h"            // LZ4 block codec: LZ4_decompress_safe (third_party/lz4)
-#include "miniz_tinfl.h"      // miniz raw-DEFLATE inflate: tinfl_decompress_mem_to_mem
+#include "miniz_tinfl.h"      // miniz raw-DEFLATE inflate: tinfl_decompress
 
 namespace rugo {
 namespace compression {
