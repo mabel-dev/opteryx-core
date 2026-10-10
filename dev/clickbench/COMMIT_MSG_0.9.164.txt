@@ -1,0 +1,12 @@
+Opteryx: pin 0.9.164, add opteryx-parquet-rewritten, retire opteryx-skene
+
+- opteryx/: install pins opteryx-core==0.9.164. 0.9.155 is no longer on PyPI,
+  and it refused local Parquet scans on >=66 vCPU hosts (41/43 nulls on the
+  192-vCPU metal machines).
+- opteryx-parquet-rewritten/: new entry. load rewrites the partitioned hits
+  with Opteryx's own Parquet writer (zstd, 64k-row groups, blocks of 4) and
+  reports that as load time. Same server and queries as opteryx/.
+- opteryx-skene/: removed.
+- Results: one compliant c6a.4xlarge run of each entry (2026-10-09).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
