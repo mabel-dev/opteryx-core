@@ -234,8 +234,8 @@ def test_bare_timestamp_means_microseconds():
     [
         ("TIMESTAMP[us]", "1755525098636416"),   # epoch integer
         ("DATE", "20684"),                       # epoch day count
-        ("TIMESTAMP[us]", '"2026-08-18T00:00:00Z"'),   # zone suffix: naive only
-        ("TIMESTAMP[us]", '"2026-08-18T00:00:00+01:00"'),
+        ("TIMESTAMP[us]", '"2026-08-18T00:00:00+25:00"'),  # zone suffix out of range
+        ("TIMESTAMP[us]", '"2026-08-18T00:00:00UTC"'),     # not an ISO zone
         ("DATE", '"18/08/2026"'),
     ],
 )

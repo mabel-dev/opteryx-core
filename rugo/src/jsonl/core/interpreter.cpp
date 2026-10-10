@@ -1176,19 +1176,15 @@ static RecordSet build_head(const uint8_t* buffer, size_t buffer_length, size_t 
     }
 }
 
-std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_length,
-                                       const std::vector<std::string>& columns,
-                                       const ParseContext& context) {
-    std::vector<uint8_t> copy(columns.size(), 1);
+std::vector<uint8_t> head_value_types(const uint8_t* buffer, size_t buffer_length,
+                                      const std::vector<std::string>& columns,
+                                      const ParseContext& context) {
+    std::vector<uint8_t> types(columns.size(), static_cast<uint8_t>(ValueType::Unknown));
+    if (buffer_length == 0) return types;
     const RecordSet head = build_head(buffer, buffer_length, context.infer_sample_size);
     const size_t limit = std::min(context.infer_sample_size, head.num_records());
     for (size_t c = 0; c < columns.size(); ++c) {
         const ColumnSpec sp = parse_column_spec(columns[c]);
-        const auto it = context.explicit_schema.find(columns[c]);
-        rugo::DeclaredType dt;
-        const bool declared_structured = it != context.explicit_schema.end() &&
-            rugo::parse_declared_type(it->second, &dt) && rugo::declared_is_structured(dt.type);
-        if (sp.as_json || declared_structured) { copy[c] = 0; continue; }
         if (sp.nested) continue;
         for (size_t r = 0; r < limit; ++r) {
             const FieldSpan* f = nullptr;
@@ -1196,10 +1192,27 @@ std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_leng
                 if (s.key_width == sp.key.size() &&
                     std::memcmp(buffer + s.key_start, sp.key.data(), s.key_width) == 0) { f = &s; break; }
             if (f == nullptr || is_null(buffer, f->value_start, f->value_start + f->value_width - 1)) continue;
-            copy[c] = (f->type == static_cast<uint8_t>(ValueType::Object) ||
-                       f->type == static_cast<uint8_t>(ValueType::Array)) ? 0 : 1;
+            types[c] = f->type;
             break;
         }
+    }
+    return types;
+}
+
+std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_length,
+                                       const std::vector<std::string>& columns,
+                                       const ParseContext& context) {
+    const std::vector<uint8_t> types = head_value_types(buffer, buffer_length, columns, context);
+    std::vector<uint8_t> copy(columns.size(), 1);
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const ColumnSpec sp = parse_column_spec(columns[c]);
+        const auto it = context.explicit_schema.find(columns[c]);
+        rugo::DeclaredType dt;
+        const bool declared_structured = it != context.explicit_schema.end() &&
+            rugo::parse_declared_type(it->second, &dt) && rugo::declared_is_structured(dt.type);
+        if (sp.as_json || declared_structured) { copy[c] = 0; continue; }
+        copy[c] = (types[c] == static_cast<uint8_t>(ValueType::Object) ||
+                   types[c] == static_cast<uint8_t>(ValueType::Array)) ? 0 : 1;
     }
     return copy;
 }

@@ -665,6 +665,12 @@ private:
             return;
         }
 
+        // Undeclared-column type hints come from the chunk's head BEFORE the prefilter
+        // drops records, so a type never depends on which rows matched (head_value_types).
+        const std::vector<uint8_t> head_types =
+            spec_->zero_columns ? std::vector<uint8_t>()
+                                : rj::head_value_types(buf, len, spec_->decode_names, ctx);
+
         std::vector<uint8_t> survivors;
         if (len > 0 && rj::maybe_prefilter(buf, len, ctx, survivors)) {
             buf = survivors.data();
@@ -693,8 +699,8 @@ private:
             const bool may_escape = std::memchr(buf, '\\', len) != nullptr;
             std::vector<rj::ParsedColumn> parsed;
             try {
-                parsed = rj::parse_all_columns(buf, ir.all_records, spec_->decode_names, 1,
-                                               may_escape, ctx);
+                parsed = rj::parse_all_columns(buf, ir.all_records, spec_->decode_names,
+                                               head_types, 1, may_escape, ctx);
             } catch (const std::invalid_argument& e) {
                 error = decode_error(e.what());
                 return;

@@ -88,14 +88,16 @@ StringColumnResult extract_column(
     const std::vector<FieldSpan>&             col,
     bool                                       copy_bytes = true,
     bool                                       may_have_escapes = false,
-    // Only the first `sample_size` rows are consulted for the type hint
-    // (ParseContext.infer_sample_size), taken from the first non-null value in that
-    // window. parse_typed_column always validates the WHOLE column against whatever
-    // hint (if any) is chosen and falls back to VARCHAR on a mismatch, so no value is
-    // ever misparsed — but if the sample window is entirely null, no hint forms at all
-    // and the column is typed VARCHAR even where a larger sample would have picked a
-    // narrower type.
-    size_t                                     sample_size = SIZE_MAX,
+    // The type hint, as a ValueType byte. An undeclared column passes its head-sample
+    // type (head_value_types: the first non-null value in the input's first
+    // infer_sample_size records, before any filtering — so the type never depends on
+    // which rows the predicates keep); ValueType::Unknown/Null there means no hint, and
+    // the column is VARCHAR. parse_typed_column validates the WHOLE column against the
+    // hint and falls back to VARCHAR on a mismatch, so no value is ever misparsed.
+    // nullptr = take it from this column's own first non-null row: only for a DECLARED
+    // column, whose type is already fixed and where the hint only steers unescaping and
+    // shape recording.
+    const uint8_t*                             type_hint = nullptr,
     // Splits the row walk across workers. nullptr (the default) runs it serially in the
     // calling thread — required when the caller is itself already one task per column.
     const RowExec*                             rows = nullptr,
@@ -178,12 +180,14 @@ struct ParsedColumn {
 // for the per-value contract. A value that doesn't fit throws std::invalid_argument (caller
 // must catch/translate — unlike the default speculative path, a declared-schema mismatch is a
 // real data/schema error, not something to silently fall back past).
-// context.infer_sample_size bounds the speculative-path type hint window for undeclared
-// columns (see extract_column).
+// head_types: one ValueType byte per column_names entry — head_value_types over the
+// UNFILTERED input — the type hint for undeclared columns (see extract_column). A size
+// mismatch throws std::invalid_argument.
 std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
     const ColumnMap&                           map,
     const std::vector<std::string>&            column_names,
+    const std::vector<uint8_t>&                head_types,
     size_t                                     max_threads,
     bool                                       may_have_escapes,
     const ParseContext&                        context

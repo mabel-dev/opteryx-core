@@ -130,25 +130,51 @@ def _mapped(path: str):
             mapping.close()
 
 
-def _bloom_plain_encode(value) -> Optional[bytes]:
-    """Encode a scalar value to its Parquet PLAIN bytes for bloom filter probing.
-    Returns None if the type is not encodable (bloom probe is skipped)."""
-    if isinstance(value, str):
-        return value.encode("utf-8")
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, int):
-        # Python ints are unbounded; the writer hashed 8 little-endian bytes. A
-        # value outside int64 is a real "not encodable" — it is not a value the
-        # column can hold, so there is nothing to probe for — but it is a RANGE,
-        # not a failure. struct.error fires at exactly these two bounds, so the
-        # bounds say the same thing without routing control flow through an
-        # exception (§9).
-        if not (-(1 << 63) <= value < (1 << 63)):
+_UNSIGNED_LOGICAL_TYPES = frozenset(("uint8", "uint16", "uint32", "uint64"))
+
+
+def _bloom_plain_encode(value, physical_type: str, logical_type: str) -> Optional[bytes]:
+    """Encode `value` to the exact PLAIN bytes the writer hashed into the bloom
+    filter of a column with this physical / logical type, or None when it cannot
+    be encoded byte-identically (the probe is then skipped: no pruning).
+
+    The encoding is the COLUMN's, never the literal's. It used to follow the
+    Python type alone — every int as 8 bytes, every float as a double — so an
+    INT32 column (hashed over 4 bytes) probed with 8 missed every value and the
+    row group was pruned: `a = 5` returned no rows from a file and the right row
+    from bytes, where there is no bloom stage. A float literal on an int column,
+    an int literal on a float column, and an int literal on a DECIMAL column (its
+    stored value is unscaled) were all probed in the wrong encoding the same way.
+
+    Only encodings that are exact are produced, matching the engine's own probe
+    (opteryx/connectors/parquet_io/pool_reader.pyx `_bloom_value_bytes`):
+      - INT32 / INT64: an int, at the physical width. Unsigned logical types are
+        stored as their bit pattern, so they pack unsigned. A value outside the
+        column's range cannot be stored in it — nothing to probe for.
+      - BYTE_ARRAY: str as UTF-8, bytes as-is.
+    Everything else declines: bool, a float literal (an int column stores 5,
+    not 5.0's bit pattern), FLOAT / DOUBLE (hashed by bit pattern, so `= 0.0`
+    would miss a stored -0.0 that compares equal), DECIMAL of any physical type
+    (the literal is not the unscaled stored value), and every other physical.
+    """
+    if isinstance(value, bool) or logical_type.startswith("decimal"):
+        return None
+    if physical_type in ("int32", "int64"):
+        if not isinstance(value, int):
             return None
-        return struct.pack("<q", value)       # int64 little-endian
-    if isinstance(value, float):
-        return struct.pack("<d", value)       # float64 little-endian
+        bits = 32 if physical_type == "int32" else 64
+        if logical_type in _UNSIGNED_LOGICAL_TYPES:
+            if not (0 <= value < (1 << bits)):
+                return None
+            return struct.pack("<I" if bits == 32 else "<Q", value)
+        if not (-(1 << (bits - 1)) <= value < (1 << (bits - 1))):
+            return None
+        return struct.pack("<i" if bits == 32 else "<q", value)
+    if physical_type == "byte_array":
+        if isinstance(value, str):
+            return value.encode("utf-8")
+        if isinstance(value, bytes):
+            return value
     return None
 
 
@@ -257,8 +283,8 @@ def _temporal_stats_value(value, convert):
 
 
 def _temporal_stats_domain(value, logical_type: str):
-    """(min/max value, bloom value) for `value` against a column whose footer
-    statistics carry `logical_type`.
+    """`value` in the raw domain of a column whose footer statistics carry
+    `logical_type`.
 
     TIMESTAMP and DATE statistics decode to the bare physical int (`decode_value`
     returns epoch units / epoch days, not datetime/date), so a datetime literal
@@ -268,22 +294,19 @@ def _temporal_stats_domain(value, logical_type: str):
     `_compare_scalar` applies at stage 2, so both stages agree on the column's
     unit and on timezone handling (aware → UTC instant, naive taken as UTC).
 
-    The bloom value is the converted instant for TIMESTAMP (physical INT64,
-    hashed over 8 bytes, which is what `_bloom_plain_encode` packs an int as).
-    DATE is physical INT32 — the writer hashes 4 bytes — so its bloom value stays
-    the original date object, which `_bloom_plain_encode` declines to encode:
-    no bloom pruning for DATE rather than an 8-byte probe that misses.
+    The converted value is also what the bloom filter is probed with:
+    `_bloom_plain_encode` packs it at the column's physical width (8 bytes for
+    TIMESTAMP's INT64, 4 for DATE's INT32).
 
-    Any other logical type returns `value` unchanged for both.
+    Any other logical type returns `value` unchanged.
     """
     unit = _parse_timestamp_unit(logical_type)
     if unit is not None:
-        converted = _temporal_stats_value(
+        return _temporal_stats_value(
             value, lambda v: _draken_native.timestamp_scalar_to_instant(v, unit))
-        return converted, converted
     if _is_date_logical_type(logical_type):
-        return _temporal_stats_value(value, _draken_native.date_scalar_to_days), value
-    return value, value
+        return _temporal_stats_value(value, _draken_native.date_scalar_to_days)
+    return value
 
 
 def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) -> List[int]:
@@ -343,8 +366,7 @@ def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) 
             # Outside the min/max `try` below: a literal that is no timestamp /
             # date raises here, before pruning, as the row-level compare would —
             # not swallowed as "type mismatch — don't prune".
-            stats_value, bloom_value = _temporal_stats_domain(
-                value, col_stats["logical_type"])
+            stats_value = _temporal_stats_domain(value, col_stats["logical_type"])
             # Min/max pruning
             if col_stats["min"] is not None and col_stats["max"] is not None:
                 pt = col_stats["physical_type"].encode("utf-8")
@@ -380,11 +402,13 @@ def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) 
                 bloom_offset = col_stats["bloom_offset"]
                 if bloom_offset >= 0:
                     bloom_length = col_stats["bloom_length"]
-                    candidates = bloom_value if op == "in" else [bloom_value]
+                    candidates = stats_value if op == "in" else [stats_value]
                     # Prune only if NONE of the candidates could be present
                     any_maybe = False
                     for candidate in candidates:
-                        encoded = _bloom_plain_encode(candidate)
+                        encoded = _bloom_plain_encode(
+                            candidate, col_stats["physical_type"],
+                            col_stats["logical_type"])
                         if encoded is None:
                             any_maybe = True  # can't encode → can't prune
                             break

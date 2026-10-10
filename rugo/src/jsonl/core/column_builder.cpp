@@ -165,7 +165,7 @@ StringColumnResult extract_column(
     const std::vector<FieldSpan>&             col,
     bool                                       copy_bytes,
     bool                                       may_have_escapes,
-    size_t                                     sample_size,
+    const uint8_t*                             type_hint,
     const RowExec*                             rows,
     RecordValueTypes                           record_value_types)
 {
@@ -245,29 +245,33 @@ StringColumnResult extract_column(
         if (chunk_esc[ri])  col_has_escape = true;
     }
 
-    // Type hint: the first non-null value inside the sample window, in ROW ORDER. Its own
-    // serial pass, so the hint can never depend on which chunk happened to finish first.
-    // The window is infer_sample_size rows (default 5), so this costs nothing.
-    const size_t sample_rows = std::min(num_rows, sample_size);
-    for (size_t row = 0; row < sample_rows; ++row) {
-        const FieldSpan* f = resolved[row];
-        if (f == nullptr) continue;
-        if (is_null(source.at(row), f->value_start, f->value_start + f->value_width - 1)) continue;
-        const uint8_t vt = f->type;
-        if (vt == static_cast<uint8_t>(ValueType::String))
-            result.inferred_type = ColumnType::String;
-        else if (vt == static_cast<uint8_t>(ValueType::Boolean))
-            result.inferred_type = ColumnType::Bool;
-        else if (vt == static_cast<uint8_t>(ValueType::Integer))
-            result.inferred_type = ColumnType::Int64;
-        else if (vt == static_cast<uint8_t>(ValueType::Double))
-            result.inferred_type = ColumnType::Float64;
-        else if (vt == static_cast<uint8_t>(ValueType::Array))
-            result.inferred_type = ColumnType::Array;
-        else if (vt == static_cast<uint8_t>(ValueType::Object))
-            result.inferred_type = ColumnType::Variant;
-        break;
+    // Type hint: the caller's head-sample type (undeclared columns), else — declared
+    // columns only — this column's first non-null row, in ROW ORDER (its own serial pass,
+    // so it can never depend on which chunk happened to finish first).
+    uint8_t vt = static_cast<uint8_t>(ValueType::Unknown);
+    if (type_hint != nullptr) {
+        vt = *type_hint;
+    } else {
+        for (size_t row = 0; row < num_rows; ++row) {
+            const FieldSpan* f = resolved[row];
+            if (f == nullptr) continue;
+            if (is_null(source.at(row), f->value_start, f->value_start + f->value_width - 1)) continue;
+            vt = f->type;
+            break;
+        }
     }
+    if (vt == static_cast<uint8_t>(ValueType::String))
+        result.inferred_type = ColumnType::String;
+    else if (vt == static_cast<uint8_t>(ValueType::Boolean))
+        result.inferred_type = ColumnType::Bool;
+    else if (vt == static_cast<uint8_t>(ValueType::Integer))
+        result.inferred_type = ColumnType::Int64;
+    else if (vt == static_cast<uint8_t>(ValueType::Double))
+        result.inferred_type = ColumnType::Float64;
+    else if (vt == static_cast<uint8_t>(ValueType::Array))
+        result.inferred_type = ColumnType::Array;
+    else if (vt == static_cast<uint8_t>(ValueType::Object))
+        result.inferred_type = ColumnType::Variant;
 
     const bool do_unescape = col_has_escape && result.inferred_type == ColumnType::String;
     result.data_owned = copy_bytes || do_unescape;
@@ -929,7 +933,7 @@ static ParsedColumn parse_column_explicit(
         // rows unescaping could ever touch are string rows, and those are refused below.
         StringColumnResult scr = extract_column(source, col,
                                                 /*copy_bytes=*/false, /*may_have_escapes=*/false,
-                                                SIZE_MAX, &rows, RecordValueTypes::Always);
+                                                /*type_hint=*/nullptr, &rows, RecordValueTypes::Always);
         // never copied: offsets index the source buffer (scr.bases)
         const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
@@ -1021,7 +1025,7 @@ static ParsedColumn parse_column_explicit(
 
     StringColumnResult scr = extract_column(source, col,
                                             /*copy_bytes=*/false, may_have_escapes,
-                                            SIZE_MAX, &rows);
+                                            /*type_hint=*/nullptr, &rows);
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     if (declared_is_string(dt.type)) {
@@ -1442,11 +1446,15 @@ std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             source,
     const ColumnMap&                           map,
     const std::vector<std::string>&            column_names,
+    const std::vector<uint8_t>&                head_types,
     size_t                                     max_threads,
     bool                                       may_have_escapes,
     const ParseContext&                        context) {
 
     const size_t ncols = column_names.size();
+    if (head_types.size() != ncols)
+        throw std::invalid_argument("parse_all_columns: " + std::to_string(head_types.size()) +
+                                    " head types for " + std::to_string(ncols) + " columns");
     std::vector<ParsedColumn> out(ncols);
     if (ncols == 0) return out;
     // A column is one draken vector, whose length is uint32_t.
@@ -1483,7 +1491,7 @@ std::vector<ParsedColumn> parse_all_columns(
         // skip the per-row write entirely.
         StringColumnResult scr = extract_column(buffer, col,
                                                 /*copy_bytes=*/false, may_have_escapes,
-                                                context.infer_sample_size, &rows,
+                                                &head_types[c], &rows,
                                                 context.parse_arrays
                                                     ? RecordValueTypes::IfArrayHinted
                                                     : RecordValueTypes::Never);

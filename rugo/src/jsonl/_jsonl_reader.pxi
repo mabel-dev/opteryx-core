@@ -115,6 +115,13 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
         const uint8_t* buffer, size_t buffer_length, const ParseContext& context
     ) except + nogil
 
+    # Per column, the ValueType of its first non-null value in the head sample of the
+    # INPUT (before any filtering): the type hint for undeclared columns.
+    vector[uint8_t] head_value_types(
+        const uint8_t* buffer, size_t buffer_length,
+        const vector[string]& columns, const ParseContext& context
+    ) except + nogil
+
 
 cdef extern from "core/nested_column.hpp" namespace "rugo::_jsonl":
     # A nested column request: `key->>'sub'` (as_json false) / `key->'sub'` (as_json true).
@@ -167,6 +174,7 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         const uint8_t* buffer,
         const ColumnMap& columns,
         const vector[string]& column_names,
+        const vector[uint8_t]& head_types,
         size_t max_threads,
         bint may_have_escapes,
         const ParseContext& context
@@ -384,6 +392,7 @@ def read_jsonl(
 
     cdef ParseContext context
     cdef vector[string] column_names_cpp
+    cdef vector[uint8_t] head_types
     cdef ColumnMap records
     cdef size_t total_rows = 0
     cdef dict declared_schema
@@ -490,6 +499,11 @@ def read_jsonl(
                 col_bytes = col.encode('utf-8')
                 if not _names_contain(column_names_cpp, col_bytes):
                     column_names_cpp.push_back(col_bytes)
+            # Undeclared columns are typed from the same head sample, before the
+            # prefilter and the predicates touch a row — so a column's type never
+            # depends on which rows matched.
+            with nogil:
+                head_types = head_value_types(buf_data, buf_len, column_names_cpp, context)
 
         if buf_len > 0:
             # Parallel scan + column-major document map: the buffer is split into
@@ -524,7 +538,7 @@ def read_jsonl(
         # or in_memory_data kept alive, only in the finally below).
         if total_rows > 0 and not column_names_cpp.empty():
             vectors = _build_vectors(
-                buf_data, buf_len, records, column_names_cpp,
+                buf_data, buf_len, records, column_names_cpp, head_types,
                 context, infer_schema, declared_schema, result['schema'],
                 result['absent_columns']
             )
@@ -597,6 +611,7 @@ cdef list _build_vectors(
     size_t buf_len,
     ColumnMap& records,
     vector[string]& column_names,
+    vector[uint8_t]& head_types,
     ParseContext& context,
     bint infer_schema,
     dict declared_schema,
@@ -628,7 +643,7 @@ cdef list _build_vectors(
     # memchr instead of Python `in` — buf_ptr may not be backed by a Python bytes object.
     may_esc = memchr(buf_ptr, 0x5C, buf_len) != NULL
     with nogil:
-        parsed = parse_all_columns(buf_ptr, records, column_names, 0, may_esc, context)
+        parsed = parse_all_columns(buf_ptr, records, column_names, head_types, 0, may_esc, context)
     for pi in range(parsed.size()):
         vec = _rugo_steal(wrap_column(parsed[pi]))
         if vec is not None:

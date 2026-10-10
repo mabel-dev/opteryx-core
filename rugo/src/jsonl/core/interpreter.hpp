@@ -329,6 +329,16 @@ ColumnMap build_columns(
 // read.
 RecordSet build_map(const uint8_t* buffer, size_t buffer_length);
 
+// Per output column, the ValueType of its first non-null value in the head sample (the
+// first context.infer_sample_size records of the INPUT — unprojected, unfiltered, before
+// any prefilter), or ValueType::Unknown when the window holds none (and for a nested
+// column, whose sub-value the head map does not resolve). THE type hint for undeclared
+// columns: taken from the same window that decides the column set and checks predicate
+// literals, so a column's type never depends on which rows the predicates keep.
+std::vector<uint8_t> head_value_types(const uint8_t* buffer, size_t buffer_length,
+                                      const std::vector<std::string>& columns,
+                                      const ParseContext& context);
+
 // Which output columns build_columns copies into ColumnMap::arena: per column, 1 when its
 // first non-null value in the head sample (context.infer_sample_size records) is a string
 // or scalar — short values whose cold, strided re-reads dominated the column builders —
