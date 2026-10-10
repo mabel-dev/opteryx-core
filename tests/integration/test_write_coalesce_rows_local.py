@@ -15,6 +15,7 @@ import sys
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import opteryx  # noqa: E402
+from rugo.parquet import DEFAULT_ROWS_PER_ROW_GROUP  # noqa: E402
 
 # The package spelling, for the reason given in test_update_delete_local.py.
 from tests.integration.test_optimize_local import ROWS_PER_SEED_FILE  # noqa: E402
@@ -33,6 +34,10 @@ def _run_with_coalesce(statement):
     session = opteryx.session(user="tester")
     list(session.execute_to_morsels(f"SET write_coalesce_rows = {COALESCE}"))
     list(session.execute_to_morsels(statement))
+
+
+def _run_without_coalesce(statement):
+    list(opteryx.session(user="tester").execute_to_morsels(statement))
 
 
 def _added_row_groups(target, before_paths):
@@ -77,3 +82,75 @@ def test_optimize_honours_write_coalesce_rows(optimize_env):
     row_groups, rows = _added_row_groups(target, before)
     assert rows == TOTAL
     assert row_groups == TOTAL // COALESCE
+
+
+
+# The target merged with itself: every row matches, so every row is rewritten by
+# the UPDATE arm and appended through the merge sink - the same sink UPDATE uses,
+# reached from MERGE's own binder path.
+MERGE_SELF = f"""
+MERGE INTO {TARGET} AS n
+USING (SELECT k FROM {TARGET}) AS t
+   ON n.k = t.k
+ WHEN MATCHED THEN UPDATE SET k = t.k + 1
+"""
+
+
+def test_merge_honours_write_coalesce_rows(optimize_env):
+    target, _ = optimize_env
+    before = _paths(target)
+
+    _run_with_coalesce(MERGE_SELF)
+
+    row_groups, rows = _added_row_groups(target, before)
+    assert rows == TOTAL
+    assert row_groups == TOTAL // COALESCE
+
+
+# Without a SET every write gets rugo's row-group default: the binder captures the
+# variable's default, not None, and the sink must not substitute anything else.
+DEFAULT_ROW_GROUPS = -(-TOTAL // DEFAULT_ROWS_PER_ROW_GROUP)  # ceil: 6
+
+
+def test_insert_default_row_groups(optimize_env):
+    target, _ = optimize_env
+    before = _paths(target)
+
+    _run_without_coalesce(f"INSERT INTO {TARGET} SELECT k FROM {TARGET}")
+
+    row_groups, rows = _added_row_groups(target, before)
+    assert rows == TOTAL
+    assert row_groups == DEFAULT_ROW_GROUPS
+
+
+def test_update_default_row_groups(optimize_env):
+    target, _ = optimize_env
+    before = _paths(target)
+
+    _run_without_coalesce(f"UPDATE {TARGET} SET k = k + 1")
+
+    row_groups, rows = _added_row_groups(target, before)
+    assert rows == TOTAL
+    assert row_groups == DEFAULT_ROW_GROUPS
+
+
+def test_merge_default_row_groups(optimize_env):
+    target, _ = optimize_env
+    before = _paths(target)
+
+    _run_without_coalesce(MERGE_SELF)
+
+    row_groups, rows = _added_row_groups(target, before)
+    assert rows == TOTAL
+    assert row_groups == DEFAULT_ROW_GROUPS
+
+
+def test_optimize_default_row_groups(optimize_env):
+    target, _ = optimize_env
+    before = _paths(target)
+
+    _run_without_coalesce(f"OPTIMIZE TABLE {TARGET}")
+
+    row_groups, rows = _added_row_groups(target, before)
+    assert rows == TOTAL
+    assert row_groups == DEFAULT_ROW_GROUPS

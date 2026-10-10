@@ -33,6 +33,7 @@
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/kernel_context.h"  // binary_op_ctx — carries the DECIMAL operand scale
 #include "ops/kernels/error_handling.h"
+#include "ops/temporal_arith.h"       // ta_with_ticks_per_second — compile-time unit divisor
 #include "ops/kernels/glob_match.h"      // draken_glob::like_match — shared with draken_like_any
 #include "ops/kernels/dfa_walk.h"        // draken_dfa::match — length-adaptive LIKE fast path
 #include "ops/kernels/like_program.h"    // draken_like_prog::match — SIMD op-program LIKE matcher
@@ -762,15 +763,20 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
     const DrakenVector* v = args[0];
     if (v->type != DRAKEN_TIMESTAMP64)
         return draken_error_sentinel("draken_date_trunc: TIMESTAMP input required");
-    static const int64_t unit_div[4] = {1, 1000, 1000000, 1000000000};
-    const int64_t sub = unit_div[c->left_unit & 3];   // sub-second ticks per second
 
     uint32_t n = v->length;
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
-    for (uint32_t i = 0; i < n; ++i) {
+    // Sub-second ticks per second is a compile-time constant per unit, so the
+    // floor divisions below are multiply-high + shift, not a divide per row.
+    const int64_t* const src = static_cast<const int64_t*>(v->data);
+    const uint32_t* const sel = v->selection;
+    const bool ok = ta_with_ticks_per_second(static_cast<int>(c->left_unit & 3),
+                                             [v, src, sel, out, n, part](auto k) {
+      constexpr int64_t sub = decltype(k)::value;
+      for (uint32_t i = 0; i < n; ++i) {
         if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
-        int64_t raw = static_cast<const int64_t*>(v->data)[v->selection[i]];
+        int64_t raw = src[sel[i]];
         int64_t secs = fk_floor_div(raw, sub);          // whole seconds since epoch
         int64_t sub_ticks = raw - secs * sub;            // preserved-then-dropped
         int64_t days = fk_floor_div(secs, 86400);
@@ -799,11 +805,16 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
                 tsecs = fk_days_from_civil(cv.y, 1, 1) * 86400; break;
             }
             default:
-                draken_free(out);
-                return draken_error_sentinel("draken_date_trunc: unsupported unit");
+                return false;
         }
         (void)sub_ticks;
         out[i] = tsecs * sub;   // back into the operand's unit; sub-second dropped
+      }
+      return true;
+    });
+    if (!ok) {
+        draken_free(out);
+        return draken_error_sentinel("draken_date_trunc: unsupported unit");
     }
     VecResult r = fk_numeric_result(v, out, n, DRAKEN_TIMESTAMP64);
     // fk_numeric_result leaves ts_unit at its VecResult default (0xFF = unset),

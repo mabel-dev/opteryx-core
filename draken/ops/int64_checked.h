@@ -111,20 +111,23 @@ struct I64OvfNeg {
 // overflowing subtraction whose left operand is 0 IS a negation — and the only value
 // it can happen for is INT64_MIN. Say so, instead of naming a subtraction the reader
 // never wrote. A message-only distinction: the arithmetic is unchanged.
+// `bits` is the RESULT width named in the message (INT16/INT32 for the narrow D.6
+// results, which can only fail on a zero divisor; INT64 otherwise).
 template <typename Op>
-[[noreturn]] static inline void i64c_throw(int64_t* owned, int64_t dividend, int64_t divisor) {
+[[noreturn]] static inline void i64c_throw(void* owned, int64_t dividend, int64_t divisor,
+                                           size_t bits = 64) {
     draken_free(owned);
+    const std::string w = "INT" + std::to_string(bits);
     if (std::is_same<Op, I64OvfSub>::value && dividend == 0)
         throw std::overflow_error(
-            "INT64 negation overflow: -(" + std::to_string(divisor) +
-            ") does not fit INT64 — fail loud, never a wrapped answer");
+            w + " negation overflow: -(" + std::to_string(divisor) +
+            ") does not fit " + w + " — fail loud, never a wrapped answer");
     if (Op::kDivMod && divisor == 0)
         throw std::domain_error(
-            std::string("INT64 ") + Op::kName +
-            " by zero: the divisor is 0 — fail loud, never a silent 0");
+            w + " " + Op::kName + " by zero: the divisor is 0 — fail loud, never a silent 0");
     throw std::overflow_error(
-        std::string("INT64 ") + Op::kName +
-        " overflow: exact integer result exceeds INT64 — fail loud, never a wrapped answer");
+        w + " " + Op::kName +
+        " overflow: exact integer result exceeds " + w + " — fail loud, never a wrapped answer");
 }
 
 // Contiguous vector-with-scalar loops: dst[j] = Op(a[j], s) / Op(s, b[j]) for j in
@@ -161,17 +164,24 @@ static inline bool i64_loop_sv(int64_t s, const int64_t* b, int64_t* dst, uint32
 // `xat`/`yat` return the int64 operand of logical row i. `av`/`bv` are the
 // operand validity bitmaps (nullptr = all valid). Frees `dst` and throws
 // std::overflow_error if any LIVE row overflows.
-template <typename Op, typename XAt, typename YAt>
-static inline void i64_checked_rows(uint32_t n, int64_t* dst, XAt xat, YAt yat,
+// W is the result width: int64_t, or a narrower signed type for the D.6 results
+// whose operands are all <= 16 bits — there the int64 result always fits W, so
+// only a zero divisor can flag.
+template <typename Op, typename W, typename XAt, typename YAt>
+static inline void i64_checked_rows(uint32_t n, W* dst, XAt xat, YAt yat,
                                     const uint8_t* av, const uint8_t* bv) {
+    static_assert(std::is_signed<W>::value, "i64_checked_rows: signed result width");
     bool any = false;
-    for (uint32_t i = 0; i < n; ++i)
-        any |= Op::apply(xat(i), yat(i), dst[i]);
+    for (uint32_t i = 0; i < n; ++i) {
+        int64_t r;
+        any |= Op::apply(xat(i), yat(i), r);
+        dst[i] = static_cast<W>(r);
+    }
     if (!any) return;
     for (uint32_t i = 0; i < n; ++i) {
         int64_t t;
         if (Op::apply(xat(i), yat(i), t) && i64c_row_valid(av, i) && i64c_row_valid(bv, i))
-            i64c_throw<Op>(dst, xat(i), yat(i));
+            i64c_throw<Op>(dst, xat(i), yat(i), sizeof(W) * 8);
     }
 }
 

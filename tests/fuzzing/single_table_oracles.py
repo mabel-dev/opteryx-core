@@ -45,6 +45,7 @@ instrument anyway — a failure names the strategy.
 from __future__ import annotations
 
 import random
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
@@ -55,6 +56,7 @@ from typing import Optional
 from typing import Sequence
 
 from opteryx import config
+from tests.fuzzing.harness import result_multiset
 from tests.fuzzing.harness import rows
 from tests.fuzzing.harness import scalar
 from tests.fuzzing.single_table_grammar import PRECEDENCE
@@ -186,37 +188,112 @@ def count_star_matches_materialised_rows(statement: Statement, rng: random.Rando
     return OracleResult("count_star_matches_materialised_rows", 2)
 
 
-def predicate_partition(statement: Statement, rng: random.Random) -> OracleResult:
-    """|sigma p| + |sigma NOT p| + |sigma p IS NULL| == |R|.
+def ternary_logic_partition(statement: Statement, rng: random.Random) -> OracleResult:
+    """sigma p ⊎ sigma NOT p ⊎ sigma (p IS NULL) == R, as multisets of whole rows.
 
-    Three-valued logic partitions every row of R into exactly one of three
-    buckets, so the counts must sum to the relation's cardinality. This is the
-    oracle that puts pressure on NULL handling: with a NULL-free relation the
-    third bucket is always empty and the invariant degenerates into
-    `|p| + |NOT p| == |R|`, which is why the corpus has NULL-heavy columns.
+    SQLancer's TLP. Three-valued logic puts every row of R into exactly one of
+    three buckets, so the three filtered results, concatenated, must BE the
+    relation — the same rows, each exactly once. This is the oracle that puts
+    pressure on NULL handling: with a NULL-free relation the third bucket is
+    always empty, which is why the corpus has NULL-heavy columns.
 
-    A failure means either the filter is dropping rows, or `NOT p` and
-    `p IS NULL` disagree about which rows are unknown.
+    It replaces a version that compared only the bucket COUNTS. A count cannot
+    see a row that lands in the wrong bucket while another lands in the right one
+    by mistake, nor a filter that keeps the right number of rows but emits the
+    wrong values for them. Comparing whole rows sees both, and every column of
+    the source is projected so the filter's payload path (selection, take,
+    borrowed buffers) is read for every type, not just the predicate's columns.
+
+    Rows are compared with exact `repr` rather than `_render`: nothing here is
+    accumulated, so there is no summation-order noise to forgive.
+
+    The concatenation happens HERE, not as a SQL `UNION ALL`: a UNION ALL defect
+    would otherwise sit on the very path being used as the reference.
+
+    The source is always a base relation (`statement.select` is only set for a
+    plain SELECT over one), so the unfiltered side is deterministic whatever
+    LIMIT the statement itself carries.
     """
-    select = statement.select
-    if select is None or select.where is None:
-        raise AssertionError("predicate_partition applied to a statement with no WHERE clause")
+    select = _require_select(statement, "ternary_logic_partition")
+    if select.where is None:
+        raise AssertionError("ternary_logic_partition applied to a statement with no WHERE clause")
 
+    columns = _source_projection(select, "ternary_logic_partition")
     source = select.source
     predicate = select.where
-    total = scalar(f"SELECT COUNT(*) AS n FROM {source}")
-    matched = scalar(f"SELECT COUNT(*) AS n FROM {source} WHERE {predicate}")
-    rejected = scalar(f"SELECT COUNT(*) AS n FROM {source} WHERE NOT {predicate}")
-    unknown = scalar(f"SELECT COUNT(*) AS n FROM {source} WHERE ({predicate}) IS NULL")
+    relation = result_multiset(f"SELECT {columns} FROM {source}")
+    buckets = {
+        "p": result_multiset(f"SELECT {columns} FROM {source} WHERE {predicate}"),
+        "NOT p": result_multiset(f"SELECT {columns} FROM {source} WHERE NOT {_grouped(predicate)}"),
+        "p IS NULL": result_multiset(f"SELECT {columns} FROM {source} WHERE {_grouped(predicate)} IS NULL"),
+    }
 
-    if matched + rejected + unknown != total:
+    combined = Counter()
+    for bucket in buckets.values():
+        combined.update(bucket)
+    whole = Counter(relation)
+    if combined != whole:
         raise OracleViolation(
-            f"predicate partition does not cover the relation: "
-            f"{matched} matched + {rejected} rejected + {unknown} unknown = "
-            f"{matched + rejected + unknown}, but {source} has {total} rows\n"
-            f"  predicate: {predicate}"
+            "the three predicate buckets do not partition the relation: "
+            + ", ".join(f"|{name}| = {len(bucket)}" for name, bucket in buckets.items())
+            + f", |R| = {len(relation)}\n"
+            + _partition_difference(whole, combined, buckets)
+            + f"\n  source: {source}\n  predicate: {predicate}"
         )
-    return OracleResult("predicate_partition", 4)
+    return OracleResult("ternary_logic_partition", 4)
+
+
+def norec_filter_matches_projected_predicate(statement: Statement, rng: random.Random) -> OracleResult:
+    """The rows `WHERE p` keeps are exactly the rows whose projected `p` is TRUE.
+
+    SQLancer's NoREC. The same predicate is evaluated two ways over the same
+    base relation:
+
+      * as a FILTER — where the optimizer and the scan are free to push it into
+        the reader, prune row groups and pages on statistics, route it through
+        the dictionary, or match LIKE on raw page bytes;
+      * as a SELECT-list VALUE — `SELECT <cols>, (p) AS norec_flag`, which
+        nothing can push or prune: every row is read and `p` is computed on it
+        by the expression engine.
+
+    The second is the reference. A disagreement means some part of the filter
+    path decided a row's fate differently from what the predicate actually
+    evaluates to on that row — the class of the NaN row-group pruning defect,
+    which the count-only partition oracle only found by chance. Whole rows are
+    compared, so a filter that keeps the right number of rows but the wrong ones
+    also fails.
+
+    The projected value must be TRUE, FALSE or NULL. Anything else from a
+    BOOLEAN predicate is itself a wrong answer.
+
+    An error on only one side is NOT absorbed. The projection evaluates `p` on
+    every row; the filter may never evaluate it on a row a pruned row group or a
+    short-circuited conjunct removed, so a raising kernel (INT64 overflow,
+    integer division by zero) can fire on one side alone. Whether that is a
+    defect is an open architect question; until it is ruled the exception goes
+    to the driver's `_classify` like any other and fails the case.
+    """
+    select = _require_select(statement, "norec_filter_matches_projected_predicate")
+    if select.where is None:
+        raise AssertionError(
+            "norec_filter_matches_projected_predicate applied to a statement with no WHERE clause"
+        )
+
+    columns = _source_projection(select, "norec_filter_matches_projected_predicate")
+    source = select.source
+    predicate = select.where
+    filtered = result_multiset(f"SELECT {columns} FROM {source} WHERE {predicate}")
+    projected = _rows_where_flag_is_true(
+        f"SELECT {columns}, {_grouped(predicate)} AS norec_flag FROM {source}", predicate
+    )
+    if filtered != projected:
+        raise OracleViolation(
+            f"WHERE p kept {len(filtered)} rows but p projected as a value is TRUE on "
+            f"{len(projected)}\n"
+            + _multiset_difference(Counter(projected), Counter(filtered), "projected TRUE", "WHERE p")
+            + f"\n  source: {source}\n  predicate: {predicate}"
+        )
+    return OracleResult("norec_filter_matches_projected_predicate", 2)
 
 
 def tautology_is_neutral(statement: Statement, rng: random.Random) -> OracleResult:
@@ -764,10 +841,12 @@ def applicable_oracles(statement: Statement) -> List[Oracle]:
 
     if select is not None:
         if select.where is not None:
-            # The partition oracle rewrites the WHERE against the raw source, so
-            # it needs a source it can name — a derived source would need the
-            # subquery repeated, which is a different query.
-            oracles.append(predicate_partition)
+            # The partition and NoREC oracles rewrite the WHERE against the raw
+            # source. `statement.select` is only set for a plain SELECT over a
+            # base relation, so the source is always one they can name and read
+            # deterministically, whatever LIMIT the statement carries.
+            oracles.append(ternary_logic_partition)
+            oracles.append(norec_filter_matches_projected_predicate)
             if statement.deterministic_multiset:
                 oracles.append(tautology_is_neutral)
                 oracles.append(double_negation_is_neutral)
@@ -819,6 +898,110 @@ def _first_difference(left: Sequence[str], right: Sequence[str]) -> str:
             return f"row {index}: {a} != {b}"
     longer, side = (left, "before") if len(left) > len(right) else (right, "after")
     return f"only {side} has row {min(len(left), len(right))}: {longer[min(len(left), len(right))]}"
+
+
+def _grouped(predicate: str) -> str:
+    """`predicate` as one operand — parenthesised only if it is not already.
+
+    NOT `f"({predicate})"` unconditionally: the generator's `full()` rendering
+    already encloses most predicates, and a REDUNDANT extra pair is not neutral
+    to the engine. `NOT ((x = ANY(arr)))` is answered while `NOT (x = ANY(arr))`
+    is De-Morganed to the kernel-less ALLOPNOTEQ and refused, so doubling the
+    parentheses would silently route these oracles around a real defect.
+    """
+    if _is_enclosed(predicate):
+        return predicate
+    return f"({predicate})"
+
+
+def _is_enclosed(text: str) -> bool:
+    """Whether the first `(` of `text` is closed by its last character.
+
+    Quote-aware: parentheses inside '...' or "..." literals and identifiers are
+    not structure.
+    """
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    depth = 0
+    quote: Optional[str] = None
+    for index, char in enumerate(text):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index == len(text) - 1
+    raise AssertionError(f"unbalanced parentheses in generated predicate: {text}")
+
+
+def _source_projection(select: SelectQuery, oracle: str) -> str:
+    """Every column of the base source, as an explicit SELECT list.
+
+    Explicit rather than `*` because `SELECT *` cannot carry an extra column, and
+    the NoREC oracle needs to append its flag; both oracles use the same list so
+    their sides are positionally identical.
+    """
+    columns = _base_source_columns(select)
+    if not columns:
+        raise AssertionError(f"{oracle} applied to a statement whose source is not a base relation")
+    return ", ".join(column.quoted for column in columns)
+
+
+def _rows_where_flag_is_true(sql: str, predicate: str) -> List[str]:
+    """The rows of `sql` whose LAST column is TRUE, rendered like `result_multiset`.
+
+    The flag is dropped before rendering, so the result compares directly with
+    the same column list read through a WHERE. A flag that is not TRUE, FALSE or
+    NULL is a wrong answer from a BOOLEAN predicate and fails here.
+    """
+    kept: List[str] = []
+    for row in rows(sql):
+        flag = row[-1]
+        if flag is True:
+            kept.append(repr(row[:-1]))
+        elif flag is not False and flag is not None:
+            raise OracleViolation(
+                f"a BOOLEAN predicate projected as a value produced {flag!r} "
+                f"({type(flag).__name__}), not TRUE, FALSE or NULL\n  predicate: {predicate}\n  {sql}"
+            )
+    return sorted(kept)
+
+
+def _multiset_difference(
+    left: Counter, right: Counter, left_name: str, right_name: str
+) -> str:
+    """Which rows only one side has, with multiplicity, and one example of each."""
+    only_left = left - right
+    only_right = right - left
+    lines = []
+    for name, extra in ((left_name, only_left), (right_name, only_right)):
+        if extra:
+            example = next(iter(extra))
+            lines.append(
+                f"  {sum(extra.values())} row(s) only in {name}, e.g. {example}"
+            )
+    return "\n".join(lines)
+
+
+def _partition_difference(whole: Counter, combined: Counter, buckets: dict) -> str:
+    """Name what went wrong with a partition: rows lost, invented, or double-bucketed."""
+    lines = [_multiset_difference(whole, combined, "R (in no bucket)", "the buckets (not in R)")]
+    names = list(buckets)
+    for index, first in enumerate(names):
+        for second in names[index + 1 :]:
+            shared = Counter(buckets[first]) & Counter(buckets[second])
+            if shared:
+                lines.append(
+                    f"  {sum(shared.values())} row(s) in both `{first}` and `{second}`, "
+                    f"e.g. {next(iter(shared))}"
+                )
+    return "\n".join(line for line in lines if line)
 
 
 def _base_source_columns(select: SelectQuery):

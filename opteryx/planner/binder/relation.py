@@ -1910,6 +1910,10 @@ def visit_compaction_commit(self, node: PlanStep, context: BindingContext) -> Tu
     # lossless and declares no new structure, so the view still holds exactly
     # what its SELECT produced. Physical maintenance, not a write.
 
+    # Bind-time capture, as visit_insert does: the sink reads it from its own
+    # parameters rather than touching session variables mid-execution.
+    node.write_coalesce_rows = context.execution_context.variables["write_coalesce_rows"]
+
     node.columns = []
     return node, context
 
@@ -2741,6 +2745,10 @@ def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
     # exactly what re-deriving a MERGE needs.
     node.read_sources = _read_sources(self, context)
     node.produced_by = _produced_by(node)
+
+    # Bind-time capture, as visit_insert does: the sink reads it from its own
+    # parameters rather than touching session variables mid-execution.
+    node.write_coalesce_rows = context.execution_context.variables["write_coalesce_rows"]
 
     # MERGE both deletes and appends, so it needs the same authority as any
     # other write to the relation - no more, and no less.

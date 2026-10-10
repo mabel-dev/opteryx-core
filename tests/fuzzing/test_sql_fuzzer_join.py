@@ -59,6 +59,7 @@ import random
 import time
 from collections import Counter
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import List, Optional, Tuple
 
 import pytest
@@ -596,6 +597,17 @@ def _make_leg(join_type: str, left_rel: Relation, right_rel: Relation,
     return JoinLeg(join_type, right_rel, equi, theta, None, None, None, None, independent)
 
 
+def _projectable(head: Relation, legs) -> List[Relation]:
+    """Relations whose columns may be projected. A reducing join emits only its left
+    side, so nothing after one is available."""
+    projectable = [head]
+    for leg in legs:
+        if leg.is_reducing:
+            break
+        projectable.append(leg.relation)
+    return projectable
+
+
 def generate_join(relations: List[Relation]) -> Optional[JoinSpec]:
     """Build one statement over `relations` (2 or 3 of them, already aliased)."""
     head, rest = relations[0], relations[1:]
@@ -632,13 +644,7 @@ def generate_join(relations: List[Relation]) -> Optional[JoinSpec]:
             return None
         legs.append(leg)
 
-    # Relations whose columns may be projected. A reducing join emits only its left
-    # side, so nothing after one is available.
-    projectable = [head]
-    for leg in legs:
-        if leg.is_reducing:
-            break
-        projectable.append(leg.relation)
+    projectable = _projectable(head, legs)
 
     selected = [
         relation.qualified(column)
@@ -943,6 +949,64 @@ def check_tautology_invariance(spec: JoinSpec) -> bool:
     return True
 
 
+def check_norec(spec: JoinSpec) -> bool:
+    """The rows `WHERE p` keeps are exactly the rows whose projected `p` is TRUE.
+
+    SQLancer's NoREC over a join. As a filter, `p` is something the optimizer is
+    free to push below the join, split across legs, or turn into a scan
+    predicate; as a SELECT-list value `(p) AS norec_flag` it can only be computed
+    on the joined rows themselves. Over an OUTER join the difference matters most
+    — a predicate on the NULL-extended side cannot be pushed below it — so a
+    disagreement points at predicate placement, the join's NULL extension, or a
+    scan-side pruning decision.
+
+    Whole rows are compared, so a filter keeping the right number of rows but the
+    wrong ones fails too. Returns False when it stood down on size.
+    """
+    if not spec.select_clause.startswith("SELECT "):
+        raise AssertionError(f"unexpected select clause {spec.select_clause!r}")
+    if spec.select_clause == "SELECT *":
+        # `SELECT *` cannot carry the flag column. The generator only emits it when
+        # no projected output names collide, so the explicit qualified list is the
+        # same columns.
+        columns = ", ".join(
+            relation.qualified(column)
+            for relation in _projectable(spec.head, spec.legs)
+            for column in relation.fields
+        )
+    else:
+        columns = spec.select_clause[len("SELECT "):]
+
+    flagged = replace(spec, select_clause=f"SELECT {columns}, ({spec.where}) AS norec_flag").sql(
+        where=None
+    )
+    if count(f"({flagged}) AS o") > _MATERIALISE_CAP:
+        return False
+    filtered_sql = replace(spec, select_clause=f"SELECT {columns}").sql()
+    filtered = harness.result_multiset(filtered_sql)
+
+    projected = []
+    for row in harness.rows(flagged):
+        flag = row[-1]
+        assert flag is True or flag is False or flag is None, (
+            f"a BOOLEAN predicate projected as a value produced {flag!r}, not TRUE, FALSE "
+            f"or NULL\n  {flagged}"
+        )
+        if flag is True:
+            projected.append(repr(row[:-1]))
+    projected.sort()
+
+    assert filtered == projected, (
+        "WHERE p disagrees with p projected as a value over the same join\n"
+        f"  filtered:  {filtered_sql}\n"
+        f"  projected: {flagged}\n"
+        f"  rows WHERE p {len(filtered)}, rows with p TRUE {len(projected)}\n"
+        f"  only in WHERE p:   {sorted((Counter(filtered) - Counter(projected)).elements())[:3]}\n"
+        f"  only in p TRUE:    {sorted((Counter(projected) - Counter(filtered)).elements())[:3]}"
+    )
+    return True
+
+
 def check_condition_order_invariance(spec: JoinSpec) -> bool:
     """Reversing the ON conjuncts must not change the result."""
     leg = spec.legs[0]
@@ -1024,6 +1088,7 @@ _ALL_ORACLE_NAMES = (
     "tautology_invariance",
     "condition_order_invariance",
     "leg_order_invariance",
+    "norec",
 )
 
 # Oracles that can legitimately never fire on a short run, so `test_sql_fuzzing_join`
@@ -1136,6 +1201,8 @@ def _applicable_oracles(spec: JoinSpec):
     # where the real signal is anyway. Delete this with the register entry.
     if not any(leg.is_asof for leg in spec.legs):
         oracles.append(("tautology_invariance", check_tautology_invariance))
+        if spec.where:
+            oracles.append(("norec", check_norec))
     return oracles
 
 

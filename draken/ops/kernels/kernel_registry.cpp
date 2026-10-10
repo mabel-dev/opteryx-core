@@ -511,7 +511,6 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_subtract", (kernel_fn_t)&draken_subtract},
     {"draken_multiply", (kernel_fn_t)&draken_multiply},
     {"draken_divide", (kernel_fn_t)&draken_divide},
-    {"draken_modulo", (kernel_fn_t)&draken_modulo},
 
     // P9.0: bitwise (×5), string_concat, IP (binary_op_other.cpp) and temporal
     // (binary_op_temporal.cpp) binary kernels removed — ALL STUBS ("not yet

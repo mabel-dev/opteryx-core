@@ -272,10 +272,10 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # grant, same reasoning as match_threshold.
     "like_selectivity_decay": (
         FLOAT64, FromConfig("LIKE_SELECTIVITY_DECAY"), VariableOwner.USER, Visibility.UNRESTRICTED),
-    # Bind-time only, read by visit_insert into the InsertNode's parameters (see
-    # insert.pyx) - same capture-at-bind reasoning as match_threshold. UNRESTRICTED:
-    # tuning how your OWN CTAS/INSERT batches its output files is not a data-access
-    # grant. The sink clamps this to rugo's DEFAULT_ROWS_PER_ROW_GROUP itself, so
+    # Bind-time only, read by visit_insert / visit_merge / visit_compaction_commit
+    # into their sinks' parameters - same capture-at-bind reasoning as
+    # match_threshold. UNRESTRICTED: tuning how your OWN write batches its output
+    # files is not a data-access grant. The sink clamps this to rugo's DEFAULT_ROWS_PER_ROW_GROUP itself, so
     # a caller cannot SET this past the row-group ceiling.
     "write_coalesce_rows": (
         INT64, FromConfig("WRITE_COALESCE_ROWS"), VariableOwner.USER, Visibility.UNRESTRICTED),

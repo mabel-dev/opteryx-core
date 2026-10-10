@@ -58,7 +58,8 @@
 #include "core/alloc.h"
 #include "core/string_slot.h"
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx, cast_timestamp_ctx, time_bucket_ctx, format_ctx
-#include "ops/temporal_arith.h"           // ta_floor_div, ta_ticks_per_second, date_diff_batch
+#include "ops/temporal_arith.h"           // ta_floor_div, ta_with_ticks_per_second, date_diff_batch
+#include "ops/int_divisor.h"              // I64Divisor — TIME_BUCKET's batch-constant period
 #include "ops/temporal_format.h"          // shared compiled-token FORMAT_TIMESTAMP formatter
 #include "ops/vec_result.h"
 #include "ops/kernels/result_helpers.h"
@@ -405,10 +406,17 @@ VecResult draken_unixtime(void* ctx, const DrakenVector* const* args, uint32_t n
         if (v->type == DRAKEN_TIMESTAMP64) {
             if (ctx == nullptr) { draken_free(out); return draken_error_sentinel("draken_unixtime: missing ctx (unit)"); }
             const auto* c = static_cast<const binary_op_ctx*>(ctx);
-            const int64_t tps = ta_ticks_per_second(c->left_unit);
             const int64_t* src = static_cast<const int64_t*>(v->data);
-            for (uint32_t i = 0u; i < n; ++i)
-                out[i] = ft_row_valid(v, i) ? ta_floor_div(src[v->selection[i]], tps) : 0;
+            ta_with_ticks_per_second(c->left_unit, [&](auto k) {
+                constexpr int64_t tps = decltype(k)::value;
+                int64_t* const o = out;          // locals, not by-reference captures:
+                const DrakenVector* const vec = v;   // -fno-strict-aliasing reloads those per row
+                const uint32_t* const sel = vec->selection;
+                const int64_t* const s = src;
+                const uint32_t rows = n;
+                for (uint32_t i = 0u; i < rows; ++i)
+                    o[i] = ft_row_valid(vec, i) ? ta_floor_div(s[sel[i]], tps) : 0;
+            });
         } else if (v->type == DRAKEN_DATE32) {
             const int32_t* src = static_cast<const int32_t*>(v->data);
             for (uint32_t i = 0u; i < n; ++i)
@@ -467,79 +475,109 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
         const int64_t mag = c->magnitude;
         // DATE32 has no logical unit; work in microseconds and emit TIMESTAMP64(us).
         const int     out_unit = is_date32 ? 2 : static_cast<int>(c->ts_unit);
-        const int64_t tps      = ta_ticks_per_second(out_unit);
-        const int64_t tpd      = ta_ticks_per_day(out_unit);
 
         const uint32_t n = v->length;
         auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("draken_time_bucket: allocation failed");
 
-        // Gather to flat int64 ticks in `out_unit`, promoting DATE32 days→ticks via
-        // the uniform data[selection[i]] access; null rows produce 0 (validity is
-        // carried by ft_dense_result, so the placeholder value is never read).
-        if (is_date32) {
-            const int32_t* src = static_cast<const int32_t*>(v->data);
-            for (uint32_t i = 0u; i < n; ++i)
-                out[i] = ft_row_valid(v, i) ? static_cast<int64_t>(src[v->selection[i]]) * tpd : 0;
-        } else {
-            const int64_t* src = static_cast<const int64_t*>(v->data);
-            for (uint32_t i = 0u; i < n; ++i)
-                out[i] = ft_row_valid(v, i) ? src[v->selection[i]] : 0;
-        }
+        // The unit's ticks-per-second/day are compile-time constants (one loop
+        // instantiation per unit); the bucket width carries the bind-time
+        // magnitude, so it is a batch-constant divisor: §11 constant-divisor
+        // dispatch (ratified 2026-10-10) divides by a precomputed magic multiplier
+        // (ops/int_divisor.h) rather than one hardware divide per row. A width of
+        // exactly 1 floors to itself (I64Divisor needs |d| >= 2).
+        auto bucket_floor = [](const draken::ops::I64Divisor& dv, bool unit_width, int64_t x) {
+            return unit_width ? x : draken::ops::i64_floor_div_by(dv, x);
+        };
+        auto divisor_for = [](int64_t width) {
+            return width >= 2 ? draken::ops::i64_divisor(width) : draken::ops::I64Divisor{};
+        };
+        const bool mag_one = (mag == 1);
+        const draken::ops::I64Divisor mag_dv = divisor_for(mag);
 
-        // Bucket in place. The switch is hoisted out of the row loop so each unit
-        // kind runs a branch-free loop.
-        switch (c->unit_kind) {
-            case 1: case 2: case 3: case 4: {   // second/minute/hour/day
-                static const int64_t seconds_per_unit_kind[5] = {0, 1, 60, 3600, 86400};
-                const int64_t period = seconds_per_unit_kind[c->unit_kind] * tps * mag;
-                for (uint32_t i = 0u; i < n; ++i)
-                    out[i] = ta_floor_div(out[i], period) * period;
-                break;
+        ta_with_ticks_per_second(out_unit, [&](auto k) {
+            constexpr int64_t tps = decltype(k)::value;
+            constexpr int64_t tpd = tps * 86400LL;
+            // Bind everything the row loops read to locals: the build is
+            // -fno-strict-aliasing, so each o[i] store would otherwise force a
+            // reload of every by-reference capture on every row.
+            int64_t* const o = out;
+            const uint32_t rows = n;
+            const DrakenVector* const vec = v;
+            const uint32_t* const sel = vec->selection;
+            const int64_t m = mag;
+            const bool m_one = mag_one;
+            const draken::ops::I64Divisor m_dv = mag_dv;
+
+            // Gather to flat int64 ticks in `out_unit`, promoting DATE32 days→ticks via
+            // the uniform data[selection[i]] access; null rows produce 0 (validity is
+            // carried by ft_dense_result, so the placeholder value is never read).
+            if (is_date32) {
+                const int32_t* src = static_cast<const int32_t*>(vec->data);
+                for (uint32_t i = 0u; i < rows; ++i)
+                    o[i] = ft_row_valid(vec, i) ? static_cast<int64_t>(src[sel[i]]) * tpd : 0;
+            } else {
+                const int64_t* src = static_cast<const int64_t*>(vec->data);
+                for (uint32_t i = 0u; i < rows; ++i)
+                    o[i] = ft_row_valid(vec, i) ? src[sel[i]] : 0;
             }
-            case 5: {   // week — 7-day, anchored to the ISO Monday on/before epoch (day -3)
-                for (uint32_t i = 0u; i < n; ++i) {
-                    const int64_t days          = ta_floor_div(out[i], tpd);
-                    const int64_t weeks_from_ref = ta_floor_div(days + 3LL, 7LL);
-                    const int64_t bucket_week    = ta_floor_div(weeks_from_ref, mag) * mag;
-                    out[i] = (-3LL + bucket_week * 7LL) * tpd;
+
+            // Bucket in place. The switch is hoisted out of the row loop so each unit
+            // kind runs a branch-free loop.
+            switch (c->unit_kind) {
+                case 1: case 2: case 3: case 4: {   // second/minute/hour/day
+                    static const int64_t seconds_per_unit_kind[5] = {0, 1, 60, 3600, 86400};
+                    const int64_t period = seconds_per_unit_kind[c->unit_kind] * tps * m;
+                    const bool period_one = (period == 1);
+                    const draken::ops::I64Divisor period_dv = divisor_for(period);
+                    for (uint32_t i = 0u; i < rows; ++i)
+                        o[i] = bucket_floor(period_dv, period_one, o[i]) * period;
+                    break;
                 }
-                break;
-            }
-            case 6: {   // month — epoch-anchored calendar months
-                for (uint32_t i = 0u; i < n; ++i) {
-                    const int64_t days = ta_floor_div(ta_floor_div(out[i], tps), 86400LL);
-                    int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
-                    const int64_t mtot = (static_cast<int64_t>(yr) - 1970) * 12 + (mo - 1);
-                    const int64_t mb   = ta_floor_div(mtot, mag) * mag;
-                    const int64_t by   = 1970 + ta_floor_div(mb, 12);
-                    const int     bm   = static_cast<int>(mb - ta_floor_div(mb, 12) * 12) + 1;
-                    out[i] = ta_ymd_to_days(static_cast<int>(by), bm, 1) * tpd;
+                case 5: {   // week — 7-day, anchored to the ISO Monday on/before epoch (day -3)
+                    for (uint32_t i = 0u; i < rows; ++i) {
+                        const int64_t days          = ta_floor_div(o[i], tpd);
+                        const int64_t weeks_from_ref = ta_floor_div(days + 3LL, 7LL);
+                        const int64_t bucket_week    = bucket_floor(m_dv, m_one, weeks_from_ref) * m;
+                        o[i] = (-3LL + bucket_week * 7LL) * tpd;
+                    }
+                    break;
                 }
-                break;
-            }
-            case 7: {   // quarter — epoch-anchored calendar quarters (3-month blocks)
-                for (uint32_t i = 0u; i < n; ++i) {
-                    const int64_t days = ta_floor_div(ta_floor_div(out[i], tps), 86400LL);
-                    int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
-                    const int64_t qtot = (static_cast<int64_t>(yr) - 1970) * 4 + (mo - 1) / 3;
-                    const int64_t qb   = ta_floor_div(qtot, mag) * mag;
-                    const int64_t by   = 1970 + ta_floor_div(qb, 4);
-                    const int     bq   = static_cast<int>(qb - ta_floor_div(qb, 4) * 4);
-                    out[i] = ta_ymd_to_days(static_cast<int>(by), bq * 3 + 1, 1) * tpd;
+                case 6: {   // month — epoch-anchored calendar months
+                    for (uint32_t i = 0u; i < rows; ++i) {
+                        const int64_t days = ta_floor_div(ta_floor_div(o[i], tps), 86400LL);
+                        int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
+                        const int64_t mtot = (static_cast<int64_t>(yr) - 1970) * 12 + (mo - 1);
+                        const int64_t mb   = bucket_floor(m_dv, m_one, mtot) * m;
+                        const int64_t by   = 1970 + ta_floor_div(mb, 12);
+                        const int     bm   = static_cast<int>(mb - ta_floor_div(mb, 12) * 12) + 1;
+                        o[i] = ta_ymd_to_days(static_cast<int>(by), bm, 1) * tpd;
+                    }
+                    break;
                 }
-                break;
-            }
-            case 8: {   // year — epoch-anchored calendar years
-                for (uint32_t i = 0u; i < n; ++i) {
-                    const int64_t days = ta_floor_div(ta_floor_div(out[i], tps), 86400LL);
-                    int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
-                    const int64_t by = 1970 + ta_floor_div(static_cast<int64_t>(yr) - 1970, mag) * mag;
-                    out[i] = ta_ymd_to_days(static_cast<int>(by), 1, 1) * tpd;
+                case 7: {   // quarter — epoch-anchored calendar quarters (3-month blocks)
+                    for (uint32_t i = 0u; i < rows; ++i) {
+                        const int64_t days = ta_floor_div(ta_floor_div(o[i], tps), 86400LL);
+                        int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
+                        const int64_t qtot = (static_cast<int64_t>(yr) - 1970) * 4 + (mo - 1) / 3;
+                        const int64_t qb   = bucket_floor(m_dv, m_one, qtot) * m;
+                        const int64_t by   = 1970 + ta_floor_div(qb, 4);
+                        const int     bq   = static_cast<int>(qb - ta_floor_div(qb, 4) * 4);
+                        o[i] = ta_ymd_to_days(static_cast<int>(by), bq * 3 + 1, 1) * tpd;
+                    }
+                    break;
                 }
-                break;
+                case 8: {   // year — epoch-anchored calendar years
+                    for (uint32_t i = 0u; i < rows; ++i) {
+                        const int64_t days = ta_floor_div(ta_floor_div(o[i], tps), 86400LL);
+                        int yr, mo, dy; ta_days_to_ymd(days, &yr, &mo, &dy);
+                        const int64_t by = 1970 + bucket_floor(m_dv, m_one, static_cast<int64_t>(yr) - 1970) * m;
+                        o[i] = ta_ymd_to_days(static_cast<int>(by), 1, 1) * tpd;
+                    }
+                    break;
+                }
             }
-        }
+        });
 
         VecResult r = ft_dense_result(v, out, n, DRAKEN_TIMESTAMP64);
         if (r.data != nullptr) r.ts_unit = static_cast<uint8_t>(out_unit);

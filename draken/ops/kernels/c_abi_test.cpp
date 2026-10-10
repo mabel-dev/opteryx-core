@@ -661,7 +661,6 @@ void test_draken_add() { int64_t l[] = {1, 2, 3}, r[] = {10, 20, 30}, e[] = {11,
 void test_draken_subtract() { int64_t l[] = {10, 20, 30}, r[] = {1, 2, 3}, e[] = {9, 18, 27}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_subtract(nullptr, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 void test_draken_multiply() { int64_t l[] = {2, 3, 4}, r[] = {5, 6, 7}, e[] = {10, 18, 28}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_multiply(nullptr, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 void test_draken_divide() { int64_t l[] = {10, 20, 30}, r[] = {2, 4, 5}; double e[] = {5.0, 5.0, 6.0}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_divide(nullptr, lv, rv); assert(!is_error(res) && res.type == DRAKEN_FLOAT64 && vectors_equal_float64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
-void test_draken_modulo() { int64_t l[] = {10, 20, 30}, r[] = {3, 6, 7}, e[] = {1, 2, 2}; DrakenVector* lv = create_int64_vector(l, 3); DrakenVector* rv = create_int64_vector(r, 3); VecResult res = draken_modulo(nullptr, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 3)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 void test_draken_binary_arith() { binary_op_ctx ctx{1}; int64_t l[] = {1, 2}, r[] = {10, 20}, e[] = {11, 22}; DrakenVector* lv = create_int64_vector(l, 2); DrakenVector* rv = create_int64_vector(r, 2); VecResult res = draken_binary_arith(&ctx, lv, rv); assert(!is_error(res) && vectors_equal_int64(res, e, 2)); free_vector(lv); free_vector(rv); draken_free(res.data); }
 
 void test_draken_bitwise_or() { int64_t l[] = {5}, r[] = {3}; DrakenVector* lv = create_int64_vector(l, 1); DrakenVector* rv = create_int64_vector(r, 1); VecResult res = draken_bitwise_or(nullptr, lv, rv); assert(is_error(res)); free_vector(lv); free_vector(rv); }
@@ -809,15 +808,6 @@ void test_arith_divide_dict_left() {
     assert(!is_error(res) && res.type == DRAKEN_FLOAT64 && vectors_equal_float64(res, e, 4));
     free_vector(L); free_vector(R); draken_free(res.data);
 }
-void test_arith_modulo_dict_left() {
-    int64_t lv[] = {10, 21}; uint32_t codes[] = {0, 1, 0, 1};
-    int64_t r[] = {3, 5, 4, 6}, e[] = {1, 1, 2, 3};
-    DrakenVector* L = create_int64_dict_vector(lv, 2, codes, 4);
-    DrakenVector* R = create_int64_vector(r, 4);
-    VecResult res = draken_modulo(nullptr, L, R);
-    assert(!is_error(res) && vectors_equal_int64(res, e, 4));
-    free_vector(L); free_vector(R); draken_free(res.data);
-}
 // Result must carry an identity selection + IDENTITY|PERMUTATION flags, never
 // the borrowed dict codes.
 void test_arith_result_is_identity_shaped() {
@@ -857,7 +847,7 @@ void test_registry_honesty() {
     // Real kernels must remain reachable by name:
     const char* real_kernels[] = {
         "draken_add", "draken_subtract", "draken_multiply", "draken_divide",
-        "draken_modulo", "draken_binary_arith",
+        "draken_binary_arith",
         "draken_cast_int64_to_float64", "draken_cast_int64_to_string",
         "draken_cast_float64_to_string", "draken_cast_string_to_float64",
         "draken_cast_date32_to_timestamp",
@@ -1248,7 +1238,7 @@ int main() {
 
     const struct { const char* name; void (*fn)(); } tests[] = {
         {"draken_add", test_draken_add}, {"draken_subtract", test_draken_subtract}, {"draken_multiply", test_draken_multiply},
-        {"draken_divide", test_draken_divide}, {"draken_modulo", test_draken_modulo}, {"draken_binary_arith", test_draken_binary_arith},
+        {"draken_divide", test_draken_divide}, {"draken_binary_arith", test_draken_binary_arith},
         {"draken_bitwise_or", test_draken_bitwise_or}, {"draken_bitwise_and", test_draken_bitwise_and}, {"draken_bitwise_xor", test_draken_bitwise_xor},
         {"draken_bitwise_shift_left", test_draken_bitwise_shift_left}, {"draken_bitwise_shift_right", test_draken_bitwise_shift_right},
         {"draken_cast_int64_to_float64", test_draken_cast_int64_to_float64}, {"draken_cast_float64_to_int64", test_draken_cast_float64_to_int64},
@@ -1286,7 +1276,6 @@ int main() {
         {"arith_subtract_dict_left", test_arith_subtract_dict_left},
         {"arith_multiply_constant_left", test_arith_multiply_constant_left},
         {"arith_divide_dict_left", test_arith_divide_dict_left},
-        {"arith_modulo_dict_left", test_arith_modulo_dict_left},
         {"arith_result_is_identity_shaped", test_arith_result_is_identity_shaped},
         // REPLACE / SOUNDEX value + shape parity (func_fn_t string kernels).
         {"soundex_values", test_soundex_values},

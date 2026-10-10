@@ -178,7 +178,7 @@ REGISTER: List[RegisteredDefect] = [
     # while the UNKNOWN bucket vanished. The result now carries the AND of both
     # operands' validity, the contract draken_compare_dv's own paths obey. The
     # DECIMAL exclusion this drove in applicable_oracles() is gone with it —
-    # predicate_partition now runs on mixed-type numeric predicates.
+    # ternary_logic_partition now runs on mixed-type numeric predicates.
     # `filter-over-a-limited-subquery-is-non-deterministic` was registered here as
     # a WrongAnswer. It was RECLASSIFIED — see RATIFIED/limit-and-offset-select-an-
     # arbitrary-subset below. It was never an oracle-visible defect: every row set

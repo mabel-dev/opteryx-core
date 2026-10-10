@@ -157,7 +157,8 @@ class _RunLedger:
 _ALL_ORACLE_NAMES = {
     "aggregate_filter_matches_where",
     "count_star_matches_materialised_rows",
-    "predicate_partition",
+    "ternary_logic_partition",
+    "norec_filter_matches_projected_predicate",
     "tautology_is_neutral",
     "double_negation_is_neutral",
     "subquery_wrapping_is_neutral",

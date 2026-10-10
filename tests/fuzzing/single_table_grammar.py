@@ -2117,7 +2117,7 @@ class Generator:
         """`x IS [NOT] JSON [SCALAR | ARRAY | OBJECT]` — JSON well-formedness.
 
         TOTAL, like IS DISTINCT FROM: a NULL is not JSON, so the predicate is never
-        UNKNOWN and predicate_partition's third bucket must stay empty. Over any
+        UNKNOWN and ternary_logic_partition's third bucket must stay empty. Over any
         VARCHAR or VARBINARY column, not just the JSON-bearing ones: text that is
         not JSON is the common case, and it is half of what is being tested.
         """

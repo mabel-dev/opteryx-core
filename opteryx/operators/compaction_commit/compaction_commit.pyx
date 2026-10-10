@@ -64,6 +64,7 @@ class CompactionCommitNode(BasePlanNode):
         self._stream = DataFileStream(
             self.connector,
             self.relation_name,
+            coalesce_rows=step.write_coalesce_rows,
             sorted_by=self.sorted_by,
             write_profile="storage",
             row_origins=self.row_origins,

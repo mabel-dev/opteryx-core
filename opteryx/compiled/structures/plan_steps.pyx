@@ -2811,13 +2811,14 @@ cdef class CompactionCommitStep(PlanStep):
 
     cdef object _baseline_snapshot_id
     cdef object _row_origins
+    cdef object _write_coalesce_rows
     cdef object _connector
     cdef str _relation_name
     cdef tuple _retired_files
     cdef object _sorted_by
     cdef object _source_tail_id
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None, row_origins=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None, row_origins=None, write_coalesce_rows=None):
         self.node_type = _step_types().CompactionCommit
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.baseline_snapshot_id = baseline_snapshot_id
@@ -2827,6 +2828,7 @@ cdef class CompactionCommitStep(PlanStep):
         self.sorted_by = sorted_by
         self.source_tail_id = source_tail_id
         self.row_origins = row_origins
+        self.write_coalesce_rows = write_coalesce_rows
 
     @property
     def row_origins(self):
@@ -2894,6 +2896,16 @@ cdef class CompactionCommitStep(PlanStep):
         _require_optional_int("CompactionCommitStep.source_tail_id", value)
         self._source_tail_id = value
 
+    @property
+    def write_coalesce_rows(self):
+        return self._write_coalesce_rows
+
+    @write_coalesce_rows.setter
+    def write_coalesce_rows(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_int("CompactionCommitStep.write_coalesce_rows", value)
+        self._write_coalesce_rows = value
+
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -2912,6 +2924,7 @@ cdef class CompactionCommitStep(PlanStep):
         out["sorted_by"] = self._sorted_by
         out["source_tail_id"] = self._source_tail_id
         out["row_origins"] = self._row_origins
+        out["write_coalesce_rows"] = self._write_coalesce_rows
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -2931,6 +2944,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._sorted_by = _copy_field(self._sorted_by, memo)
         new._source_tail_id = _copy_field(self._source_tail_id, memo)
         new._row_origins = _copy_field(self._row_origins, memo)
+        new._write_coalesce_rows = _copy_field(self._write_coalesce_rows, memo)
         new._sync_row()
         return new
 
@@ -2945,6 +2959,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._sorted_by = self._sorted_by
         new._source_tail_id = self._source_tail_id
         new._row_origins = self._row_origins
+        new._write_coalesce_rows = self._write_coalesce_rows
         new._row[0] = self._row[0]
         return new
 
@@ -7456,8 +7471,9 @@ cdef class MergeStep(PlanStep):
     cdef str _target_alias
     cdef tuple _target_column_names
     cdef object _target_schema
+    cdef object _write_coalesce_rows
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, executing_task=None, file_paths=None, operation=None, produced_by=None, read_sources=None, relation_name=None, source_tail_id=None, statement_name=None, target_alias=None, target_column_names=None, target_schema=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, executing_task=None, file_paths=None, operation=None, produced_by=None, read_sources=None, relation_name=None, source_tail_id=None, statement_name=None, target_alias=None, target_column_names=None, target_schema=None, write_coalesce_rows=None):
         self.node_type = _step_types().Merge
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.connector = connector
@@ -7472,6 +7488,7 @@ cdef class MergeStep(PlanStep):
         self.target_alias = target_alias
         self.target_column_names = target_column_names
         self.target_schema = target_schema
+        self.write_coalesce_rows = write_coalesce_rows
 
     @property
     def connector(self):
@@ -7582,6 +7599,16 @@ cdef class MergeStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_schema = value
 
+    @property
+    def write_coalesce_rows(self):
+        return self._write_coalesce_rows
+
+    @write_coalesce_rows.setter
+    def write_coalesce_rows(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_int("MergeStep.write_coalesce_rows", value)
+        self._write_coalesce_rows = value
+
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -7605,6 +7632,7 @@ cdef class MergeStep(PlanStep):
         out["target_alias"] = self._target_alias
         out["target_column_names"] = self._target_column_names
         out["target_schema"] = self._target_schema
+        out["write_coalesce_rows"] = self._write_coalesce_rows
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -7629,6 +7657,7 @@ cdef class MergeStep(PlanStep):
         new._target_alias = _copy_field(self._target_alias, memo)
         new._target_column_names = _copy_field(self._target_column_names, memo)
         new._target_schema = _copy_field(self._target_schema, memo)
+        new._write_coalesce_rows = _copy_field(self._write_coalesce_rows, memo)
         new._sync_row()
         return new
 
@@ -7648,6 +7677,7 @@ cdef class MergeStep(PlanStep):
         new._target_alias = self._target_alias
         new._target_column_names = self._target_column_names
         new._target_schema = self._target_schema
+        new._write_coalesce_rows = self._write_coalesce_rows
         new._row[0] = self._row[0]
         return new
 
@@ -11229,6 +11259,6 @@ cpdef frozenset steps_with(str field):
             "window_functions": frozenset({T.FramedWindow, T.Window}),
             "window_source": frozenset({T.CreateTrigger}),
             "workspace_name": frozenset({T.AlterWorkspace, T.AlterWorkspaceSecure, T.DropSecret, T.DropWorkspace}),
-            "write_coalesce_rows": frozenset({T.Insert}),
+            "write_coalesce_rows": frozenset({T.CompactionCommit, T.Insert, T.Merge}),
         }
     return _STEPS_WITH[field]

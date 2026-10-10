@@ -96,7 +96,8 @@ text. Tune per embedder with `SET match_threshold`.
 """
 
 WRITE_COALESCE_ROWS: int = int(get("WRITE_COALESCE_ROWS", 65536))
-"""Row-count target the INSERT/CTAS/RMV/OPTIMIZE sink (DataFileStream)
+"""Row-count target every data-file sink (DataFileStream: INSERT/CTAS/RMV,
+UPDATE/DELETE/MERGE, OPTIMIZE)
 coalesces arriving morsels up to before writing each parquet ROW GROUP of the
 open data file. One batch is one row group, so this IS the written row-group
 size; the writer then groups row groups into column-major blocks of 4

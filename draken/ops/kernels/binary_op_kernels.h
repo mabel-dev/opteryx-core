@@ -31,9 +31,10 @@ extern "C" {
  * ========================================================================== */
 
 /**
- * Binary arithmetic dispatch: add, sub, mul, div, mod.
+ * Binary arithmetic dispatch: add, sub, mul, div.
  * ctx → binary_op_ctx{op_code} where op_code is one of:
- *   BOP_PLUS (0), BOP_MINUS (1), BOP_MULTIPLY (2), BOP_DIVIDE (3), BOP_MODULO (4)
+ *   OP_PLUS (1), OP_MINUS (2), OP_MULTIPLY (3), OP_DIVIDE (4)
+ * Integer MODULO is draken_binop's (fixed_int_ops.h fi_int_arith / fi_uint_arith).
  * Dispatches internally to the right operation.
  *
  * Replaces the _build_arithmetic_closure that currently does
@@ -52,7 +53,6 @@ VecResult draken_add(void* ctx, const DrakenVector* left, const DrakenVector* ri
 VecResult draken_subtract(void* ctx, const DrakenVector* left, const DrakenVector* right);
 VecResult draken_multiply(void* ctx, const DrakenVector* left, const DrakenVector* right);
 VecResult draken_divide(void* ctx, const DrakenVector* left, const DrakenVector* right);
-VecResult draken_modulo(void* ctx, const DrakenVector* left, const DrakenVector* right);
 
 /* ============================================================================
  * Bitwise Operators — ctx is NULL

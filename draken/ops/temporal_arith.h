@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <type_traits>
 
 // ---------------------------------------------------------------------------
 // Howard Hinnant's proleptic Gregorian day ↔ date conversion.
@@ -82,6 +83,25 @@ static inline int64_t ta_ticks_per_day(int unit_code) noexcept {
     }
 }
 
+// Resolve a unit code to its ticks-per-second as a COMPILE-TIME constant: `f` is
+// invoked with std::integral_constant<int64_t, TPS>, so every division by TPS (or
+// TPS * 86400, ...) inside f's row loop lowers to multiply-high + shift instead of
+// one hardware divide per row. The unit is a per-batch property; the row loop is
+// instantiated once per unit. Mapping (including the default) is exactly
+// ta_ticks_per_second's.
+template <int64_t TPS> using TaTps = std::integral_constant<int64_t, TPS>;
+
+template <typename F>
+static inline decltype(auto) ta_with_ticks_per_second(int unit_code, F&& f) {
+    switch (unit_code) {
+        case 0:  return f(TaTps<1LL>{});
+        case 1:  return f(TaTps<1000LL>{});
+        case 2:  return f(TaTps<1000000LL>{});
+        case 3:  return f(TaTps<1000000000LL>{});
+        default: return f(TaTps<1000000LL>{});
+    }
+}
+
 // ---------------------------------------------------------------------------
 // date_trunc_batch
 //
@@ -102,10 +122,11 @@ static inline int64_t ta_ticks_per_day(int unit_code) noexcept {
 static inline void date_trunc_batch(
     const int64_t* src, uint32_t n, int unit_code, int trunc_kind, int64_t* out) noexcept
 {
-    const int64_t tps = ta_ticks_per_second(unit_code);
-    const int64_t tpd = ta_ticks_per_day(unit_code);
-    const int64_t tph = tps * 3600LL;
-    const int64_t tpm = tps * 60LL;
+  ta_with_ticks_per_second(unit_code, [src, n, trunc_kind, out](auto k) {
+    constexpr int64_t tps = decltype(k)::value;
+    constexpr int64_t tpd = tps * 86400LL;
+    constexpr int64_t tph = tps * 3600LL;
+    constexpr int64_t tpm = tps * 60LL;
 
     for (uint32_t i = 0u; i < n; ++i) {
         const int64_t v = src[i];
@@ -160,6 +181,7 @@ static inline void date_trunc_batch(
         }
         out[i] = result;
     }
+  });
 }
 
 // ---------------------------------------------------------------------------

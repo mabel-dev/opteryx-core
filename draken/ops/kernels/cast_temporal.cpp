@@ -721,6 +721,7 @@ VecResult draken_cast_timestamp_to_blob(void* ctx, const DrakenVector* v) {
     return r;
 }
 
+extern "C++" {   // the helpers below are templates; this TU region is extern "C"
 namespace {
 // Kept OUTSIDE the DRAKEN_KERNEL_TRY macro body below: an in-body brace-init
 // array literal's commas are seen as macro-argument separators (the
@@ -734,7 +735,55 @@ inline int64_t fk_ts_ticks_per_sec(unsigned unit) {
         default: return 1;   // 0 = seconds
     }
 }
+
+// Narrowing rescale with a compile-time factor (a power of 1000): the floor
+// division lowers to multiply-high + shift instead of one divide per row.
+template <int64_t F>
+inline void fk_ts_rescale_down(const DrakenVector* v, int64_t* out) {
+    const int64_t* const src = static_cast<const int64_t*>(v->data);
+    const uint32_t* const sel = v->selection;
+    const uint32_t n = v->length;
+    for (uint32_t j = 0u; j < n; ++j)
+        out[j] = ta_floor_div(src[sel[j]], F);
+}
+
+// out[j] = src[selection[j]] rescaled from src_ticks to dst_ticks per second. The
+// ratio is resolved ONCE per batch; returns false for a ratio that is not a power
+// of 1000 (unreachable for the four units).
+inline bool fk_ts_rescale(const DrakenVector* v, int64_t src_ticks, int64_t dst_ticks,
+                          int64_t* out) {
+    const int64_t* const src = static_cast<const int64_t*>(v->data);
+    const uint32_t* const sel = v->selection;
+    const uint32_t n = v->length;
+    if (src_ticks < dst_ticks) {
+        const int64_t mul = dst_ticks / src_ticks;
+        for (uint32_t j = 0u; j < n; ++j) out[j] = src[sel[j]] * mul;
+        return true;
+    }
+    switch (src_ticks / dst_ticks) {
+        case 1:
+            for (uint32_t j = 0u; j < n; ++j) out[j] = src[sel[j]];
+            return true;
+        case 1000LL:       fk_ts_rescale_down<1000LL>(v, out);       return true;
+        case 1000000LL:    fk_ts_rescale_down<1000000LL>(v, out);    return true;
+        case 1000000000LL: fk_ts_rescale_down<1000000000LL>(v, out); return true;
+        default: return false;
+    }
+}
+
+// TIMESTAMP64 ticks → DATE32 days, ticks-per-day a compile-time constant per unit.
+inline void fk_ts_to_date32(const DrakenVector* v, int unit_code, int32_t* out) {
+    const int64_t* const src = static_cast<const int64_t*>(v->data);
+    const uint32_t* const sel = v->selection;
+    const uint32_t n = v->length;
+    ta_with_ticks_per_second(unit_code, [src, sel, n, out](auto k) {
+        constexpr int64_t tpd = decltype(k)::value * 86400LL;
+        for (uint32_t j = 0u; j < n; ++j)
+            out[j] = static_cast<int32_t>(ta_floor_div(src[sel[j]], tpd));
+    });
+}
 }  // namespace
+}  // extern "C++"
 
 // TIMESTAMP64 → TIMESTAMP64 unit rescale (e.g. `EventTime::TIMESTAMP[s]` where
 // EventTime is already TIMESTAMP64 at a different unit). ctx = binary_op_ctx:
@@ -761,23 +810,11 @@ VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* v) {
         const TimestampUnit dst_unit = static_cast<TimestampUnit>(c->right_unit & 3);
 
         const uint32_t n = v->length;
-        const int64_t* src = static_cast<const int64_t*>(v->data);
         int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
-        for (uint32_t j = 0u; j < n; ++j) {
-            int64_t raw = src[v->selection[j]];
-            if (src_ticks >= dst_ticks) {
-                int64_t factor = src_ticks / dst_ticks;
-                if (factor == 1) {
-                    out[j] = raw;
-                } else {
-                    int64_t q = raw / factor;
-                    int64_t r = raw % factor;
-                    out[j] = (r != 0 && ((r < 0) != (factor < 0))) ? q - 1 : q;
-                }
-            } else {
-                out[j] = raw * (dst_ticks / src_ticks);
-            }
+        if (!fk_ts_rescale(v, src_ticks, dst_ticks, out)) {
+            draken_free(out);
+            return draken_error_sentinel("cast timestamp rescale: unit ratio is not a power of 1000");
         }
         VecResult r;
         r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
@@ -808,14 +845,11 @@ VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* v) {
             return draken_error_sentinel_fmt("cast timestamp->date32: expected TIMESTAMP64, got %d", v->type);
         int unit_code = 2;  // default microseconds
         if (ctx) unit_code = static_cast<const binary_op_ctx*>(ctx)->left_unit;
-        const int64_t tpd = ta_ticks_per_day(unit_code);
 
         const uint32_t n = v->length;
-        const int64_t* src = static_cast<const int64_t*>(v->data);
         int32_t* out = static_cast<int32_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int32_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
-        for (uint32_t j = 0u; j < n; ++j)
-            out[j] = static_cast<int32_t>(ta_floor_div(src[v->selection[j]], tpd));
+        fk_ts_to_date32(v, unit_code, out);
         VecResult r;
         r.data = out; r.type = DRAKEN_DATE32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         r.length = n; r.data_length = n;

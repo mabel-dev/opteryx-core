@@ -52,9 +52,6 @@ from opteryx.models import NonTabularResult
 from opteryx.models import row_count_phrase
 from opteryx.models import QueryProperties
 
-# Kept in step with rugo's row-group default, exactly as InsertNode does - see
-# the note there for why a flushed file must not span more than one row group.
-
 cdef class _MergeAddresses:
     """Owner for the statement's native address state.
 
@@ -110,7 +107,11 @@ class MergeNode(BasePlanNode):
 
         # Appended rows become row groups of streaming, target-sized files -
         # see DataFileStream for the shape and for why never a file per batch.
-        self._stream = DataFileStream(self.connector, self.relation_name)
+        self._stream = DataFileStream(
+            self.connector,
+            self.relation_name,
+            coalesce_rows=step.write_coalesce_rows,
+        )
 
     @property
     def name(self):

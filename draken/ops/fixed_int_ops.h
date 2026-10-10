@@ -34,6 +34,7 @@
 #include <string.h>
 #include <stdexcept>
 #include "ops/int64_checked.h"
+#include "ops/int_divisor.h"     // I64Divisor — batch-constant DIV/MOD divisor
 #include <limits>
 #include <type_traits>
 #include <unordered_map>
@@ -181,109 +182,106 @@ static inline VecResult fi_make_dense(T* data, uint8_t* validity, uint32_t n) {
 // it to the float path. Covers PLUS/MINUS/MULTIPLY/MODULO/INT_DIVIDE only.
 // ===========================================================================
 
-// Sign-extend the i-th logical value of any signed-int vector to int64.
-// E33: also zero-extends UINT8/16/32 — their full range fits in int64's positive
-// half, so a signed-vs-narrow-unsigned pair (e.g. INT32 + UINT16) can compute
-// here safely. UINT64 is deliberately NOT handled — its range doesn't fit in
-// int64_t; UINT64 x UINT64/narrow-unsigned goes through fi_read_u64/fi_uint_arith
-// below, and UINT64 x signed is the DECIMAL128 escape (draken_binop).
-static inline int64_t fi_read_i64(const DrakenVector& v, uint32_t i) {
-    const uint32_t p = v.selection[i];
-    switch (v.type) {
-        case DRAKEN_INT8:   return static_cast<const int8_t*>(v.data)[p];
-        case DRAKEN_INT16:  return static_cast<const int16_t*>(v.data)[p];
-        case DRAKEN_INT32:  return static_cast<const int32_t*>(v.data)[p];
-        case DRAKEN_INT64:  return static_cast<const int64_t*>(v.data)[p];
-        case DRAKEN_UINT8:  return static_cast<int64_t>(static_cast<const uint8_t*>(v.data)[p]);
-        case DRAKEN_UINT16: return static_cast<int64_t>(static_cast<const uint16_t*>(v.data)[p]);
-        case DRAKEN_UINT32: return static_cast<int64_t>(static_cast<const uint32_t*>(v.data)[p]);
-        default: throw std::invalid_argument("fi_read_i64: non-integer type");
+// Operand storage types are resolved ONCE per batch (fi_with_*_operand) and the
+// row loops are instantiated per (left type, right type, op): no per-row switch
+// on DrakenType or op code. Each operand is read through the uniform
+// data[selection[i]] access and widened to the 64-bit compute type.
+template<typename T> struct FiType { using type = T; };
+
+// Signed-space operands. E33: also UINT8/16/32 — their full range fits in int64's
+// positive half, so a signed-vs-narrow-unsigned pair (e.g. INT32 + UINT16) can
+// compute here safely. UINT64 is deliberately NOT handled — its range doesn't fit
+// in int64_t; UINT64 x UINT64/narrow-unsigned goes through fi_uint_arith below,
+// and UINT64 x signed is the DECIMAL128 escape (draken_binop).
+template<typename F>
+static inline VecResult fi_with_i64_operand(DrakenType t, F&& f) {
+    switch (t) {
+        case DRAKEN_INT8:   return f(FiType<int8_t>{});
+        case DRAKEN_INT16:  return f(FiType<int16_t>{});
+        case DRAKEN_INT32:  return f(FiType<int32_t>{});
+        case DRAKEN_INT64:  return f(FiType<int64_t>{});
+        case DRAKEN_UINT8:  return f(FiType<uint8_t>{});
+        case DRAKEN_UINT16: return f(FiType<uint16_t>{});
+        case DRAKEN_UINT32: return f(FiType<uint32_t>{});
+        default: throw std::invalid_argument("fi_int_arith: non-integer operand");
     }
 }
 
-// op codes match BCBinaryOpCode: 1=PLUS 2=MINUS 3=MULTIPLY 5=MODULO 6=INT_DIVIDE.
-// Used ONLY for result widths narrower than INT64 (operands are <= INT32 there,
-// so int64 space cannot overflow and INT32_MIN / -1 is safe). An INT64 RESULT
-// goes through fi_int64_arith below — overflow-checked, fail loud.
-static inline int64_t fi_apply_i64(int op, int64_t x, int64_t y) {
-    switch (op) {
-        case 1: return x + y;
-        case 2: return x - y;
-        case 3: return x * y;
-        // A zero divisor yields a placeholder 0 here; fi_int_arith_store REPORTS it (a
-        // live row with a zero divisor is a divide-by-zero error, never a silent 0).
-        case 5: return (y == 0) ? 0 : x % y;
-        case 6: return (y == 0) ? 0 : x / y;
-        default: throw std::invalid_argument("fi_apply_i64: unsupported op");
-    }
-}
-
-template<typename W, DrakenType WTAG>
-static inline VecResult fi_int_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
-    const uint32_t n = a.length;
-    W* dst = fi_alloc<W>(n);
-    bool any_zero = false;
-    for (uint32_t i = 0; i < n; ++i) {
-        const int64_t y = fi_read_i64(b, i);
-        any_zero |= ((op == 5 || op == 6) & (y == 0));
-        dst[i] = static_cast<W>(fi_apply_i64(op, fi_read_i64(a, i), y));
-    }
-    div_zero_rescan(any_zero, n, [&](uint32_t i) { return fi_read_i64(b, i); },
-                    a.validity, b.validity, dst, op == 6 ? "division" : "modulo",
-                    "INT" + std::to_string(sizeof(W) * 8));
-    return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
-}
-
-// D.6 result tag = next-power of the wider operand width. E33: extended with an
+// D.6 result width = next-power of the wider operand width. E33: extended with an
 // "effective rank" that maps narrow-unsigned types (UINT8/16/32) to the rank of
 // the smallest SIGNED type that fully covers their range (matches
 // type_unification.py's cross-sign lattice) before applying the same
-// widen-the-max-rank-by-one rule used for pure-signed pairs. UINT64 must never
-// reach here (see fi_read_i64's contract above).
-static inline DrakenType fi_arith_result_tag(DrakenType ta, DrakenType tb) {
-    auto rank = [](DrakenType t) -> int {
-        switch (t) {
-            case DRAKEN_INT8:   return 0;
-            case DRAKEN_UINT8:  return 1;  // needs INT16 to hold its full range
-            case DRAKEN_INT16:  return 1;
-            case DRAKEN_UINT16: return 2;  // needs INT32
-            case DRAKEN_INT32:  return 2;
-            case DRAKEN_UINT32: return 3;  // needs INT64
-            case DRAKEN_INT64:  return 3;
-            default: return -1;
-        }
-    };
-    const int r = rank(ta) > rank(tb) ? rank(ta) : rank(tb);
-    switch (r) {
-        case 0: return DRAKEN_INT16;  // int8  → int16
-        case 1: return DRAKEN_INT32;  // int16 → int32
-        case 2: return DRAKEN_INT64;  // int32 → int64
-        case 3: return DRAKEN_INT64;  // int64 → int64
-        default: throw std::invalid_argument("fi_arith_result_tag: non-integer operand");
-    }
+// widen-the-max-rank-by-one rule used for pure-signed pairs.
+template<typename T> constexpr int fi_signed_rank() {
+    if constexpr (std::is_same<T, int8_t>::value)   return 0;
+    if constexpr (std::is_same<T, uint8_t>::value)  return 1;  // needs INT16
+    if constexpr (std::is_same<T, int16_t>::value)  return 1;
+    if constexpr (std::is_same<T, uint16_t>::value) return 2;  // needs INT32
+    if constexpr (std::is_same<T, int32_t>::value)  return 2;
+    if constexpr (std::is_same<T, uint32_t>::value) return 3;  // needs INT64
+    if constexpr (std::is_same<T, int64_t>::value)  return 3;
+    return -1;
 }
+template<typename TA, typename TB> struct FiIntResult {
+    static constexpr int ra = fi_signed_rank<TA>(), rb = fi_signed_rank<TB>();
+    static_assert(ra >= 0 && rb >= 0, "FiIntResult: non-integer operand");
+    static constexpr int r = ra > rb ? ra : rb;
+    using W = typename std::conditional<r == 0, int16_t,          // int8  → int16
+              typename std::conditional<r == 1, int32_t,          // int16 → int32
+                                        int64_t>::type>::type;    // int32/int64 → int64
+    static constexpr DrakenType tag = r == 0 ? DRAKEN_INT16 : r == 1 ? DRAKEN_INT32 : DRAKEN_INT64;
+};
 
-// INT64-result arithmetic: overflow FAILS LOUD (ops/int64_checked.h), never
-// wraps; INT64_MIN / -1 never reaches idiv. Op is hoisted out of the row loop.
-template<typename Op>
-static inline VecResult fi_int64_arith_op(const DrakenVector& a, const DrakenVector& b) {
+// Overflow FAILS LOUD (ops/int64_checked.h), never wraps; INT64_MIN / -1 never
+// reaches idiv; a zero divisor on a live row raises. A narrow result (operands
+// <= 16 bits) is computed exactly in int64 and always fits W.
+template<typename Op, typename TA, typename TB>
+static inline VecResult fi_int_arith_op(const DrakenVector& a, const DrakenVector& b) {
+    using R = FiIntResult<TA, TB>;
+    using W = typename R::W;
     const uint32_t n = a.length;
-    int64_t* dst = fi_alloc<int64_t>(n);
-    i64_checked_rows<Op>(n, dst,
-        [&](uint32_t i) { return fi_read_i64(a, i); },
-        [&](uint32_t i) { return fi_read_i64(b, i); },
+    const TA* const ad = static_cast<const TA*>(a.data);
+    const TB* const bd = static_cast<const TB*>(b.data);
+    const uint32_t* const asel = a.selection;
+    const uint32_t* const bsel = b.selection;
+    W* dst = fi_alloc<W>(n);
+    auto xat = [ad, asel](uint32_t i) { return static_cast<int64_t>(ad[asel[i]]); };
+    if constexpr (Op::kDivMod) {
+        // §11 constant-divisor dispatch (ratified 2026-10-10): a batch-constant
+        // divisor with |d| >= 2 divides by a precomputed magic multiplier
+        // (ops/int_divisor.h) instead of one hardware divide per row. Nothing can
+        // fail there. d in {-1, 0, 1} — and a NULL constant whose slot happens to
+        // hold one — takes the uniform loop below, which owns those rules.
+        if (n > 0u && draken_is_constant(&b)) {
+            const int64_t d = static_cast<int64_t>(bd[bsel[0]]);
+            if (d >= 2 || d <= -2) {
+                const I64Divisor dv = i64_divisor(d);
+                if constexpr (std::is_same<Op, I64OvfDiv>::value) {
+                    for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(i64_div_by(dv, xat(i)));
+                } else {
+                    static_assert(std::is_same<Op, I64OvfMod>::value, "fi_int_arith_op: div/mod only");
+                    for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(i64_mod_by(dv, xat(i)));
+                }
+                return fi_make_dense<W, R::tag>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+            }
+        }
+    }
+    i64_checked_rows<Op>(n, dst, xat,
+        [bd, bsel](uint32_t i) { return static_cast<int64_t>(bd[bsel[i]]); },
         a.validity, b.validity);
-    return fi_make_dense<int64_t, DRAKEN_INT64>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+    return fi_make_dense<W, R::tag>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
-static inline VecResult fi_int64_arith(int op, const DrakenVector& a, const DrakenVector& b) {
+template<typename TA, typename TB>
+static inline VecResult fi_int_arith_typed(int op, const DrakenVector& a, const DrakenVector& b) {
+    // op codes match BCBinaryOpCode: 1=PLUS 2=MINUS 3=MULTIPLY 5=MODULO 6=INT_DIVIDE.
     switch (op) {
-        case 1: return fi_int64_arith_op<I64OvfAdd>(a, b);
-        case 2: return fi_int64_arith_op<I64OvfSub>(a, b);
-        case 3: return fi_int64_arith_op<I64OvfMul>(a, b);
-        case 5: return fi_int64_arith_op<I64OvfMod>(a, b);
-        case 6: return fi_int64_arith_op<I64OvfDiv>(a, b);
-        default: throw std::invalid_argument("fi_int64_arith: unsupported op");
+        case 1: return fi_int_arith_op<I64OvfAdd, TA, TB>(a, b);
+        case 2: return fi_int_arith_op<I64OvfSub, TA, TB>(a, b);
+        case 3: return fi_int_arith_op<I64OvfMul, TA, TB>(a, b);
+        case 5: return fi_int_arith_op<I64OvfMod, TA, TB>(a, b);
+        case 6: return fi_int_arith_op<I64OvfDiv, TA, TB>(a, b);
+        default: throw std::invalid_argument("fi_int_arith: unsupported op");
     }
 }
 
@@ -291,12 +289,12 @@ static inline VecResult fi_int64_arith(int op, const DrakenVector& a, const Drak
 static inline VecResult fi_int_arith(int op, const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("fi_int_arith: length mismatch");
-    switch (fi_arith_result_tag(a.type, b.type)) {
-        case DRAKEN_INT16: return fi_int_arith_store<int16_t, DRAKEN_INT16>(op, a, b);
-        case DRAKEN_INT32: return fi_int_arith_store<int32_t, DRAKEN_INT32>(op, a, b);
-        case DRAKEN_INT64: return fi_int64_arith(op, a, b);
-        default: throw std::invalid_argument("fi_int_arith: bad result tag");
-    }
+    return fi_with_i64_operand(a.type, [&](auto ta) {
+        return fi_with_i64_operand(b.type, [&](auto tb) {
+            return fi_int_arith_typed<typename decltype(ta)::type,
+                                      typename decltype(tb)::type>(op, a, b);
+        });
+    });
 }
 
 // ===========================================================================
@@ -308,71 +306,69 @@ static inline VecResult fi_int_arith(int op, const DrakenVector& a, const Draken
 // is the DECIMAL128 escape in draken_binop instead.
 // ===========================================================================
 
-static inline uint64_t fi_read_u64(const DrakenVector& v, uint32_t i) {
-    const uint32_t p = v.selection[i];
-    switch (v.type) {
-        case DRAKEN_UINT8:  return static_cast<const uint8_t* >(v.data)[p];
-        case DRAKEN_UINT16: return static_cast<const uint16_t*>(v.data)[p];
-        case DRAKEN_UINT32: return static_cast<const uint32_t*>(v.data)[p];
-        case DRAKEN_UINT64: return static_cast<const uint64_t*>(v.data)[p];
-        default: throw std::invalid_argument("fi_read_u64: non-unsigned-integer type");
+template<typename F>
+static inline VecResult fi_with_u64_operand(DrakenType t, F&& f) {
+    switch (t) {
+        case DRAKEN_UINT8:  return f(FiType<uint8_t>{});
+        case DRAKEN_UINT16: return f(FiType<uint16_t>{});
+        case DRAKEN_UINT32: return f(FiType<uint32_t>{});
+        case DRAKEN_UINT64: return f(FiType<uint64_t>{});
+        default: throw std::invalid_argument("fi_uint_arith: non-unsigned-integer operand");
     }
 }
 
+// Same-width widens by one step (mirroring FiIntResult's convention for
+// pure-signed pairs); UINT64 is the ceiling (stays UINT64, matching int64→int64).
+template<typename TA, typename TB> struct FiUintResult {
+    static constexpr int ra = sizeof(TA) == 1 ? 0 : sizeof(TA) == 2 ? 1 : sizeof(TA) == 4 ? 2 : 3;
+    static constexpr int rb = sizeof(TB) == 1 ? 0 : sizeof(TB) == 2 ? 1 : sizeof(TB) == 4 ? 2 : 3;
+    static constexpr int r = ra > rb ? ra : rb;
+    using W = typename std::conditional<r == 0, uint16_t,
+              typename std::conditional<r == 1, uint32_t, uint64_t>::type>::type;
+    static constexpr DrakenType tag = r == 0 ? DRAKEN_UINT16 : r == 1 ? DRAKEN_UINT32 : DRAKEN_UINT64;
+};
 
-template<typename Op, typename W, DrakenType WTAG>
+template<typename Op, typename TA, typename TB>
 static inline VecResult fi_uint_arith_op(const DrakenVector& a, const DrakenVector& b) {
+    using R = FiUintResult<TA, TB>;
+    using W = typename R::W;
     const uint32_t n = a.length;
+    const TA* const ad = static_cast<const TA*>(a.data);
+    const TB* const bd = static_cast<const TB*>(b.data);
+    const uint32_t* const asel = a.selection;
+    const uint32_t* const bsel = b.selection;
     W* dst = fi_alloc<W>(n);
     u_checked_rows<Op, W>(n, dst,
-        [&](uint32_t i) { return fi_read_u64(a, i); },
-        [&](uint32_t i) { return fi_read_u64(b, i); },
+        [ad, asel](uint32_t i) { return static_cast<uint64_t>(ad[asel[i]]); },
+        [bd, bsel](uint32_t i) { return static_cast<uint64_t>(bd[bsel[i]]); },
         a.validity, b.validity);
-    return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+    return fi_make_dense<W, R::tag>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
 // All-unsigned cross-width arithmetic. add / sub / mul are overflow-checked and FAIL
 // LOUD (ops/int64_checked.h) — including a subtraction below zero and a result above
-// the result width; div / mod by zero stays 0 (separate ruling).
-template<typename W, DrakenType WTAG>
-static inline VecResult fi_uint_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
+// the result width; div / mod by zero on a live row raises.
+template<typename TA, typename TB>
+static inline VecResult fi_uint_arith_typed(int op, const DrakenVector& a, const DrakenVector& b) {
     switch (op) {
-        case 1: return fi_uint_arith_op<U64OvfAdd, W, WTAG>(a, b);
-        case 2: return fi_uint_arith_op<U64OvfSub, W, WTAG>(a, b);
-        case 3: return fi_uint_arith_op<U64OvfMul, W, WTAG>(a, b);
-        case 5: return fi_uint_arith_op<U64OvfMod, W, WTAG>(a, b);
-        case 6: return fi_uint_arith_op<U64OvfDiv, W, WTAG>(a, b);
-        default: throw std::invalid_argument("fi_uint_arith_store: unsupported op");
-    }
-}
-
-// Same-width widens by one step (mirroring fi_arith_result_tag's convention for
-// pure-signed pairs); UINT64 is the ceiling (stays UINT64, matching int64→int64).
-static inline DrakenType fi_uint_arith_result_tag(DrakenType ta, DrakenType tb) {
-    auto rank = [](DrakenType t) -> int {
-        switch (t) { case DRAKEN_UINT8: return 0; case DRAKEN_UINT16: return 1;
-                     case DRAKEN_UINT32: return 2; case DRAKEN_UINT64: return 3;
-                     default: return -1; }
-    };
-    const int r = rank(ta) > rank(tb) ? rank(ta) : rank(tb);
-    switch (r) {
-        case 0: return DRAKEN_UINT16;
-        case 1: return DRAKEN_UINT32;
-        case 2: return DRAKEN_UINT64;
-        case 3: return DRAKEN_UINT64;
-        default: throw std::invalid_argument("fi_uint_arith_result_tag: non-unsigned operand");
+        case 1: return fi_uint_arith_op<U64OvfAdd, TA, TB>(a, b);
+        case 2: return fi_uint_arith_op<U64OvfSub, TA, TB>(a, b);
+        case 3: return fi_uint_arith_op<U64OvfMul, TA, TB>(a, b);
+        case 5: return fi_uint_arith_op<U64OvfMod, TA, TB>(a, b);
+        case 6: return fi_uint_arith_op<U64OvfDiv, TA, TB>(a, b);
+        default: throw std::invalid_argument("fi_uint_arith: unsupported op");
     }
 }
 
 static inline VecResult fi_uint_arith(int op, const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("fi_uint_arith: length mismatch");
-    switch (fi_uint_arith_result_tag(a.type, b.type)) {
-        case DRAKEN_UINT16: return fi_uint_arith_store<uint16_t, DRAKEN_UINT16>(op, a, b);
-        case DRAKEN_UINT32: return fi_uint_arith_store<uint32_t, DRAKEN_UINT32>(op, a, b);
-        case DRAKEN_UINT64: return fi_uint_arith_store<uint64_t, DRAKEN_UINT64>(op, a, b);
-        default: throw std::invalid_argument("fi_uint_arith: bad result tag");
-    }
+    return fi_with_u64_operand(a.type, [&](auto ta) {
+        return fi_with_u64_operand(b.type, [&](auto tb) {
+            return fi_uint_arith_typed<typename decltype(ta)::type,
+                                       typename decltype(tb)::type>(op, a, b);
+        });
+    });
 }
 
 // ===========================================================================
@@ -981,26 +977,16 @@ static inline VecResult fixed_int_mul_scalar(const DrakenVector& a, int64_t scal
     else return fixed_int_scalar_checked<T, I64OvfMul>(a, scalar);
 }
 
+// Vector x vector DIV / MOD run the draken_binop integer loops (fi_int_arith_op /
+// fi_uint_arith_op) — one signed and one unsigned implementation, not a copy per
+// width. The OpsTable dispatches on a.type and both operands are T (as before), so
+// only the <T, T> instantiation is pulled in here; its D.6 result width equals
+// NextWider<T>.
 template<typename T>
 static inline VecResult fixed_int_div(const DrakenVector& a, const DrakenVector& b) {
-    using W = typename NextWider<T>::type;
-    constexpr DrakenType WTAG = NextWider<T>::tag;
     if (a.length != b.length) throw std::invalid_argument("fixed_int_div: length mismatch");
-    const uint32_t n = a.length;
-    const T* ad = static_cast<const T*>(a.data);
-    const T* bd = static_cast<const T*>(b.data);
-    W* dst = fi_alloc<W>(n);
-    bool any_zero = false;
-    for (uint32_t i = 0; i < n; ++i) {
-        const W bv = static_cast<W>(bd[b.selection[i]]);
-        any_zero |= (bv == W(0));
-        dst[i] = (bv == W(0)) ? W(0) : static_cast<W>(ad[a.selection[i]]) / bv;
-    }
-    div_zero_rescan(any_zero, n, [&](uint32_t i) { return bd[b.selection[i]]; },
-                    a.validity, b.validity, dst, "division",
-                    std::string(std::is_unsigned<T>::value ? "UINT" : "INT") +
-                        std::to_string(sizeof(W) * 8));
-    return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+    if constexpr (std::is_unsigned<T>::value) return fi_uint_arith_op<U64OvfDiv, T, T>(a, b);
+    else return fi_int_arith_op<I64OvfDiv, T, T>(a, b);
 }
 
 template<typename T>
@@ -1011,24 +997,9 @@ static inline VecResult fixed_int_div_scalar(const DrakenVector& a, int64_t scal
 
 template<typename T>
 static inline VecResult fixed_int_mod(const DrakenVector& a, const DrakenVector& b) {
-    using W = typename NextWider<T>::type;
-    constexpr DrakenType WTAG = NextWider<T>::tag;
     if (a.length != b.length) throw std::invalid_argument("fixed_int_mod: length mismatch");
-    const uint32_t n = a.length;
-    const T* ad = static_cast<const T*>(a.data);
-    const T* bd = static_cast<const T*>(b.data);
-    W* dst = fi_alloc<W>(n);
-    bool any_zero = false;
-    for (uint32_t i = 0; i < n; ++i) {
-        const W bv = static_cast<W>(bd[b.selection[i]]);
-        any_zero |= (bv == W(0));
-        dst[i] = (bv == W(0)) ? W(0) : static_cast<W>(ad[a.selection[i]]) % bv;
-    }
-    div_zero_rescan(any_zero, n, [&](uint32_t i) { return bd[b.selection[i]]; },
-                    a.validity, b.validity, dst, "modulo",
-                    std::string(std::is_unsigned<T>::value ? "UINT" : "INT") +
-                        std::to_string(sizeof(W) * 8));
-    return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+    if constexpr (std::is_unsigned<T>::value) return fi_uint_arith_op<U64OvfMod, T, T>(a, b);
+    else return fi_int_arith_op<I64OvfMod, T, T>(a, b);
 }
 
 template<typename T>
