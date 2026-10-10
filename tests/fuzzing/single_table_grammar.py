@@ -1267,11 +1267,6 @@ def _op_of(node: Node) -> Optional[str]:
 
 def _probe_is_generatable(probe: Node) -> bool:
     nodes = _subtree_nodes(probe)
-    # RLIKE runs only where the generator put it (top-level predicate position,
-    # at most one connective deep); re-association moves it.
-    # single_table_known_gaps/rlike-outside-top-level-predicate-position.
-    if any(_op_of(n) in ("RLIKE", "NOT RLIKE") for n in nodes):
-        return False
     for n in nodes:
         if isinstance(n, Prefix) and n.op == "NOT":
             for inner in _subtree_nodes(n.operand):
@@ -1386,11 +1381,6 @@ class Generator:
         self.relation = relation
         self.names = names
         self.tags: Set[str] = set()
-        # True while building a predicate that is an *operand* (a CASE/IIF
-        # condition) rather than a WHERE clause. RLIKE evaluates correctly as a
-        # WHERE predicate and as a bare projection, but fails inside CASE — see
-        # single_table_known_gaps/rlike-outside-top-level-predicate-position.
-        self._predicate_is_an_operand = False
 
     # ── literals ─────────────────────────────────────────────────────────────
 
@@ -1685,14 +1675,8 @@ class Generator:
                 drawn_constants[index] = constant
                 arguments.append(Atom(constant, argument_ty, _literal_binding(constant)))
             elif argument_ty is Ty.BOOLEAN:
-                # A BOOLEAN function argument is a predicate in operand
-                # position (IIF's condition), which is where RLIKE breaks.
-                was_operand = self._predicate_is_an_operand
-                self._predicate_is_an_operand = True
-                try:
-                    arguments.append(self.predicate(depth + 1))
-                finally:
-                    self._predicate_is_an_operand = was_operand
+                # A BOOLEAN function argument is a predicate (IIF's condition).
+                arguments.append(self.predicate(depth + 1))
             else:
                 arguments.append(
                     self._function_argument(overload.name, param, index, argument_ty, depth)
@@ -1981,12 +1965,7 @@ class Generator:
         # projecting only `arr_str`, whose outer projection falls back to INTEGER.
         if not self.can_produce(Ty.BOOLEAN):
             return None
-        was_operand = self._predicate_is_an_operand
-        self._predicate_is_an_operand = True
-        try:
-            condition = self.predicate(depth + 1)
-        finally:
-            self._predicate_is_an_operand = was_operand
+        condition = self.predicate(depth + 1)
         # A temporal-returning FUNCTION CALL in a CASE branch has no native
         # implementation ("a function call in `IF_THEN_ELSE(...)`"), though the
         # same call outside a CASE is fine and numeric/string calls inside one
@@ -2175,12 +2154,7 @@ class Generator:
         binary = self.relation.of(Ty.VARBINARY)
         if not text and not binary:
             return None
-        # RLIKE evaluates correctly only as the whole predicate or as a direct
-        # child of one connective; nested any deeper — or in operand position
-        # inside CASE/IIF — it fails at execution with err_op=15. See
-        # single_table_known_gaps/rlike-outside-top-level-predicate-position.
-        rlike_ok = not self._predicate_is_an_operand and depth <= 1
-        if text and rlike_ok and rng.random() < 0.2:
+        if text and rng.random() < 0.2:
             self.tags.add("rlike")
             operator = rng.choice(("RLIKE", "NOT RLIKE") if negated else ("RLIKE",))
             pattern = "'" + rng.choice(("^a", "[aeiou]", "z$", "[0-9]")) + "'"
@@ -2240,21 +2214,13 @@ class Generator:
             self._null_predicate,
             self._boolean_column_predicate,
         ]
-        # These three cannot emit RLIKE today, but a CASE condition IS operand
-        # position, so it carries the same flag every other CASE/IIF condition
-        # carries — the guard belongs to the position, not to today's builders.
         conditions: List[Node] = []
-        was_operand = self._predicate_is_an_operand
-        self._predicate_is_an_operand = True
-        try:
-            for builder in rng.sample(condition_builders, len(condition_builders)):
-                built = builder(depth + 1, negated)
-                if built is not None:
-                    conditions.append(built)
-                if len(conditions) == rng.randint(1, 3):
-                    break
-        finally:
-            self._predicate_is_an_operand = was_operand
+        for builder in rng.sample(condition_builders, len(condition_builders)):
+            built = builder(depth + 1, negated)
+            if built is not None:
+                conditions.append(built)
+            if len(conditions) == rng.randint(1, 3):
+                break
         if not conditions:
             return None
         self.tags.add("case_predicate")

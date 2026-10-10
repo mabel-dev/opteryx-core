@@ -5479,6 +5479,16 @@ class _Compiler:
             semi_emit = _live_positions(playout, live)
             if len(semi_emit) == len(playout):
                 semi_emit = None
+        # "Emit everything" emits the probe STREAM, and a cross-type key widened that
+        # stream: _coerce_join_keys appended its CAST column(s) after the leg's real
+        # columns, past the end of `playout`. Emitted, the CAST rode out under no
+        # identity, and the next operator's first computed column — placed at
+        # index len(playout) by the layout — physically read it: `SELECT r0.year,
+        # (r0.gender > 'syny') AS f ... LEFT ANTI JOIN ... ON r0.year = r1.radius`
+        # answered f = 2004.0, the year cast to DOUBLE. Narrow back to the leg's own
+        # columns whenever the stream is wider than the layout.
+        if mode in semi_anti_modes and semi_emit is None and len(pkeyout) != len(playout):
+            semi_emit = list(range(len(playout)))
         semi_layout = list(playout) if semi_emit is None \
             else [playout[i] for i in semi_emit]
         if filter_residual is not None:

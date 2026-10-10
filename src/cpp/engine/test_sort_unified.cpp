@@ -5,7 +5,7 @@
 //
 // Build & run:
 //   g++ -O2 -std=c++20 -I. -Idraken -Idraken/core -Isrc/cpp -Ithird_party/cyan4973 \
-//       -pthread src/cpp/engine/test_sort_unified.cpp draken/core/vector_alloc.cpp \
+//       -pthread src/cpp/engine/test_sort_unified.cpp draken/core/vector_alloc.cpp draken/core/mem_account.cpp \
 //       -o /tmp/test_sort_unified && /tmp/test_sort_unified
 //
 // What it proves:
@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <numeric>
@@ -33,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "core/mem_account.h"
 #include "morsels/sort.hpp"
 
 static int g_checks = 0;
@@ -607,6 +609,306 @@ static void test_unsupported_key_fails_loud() {
     CHECK(sort_key_type_supported(DRAKEN_VARCHAR), "VARCHAR must be a sortable key");
 }
 
+// The radix full sort (radix_sort_perm, reached through sort_perm for AoS keys with
+// n >= SORT_RADIX_MIN) must land on EXACTLY std::stable_sort's permutation under the
+// general comparator — over both of its routes (packed key|index when the key bits fit
+// beside the index, carried index otherwise), the folded and the separate NULL-rank
+// pass, every direction x null-placement pair, and a non-identity starting perm (ties
+// must keep THAT order, not row-id order). Each case also runs radix_sort_perm
+// directly, so already-ordered input still exercises the radix rather than stopping
+// at the census.
+static std::vector<int64_t> radix_case_values(std::mt19937_64& rng, size_t n, int range) {
+    std::vector<int64_t> v(n);
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t r = rng();
+        switch (range) {
+            case 0: v[i] = static_cast<int64_t>(r % 7) - 3; break;             // ties
+            case 1: v[i] = static_cast<int64_t>(r % 1000003); break;           // ~20 bits
+            case 2: v[i] = static_cast<int64_t>(r >> 34); break;               // 30 bits
+            case 3: v[i] = static_cast<int64_t>(r); break;                     // all 64
+            case 4: v[i] = (r & 1) ? INT64_MIN + static_cast<int64_t>(r % 3)
+                                   : INT64_MAX - static_cast<int64_t>(r % 3); break;
+            default: v[i] = 42; break;                                         // constant
+        }
+    }
+    return v;
+}
+
+template <int NP>
+static std::vector<uint32_t> radix_direct(const std::vector<SortKeyColumn>& keys,
+                                          const std::vector<uint32_t>& start) {
+    std::vector<RowKeyN<NP>> rows;
+    std::vector<uint8_t> masks;
+    std::array<bool, NP> nf{};
+    build_aos_keys<NP>(keys, start.size(), rows, masks, nf);
+    std::vector<uint32_t> perm = start;
+    radix_sort_perm<NP>(rows.data(), masks.data(), nf, perm, kSortThreads);
+    return perm;
+}
+
+static std::vector<uint32_t> radix_direct_any(const std::vector<SortKeyColumn>& keys,
+                                              const std::vector<uint32_t>& start) {
+    switch (keys.size()) {
+        case 1: return radix_direct<1>(keys, start);
+        case 2: return radix_direct<2>(keys, start);
+        case 3: return radix_direct<3>(keys, start);
+        default: return radix_direct<4>(keys, start);
+    }
+}
+
+static void test_radix_matches_stable_sort() {
+    std::mt19937_64 rng(2026);
+    int cases = 0;
+    for (size_t n : {size_t(SORT_RADIX_MIN), size_t(5003), size_t(300000)}) {
+        for (int nparts = 1; nparts <= 4; ++nparts) {
+            for (int trial = 0; trial < 8; ++trial) {
+                std::vector<CxxColumn> cols;
+                std::vector<SortKeySpec> spec;
+                for (int k = 0; k < nparts; ++k) {
+                    const int range = static_cast<int>((rng() % 6));
+                    const int null_pct = (trial % 4 == 0) ? 0 : (trial % 4 == 3 ? 100 : 20);
+                    std::vector<int64_t> vals = radix_case_values(rng, n, range);
+                    std::vector<bool> valid(n, true);
+                    for (size_t i = 0; i < n; ++i)
+                        if (null_pct && static_cast<int>(rng() % 100) < null_pct) valid[i] = false;
+                    if (k == 1 && trial % 2 == 1) {
+                        // a FLOAT column: NaN, +-0.0, +-inf, negatives
+                        std::vector<double> f(n);
+                        for (size_t i = 0; i < n; ++i) {
+                            switch (rng() % 6) {
+                                case 0: f[i] = std::nan(""); break;
+                                case 1: f[i] = (rng() & 1) ? -0.0 : 0.0; break;
+                                case 2: f[i] = (rng() & 1) ? -INFINITY : INFINITY; break;
+                                default: f[i] = static_cast<double>(static_cast<int64_t>(rng() % 2001) - 1000) / 8.0;
+                            }
+                        }
+                        cols.push_back(col_f64(f, valid));
+                    } else {
+                        cols.push_back(col_i64(vals, valid));
+                    }
+                    spec.push_back({static_cast<size_t>(k), (k + trial) % 2 == 0,
+                                    (k + trial / 2) % 2 == 0});
+                }
+                std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+                auto keys = keys_of(ms, spec, n);
+
+                for (int order = 0; order < 3; ++order) {
+                    // 0: identity start; 1: shuffled start; 2: start = the sorted order
+                    std::vector<uint32_t> start(n);
+                    std::iota(start.begin(), start.end(), 0u);
+                    if (order == 1) std::shuffle(start.begin(), start.end(), rng);
+                    if (order == 2) std::stable_sort(start.begin(), start.end(), SortKeyCmp{keys});
+                    std::vector<uint32_t> ref = start;
+                    std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+
+                    std::vector<uint32_t> via = start;
+                    sort_perm(keys, via, SIZE_MAX, kSortThreads);
+                    CHECK(via == ref, "sort_perm (radix route) != std::stable_sort");
+                    CHECK(radix_direct_any(keys, start) == ref,
+                          "radix_sort_perm != std::stable_sort");
+                    ++cases;
+                }
+            }
+        }
+    }
+    std::printf("  radix vs stable_sort: %d cases\n", cases);
+}
+
+// The run census must agree with vergesort's own verdict on the shapes it decides:
+// sorted, reversed, k sorted runs, and random — and the full sort still lands on the
+// stable order in each (this is what exercises the census-skip and vergesort-merge
+// routes of sort_perm_full on the comparator path, which the radix test bypasses).
+static void test_run_census_routes() {
+    std::mt19937_64 rng(77);
+    const size_t n = 200000;
+    for (int shape = 0; shape < 6; ++shape) {
+        std::vector<int64_t> vals(n);
+        for (size_t i = 0; i < n; ++i) {
+            switch (shape) {
+                case 0: vals[i] = static_cast<int64_t>(i / 3); break;               // sorted, ties
+                case 1: vals[i] = static_cast<int64_t>(n - i); break;               // strictly reversed
+                case 2: vals[i] = static_cast<int64_t>((i % (n / 8)) / 2); break;   // 8 sorted runs
+                case 3: vals[i] = static_cast<int64_t>((i % (n / 40))); break;      // 40 runs
+                case 4: vals[i] = static_cast<int64_t>((n - i) / 3); break;         // reversed, ties
+                default: vals[i] = static_cast<int64_t>(rng() % 1000); break;       // random
+            }
+        }
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_i64(vals, std::vector<bool>(n, true)));
+        std::vector<SortKeySpec> spec{{0, true, true}};
+        std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+        auto keys = keys_of(ms, spec, n);
+        std::vector<uint32_t> ref(n);
+        std::iota(ref.begin(), ref.end(), 0u);
+        std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+        CHECK(sort_via_dispatch(keys, n, SIZE_MAX) == ref, "census route: AoS dispatch != stable_sort");
+        CHECK(sort_via_generic(keys, n, SIZE_MAX) == ref, "census route: comparator path != stable_sort");
+
+        std::vector<uint32_t> id(n);
+        std::iota(id.begin(), id.end(), 0u);
+        SortRunCensus c = sort_run_census(SortKeyCmp{keys}, id.data(), n, kSortThreads,
+                                          SORT_VERGESORT_THRESHOLD);
+        if (shape == 0) CHECK(c.descents == 0, "sorted input must census to zero descents");
+        else CHECK(c.descents > 0, "unsorted input must census to some descent");
+        if (shape <= 2) CHECK(!sort_census_declines(c, SORT_VERGESORT_THRESHOLD), "census declined a shape vergesort takes");
+        // Soundness at every threshold either fallback uses: vergesort's own verdict
+        // on a copy must be "decline" whenever the census says so.
+        for (uint32_t th : {1u, 2u, 4u, SORT_VERGESORT_THRESHOLD}) {
+            SortRunCensus ct = sort_run_census(SortKeyCmp{keys}, id.data(), n, kSortThreads, th);
+            std::vector<uint32_t> p = id;
+            std::unique_ptr<uint32_t[]> tmp(new uint32_t[n]);
+            uint32_t runs[SORT_VERGESORT_THRESHOLD + 3];
+            bool vg = vergesort_generic(p.data(), tmp.get(), SortKeyCmp{keys}, n, th, runs);
+            if (sort_census_declines(ct, th)) CHECK(!vg, "census declined but vergesort would take it");
+        }
+    }
+}
+
+// The radix scratch is charged to the process memory account while it is live and
+// fully released afterwards: peak rises by at least the two key buffers of the
+// carried-index route (full-range int64 keys cannot pack), charged returns to where
+// it started. Proves the TrackedUninitAllocator actually reaches the account.
+static void test_radix_scratch_is_charged() {
+    const size_t n = 300000;
+    std::mt19937_64 rng(5);
+    std::vector<int64_t> vals(n);
+    for (size_t i = 0; i < n; ++i) vals[i] = static_cast<int64_t>(rng());
+    std::vector<CxxColumn> cols;
+    cols.push_back(col_i64(vals, std::vector<bool>(n, true)));
+    std::vector<SortKeySpec> spec{{0, true, true}};
+    std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+    auto keys = keys_of(ms, spec, n);
+    std::vector<uint32_t> start(n);
+    std::iota(start.begin(), start.end(), 0u);
+
+    const int64_t before = draken_mem_charged();
+    draken_mem_reset_peak();
+    std::vector<uint32_t> got = radix_direct<1>(keys, start);
+    const int64_t peak = draken_mem_peak();
+    CHECK(draken_mem_charged() == before, "radix scratch not fully uncharged");
+    CHECK(peak - before >= static_cast<int64_t>(2 * n * sizeof(uint64_t)),
+          "radix scratch not charged to the memory account");
+    std::vector<uint32_t> ref = start;
+    std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+    CHECK(got == ref, "radix_sort_perm != std::stable_sort (charged run)");
+}
+
+// A wide radix team (16) takes the narrowest vergesort threshold (1): K=2 and K=4
+// sorted runs go to the radix, a single reversed run stays with vergesort — and every
+// route still lands on std::stable_sort's permutation.
+static void test_wide_team_threshold_routes() {
+    CHECK(sort_vergesort_radix_threshold(1) == 4 && sort_vergesort_radix_threshold(4) == 4 &&
+          sort_vergesort_radix_threshold(6) == 2 && sort_vergesort_radix_threshold(8) == 2 &&
+          sort_vergesort_radix_threshold(16) == 1, "radix vergesort threshold rule");
+    const size_t n = 16 * SORT_TEAM_ROWS_PER_THREAD + 7;   // team width 16
+    std::mt19937_64 rng(31);
+    for (int shape = 0; shape < 4; ++shape) {
+        std::vector<int64_t> vals(n);
+        const size_t runs = shape == 0 ? 2 : (shape == 1 ? 4 : 1);
+        for (size_t i = 0; i < n; ++i) vals[i] = static_cast<int64_t>(rng() % 50000);
+        if (shape <= 1) {
+            size_t chunk = (n + runs - 1) / runs;
+            for (size_t s0 = 0; s0 < n; s0 += chunk)
+                std::sort(vals.begin() + s0, vals.begin() + std::min(n, s0 + chunk));
+        } else if (shape == 2) {
+            for (size_t i = 0; i < n; ++i) vals[i] = static_cast<int64_t>(n - i);   // one reversed run
+        }   // shape 3: random
+        std::vector<bool> valid(n, true);
+        for (size_t i = 0; i < n; i += 13) valid[i] = false;
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_i64(vals, valid));
+        std::vector<SortKeySpec> spec{{0, shape % 2 == 0, true}};
+        std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+        auto keys = keys_of(ms, spec, n);
+        std::vector<uint32_t> ref(n);
+        std::iota(ref.begin(), ref.end(), 0u);
+        std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+        std::vector<uint32_t> via(n);
+        std::iota(via.begin(), via.end(), 0u);
+        sort_perm(keys, via, SIZE_MAX, 16u);
+        CHECK(via == ref, "wide-team sort_perm != std::stable_sort");
+    }
+}
+
+// The census-rebuilt stage 1 (sort_census_runs + reverse + merge) must be EXACTLY
+// vergesort_generic: same accept/decline verdict and, when accepted, the identical
+// permutation — over ascending runs with ties, strictly descending runs, alternating
+// asc/desc runs, uneven run lengths (transitions land on census range boundaries),
+// and random input, at every threshold the engine uses.
+static void test_census_runs_match_vergesort() {
+    std::mt19937_64 rng(404);
+    const size_t n = 300007;   // team width 4: probe + four census ranges
+    int accepted = 0, declined = 0;
+    for (int trial = 0; trial < 120; ++trial) {
+        const int shape = trial % 6;
+        const size_t K = 1 + static_cast<size_t>(rng() % 20);
+        // run boundaries: equal (shapes 0-3) or random lengths (shapes 4-5)
+        std::vector<size_t> cut{0};
+        for (size_t r = 1; r < K; ++r)
+            cut.push_back(shape >= 4 ? 1 + rng() % (n - 1) : r * n / K);
+        cut.push_back(n);
+        std::sort(cut.begin(), cut.end());
+        cut.erase(std::unique(cut.begin(), cut.end()), cut.end());
+        std::vector<int64_t> vals(n);
+        for (size_t i = 0; i < n; ++i) vals[i] = static_cast<int64_t>(rng() % (shape == 0 ? 50 : 1000000));
+        for (size_t r = 0; r + 1 < cut.size(); ++r) {
+            auto b = vals.begin() + static_cast<ptrdiff_t>(cut[r]);
+            auto e = vals.begin() + static_cast<ptrdiff_t>(cut[r + 1]);
+            const bool desc = shape == 1 || (shape == 2 && r % 2 == 1) || (shape == 4 && (rng() & 1));
+            if (shape == 5) continue;   // random: no runs imposed
+            if (desc) {
+                // strictly descending: distinct values (vergesort's desc runs are strict)
+                int64_t v = static_cast<int64_t>(5000000 + rng() % 1000);
+                for (auto it = b; it != e; ++it) *it = v--;
+            } else {
+                std::sort(b, e);
+            }
+        }
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_i64(vals, std::vector<bool>(n, true)));
+        std::vector<SortKeySpec> spec{{0, true, true}};
+        std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+        auto keys = keys_of(ms, spec, n);
+        SortKeyCmp cmp{keys};
+        for (uint32_t th : {1u, 2u, 4u, SORT_VERGESORT_THRESHOLD}) {
+            std::vector<uint32_t> id(n);
+            std::iota(id.begin(), id.end(), 0u);
+            std::vector<uint32_t> vg = id;
+            std::unique_ptr<uint32_t[]> tmp(new uint32_t[n]);
+            uint32_t vruns[SORT_VERGESORT_THRESHOLD + 3];
+            const bool vg_ok = vergesort_generic(vg.data(), tmp.get(), cmp, n, th, vruns);
+
+            SortRunCensus c = sort_run_census(cmp, id.data(), n, 4u, th);
+            bool cs_ok = false;
+            std::vector<uint32_t> cs = id;
+            if (c.descents == 0) {
+                cs_ok = true;   // identity
+            } else if (!sort_census_declines(c, th)) {
+                uint32_t runs[SORT_VERGESORT_THRESHOLD + 1];
+                bool rd[SORT_VERGESORT_THRESHOLD];
+                uint32_t nr = 0;
+                cs_ok = sort_census_runs(c, n, th, runs, rd, nr);
+                if (cs_ok) {
+                    for (uint32_t r = 0; r < nr; ++r)
+                        if (rd[r]) std::reverse(cs.begin() + runs[r], cs.begin() + runs[r + 1]);
+                    if (nr > 1) _vgs_merge_runs_cmp(cs.data(), tmp.get(), cmp, runs, nr,
+                                                    static_cast<uint32_t>(n));
+                }
+            }
+            CHECK(cs_ok == vg_ok, "census-rebuilt runs: accept/decline differs from vergesort");
+            if (vg_ok) CHECK(cs == vg, "census-rebuilt runs: permutation differs from vergesort");
+            (vg_ok ? accepted : declined)++;
+        }
+        // and the public route lands on the stable order whichever stage takes it
+        std::vector<uint32_t> ref(n);
+        std::iota(ref.begin(), ref.end(), 0u);
+        std::stable_sort(ref.begin(), ref.end(), cmp);
+        CHECK(sort_via_dispatch(keys, n, SIZE_MAX) == ref, "census route (AoS) != stable_sort");
+        CHECK(sort_via_generic(keys, n, SIZE_MAX) == ref, "census route (generic) != stable_sort");
+    }
+    std::printf("  census runs vs vergesort: %d accepted, %d declined\n", accepted, declined);
+}
+
 int main() {
     test_aos_matches_generic();
     test_matches_independent_reference();
@@ -621,6 +923,11 @@ int main() {
     test_sort_morsels_across_morsels();
     test_aos_gate_does_not_change_the_answer();
     test_unsupported_key_fails_loud();
+    test_radix_matches_stable_sort();
+    test_run_census_routes();
+    test_radix_scratch_is_charged();
+    test_wide_team_threshold_routes();
+    test_census_runs_match_vergesort();
     std::printf("test_sort_unified: all %d checks passed\n", g_checks);
     return 0;
 }

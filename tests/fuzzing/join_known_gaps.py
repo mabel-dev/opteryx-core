@@ -123,30 +123,10 @@ REGISTER: List[RegisteredDefect] = [
             "Pinned by test_wrong_answer_asof_tie_breaking_is_still_unstable."
         ),
     ),
-    RegisteredDefect(
-        id="asof-using-an-array-key-drops-every-row",
-        repro=(
-            "SELECT COUNT(*) FROM testdata.fuzzing.mixed AS a ASOF JOIN "
-            "testdata.fuzzing.mixed AS b MATCH_CONDITION(a.i_null <= b.d_null) "
-            "USING (arr_str)"
-        ),
-        error_type="WrongAnswer",
-        signature="",
-        detail=(
-            "`USING` bypasses the type check `ON` applies, so an ARRAY equi key is "
-            "refused one way and silently wrong the other:\n"
-            "  ON a.arr_str = b.arr_str        -> IncorrectTypeError   (correct)\n"
-            "  USING (arr_str)                 -> 0 rows               (WRONG)\n"
-            "  USING (i_group)                 -> 2000 rows            (correct)\n"
-            "  no USING                        -> 2000 rows            (correct)\n"
-            "ASOF is LEFT semantics — every left row is emitted exactly once, matched "
-            "or not — so 0 rows from a 2,000-row left relation is not a partitioning "
-            "that found nothing, it is every row dropped.\n"
-            "Found by the asof_left_semantics oracle. The generator declines ARRAY as "
-            "a USING key (_make_leg), naming this entry.\n"
-            "Pinned by test_wrong_answer_asof_using_an_array_key_still_drops_every_row."
-        ),
-    ),
+    # `asof-using-an-array-key-drops-every-row` was registered here. CLOSED by
+    # removing the syntax: ASOF takes its equality keys in ON (architect,
+    # 2026-10-10), where an ARRAY key is refused by the type check, and
+    # `ASOF ... USING` is refused outright.
     # ─────────────────────────────────────────────────────────────────────────
     # RATIFIED REFUSALS — pinned so they are asserted rather than assumed, and go
     # red if someone implements them without telling the fuzzer.

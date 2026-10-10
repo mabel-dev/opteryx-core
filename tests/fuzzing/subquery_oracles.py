@@ -365,16 +365,6 @@ def applicable_oracles(case: SubqueryCase) -> List[Oracle]:
 
     if case.form == "not_in":
         oracles.append(not_in_null_semantics)
-    elif case.form == "corr_scalar" and case.aggregate == "COUNT":
-        # A correlated COUNT over an empty correlation group must be 0, and the
-        # engine decorrelates it with an INNER join, so the outer row is dropped
-        # instead. The join rewrite is RIGHT and the engine is WRONG, so this
-        # oracle would fail every time on a defect that is already registered.
-        # See subquery_known_gaps/correlated-scalar-subquery-drops-unmatched-outer-rows.
-        #
-        # The exclusion is structural — a query SHAPE, not an error message —
-        # and it disappears with the register entry.
-        pass
     else:
         oracles.append(subquery_matches_join_rewrite)
 

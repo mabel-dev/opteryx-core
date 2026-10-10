@@ -3093,8 +3093,19 @@ def nested(branch, alias: Optional[List[str]] = None, key=None, *, plan_context)
     # a name containing quotes and parentheses, so the column was unaddressable
     # downstream, and CREATE TABLE/MATERIALIZED VIEW baked that text into the
     # stored schema.
+    #
+    # Stacked parentheses collapse to ONE wrapper. `((p))` means exactly `(p)`,
+    # and generated SQL adds redundant pairs freely, but passes that look through
+    # a NESTED look through one level: boolean simplification's NOT rules strip a
+    # single wrapper, so `NOT ((x = ANY(arr)))` skipped the inversion that
+    # `NOT (x = ANY(arr))` takes and planned differently. An inner wrapper never
+    # carries an alias (aliases arrive on the outermost select item), but one that
+    # did would be kept.
+    centre = build(branch, plan_context=plan_context)
+    while centre.node_type == NodeType.NESTED and centre.alias is None:
+        centre = centre.centre
     return Nested(
-        centre=build(branch, plan_context=plan_context),
+        centre=centre,
         alias=alias,
         arena=plan_context.expressions,
     )

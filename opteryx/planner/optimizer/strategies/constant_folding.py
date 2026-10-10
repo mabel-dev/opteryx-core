@@ -299,28 +299,6 @@ _EXACT_ARITHMETIC = {
 }
 
 
-def _compile_rlike_patterns(node, telemetry: QueryTelemetry, *, plan_context):
-    """Compile the pattern of every RLIKE / NOT RLIKE in `node`'s subtree, bottom up.
-
-    The draken RLIKE kernel accepts only a pre-compiled DFA blob as its pattern;
-    PredicateRewriteStrategy compiles it, but runs AFTER constant folding. An
-    all-literal `'apple' RLIKE 'a.ple'` therefore reached the VM with raw regex
-    text and failed with "malformed compiled DFA blob". Same shape of problem, and
-    same remedy, as _desugar_rewrite_only: apply the rewrite here, anywhere in the
-    subtree about to be evaluated, using the one compiler the filter path uses.
-    """
-    from .predicate_rewriter import _rewrite_rlike_to_dfa
-
-    node = rewrite_children(
-        node,
-        lambda child: _compile_rlike_patterns(child, telemetry, plan_context=plan_context),
-        share=True,
-    )
-    if node.node_type == NodeType.COMPARISON_OPERATOR and node.value in ("RLike", "NotRLike"):
-        return _rewrite_rlike_to_dfa(node, telemetry, plan_context=plan_context)
-    return node
-
-
 def _fold_exact_literal_arithmetic(root, telemetry: QueryTelemetry, *, plan_context):
     """Fold `literal <op> literal` for float literals in exact decimal arithmetic.
 
@@ -694,10 +672,6 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         rewritten = _desugar_rewrite_only(root, telemetry, plan_context=plan_context)
         if rewritten is not root:
             return fold_constants(rewritten, telemetry, plan_context=plan_context)
-
-        compiled = _compile_rlike_patterns(root, telemetry, plan_context=plan_context)
-        if compiled is not root:
-            return fold_constants(compiled, telemetry, plan_context=plan_context)
 
         exact = _fold_exact_literal_arithmetic(root, telemetry, plan_context=plan_context)
         if exact is not None:

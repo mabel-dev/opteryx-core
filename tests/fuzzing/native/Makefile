@@ -111,12 +111,37 @@ TEXT_INC   := -I$(ROOT)/rugo/src $(DRAKEN_INC) -I$(ROOT)/third_party/fastfloat \
 JSONL_SRCS := $(filter-out %/column_builder.cpp,$(wildcard $(ROOT)/rugo/src/jsonl/core/*.cpp))
 CSV_SRCS   := $(filter-out %/csv_column_builder.cpp,$(wildcard $(ROOT)/rugo/src/csv/core/*.cpp))
 
+# --- rugo avro ----------------------------------------------------------------
+# All of it is pure C++ (the Python edge is _avro_column_wrap.cpp, excluded). The
+# reader resolves yyjson and mabel base64 from draken_native and ryu from the
+# rugo_native text casts in the wheel; here they are compiled in.
+AVRO_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/avro $(DRAKEN_INC) -I$(ZSTD_DIR) \
+             -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
+             -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/yyjson/src \
+             -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu
+AVRO_SRCS := $(ROOT)/rugo/src/avro/avro_schema.cpp \
+             $(ROOT)/rugo/src/avro/avro_container.cpp \
+             $(ROOT)/rugo/src/avro/avro_reader.cpp \
+             $(ROOT)/draken/core/mem_account.cpp \
+             $(ROOT)/third_party/snappy/snappy.cc \
+             $(ROOT)/third_party/snappy/snappy-sinksource.cc \
+             $(ROOT)/third_party/snappy/snappy-stubs-internal.cc \
+             $(ROOT)/third_party/miniz/miniz_tinfl.cpp \
+             $(ZSTD_SRCS)
+# C sources: compiled as C (clang++ would compile a .c as C++, which these are not).
+AVRO_CSRCS := $(ROOT)/third_party/yyjson/src/yyjson.c \
+              $(wildcard $(ROOT)/third_party/mabel/base64/*.c) \
+              $(ROOT)/third_party/ulfjack/ryu/d2s.c \
+              $(ROOT)/third_party/ulfjack/ryu/f2s.c \
+              $(ROOT)/third_party/ulfjack/ryu/d2fixed.c
+CC ?= clang
+
 # Overridable so a release pipeline gates on its OWN parsers and nothing else:
 # skene's floor should not go red because a Parquet corpus input regressed, and
 # rugo's should not go red because a .skene one did.
 #   make replay TARGETS=skene
 #   make replay TARGETS="parquet jsonl csv"
-TARGETS ?= skene parquet jsonl csv
+TARGETS ?= skene parquet jsonl csv avro
 
 # Rebuild when the code under test changes, not only when a harness does.
 # Without these a developer edits skene/reader.cpp, runs `make fuzz-native`, and
@@ -128,6 +153,7 @@ SKENE_DEPS   := $(SKENE_SRCS) $(wildcard $(ROOT)/skene/include/skene/*.h) \
 PARQUET_DEPS := $(PARQUET_SRCS) $(wildcard $(ROOT)/rugo/src/parquet/*.hpp)
 JSONL_DEPS   := $(JSONL_SRCS) $(wildcard $(ROOT)/rugo/src/jsonl/core/*.hpp)
 CSV_DEPS     := $(CSV_SRCS) $(wildcard $(ROOT)/rugo/src/csv/core/*.hpp)
+AVRO_DEPS    := $(filter-out %.S,$(AVRO_SRCS)) $(AVRO_CSRCS) $(wildcard $(ROOT)/rugo/src/avro/*.hpp)
 
 .PHONY: all replay fuzz run clean check-fuzzer corpus-dirs
 
@@ -150,6 +176,13 @@ $(BUILD)/jsonl_replay: fuzz_jsonl.cpp replay_main.cpp $(JSONL_DEPS) | $(BUILD)
 
 $(BUILD)/csv_replay: fuzz_csv.cpp replay_main.cpp $(CSV_DEPS) | $(BUILD)
 	$(CXX) $(BASE) $(TEXT_INC) fuzz_csv.cpp replay_main.cpp $(CSV_SRCS) -o $@
+
+AVRO_COBJS = @mkdir -p $(BUILD)/avro_c && for f in $(AVRO_CSRCS); do \
+	  $(CC) -std=c11 $(OPT) -g $(SAN) -w $(AVRO_INC) -c $$f -o $(BUILD)/avro_c/$$(basename $$f .c).o || exit 1; done
+
+$(BUILD)/avro_replay: fuzz_avro.cpp replay_main.cpp $(AVRO_DEPS) | $(BUILD)
+	$(AVRO_COBJS)
+	$(CXX) $(BASE) $(AVRO_INC) fuzz_avro.cpp replay_main.cpp $(AVRO_SRCS) $(BUILD)/avro_c/*.o -o $@
 
 REPLAY_BINS := $(addprefix $(BUILD)/,$(addsuffix _replay,$(TARGETS)))
 
@@ -193,6 +226,10 @@ $(BUILD)/jsonl_fuzz: fuzz_jsonl.cpp $(JSONL_DEPS) | $(BUILD)
 
 $(BUILD)/csv_fuzz: fuzz_csv.cpp $(CSV_DEPS) | $(BUILD)
 	$(CXX) $(BASE) -fsanitize=fuzzer $(TEXT_INC) $< $(CSV_SRCS) -o $@
+
+$(BUILD)/avro_fuzz: fuzz_avro.cpp $(AVRO_DEPS) | $(BUILD)
+	$(AVRO_COBJS)
+	$(CXX) $(BASE) -fsanitize=fuzzer $(AVRO_INC) $< $(AVRO_SRCS) $(BUILD)/avro_c/*.o -o $@
 
 FUZZ_BINS := $(addprefix $(BUILD)/,$(addsuffix _fuzz,$(TARGETS)))
 

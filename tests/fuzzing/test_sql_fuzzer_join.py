@@ -14,7 +14,7 @@ WHAT IS GENERATED
 * Equi ON conditions of one or more conjuncts, plus NON-EQUALITY (theta) conjuncts
   on INNER — the only join type that supports one.
 * ASOF `MATCH_CONDITION(a.x <op> b.y)` over all four operators, with an optional
-  `USING` equi-partition.
+  `ON` equi-partition (ASOF refuses USING).
 * Join keys across every admissible type family INCLUDING BOOLEAN and VARBINARY,
   and deliberately cross-type (`INTEGER = FLOAT`, `DATE = TIMESTAMP`).
 
@@ -346,7 +346,7 @@ class JoinLeg:
 
     join_type: str
     relation: Relation
-    #: Rendered equality conjuncts. For ASOF these are the USING key names instead.
+    #: Rendered equality conjuncts. For ASOF they are the optional ON partition.
     equi: Tuple[str, ...]
     #: Rendered NON-equality conjuncts. Only ever populated for an INNER join — see
     #: the architect ruling recorded on `generate_join`.
@@ -387,9 +387,9 @@ class JoinLeg:
         if self.is_asof:
             rendered = f"ASOF JOIN {self.relation.ref} MATCH_CONDITION({self.match_condition})"
             if equi:
-                # ASOF's equi-partition. `USING (key)` must follow MATCH_CONDITION —
-                # the parser rejects the other order.
-                rendered += f" USING ({', '.join(equi)})"
+                # ASOF's equi-partition. `ON` must follow MATCH_CONDITION — the
+                # parser rejects the other order.
+                rendered += f" ON {' AND '.join(equi)}"
             return rendered
         return f"{join_type} {self.relation.ref} ON {' AND '.join(equi + theta)}"
 
@@ -548,30 +548,13 @@ def _make_leg(join_type: str, left_rel: Relation, right_rel: Relation,
             return None
         left_column, right_column = pair
         operator = random.choice([">=", ">", "<=", "<"])
-        # ASOF's optional equi-partition is `USING (name)`, which needs a column of
-        # that NAME in both relations — guaranteed for a self-join, chancy otherwise,
-        # so it is only offered where it exists.
-        # The USING partition is an equi key, so it takes the same exclusions any
-        # other join key does — the NaN one, and ARRAY.
-        #
-        # ARRAY matters here beyond "we do not join on arrays": `ON a.arr = b.arr` is
-        # correctly REFUSED (IncorrectTypeError), but `USING (arr)` is ACCEPTED and
-        # returns ZERO rows from an ASOF whose LEFT semantics require |left| — see
-        # join_known_gaps/asof-using-an-array-key-drops-every-row. The exclusion
-        # disappears with that entry.
-        def keyable(relation):
-            return {
-                column.name
-                for column in relation.key_fields
-                if column.category not in _UNJOINABLE
-            }
-
-        shared = sorted(keyable(left_rel) & keyable(right_rel))
-        using: Tuple[str, ...] = ()
-        if shared and random.random() < 0.4:
-            using = (random.choice(shared),)
+        # ASOF's optional equi-partition is an ON clause (USING is refused for
+        # ASOF), built exactly as any other join's equi keys are.
+        partition: Tuple[str, ...] = ()
+        if random.random() < 0.4:
+            partition = _equi_conjuncts(left_rel, right_rel)
         return JoinLeg(
-            join_type, right_rel, using, (),
+            join_type, right_rel, partition, (),
             match_left=left_rel.qualified(left_column),
             match_operator=operator,
             match_right=right_rel.qualified(right_column),
@@ -902,7 +885,7 @@ def check_asof_matches_are_reachable(spec: JoinSpec) -> None:
     NOT the same check as `check_asof_left_semantics`, which counts EMITTED rows;
     this one counts MATCHED ones, and an unmatched row is emitted too.
 
-    Only run without USING: an equi-partition makes reachability a per-partition
+    Only run without an ON partition: it makes reachability a per-partition
     question, and the aggregate form would have to repeat the partition key — a
     second thing to get wrong rather than an independent check.
     """
@@ -1683,32 +1666,3 @@ def test_wrong_answer_asof_tie_breaking_is_still_unstable():
         "`asof-tie-breaking-is-not-deterministic` register entry, and the ASOF "
         "exclusion in _applicable_oracles()."
     )
-
-
-def test_wrong_answer_asof_using_an_array_key_still_drops_every_row():
-    """Pins join_known_gaps/asof-using-an-array-key-drops-every-row.
-
-    Asserts the WRONG count. When `USING (<array>)` either refuses or partitions
-    properly this goes red, and the fix is to delete this test, the register entry,
-    and the ARRAY exclusion in `_make_leg`'s USING selection.
-    """
-    relation = "testdata.fuzzing.mixed"
-    match = "MATCH_CONDITION(a.i_null <= b.d_null)"
-    left_rows = harness.scalar(f"SELECT COUNT(*) FROM {relation}")
-
-    assert harness.scalar(
-        f"SELECT COUNT(*) FROM {relation} AS a ASOF JOIN {relation} AS b {match}"
-    ) == left_rows, "the un-partitioned ASOF stopped honouring LEFT semantics too"
-    assert harness.scalar(
-        f"SELECT COUNT(*) FROM {relation} AS a ASOF JOIN {relation} AS b {match} "
-        f"USING (i_group)"
-    ) == left_rows, "a scalar USING key stopped honouring LEFT semantics too"
-    assert harness.scalar(
-        f"SELECT COUNT(*) FROM {relation} AS a ASOF JOIN {relation} AS b {match} "
-        f"USING (arr_str)"
-    ) == 0, (
-        "ASOF with an ARRAY USING key no longer drops every row — the defect is "
-        "FIXED. Delete this test, the `asof-using-an-array-key-drops-every-row` "
-        "register entry, and the ARRAY exclusion in _make_leg."
-    )
-

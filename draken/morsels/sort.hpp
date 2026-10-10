@@ -6,10 +6,16 @@
 // them in its Sink classes). Nothing here depends on the engine (no Sink, no
 // MorselBuffer) or on Python — only draken's own vector/morsel types.
 //
-// TWO STAGES:
+// STAGES (full sort):
+//   0. a parallel run census (sort_run_census) over adjacent pairs, when the input
+//      is wide enough for more than one thread: no descent at all means the input is
+//      already in order and the sort is the identity; a transition count that proves
+//      vergesort would decline skips stage 1.
 //   1. vergesort run-detection prepass — exploits pre-existing order (time-series,
 //      already-clustered data) in O(n) instead of O(n log n).
-//   2. if vergesort declines (too many runs), a parallel stable comparison sort.
+//   2. if vergesort declines (too many runs): a parallel LSD radix sort when every key
+//      normalizes to one uint64 (radix_sort_perm), otherwise a parallel stable
+//      comparison sort.
 //   The LIMIT/TopN case skips both and uses std::partial_sort — O(n log k) is already
 //   cheaper than either stage when k is small.
 //
@@ -37,15 +43,19 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "core/string_slot.h"    // DrakenStringSlot, str_length, str_data
+#include "core/tracked_allocator.h"   // TrackedUninitAllocator — radix scratch is charged
 #include "core/vector_owner.h"   // VectorOwner, OwnedBuffer
 #include "core/vector_alloc.h"   // draken_zero_sel — the DRAKEN_NULL gather arm
 #include "core/vergesort.h"      // vergesort_generic — stage 1
@@ -453,7 +463,7 @@ inline void parallel_stable_sort_perm(const std::vector<SortKeyColumn>& keys,
     parallel_stable_sort_cmp(SortKeyCmp{keys}, perm, nthreads);
 }
 
-// ---- the two-stage sort ------------------------------------------------------------
+// ---- the full-sort stages ---------------------------------------------------------
 
 // Run-count cutoff for the vergesort prepass: merge K sorted runs only when K is
 // small enough that log2(K) merge passes beat sorting outright.
@@ -471,14 +481,526 @@ inline void parallel_stable_sort_perm(const std::vector<SortKeyColumn>& keys,
 // fallback at full parallel strength).
 inline constexpr uint32_t SORT_VERGESORT_THRESHOLD = 16;
 
+// The same cutoff when the fallback is the RADIX sort (radix_sort_perm): a function
+// of the radix team width, not a constant, because vergesort's merge is SERIAL while
+// the radix runs on the whole team — the wider the team, the fewer runs a merge can
+// afford. The merge costs ceil(log2 K) passes, so only 1 / 2 / 4 / 8 are distinct.
+//
+// MEASURED 2026-10-10 with a sweep of the merge vs radix_sort_perm over K equal
+// sorted runs (1M and 10M rows, 1 and 2 key columns, 0% and 30% NULLs), radix time
+// over merge time:
+//     x86 i5-8500, team 4:  K=2 1.45-2.20  K=4 0.84-1.29 (tie)  K=8 0.59-0.89
+//     x86 i5-8500, team 6:  K=2 1.27-1.97  K=4 0.74-1.17        K=8 0.52-0.82
+//     Apple M5 Pro, team 16: K=2 0.46-1.06  K=4 0.24-0.51       K=8 0.17-0.38
+// so: team <= 4 -> 4 runs, team <= 8 -> 2, wider -> 1 (vergesort then only reverses
+// a single descending run). The 8 boundary interpolates between 6 and 16 — no team
+// width in that range was measured. A team of 1 (n below ~131k) gets 4, the most
+// merge-friendly value measured; small-n crossovers were not swept.
+inline uint32_t sort_vergesort_radix_threshold(unsigned team_width) {
+    if (team_width <= 4) return 4;
+    if (team_width <= 8) return 2;
+    return 1;
+}
+
+// ---- sort team: one thread team, phases separated by a barrier -------------------
+//
+// The radix sort runs up to ~10 dependent phases (key build, then per digit a
+// histogram and a scatter). Spawning a thread set per phase would pay the spawn/join
+// cost ten times over, so one team is spawned per sort and the phases are separated
+// by this barrier.
+class SortTeamBarrier {
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    const unsigned n_;
+    unsigned waiting_ = 0;
+    uint64_t generation_ = 0;
+public:
+    explicit SortTeamBarrier(unsigned n) : n_(n) {}
+    void wait() {
+        if (n_ <= 1) return;
+        std::unique_lock<std::mutex> lk(mtx_);
+        const uint64_t gen = generation_;
+        if (++waiting_ == n_) {
+            waiting_ = 0;
+            ++generation_;
+            cv_.notify_all();
+            return;
+        }
+        cv_.wait(lk, [&] { return generation_ != gen; });
+    }
+};
+
+// Rows each team member must own before another member is worth spawning. Matches the
+// granularity the stable comparison sort already threads at (one thread below 200k).
+inline constexpr size_t SORT_TEAM_ROWS_PER_THREAD = 65536;
+
+inline unsigned sort_team_width(size_t n, unsigned nthreads) {
+    size_t cap = n / SORT_TEAM_ROWS_PER_THREAD;
+    if (cap < 1) cap = 1;
+    unsigned nt = nthreads < 1 ? 1u : nthreads;
+    return cap < nt ? static_cast<unsigned>(cap) : nt;
+}
+
+// Run fn(t) for t in [0, nt) — member 0 on the calling thread.
+template <class Fn>
+inline void sort_team_run(unsigned nt, Fn fn) {
+    std::vector<std::thread> team;
+    team.reserve(nt > 0 ? nt - 1 : 0);
+    for (unsigned t = 1; t < nt; ++t) team.emplace_back([&fn, t]() { fn(t); });
+    fn(0);
+    for (std::thread& th : team) th.join();
+}
+
+// ---- stage 0: run census ------------------------------------------------------------
+//
+// Over the adjacent pairs (perm[p], perm[p+1]): `descents` counts pairs out of order
+// (cmp(perm[p+1], perm[p])); `transitions` counts adjacent PAIRS whose descent-ness
+// differs. vergesort_generic partitions the rows into runs, each either non-descending
+// (no descent pair inside) or strictly descending (only descent pairs inside), with
+// one boundary pair between consecutive runs. Two pairs of different class therefore
+// cannot both lie inside one run, so every transition touches a boundary pair, and a
+// boundary pair touches at most two transitions:
+//     transitions <= 2 * (runs - 1)   =>   runs >= transitions / 2 + 1.
+// So `transitions / 2 + 1 > threshold` PROVES vergesort would decline at `threshold`,
+// and its serial O(n) scan can be skipped. `descents == 0` proves the input is
+// already in order — vergesort's one-run case — so the sort is the identity.
+//
+// A member stops counting as soon as its own transitions reach the decline bound
+// (`decided`): that alone settles both questions (a transition implies a descent).
+// On random input that happens within the first few dozen pairs.
+// When the census does NOT rule vergesort out, its transitions number fewer than
+// 2 * threshold (<= 2 * SORT_VERGESORT_THRESHOLD), so it also records WHERE they are:
+// with the descent-ness of pair 0 that determines vergesort's greedy run split
+// exactly (sort_census_runs), and vergesort's own serial scan is never run on top of
+// the parallel one — measured 4-10% of a 2-4-run sort on x86 at team width 4.
+inline constexpr size_t SORT_CENSUS_MAX_POS = 2 * static_cast<size_t>(SORT_VERGESORT_THRESHOLD);
+
+struct SortRunCensus {
+    size_t descents = 0;
+    size_t transitions = 0;
+    bool decided = false;      // transitions already prove vergesort would decline
+    bool first_desc = false;   // pair 0 is a descent (set by the range that starts at 0)
+    uint32_t n_pos = 0;        // recorded transition pair indices, ascending
+    size_t pos[SORT_CENSUS_MAX_POS];
+};
+
+inline bool sort_census_declines(const SortRunCensus& c, uint32_t threshold) {
+    return c.decided || c.transitions / 2 + 1 > threshold;
+}
+
+// `cmp` is taken BY VALUE and the counters are plain locals: with a by-reference
+// comparator and counters living in the (NRVO) result struct, the compiler cannot
+// prove the counter stores leave the comparator's pointers alone and reloads them on
+// every pair — measured 3x slower per pair than vergesort's by-value scan.
+template <class Cmp>
+inline SortRunCensus sort_census_range(Cmp cmp, const uint32_t* perm,
+                                       size_t lo, size_t hi, uint32_t threshold) {
+    // Pairs p in [lo, hi). The transition between pair lo-1 and pair lo belongs here.
+    const size_t decide_at = 2 * static_cast<size_t>(threshold);
+    SortRunCensus c;
+    size_t descents = 0, transitions = 0;
+    bool decided = false;
+    const bool first = lo > 0 ? cmp(perm[lo], perm[lo - 1]) : cmp(perm[1], perm[0]);
+    bool prev = first;
+    for (size_t p = lo; p < hi; ++p) {
+        const bool desc = cmp(perm[p + 1], perm[p]);
+        descents += desc;
+        if (__builtin_expect(desc != prev, 0)) {   // pair 0 seeds prev with itself
+            // transitions < decide_at <= SORT_CENSUS_MAX_POS here, so the slot exists
+            c.pos[transitions++] = p;
+            if (transitions >= decide_at) { decided = true; break; }
+        }
+        prev = desc;
+    }
+    c.descents = descents;
+    c.transitions = transitions;
+    c.decided = decided;
+    c.first_desc = lo == 0 ? first : false;
+    c.n_pos = static_cast<uint32_t>(transitions);
+    return c;
+}
+
+// The serial probe of the first SORT_CENSUS_PROBE pairs decides random input without
+// spawning the team at all.
+inline constexpr size_t SORT_CENSUS_PROBE = 4096;
+
+template <class Cmp>
+inline SortRunCensus sort_run_census(const Cmp& cmp, const uint32_t* perm, size_t n,
+                                     unsigned nthreads, uint32_t threshold) {
+    SortRunCensus total;
+    if (n < 2) return total;
+    const size_t npairs = n - 1;
+    const size_t probe = npairs < SORT_CENSUS_PROBE ? npairs : SORT_CENSUS_PROBE;
+    SortRunCensus head = sort_census_range(cmp, perm, 0, probe, threshold);
+    if (head.decided || probe == npairs) return head;
+
+    const size_t rest = npairs - probe;
+    const unsigned nt = sort_team_width(rest, nthreads);
+    std::vector<SortRunCensus> part(nt);
+    sort_team_run(nt, [&](unsigned t) {
+        size_t lo = probe + rest * t / nt, hi = probe + rest * (t + 1) / nt;
+        part[t] = sort_census_range(cmp, perm, lo, hi, threshold);
+    });
+    total = head;
+    for (const SortRunCensus& c : part) {
+        total.descents += c.descents;
+        total.transitions += c.transitions;
+        total.decided = total.decided || c.decided;
+        // Positions are only needed (and only fit) when vergesort is not ruled out;
+        // ranges are in pair order, so concatenation keeps them ascending.
+        for (uint32_t k = 0; k < c.n_pos && total.n_pos < SORT_CENSUS_MAX_POS; ++k)
+            total.pos[total.n_pos++] = c.pos[k];
+    }
+    return total;
+}
+
+// vergesort_generic's greedy run split, rebuilt from a census that did not rule it
+// out (so its recorded positions are complete). The class of pair q is
+// first_desc XOR (number of transitions at or before q is odd). A run starting at row
+// i keeps pair i's class until the first transition t > i, and ends at row t (row
+// n-1 if none); pair t is the boundary pair and the next run starts at t+1 — exactly
+// vergesort_generic's loop. Returns false when that split has more than `threshold`
+// runs (vergesort would decline). runs[] needs threshold + 1 slots (the sentinel).
+inline bool sort_census_runs(const SortRunCensus& c, size_t n, uint32_t threshold,
+                             uint32_t* runs, bool* run_desc, uint32_t& num_runs) {
+    num_runs = 0;
+    uint32_t ti = 0;
+    size_t i = 0;
+    while (i < n) {
+        if (num_runs >= threshold) return false;
+        runs[num_runs] = static_cast<uint32_t>(i);
+        if (i + 1 >= n) { run_desc[num_runs++] = false; break; }
+        while (ti < c.n_pos && c.pos[ti] <= i) ++ti;   // transitions at or before pair i
+        run_desc[num_runs++] = c.first_desc ^ ((ti & 1u) != 0);
+        const size_t end = ti < c.n_pos ? c.pos[ti] : n - 1;
+        i = end + 1;
+    }
+    runs[num_runs] = static_cast<uint32_t>(n);
+    return true;
+}
+
+// ---- stage 2a: parallel LSD radix sort over the AoS keys ---------------------------
+//
+// Applies to exactly the keys the AoS comparator accepts (aos_keys_eligible: 1..4
+// columns, each normalized to ONE uint64 with direction pre-baked), and produces
+// exactly AoSKeyCmpN's stable order:
+//   - Each key column k is a value digit-string (the RowKeyN part) plus, when the
+//     column holds a NULL, a one-bit NULL rank MORE significant than the value
+//     (rank 0 sorts first: NULL when nulls_first, valid otherwise). A NULL row's value
+//     is the same constant for every NULL row of that column (build_aos_keys stores
+//     the normalized 0, bit-flipped under DESC), so NULLs tie on the value and fall
+//     through to the next column — SortKeyCmp's "both NULL: equal on this key".
+//   - Columns are processed least significant first; LSD radix is stable, so ties on
+//     the whole key keep their order in `perm` — the stable sort's answer.
+//
+// Byte skipping: a byte position where every row holds the same value is a no-op pass.
+// The census pass ORs (key ^ first_key) per column; a zero byte in that mask is
+// skipped. Only the high-bit width hb = 64 - clz(mask) of each column is ever sorted.
+//
+// Packed key|index: when the sum of every column's hb (+1 per nullable column) plus
+// the bits of an index into perm fits in 64, each row becomes ONE uint64
+//     [col0 rank][col0 value bits]...[colK-1 rank][colK-1 value bits][perm position]
+// and the passes move 8 bytes per row instead of a key plus an index. The position in
+// the low bits makes every packed key distinct and orders ties by arrival, so the
+// result is the stable order without relying on pass stability at all.
+//
+// SORT_RADIX_MIN: below it the comparison sort is used. Below ~131k rows both sides
+// run on one thread, so this is a per-core crossover, not a DOP one.
+//
+// MEASURED 2026-10-10, radix_sort_perm vs parallel_stable_sort_cmp over the AoS keys
+// (1 and 2 key columns, 0% and 30% NULLs), radix time over comparison time:
+//     x86 i5-8500:  n=512 0.62-1.17 (loses with NULLs)  n=1024 0.39-0.65  n=2048 0.33-0.55
+//     Apple M5 Pro: n=1024 0.46-1.55 (noisy)  n=2048 0.25-0.78  n=4096 0.33-1.02
+//                   n=8192 and up: wins in every configuration
+// 2048 is clear of the crossover on both.
+inline constexpr size_t SORT_RADIX_MIN = 2048;
+
+// Radix scratch: charged to the process memory account (mem_account.h) like every
+// other engine buffer, and NOT zero-filled — every element is written before it is
+// read, exactly as the new[] blocks this replaced.
+template <class T>
+using SortScratch = std::vector<T, draken::TrackedUninitAllocator<T>>;
+
+inline unsigned sort_bit_width(uint64_t x) {
+    return x == 0 ? 0u : 64u - static_cast<unsigned>(__builtin_clzll(x));
+}
+
+inline uint64_t sort_low_mask(unsigned bits) {
+    return bits >= 64 ? ~0ULL : ((1ULL << bits) - 1ULL);
+}
+
+// One LSD pass over the digit at `shift`, team member t of nt. Reads src_k/src_i over
+// the member's slice twice (histogram, then scatter); `hist` is nt*256 counters.
+// CARRY=false is the packed mode (the index lives inside the key).
+template <bool CARRY>
+inline void radix_team_pass(unsigned t, unsigned nt, size_t n, unsigned shift,
+                            const uint64_t* src_k, const uint32_t* src_i,
+                            uint64_t* dst_k, uint32_t* dst_i,
+                            size_t* hist, SortTeamBarrier& bar) {
+    const size_t lo = n * t / nt, hi = n * (t + 1) / nt;
+    size_t* h = hist + static_cast<size_t>(t) * 256;
+    std::memset(h, 0, 256 * sizeof(size_t));
+    for (size_t i = lo; i < hi; ++i) ++h[(src_k[i] >> shift) & 0xFF];
+    bar.wait();
+    size_t off[256];
+    size_t run = 0;
+    for (unsigned b = 0; b < 256; ++b) {
+        for (unsigned u = 0; u < nt; ++u) {
+            if (u == t) off[b] = run;
+            run += hist[static_cast<size_t>(u) * 256 + b];
+        }
+    }
+    for (size_t i = lo; i < hi; ++i) {
+        const uint64_t k = src_k[i];
+        const size_t o = off[(k >> shift) & 0xFF]++;
+        dst_k[o] = k;
+        if constexpr (CARRY) dst_i[o] = src_i[i];
+    }
+    bar.wait();   // every scatter lands before the next pass reads, or hist is reused
+}
+
+// The digit shifts a column needs: every byte of [base, base + bits) whose `mask`
+// bits are not all zero. LSD order (least significant first).
+inline void radix_digit_shifts(uint64_t mask, unsigned base, unsigned bits,
+                               std::vector<unsigned>& shifts) {
+    for (unsigned s = 0; s < bits; s += 8) {
+        if ((mask >> s) & 0xFF) shifts.push_back(base + s);
+    }
+}
+
+template <int NPARTS>
+inline void radix_sort_perm(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
+                            const std::array<bool, NPARTS>& nulls_first,
+                            std::vector<uint32_t>& perm, unsigned nthreads) {
+    const size_t n = perm.size();
+    if (n < 2) return;
+    const unsigned nt = sort_team_width(n, nthreads);
+
+    // Census of the keys themselves: per column, which bits vary among the VALID rows
+    // (OR ^ AND — a bit varies iff some row has it set and some clear) and whether any
+    // row is NULL. NULL rows are left out of the bit census: their value only has to
+    // be one constant (it is masked to the sorted width below), and leaving them in
+    // would widen a DESC column to all 64 bits (a NULL's normalized key is ~0 there).
+    std::vector<std::array<uint64_t, NPARTS>> or_part(nt), and_part(nt);
+    std::vector<uint8_t> null_part(nt, 0);
+    sort_team_run(nt, [&](unsigned t) {
+        const size_t lo = n * t / nt, hi = n * (t + 1) / nt;
+        std::array<uint64_t, NPARTS> o{}, a;
+        a.fill(~0ULL);
+        uint8_t all_valid = 0xFF;
+        for (size_t i = lo; i < hi; ++i) {
+            const uint32_t r = perm[i];
+            const uint8_t m = masks[r];
+            for (int k = 0; k < NPARTS; ++k) {
+                const uint64_t vm = 0ULL - static_cast<uint64_t>((m >> k) & 1u);
+                const uint64_t v = rows[r].parts[k];
+                o[k] |= v & vm;
+                a[k] &= v | ~vm;
+            }
+            all_valid &= m;
+        }
+        or_part[t] = o;
+        and_part[t] = a;
+        null_part[t] = static_cast<uint8_t>(~all_valid);
+    });
+    std::array<uint64_t, NPARTS> diff{};
+    uint8_t has_null = 0;
+    {
+        std::array<uint64_t, NPARTS> o{}, a;
+        a.fill(~0ULL);
+        for (unsigned t = 0; t < nt; ++t) {
+            for (int k = 0; k < NPARTS; ++k) { o[k] |= or_part[t][k]; a[k] &= and_part[t][k]; }
+            has_null |= null_part[t];
+        }
+        // An all-NULL column has o = 0, a = ~0: o ^ a would claim every bit varies.
+        for (int k = 0; k < NPARTS; ++k) diff[k] = (o[k] & ~a[k]);
+    }
+    std::array<unsigned, NPARTS> hb{};
+    std::array<unsigned, NPARTS> nb{};
+    unsigned key_bits = 0;
+    for (int k = 0; k < NPARTS; ++k) {
+        hb[k] = sort_bit_width(diff[k]);
+        nb[k] = (has_null >> k) & 1u;
+        key_bits += hb[k] + nb[k];
+    }
+    if (key_bits == 0) return;   // every row ties on the whole key: stable = identity
+
+    // NULL rank of column k for row-validity mask m: 0 sorts first.
+    auto rank_of = [&](uint8_t m, int k) -> uint64_t {
+        const uint64_t valid = (m >> k) & 1u;
+        return nulls_first[k] ? valid : (valid ^ 1u);
+    };
+
+    const unsigned idx_bits = sort_bit_width(static_cast<uint64_t>(n - 1));
+    SortTeamBarrier bar(nt);
+    SortScratch<size_t> hist(static_cast<size_t>(nt) * 256);
+
+    if (key_bits + idx_bits <= 64) {
+        // ---- packed key|index ----
+        SortScratch<uint64_t> a(n), b(n);
+        std::vector<uint64_t> pdiff_part(nt, 0);
+        const uint64_t idx_mask = sort_low_mask(idx_bits);
+        auto pack = [&](uint32_t r) -> uint64_t {
+            uint64_t acc = 0;
+            for (int k = 0; k < NPARTS; ++k) {
+                if (nb[k]) acc = (acc << 1) | rank_of(masks[r], k);
+                if (hb[k]) acc = (acc << hb[k]) | (rows[r].parts[k] & sort_low_mask(hb[k]));
+            }
+            return acc;
+        };
+        const uint64_t pfirst = pack(perm[0]);
+        std::vector<unsigned> shifts;
+        uint32_t* out = perm.data();
+        SortScratch<uint32_t> src_perm(n);
+        uint64_t* final_k = nullptr;
+        sort_team_run(nt, [&](unsigned t) {
+            const size_t lo = n * t / nt, hi = n * (t + 1) / nt;
+            uint64_t d = 0;
+            for (size_t i = lo; i < hi; ++i) {
+                const uint64_t pk = pack(out[i]);
+                d |= pk ^ pfirst;
+                a[i] = (pk << idx_bits) | static_cast<uint64_t>(i);
+                src_perm[i] = out[i];
+            }
+            pdiff_part[t] = d;
+            bar.wait();
+            if (t == 0) {
+                uint64_t pd = 0;
+                for (uint64_t x : pdiff_part) pd |= x;
+                radix_digit_shifts(pd, idx_bits, key_bits, shifts);
+            }
+            bar.wait();
+            uint64_t* src = a.data();
+            uint64_t* dst = b.data();
+            for (unsigned s : shifts) {
+                radix_team_pass<false>(t, nt, n, s, src, nullptr, dst, nullptr,
+                                       hist.data(), bar);
+                std::swap(src, dst);
+            }
+            if (t == 0) final_k = src;
+            bar.wait();
+            for (size_t i = lo; i < hi; ++i) out[i] = src_perm[final_k[i] & idx_mask];
+        });
+        return;
+    }
+
+    // ---- key + carried index, one column at a time (least significant first) ----
+    SortScratch<uint64_t> ka(n), kb(n);
+    SortScratch<uint32_t> ib(n);
+    uint32_t* cur_i = perm.data();   // row ids in current order
+    uint32_t* alt_i = ib.data();
+    for (int k = NPARTS - 1; k >= 0; --k) {
+        // Fold the NULL rank in above the value bits when there is room; a nullable
+        // column whose values span all 64 bits gets its rank as a separate pass.
+        const bool fold = nb[k] && hb[k] < 64;
+        const bool rank_pass = nb[k] && !fold;
+        const unsigned bits = hb[k] + (fold ? 1u : 0u);
+        std::vector<unsigned> shifts;
+        radix_digit_shifts(diff[k] | (fold ? (1ULL << hb[k]) : 0ULL), 0, bits, shifts);
+        if (shifts.empty() && !rank_pass) continue;
+        const uint64_t vmask = sort_low_mask(hb[k]);
+        uint32_t* res_i = cur_i;
+        sort_team_run(nt, [&](unsigned t) {
+            const size_t lo = n * t / nt, hi = n * (t + 1) / nt;
+            for (size_t i = lo; i < hi; ++i) {
+                const uint32_t r = cur_i[i];
+                uint64_t v = rows[r].parts[k] & vmask;
+                if (fold) v |= rank_of(masks[r], k) << hb[k];
+                ka[i] = v;
+            }
+            bar.wait();
+            uint64_t* sk = ka.data();
+            uint64_t* dk = kb.data();
+            uint32_t* si = cur_i;
+            uint32_t* di = alt_i;
+            for (unsigned s : shifts) {
+                radix_team_pass<true>(t, nt, n, s, sk, si, dk, di, hist.data(), bar);
+                std::swap(sk, dk);
+                std::swap(si, di);
+            }
+            if (rank_pass) {
+                for (size_t i = lo; i < hi; ++i) sk[i] = rank_of(masks[si[i]], k);
+                bar.wait();
+                radix_team_pass<true>(t, nt, n, 0, sk, si, dk, di, hist.data(), bar);
+                std::swap(si, di);
+            }
+            if (t == 0) res_i = si;
+        });
+        if (res_i != cur_i) std::swap(cur_i, alt_i);
+    }
+    if (cur_i != perm.data()) std::memcpy(perm.data(), cur_i, n * sizeof(uint32_t));
+}
+
+// ---- the full-sort driver ------------------------------------------------------------
+
+// Full stable sort of `perm` by `cmp`: census, then vergesort (merging at most
+// `threshold` runs — the fallback decides what a merge must beat), then
+// `fallback(perm)`.
+template <class Cmp, class Fallback>
+inline void sort_perm_full(const Cmp& cmp, std::vector<uint32_t>& perm, unsigned nthreads,
+                           uint32_t threshold, Fallback fallback) {
+    const size_t n = perm.size();
+    if (n < 2) return;
+    // Stage 0 — only when it can run on more than one thread. Serially it does more
+    // per pair than vergesort's own scan, which already finds sorted input in one
+    // pass and gives up early on random input: measured 10M sorted rows, team of 1,
+    // 8.2ms with the census vs 6.4ms without; team of 16, 2.7ms vs 6.4ms.
+    if (sort_team_width(n, nthreads) > 1) {
+        const SortRunCensus census = sort_run_census(cmp, perm.data(), n, nthreads, threshold);
+        if (census.descents == 0) return;   // already in order: the stable sort is identity
+        if (!sort_census_declines(census, threshold)) {
+            // Stage 1 from the census: same runs, same reversals, same merge as
+            // vergesort_generic, without its serial scan.
+            uint32_t runs[SORT_VERGESORT_THRESHOLD + 1];
+            bool run_desc[SORT_VERGESORT_THRESHOLD];
+            uint32_t num_runs = 0;
+            if (threshold > SORT_VERGESORT_THRESHOLD) std::abort();
+            if (sort_census_runs(census, n, threshold, runs, run_desc, num_runs)) {
+                for (uint32_t r = 0; r < num_runs; ++r) {
+                    if (run_desc[r]) std::reverse(perm.begin() + runs[r], perm.begin() + runs[r + 1]);
+                }
+                if (num_runs > 1) {
+                    std::unique_ptr<uint32_t[]> tmp(new uint32_t[n]);
+                    _vgs_merge_runs_cmp(perm.data(), tmp.get(), cmp, runs, num_runs,
+                                        static_cast<uint32_t>(n));
+                }
+                return;
+            }
+        }
+        fallback(perm);
+        return;
+    }
+    {
+        // Team of one: stage 1 is vergesort's own scan. `tmp` is only written during
+        // the merge, so on a miss its pages are
+        // never faulted in — new[] (not vector) to skip the value-initialization that
+        // would touch all n*4 bytes up front.
+        std::unique_ptr<uint32_t[]> tmp(new uint32_t[n]);
+        // +3, not +2 — see vergesort_generic's contract: num_runs can reach
+        // threshold+2 and the sentinel write needs one slot past that. Every
+        // threshold in this file is at most SORT_VERGESORT_THRESHOLD.
+        uint32_t runs[SORT_VERGESORT_THRESHOLD + 3];
+        if (threshold > SORT_VERGESORT_THRESHOLD) std::abort();
+        if (vergesort_generic(perm.data(), tmp.get(), cmp, n, threshold, runs)) {
+            return;
+        }
+    }
+    // Stage 2. On a miss vergesort has reversed some descending runs in place, but
+    // that does NOT disturb stability: runs are extended with STRICT `<`, so a
+    // reversed run contains no equal keys, and reversal keeps every element inside
+    // its own run's index range — so the relative order of equal keys is unchanged
+    // and the stable fallback yields exactly what it would have from the identity.
+    fallback(perm);
+}
+
 // Sort `perm` (pre-filled with row ids) by `cmp`.
 //
 // `take_first`: rows actually consumed downstream. SIZE_MAX (full sort) runs the
-// vergesort prepass then the parallel stable sort. A real limit uses partial_sort —
-// O(n log k) instead of O(n log n), the difference between compacting 65k TopN
-// candidates to 10 and fully sorting them — and deliberately SKIPS vergesort: an
-// extra O(n) run-detection scan cannot pay for itself against a bound that is
-// already cheaper than one full pass. Ties at the boundary are unspecified either
+// census, the vergesort prepass, then the parallel stable sort. A real limit uses
+// partial_sort — O(n log k) instead of O(n log n), the difference between compacting
+// 65k TopN candidates to 10 and fully sorting them — and deliberately SKIPS the
+// census and vergesort: an extra O(n) scan cannot pay for itself against a bound that
+// is already cheaper than one full pass. Ties at the boundary are unspecified either
 // way (SQL's ORDER BY..LIMIT contract; cross-worker compaction is already
 // tie-unstable).
 template <class Cmp>
@@ -491,29 +1013,16 @@ inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_firs
                           perm.end(), cmp);
         return;
     }
-    if (n < 2) return;
-
-    // Stage 1. `tmp` is only written during the merge, so on a miss its pages are
-    // never faulted in — new[] (not vector) to skip the value-initialization that
-    // would touch all n*4 bytes up front.
-    std::unique_ptr<uint32_t[]> tmp(new uint32_t[n]);
-    // +3, not +2 — see vergesort_generic's contract: num_runs can reach
-    // threshold+2 and the sentinel write needs one slot past that.
-    uint32_t runs[SORT_VERGESORT_THRESHOLD + 3];
-    if (vergesort_generic(perm.data(), tmp.get(), cmp, n,
-                          SORT_VERGESORT_THRESHOLD, runs)) {
-        return;
-    }
-    // Stage 2. On a miss vergesort has reversed some descending runs in place, but
-    // that does NOT disturb stability: runs are extended with STRICT `<`, so a
-    // reversed run contains no equal keys, and reversal keeps every element inside
-    // its own run's index range — so the relative order of equal keys is unchanged
-    // and this sort yields exactly what it would have from the identity permutation.
-    parallel_stable_sort_cmp(cmp, perm, nthreads);
+    sort_perm_full(cmp, perm, nthreads, SORT_VERGESORT_THRESHOLD,
+                   [&](std::vector<uint32_t>& p) {
+        parallel_stable_sort_cmp(cmp, p, nthreads);
+    });
 }
 
 // Stable multi-key permutation over `perm`, dispatching to the AoS comparator when
 // the key shape allows it and to SortKeyCmp otherwise. Both produce the same order.
+// A full sort over AoS keys falls back to the radix sort instead of the comparison
+// sort once there are SORT_RADIX_MIN rows — again the same order.
 inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
                       size_t take_first, unsigned nthreads) {
     const size_t n = perm.size();
@@ -525,8 +1034,25 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
                 std::vector<uint8_t> masks;                                      \
                 std::array<bool, NP> nf{};                                       \
                 build_aos_keys<NP>(keys, n, rows, masks, nf);                    \
-                sort_perm_cmp(AoSKeyCmpN<NP>{rows.data(), masks.data(), nf},     \
-                              perm, take_first, nthreads);                       \
+                /* Raw pointers, captured BY VALUE below: a [&] capture of the */ \
+                /* vectors lets their addresses escape, and the uint8_t mask    */ \
+                /* stores in the inlined key build may then alias them — the    */ \
+                /* build reloads its pointers per row (measured 2.6x slower).   */ \
+                const RowKeyN<NP>* rows_p = rows.data();                         \
+                const uint8_t* masks_p = masks.data();                           \
+                AoSKeyCmpN<NP> cmp{rows_p, masks_p, nf};                         \
+                if (take_first >= n && n >= SORT_RADIX_MIN) {                    \
+                    sort_perm_full(cmp, perm, nthreads,                          \
+                                   sort_vergesort_radix_threshold(               \
+                                       sort_team_width(n, nthreads)),            \
+                                   [rows_p, masks_p, nf, nthreads](              \
+                                       std::vector<uint32_t>& p) {               \
+                                       radix_sort_perm<NP>(rows_p, masks_p, nf,  \
+                                                           p, nthreads);         \
+                                   });                                           \
+                } else {                                                         \
+                    sort_perm_cmp(cmp, perm, take_first, nthreads);              \
+                }                                                                \
                 return;                                                          \
             }
             DRAKEN_SORT_AOS_ARM(1)

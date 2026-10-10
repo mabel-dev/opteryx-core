@@ -47,6 +47,7 @@ from opteryx.compiled.structures.expressions import Not
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.expressions import rewrite_children
 from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.compiled.structures.plan_steps import FilterStep
 
@@ -94,6 +95,33 @@ def _emitted_identities(plan, nid, memo):
         ids = frozenset(acc)
     memo[nid] = ids
     return ids
+
+
+def _bound_to_scan_columns(condition, scan_columns_by_identity):
+    """`condition` with every identifier bound to the SCAN's own schema column.
+
+    A predicate written against a rename (`SELECT COUNT(*) FROM (SELECT id AS k
+    FROM t) WHERE k = 3`) reaches the scan carrying the alias row: the same
+    identity as the scan's `id`, but named `k`. The readers resolve a pushed
+    predicate's columns against the file BY NAME, so `k` read as an absent column —
+    the all-NULL constant on parquet (`k IS NULL` matched every row, `k = 3`
+    none), "requested column 'k' is not in this file" on skene. Once the predicate
+    is the scan's, it must speak the scan's names. A copy: nodes other holders
+    can see are not rewritten in place.
+    """
+    if condition.node_type == NodeType.IDENTIFIER:
+        own = scan_columns_by_identity.get(condition.schema_column.identity)
+        if own is None:
+            raise InvalidInternalStateError(
+                f"a predicate pushed into a scan reads column `{condition.schema_column.name}`, "
+                "which the scanned relation does not have"
+            )
+        return condition.with_fields(schema_column=own, source_column=own.name)
+    return rewrite_children(
+        condition,
+        lambda child: _bound_to_scan_columns(child, scan_columns_by_identity),
+        share=True,
+    )
 
 
 def _predicate_column_ids(predicate):
@@ -1858,7 +1886,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         # Commit both selective and metadata-only predicates unconditionally — the
         # scan's own selectivity estimate decides whether two-pass pays off, not this
         # strategy (see comment above).
+        scan_columns_by_identity = {sc.identity: sc for sc in node.schema.columns}
         for _predicate, condition in selective_to_push + metadata_to_push:
+            condition = _bound_to_scan_columns(condition, scan_columns_by_identity)
             node.predicates = (*(node.predicates or ()), condition)
             # The predicate reached the READER — the outcome this whole strategy
             # exists to produce (CLAUDE.md §12.1: faster queries read less data) and,

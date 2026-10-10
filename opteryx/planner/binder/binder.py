@@ -22,6 +22,7 @@ from opteryx.expression.functions.registrar import fixed_value_function
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.binder.pattern_compile import compile_rlike_pattern
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import (
     BOOLEAN as _CT_BOOLEAN,
@@ -1618,6 +1619,13 @@ def inner_binder(
                 mismatches = get_mismatched_condition_column_types(node, relaxed=True)
                 if mismatches:
                     raise IncompatibleTypesError(**mismatches)
+
+            # RLIKE's kernel takes only a compiled pattern, so compiling it is a
+            # lowering every query needs, done here rather than in a strategy that
+            # can be switched off. After the type check, so a wrongly-typed pattern
+            # is reported as that.
+            if node_type == NodeType.COMPARISON_OPERATOR and node.value in ("RLike", "NotRLike"):
+                compile_rlike_pattern(node, plan_context=context.plan_context)
 
             result_type = determine_type(node)  # ColumnType | None (Phase 2)
             # D-2: when the result is DECIMAL, also derive (precision, scale).

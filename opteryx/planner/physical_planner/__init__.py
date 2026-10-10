@@ -71,14 +71,21 @@ def _translate_jsonl_predicates(predicates, physical_by_identity):
 
     Every entry here was already gated by JsonlPredicatePushable.can_push at
     optimizer time to be exactly a `column OP literal` COMPARISON_OPERATOR with
-    op in JSONL_OP_XLAT -- this only re-derives that shape to build the tuple,
-    it does not re-validate it. A predicate can_push declined is never in this
-    list; it stays behind as an ordinary Filter node above the scan instead.
+    op in JSONL_OP_XLAT, or an IsEmpty / IsNotEmpty UNARY_OPERATOR on a plain
+    column (JSONL_EMPTINESS_XLAT, pushed as `== ''` / `!= ''`) -- this only
+    re-derives that shape to build the tuple, it does not re-validate it. A
+    predicate can_push declined is never in this list; it stays behind as an
+    ordinary Filter node above the scan instead.
     """
+    from opteryx.connectors.jsonl_io import JSONL_EMPTINESS_XLAT
     from opteryx.connectors.jsonl_io import JSONL_OP_XLAT
 
     translated = []
     for condition in predicates or []:
+        if condition.node_type == NodeType.UNARY_OPERATOR:
+            physical_name = physical_by_identity[condition.centre.schema_column.identity]
+            translated.append((physical_name, JSONL_EMPTINESS_XLAT[condition.value], b""))
+            continue
         left, right = binary_operands(condition)
         if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
             ident, literal, op = left, right, condition.value
@@ -143,7 +150,12 @@ def _jsonl_scan_inputs(scan):
     # A pushed predicate's column is not necessarily projected; its own
     # schema_column carries the same identity→name mapping.
     for condition in predicates:
-        for side in binary_operands(condition):
+        sides = (
+            (condition.centre,)
+            if condition.node_type == NodeType.UNARY_OPERATOR
+            else binary_operands(condition)
+        )
+        for side in sides:
             schema_column = side.schema_column
             if schema_column is not None:
                 physical_by_identity.setdefault(schema_column.identity, schema_column.name)

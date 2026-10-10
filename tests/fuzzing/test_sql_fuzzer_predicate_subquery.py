@@ -305,58 +305,6 @@ def test_nested_subquery_position_terminates_with_its_verdict(label, sql, verdic
         f"reached at all.\n  {sql}\n  {output[:400]}"
     )
 
-def test_wrong_answer_correlated_scalar_subquery_drops_unmatched_outer_rows():
-    """Pins subquery_known_gaps/correlated-scalar-subquery-drops-unmatched-outer-rows.
-
-    A wrong answer cannot be absorbed by message matching, so the broken
-    behaviour is asserted DIRECTLY here. When the decorrelation stops using an
-    INNER join this goes red, and the register entry and the
-    `applicable_oracles` exclusion that cites it both come out.
-
-    Mercury (id 1) and Venus (id 2) have no satellites. Every assertion below
-    records what the engine returns today; the comment on each records what SQL
-    requires.
-    """
-    from tests.fuzzing.harness import rows as read
-
-    def ids(predicate):
-        sql = f"SELECT sq_o.id FROM testdata.planets AS sq_o WHERE {predicate}"
-        return sorted(row[0] for row in read(sql))
-
-    moonless = "(SELECT COUNT(*) FROM testdata.satellites AS sq_i WHERE sq_i.planetId = sq_o.id)"
-    biggest = "(SELECT MAX(sq_i.radius) FROM testdata.satellites AS sq_i WHERE sq_i.planetId = sq_o.id)"
-
-    assert ids("sq_o.id IS NOT NULL") == [1, 2, 3, 4, 5, 6, 7, 8, 9], "the corpus has changed"
-    assert ids("sq_o.id IN (SELECT sq_i.planetId FROM testdata.satellites AS sq_i)") == [
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-    ], "the corpus has changed: Mercury and Venus are no longer the moonless planets"
-
-    assert ids(f"{moonless} = 0") == []  # SQL requires [1, 2]
-    assert ids(f"{moonless} < 1") == []  # SQL requires [1, 2]
-    assert ids(f"{biggest} IS NULL") == []  # SQL requires [1, 2]
-    assert ids(f"COALESCE({biggest}, -1.0) < 0.0") == []  # SQL requires [1, 2]
-    assert ids(f"sq_o.id > {moonless}") == [3, 4, 9]  # SQL requires [1, 2, 3, 4, 9]
-
-    # The half that IS right, asserted so a "fix" that swings the other way —
-    # keeping unmatched rows where the comparison should have dropped them —
-    # cannot pass this test.
-    assert ids(f"sq_o.id > {biggest}") == []
-    assert ids(
-        "sq_o.id >= (SELECT MIN(sq_i.id) FROM testdata.satellites AS sq_i "
-        "WHERE sq_i.planetId = sq_o.id)"
-    ) == [3, 4, 5]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# The generator's assumptions must stay true
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 @pytest.mark.parametrize(
     "label,sql,expected", SUPPORT_MATRIX, ids=[row[0] for row in SUPPORT_MATRIX]
@@ -523,7 +471,6 @@ if __name__ == "__main__":  # pragma: no cover
         test_registered_defect_still_reproduces(_defect)
     for _label, _sql, _verdict in NESTED_POSITIONS:
         test_nested_subquery_position_terminates_with_its_verdict(_label, _sql, _verdict)
-    test_wrong_answer_correlated_scalar_subquery_drops_unmatched_outer_rows()
     test_not_in_over_an_empty_subquery_is_true_for_every_row()
     test_register_shape_tags_are_reachable()
     test_every_correlation_pair_discriminates()

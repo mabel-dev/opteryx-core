@@ -525,8 +525,8 @@ cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr"
 
 # draken_rlike bind-time modes (bit0 = negate; no case-insensitive bit — RLIKE
 # has no ILIKE-style SQL variant). The pattern operand at this point is always
-# a pre-compiled DFA blob (predicate_rewriter.py's _rewrite_rlike_to_dfa runs
-# at optimize time, before bind-time lowering ever sees the node) — a
+# a pre-compiled DFA blob (binder/pattern_compile.py's compile_rlike_pattern
+# runs when the predicate is bound, before lowering ever sees the node) — a
 # non-literal or uncompilable pattern raises NotSupportedError there, so this
 # arm never needs to handle a raw pattern.
 cdef dict _RLIKE_MODES = {"RLike": 0, "NotRLike": 1}

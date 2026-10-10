@@ -48,6 +48,7 @@ __all__ = [
     "first_schema_chunk",
     "DEFAULT_CHUNK_SIZE",
     "JsonlPredicatePushable",
+    "JSONL_EMPTINESS_XLAT",
     "JSONL_OP_XLAT",
     "JSONL_SUPPORTED_TYPES",
 ]
@@ -84,6 +85,17 @@ JSONL_OP_XLAT = {
     "NotInList": "not in",
 }
 
+# Emptiness tests, pushed as the rugo string comparison they were rewritten from
+# (predicate_rewriter turns `col = ''` / `col <> ''` into IsEmpty / IsNotEmpty).
+# Against an empty literal rugo's `==` / `!=` is a length check on the value span the
+# structural scan already found (value_parser.cpp apply_op_bytes) — the adjacent-quotes
+# test, no compare, no decode. NULL and absent keys fail both, as SQL `col = ''` /
+# `col <> ''` do.
+JSONL_EMPTINESS_XLAT = {
+    "IsEmpty": "==",
+    "IsNotEmpty": "!=",
+}
+
 # IN-list ops: the list literal is always the RIGHT operand (`column IN (...)`),
 # so these have no `literal OP column` mirror form.
 _JSONL_LIST_OPS = {"InList", "NotInList"}
@@ -94,9 +106,10 @@ class JsonlPredicatePushable(PredicatePushable):
 
     Deliberately narrower than PredicatePushable's default ``can_push``: only
     a plain ``column OP literal`` comparison with an op in JSONL_OP_XLAT (for
-    IN / NOT IN, ``column IN (literal list)`` only) is
-    representable as one of rugo's predicate tuples, so every other shape --
-    BETWEEN, UNARY_OPERATOR (IsNull/IsEmpty/...), a boolean-valued FUNCTION --
+    IN / NOT IN, ``column IN (literal list)`` only), or IsEmpty / IsNotEmpty on a
+    plain string column (JSONL_EMPTINESS_XLAT), is representable as one of rugo's
+    predicate tuples, so every other shape -- BETWEEN, any other UNARY_OPERATOR
+    (IsNull/IsTrue/...), a boolean-valued FUNCTION --
     is rejected here rather than relying on PredicatePushable.can_push's
     generic "boolean function is its own predicate" bypass, which would mark
     something unpushable-to-rugo as pushable with no way to translate it at
@@ -122,6 +135,13 @@ class JsonlPredicatePushable(PredicatePushable):
 
     def can_push(self, operator, types=None) -> bool:
         condition = operator.condition
+        if condition.node_type == NodeType.UNARY_OPERATOR:
+            if condition.value not in JSONL_EMPTINESS_XLAT:
+                return False
+            ident = condition.centre
+            if ident is None or ident.node_type != NodeType.IDENTIFIER or ident.schema_column is None:
+                return False
+            return ident.schema_column.category in (LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR)
         if condition.node_type != NodeType.COMPARISON_OPERATOR:
             return False
         if condition.value not in JSONL_OP_XLAT:

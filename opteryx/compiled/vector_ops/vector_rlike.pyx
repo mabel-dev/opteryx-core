@@ -22,8 +22,8 @@ cdef extern from "core/alloc.h":
 
 
 # Pattern operand is a pre-compiled DFA blob (vector_dfa_compile.compile_rlike_dfa),
-# produced at plan time from a literal pattern by predicate_rewriter.py's
-# _rewrite_rlike_to_dfa — never a raw regex string. RE2 is not linked here; RE2's
+# produced at bind time from a literal pattern by binder/pattern_compile.py's
+# compile_rlike_pattern — never a raw regex string. RE2 is not linked here; RE2's
 # parser only ever runs at plan time (vector_dfa_compile.pyx). A non-literal or
 # uncompilable pattern is refused with NotSupportedError before a predicate ever
 # reaches this function — see .claude/CLAUDE.md's plan-time-refusal precedent.

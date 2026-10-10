@@ -224,8 +224,8 @@ def ternary_logic_partition(statement: Statement, rng: random.Random) -> OracleR
     relation = result_multiset(f"SELECT {columns} FROM {source}")
     buckets = {
         "p": result_multiset(f"SELECT {columns} FROM {source} WHERE {predicate}"),
-        "NOT p": result_multiset(f"SELECT {columns} FROM {source} WHERE NOT {_grouped(predicate)}"),
-        "p IS NULL": result_multiset(f"SELECT {columns} FROM {source} WHERE {_grouped(predicate)} IS NULL"),
+        "NOT p": result_multiset(f"SELECT {columns} FROM {source} WHERE NOT ({predicate})"),
+        "p IS NULL": result_multiset(f"SELECT {columns} FROM {source} WHERE ({predicate}) IS NULL"),
     }
 
     combined = Counter()
@@ -284,7 +284,7 @@ def norec_filter_matches_projected_predicate(statement: Statement, rng: random.R
     predicate = select.where
     filtered = result_multiset(f"SELECT {columns} FROM {source} WHERE {predicate}")
     projected = _rows_where_flag_is_true(
-        f"SELECT {columns}, {_grouped(predicate)} AS norec_flag FROM {source}", predicate
+        f"SELECT {columns}, ({predicate}) AS norec_flag FROM {source}", predicate
     )
     if filtered != projected:
         raise OracleViolation(
@@ -898,46 +898,6 @@ def _first_difference(left: Sequence[str], right: Sequence[str]) -> str:
             return f"row {index}: {a} != {b}"
     longer, side = (left, "before") if len(left) > len(right) else (right, "after")
     return f"only {side} has row {min(len(left), len(right))}: {longer[min(len(left), len(right))]}"
-
-
-def _grouped(predicate: str) -> str:
-    """`predicate` as one operand — parenthesised only if it is not already.
-
-    NOT `f"({predicate})"` unconditionally: the generator's `full()` rendering
-    already encloses most predicates, and a REDUNDANT extra pair is not neutral
-    to the engine. `NOT ((x = ANY(arr)))` is answered while `NOT (x = ANY(arr))`
-    is De-Morganed to the kernel-less ALLOPNOTEQ and refused, so doubling the
-    parentheses would silently route these oracles around a real defect.
-    """
-    if _is_enclosed(predicate):
-        return predicate
-    return f"({predicate})"
-
-
-def _is_enclosed(text: str) -> bool:
-    """Whether the first `(` of `text` is closed by its last character.
-
-    Quote-aware: parentheses inside '...' or "..." literals and identifiers are
-    not structure.
-    """
-    if not (text.startswith("(") and text.endswith(")")):
-        return False
-    depth = 0
-    quote: Optional[str] = None
-    for index, char in enumerate(text):
-        if quote is not None:
-            if char == quote:
-                quote = None
-            continue
-        if char in ("'", '"'):
-            quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return index == len(text) - 1
-    raise AssertionError(f"unbalanced parentheses in generated predicate: {text}")
 
 
 def _source_projection(select: SelectQuery, oracle: str) -> str:

@@ -757,6 +757,17 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
 
+clickbench-json: ## Run ClickBench on upstream's hits.json.gz split into 100 x 1M-row zstd shards (downloads 22 GiB to scratch/hits.json.gz, splits to scratch/hits_json on first run)
+	@# Download to .partial and rename only on success, so an interrupted download
+	@# never looks complete. The split is dev/clickbench/split_hits_json.sh — the
+	@# same script a ClickBench submission's load step would run; it writes
+	@# scratch/hits_json only on success.
+	@test -f scratch/hits.json.gz || { curl -fL --retry 3 -o scratch/hits.json.gz.partial https://datasets.clickhouse.com/hits_compatible/hits.json.gz && mv scratch/hits.json.gz.partial scratch/hits.json.gz; }
+	@test -d scratch/hits_json || dev/clickbench/split_hits_json.sh scratch/hits.json.gz scratch/hits_json
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (json) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant json --iterations 3
+
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile

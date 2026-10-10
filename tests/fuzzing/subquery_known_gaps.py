@@ -71,48 +71,11 @@ REGISTER: List[RegisteredDefect] = [
     # ─────────────────────────────────────────────────────────────────────────
     # WRONG ANSWERS — no exception, just the wrong rows.
     # ─────────────────────────────────────────────────────────────────────────
-    RegisteredDefect(
-        id="correlated-scalar-subquery-drops-unmatched-outer-rows",
-        repro=(
-            "SELECT sq_o.id FROM testdata.planets AS sq_o WHERE "
-            "(SELECT COUNT(*) FROM testdata.satellites AS sq_i "
-            "WHERE sq_i.planetId = sq_o.id) = 0"
-        ),
-        error_type="WrongAnswer",
-        signature="",
-        detail=(
-            "A correlated scalar subquery is decorrelated to an INNER join, so an outer row "
-            "with no matching inner group is DROPPED instead of receiving the aggregate's "
-            "empty-set value. `_decorrelate` in "
-            "opteryx/planner/optimizer/strategies/decorrelate_subquery.py sets "
-            "`join.type = \"inner\" if local_pairs else \"cross join\"`; the correlated case "
-            "always has local pairs, so it is always INNER.\n"
-            "\n"
-            "Mercury (id 1) and Venus (id 2) have no satellites. COUNT over an empty group is "
-            "0, not NULL, so `(SELECT COUNT(*) ...) = 0` must return both. It returns "
-            "nothing.\n"
-            "\n"
-            "Three independent spellings, all measured on testdata.planets:\n"
-            "  (SELECT COUNT(*) ... ) = 0                     -> []      expected [(1,), (2,)]\n"
-            "  (SELECT COUNT(*) ... ) < 1                     -> []      expected [(1,), (2,)]\n"
-            "  (SELECT MAX(sq_i.radius) ... ) IS NULL         -> []      expected [(1,), (2,)]\n"
-            "  COALESCE((SELECT MAX(...)), -1.0) < 0.0        -> []      expected [(1,), (2,)]\n"
-            "and `sq_o.id > (SELECT COUNT(*) ...)` returns 3 rows where 5 are correct.\n"
-            "\n"
-            "WHY IT HID: under a bare comparison the two errors cancel. MIN/MAX/SUM/AVG over "
-            "an empty group are NULL, a comparison against NULL is UNKNOWN, and WHERE drops "
-            "that row — the same row the INNER join already dropped. Only COUNT (whose empty-"
-            "group value is 0, not NULL) and predicates that ASK about the NULL (IS NULL, "
-            "COALESCE) can tell the two apart. That is why `subquery_matches_join_rewrite` "
-            "runs happily on MIN/MAX/SUM/AVG and stands down only on COUNT.\n"
-            "\n"
-            "THE FIX IS DESIGN-IMPACTING, which is why this is registered rather than fixed: "
-            "the join has to become LEFT OUTER, and the substituted value has to carry the "
-            "aggregate's empty-set value (COALESCE(x, 0) for COUNT). LEFT OUTER is a different "
-            "operator with different cost, so which join the correlated scalar path uses is "
-            "the architect's call, not this fuzzer's."
-        ),
-    ),
+    # `correlated-scalar-subquery-drops-unmatched-outer-rows` was registered here.
+    # FIXED: an outer row with no matching inner group now receives the
+    # aggregate's empty-set value (`(SELECT COUNT(*) ...) = 0` returns Mercury and
+    # Venus), so the pin test and the COUNT exclusion in applicable_oracles() are
+    # gone and subquery_matches_join_rewrite covers correlated COUNT again.
     # ─────────────────────────────────────────────────────────────────────────
     # ERRORS — the query is refused, but for the wrong reason or with an
     # internal message. Each is a real limitation; what is registered is that

@@ -881,6 +881,14 @@ def draken_rugo_extensions(parquet_created_by):
                     # explicit_schema's canonical type-name vocabulary, shared by
                     # the JSONL and CSV readers (rugo/src/declared_type.hpp).
                     "rugo/src/declared_type.cpp",
+                    # avro reader C++ sources (docs/AVRO_READER_DESIGN.md). Schema JSON
+                    # is parsed with yyjson, whose single home is draken_native
+                    # (resolved at load, as the draken bridge symbols are).
+                    "rugo/src/avro/avro_schema.cpp",
+                    "rugo/src/avro/avro_container.cpp",
+                    "rugo/src/avro/avro_reader.cpp",
+                    # Python edge of the avro reader (wrap_avro_column); rugo_native only.
+                    "rugo/src/avro/_avro_column_wrap.cpp",
                 ]
                 + get_parquet_vendor_sources()
                 + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
@@ -900,6 +908,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet",
                     "rugo/src/jsonl/core",
                     "rugo/src/csv/core",
+                    "third_party/yyjson/src",       # avro schema parsing (symbols from draken_native)
                     "third_party/snappy",
                     "third_party/zstd",
                     "third_party/zstd/common",
@@ -946,6 +955,12 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/declared_type.hpp",
                 "rugo/src/declared_parse.hpp",
                 "rugo/src/chunk_limit.hpp",
+                "rugo/src/avro/avro_varint.hpp",
+                "rugo/src/avro/avro_schema.hpp",
+                "rugo/src/avro/avro_container.hpp",
+                "rugo/src/avro/avro_reader.hpp",
+                "rugo/src/avro/_avro_column_wrap.hpp",
+                "rugo/src/avro/_avro_reader.pxi",
             ],
             define_macros=[
                 ("HAVE_SNAPPY", "1"),

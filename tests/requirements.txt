@@ -34,6 +34,11 @@ opteryx-catalog
 # test oracles only - never imported by opteryx/, rugo/, or draken/
 pyarrow
 jellyfish  # SOUNDEX reference for tests/unit/functions/test_soundex.py
+# Avro oracles for tests/rugo/test_avro_reader.py (pyarrow has no Avro reader);
+# python-snappy is the reference `avro` package's snappy codec.
+fastavro
+avro
+python-snappy
 
 setuptools_rust
 

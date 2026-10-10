@@ -370,19 +370,11 @@ REGISTER: List[RegisteredDefect] = [
     # POSITION-DEPENDENT EVALUATION — an expression that works standalone but
     # fails once it is nested inside another expression.
     # ─────────────────────────────────────────────────────────────────────────
-    RegisteredDefect(
-        id="rlike-outside-top-level-predicate-position",
-        repro="SELECT (CASE WHEN name RLIKE '^a' THEN name ELSE name END) FROM testdata.planets",
-        error_type="RuntimeError",
-        signature="err_op=15",
-        detail=(
-            "RLIKE inside a projected CASE/IIF fails at execution with err_op=15 "
-            "(ExprMultiProjectOperator: expression evaluation failed): the pattern reaches "
-            "the kernel un-compiled. LIKE and ILIKE are unaffected. (RLIKE nested in a "
-            "multi-term OR in a WHERE, once part of this entry, runs since the predicate "
-            "rewriter walks every child, 2026-09-25.)"
-        ),
-    ),
+    # `rlike-outside-top-level-predicate-position` was registered here. FIXED:
+    # RLIKE pattern compilation moved from PredicateRewriteStrategy (which only
+    # reached predicate positions) into the binder (planner/binder/
+    # pattern_compile.py), so a pattern inside a projected CASE/IIF is compiled
+    # like any other. The generator's RLIKE placement limits went with it.
     RegisteredDefect(
         id="temporal-function-call-inside-a-case-branch",
         repro=(
@@ -395,6 +387,22 @@ REGISTER: List[RegisteredDefect] = [
             "A temporal-returning function call in a CASE branch raises 'a function call in "
             "`IF_THEN_ELSE(...)`, outside the c-native kernel set'. The same TRUNC outside the "
             "CASE runs, and numeric (ABS) and string (UPPER) calls inside the same CASE run."
+        ),
+    ),
+    RegisteredDefect(
+        id="all-op-not-eq-has-no-native-kernel",
+        repro=(
+            "SELECT row_id FROM testdata.fuzzing.mixed "
+            'WHERE NOT (-359066 = ANY("arr_int"))'
+        ),
+        error_type="NotSupportedError",
+        signature="ALLOPNOTEQ",
+        detail=(
+            "`x <> ALL(arr)` has no native kernel, and boolean simplification inverts "
+            "`NOT (x = ANY(arr))` into exactly that, so the NOT form is refused too: "
+            "'a comparison in a filter predicate `x ALLOPNOTEQ arr`, outside the c-native "
+            "kernel set'. `= ANY` itself runs. The fuzzer reaches it through the TLP "
+            "oracle's `NOT p` bucket whenever p is an `= ANY` test over an ARRAY column."
         ),
     ),
     RegisteredDefect(

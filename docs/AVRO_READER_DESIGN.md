@@ -457,3 +457,134 @@ The user asked "structs are json, maps are json, why not use those?" Agreed. Rev
   profile, fixing it is a later decision.
 - Parallel-ARRAY builders are dropped. A JSON renderer is added; ryu and mabel
   base64 are reused. Net A ≈ 2.9k lines unchanged.
+
+## 18. Build, step 1 (2026-10-10)
+
+Contract taken as ruled ("grand, get started"): edge `read_avro(data, columns=None)`
+and `read_avro_metadata(data)`; Avro `string` → VARCHAR; uuid refused (as parquet);
+batches of whole blocks up to 65,536 rows; yyjson resolved from draken_native (its
+single home, the same way as the draken bridge symbols). An invalid logical type is
+refused, where the spec says to ignore it (§4.1).
+
+**Built** (`rugo/src/avro/`, ~1.6k lines C++/Cython, in `rugo_native`): container +
+null/deflate/snappy(+CRC)/zstandard; schema parse with every §8 refusal; compiler
+(dotted projection through records and nullable records, skip ops with fused
+fixed-width skips, negative-count array/map blocks); interpreter writing Draken
+buffers directly (D3 = V); BOOL, INT32/64, FLOAT32/64, VARCHAR, VARBINARY, enum →
+dict VARCHAR, DATE32, TIME64(us), TIMESTAMP64(us), DECIMAL / DECIMAL128.
+
+**Not built yet:** whole record/map/array output (JSON text + ARRAY, §17.2); reader
+schema (field-id matching, promotions, D5 defaults); Iceberg manifest fixtures;
+fuzz target; `make slt` sign-off.
+
+**Oracles:** PyArrow has no Avro reader. fastavro (writer + reader) and Apache's
+reference `avro` package (reader; `python-snappy` for its snappy codec), both
+test-only (`tests/requirements.txt`). Spark/Java-written files come later as
+checked-in fixtures. `tests/rugo/test_avro_reader.py`: 91 pass, 21 fail (below).
+
+### 18.1 Open: deflate as written by Python (D10)
+fastavro **and PyIceberg** write deflate blocks as `zlib.compress(data)[2:-1]`: a
+raw deflate stream followed by 3 leftover bytes of the zlib adler32. Java and zlib
+stop at the stream's end marker and ignore what follows. Rugo refuses trailing
+bytes, so every Python-written deflate file is refused today, including
+PyIceberg's manifests (deflate is its default). Options:
+(a) accept up to 4 bytes after the end-of-stream marker (the zlib trailer
+remnant), refuse more; (b) accept any trailing bytes, as Java does; (c) keep
+refusing.
+
+### 18.2 Observed, outside scope
+A DECIMAL128 Vector's `to_pylist()` returns values rounded to 28 significant digits
+(it looks like Python's default `Decimal` context). It is in draken's
+Python conversion, not the reader. Tests keep 128-bit values to ≤ 28 digits until
+it is looked at.
+
+## 19. Build, step 2 (2026-10-10)
+
+**D10 ruled (a)** and built: up to 4 bytes may follow the deflate end-of-stream
+marker; more is refused.
+
+**Built since §18:**
+- Nested output per §17.2: whole record / map / array of records or arrays → NVARCHAR
+  JSON text using parquet's renderer helpers (`draken/interop/value_format.hpp`, ryu,
+  mabel base64); array of a plain scalar → ARRAY (numeric, or string-family child,
+  nullable elements). An array of a logical type or an enum is refused: Draken's ARRAY
+  child cannot carry one.
+- Iceberg: `tests/rugo/test_avro_iceberg_manifests.py`. PyIceberg-written v1 and v2
+  tables (partitioned, appends + a copy-on-write delete) have every manifest-list and
+  manifest entry compared with PyIceberg's own decoder: status, snapshot id, content,
+  path, format, partition, counts, sizes, null counts, lower/upper bounds.
+- Fuzzing: `avro` target in `tests/fuzzing/native` (replay under ASan/UBSan, libFuzzer
+  in CI), seeded by `dev/generate_avro_fuzz_corpus.py` (4 codecs + PyIceberg manifest
+  list and manifest). 5,000 local mutations: no sanitizer report. The mutation found
+  that raw header bytes could reach Python as `UnicodeDecodeError`. Fixed: metadata keys
+  and `avro.schema` must be strict UTF-8, and the codec name is escaped in its error.
+- Tests: 124 pass (`test_avro_reader.py`, `test_avro_iceberg_manifests.py`).
+
+**v1 vs v2 manifests:** v1 has no `data_file.content`. Reading both with one column
+list needs the reader schema (below). Until then the test selects it on v2 only.
+
+### 19.1 Reader schema — proposed resolution rules (awaiting ratification)
+
+`read_avro(data, columns=None, reader_schema=None)`. With a reader schema, column
+names and output types come from the reader schema. Each file's writer schema is
+resolved against it when the file is opened (D2).
+
+| Case | Rule |
+|---|---|
+| Field matching | by `field-id` when both fields carry one, else by name; one side with ids and the other without → refused |
+| Writer-only field | skipped |
+| Reader-only field | default (D5), or NULL when nullable without a default; required without a default → refused (**see D11**) |
+| `["null",W]` → `["null",R]` | resolve W→R |
+| `W` → `["null",R]` | resolve W→R (no nulls occur) |
+| `["null",W]` → `R` (not nullable) | **refused** when the file is opened (the spec only fails when a null is met; we fail fast) |
+| Promotions | int→long, int/long→float, int/long/float→double, string↔bytes |
+| Logical types | must be equal on both sides, else refused |
+| enum | the reader's symbols must contain every writer symbol; codes are remapped to the reader's order |
+| fixed | equal size |
+| Record / map / array inside a JSON column | writer and reader subtrees must be identical, else refused (no evolution inside JSON text) |
+| ARRAY items | resolved as a scalar leaf |
+
+### 19.2 How a default reaches a Vector (superseded — see §19.4)
+
+§16 planned a constant-shape vector (`draken_vector_from_constant`). That exists as a
+C function returning a `DrakenVector`, but **there is no Python-edge producer for
+it**. Every `draken_vector_own_*` in `draken/vectors/_vector_bridge.h` builds a dense
+or dict vector. Options:
+- (a) add `draken_vector_own_constant(...)` to draken's bridge (a new exported
+  producer; draken API change, no ABI change to `DrakenVector`), used for both
+  defaults and NULL fill;
+- (b) materialise the default densely, one copy per row (no draken change, a per-row
+  write, not constant-shaped);
+- (c) dict shape: a one-entry dictionary with all-zero codes (existing
+  `draken_vector_own_dict` / `_string_dict`; `length` codes allocated, not constant).
+
+### 19.3 Reader schema — as ruled and built (2026-10-10)
+
+Ruled: 1a refuse at open (agrees with Apache's reference; fastavro errors only when a
+null arrives); 1b "follow the convention unless it hurts"; 1c resolve nested records
+inside JSON as fastavro and Apache do.
+
+| Case | Built behaviour |
+|---|---|
+| Field matching | by `field-id` when the file's field has one and the reader record uses ids; else by name. Two file fields resolving to one reader field → refused |
+| File-only field | skipped |
+| Reader-only field | its default as a **constant** (one value, positions all 0 — CLAUDE.md §11); no default → a NULL constant (as parquet's absent columns). Under a nullable record the constant is NULL where the record is |
+| Nullable in file, required in reader | refused when the file is opened |
+| Promotions | int→long/float/double, long→float/double, float→double, string↔bytes |
+| Logical types | follow the FILE (the reader's logical type is not consulted) — the fastavro / Apache convention; e.g. a scale-2 decimal read with a scale-4 reader stays scale 2 |
+| enum | the file's symbols must all be in the reader's; codes remapped to the reader's order |
+| JSON columns | nested records resolved: fields reordered (rendered into slots, then written in the reader's order), dropped, and reader-only fields written as their default literal |
+| Defaults | spec form: bytes/fixed default code points 0-255 are the bytes (ISO-8859-1); a date default renders as a date. fastavro returns these defaults unconverted and Apache's Python package UTF-8-encodes bytes defaults — both deviate from the spec, and the tests assert the spec |
+
+Tests: `tests/rugo/test_avro_reader_schema.py`, including one reader schema (the v2
+manifest's, with `content` defaulted to 0) reading both v1 and v2 PyIceberg manifests.
+The fuzz target also resolves against a reader schema.
+
+### 19.4 Gap: constant TIMESTAMP / TIME / DECIMAL
+
+The constant producers at the Python edge (`draken_vector_own_dict`,
+`draken_vector_own_string_dict`) take no logical-type descriptor, and TIMESTAMP64 /
+TIME64 / DECIMAL vectors require one (precision/scale, unit). So a reader-only field
+of those types, default or NULL, is **refused** today, naming this section. Closing it
+needs a producer that takes value list + positions + logical descriptor (the
+`own_raw_logical` counterpart for the compressed form) — a draken bridge addition.

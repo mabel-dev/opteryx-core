@@ -23,6 +23,7 @@ python 01_read_parquet.py
 | [05_read_csv.py](05_read_csv.py) | Read CSV — projection, predicate pushdown, TSV, null handling |
 | [06_read_jsonl.py](06_read_jsonl.py) | Read JSONL — schema inference, projection, predicate pushdown |
 | [07_streaming_write.py](07_streaming_write.py) | Stream several morsels to a Parquet file at constant memory, one row group per batch |
+| [08_read_avro.py](08_read_avro.py) | Read Avro — header, projection into nested records, nested JSON, reading with a reader schema |
 | [space_missions.ipynb](space_missions.ipynb) | Colab notebook tour: schema, projection, filtering, aggregation, sorting, JSONL/CSV writes, Arrow interop |
 
 ---

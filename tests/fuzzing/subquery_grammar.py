@@ -664,11 +664,9 @@ NESTED_POSITIONS: Tuple[Tuple[str, str, Optional[str]], ...] = (
 # One generated case
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: Aggregates the scalar-subquery forms draw from. COUNT is here on purpose even
-#: though it is the one that exposes
-#: subquery_known_gaps/correlated-scalar-subquery-drops-unmatched-outer-rows:
-#: the point of a fuzzer is to keep emitting the broken shape, and the ORACLE
-#: declines (naming the entry), not the generator.
+#: Aggregates the scalar-subquery forms draw from. COUNT matters most: its
+#: empty-group value is 0, not NULL, so it is the aggregate that tells a dropped
+#: unmatched outer row apart from one correctly compared against NULL.
 _AGGREGATES: Tuple[str, ...] = ("MIN", "MAX", "SUM", "AVG", "COUNT")
 
 _COMPARISONS: Tuple[str, ...] = (">", ">=", "<", "<=", "=", "!=")

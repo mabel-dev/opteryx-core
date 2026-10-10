@@ -21,6 +21,8 @@ class Dataset(enum.Enum):
     FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k" # preferred
     FULL_SINGLE = "scratch.hits_single"
     FULL_SPLIT_SKENE = "scratch.hits_skene"
+    # Upstream's hits.json.gz split into 1M-row zstd shards (dev/clickbench/split_hits_json.sh).
+    FULL_SPLIT_JSON = "scratch.hits_json"
     # Remote Iceberg tables on AIStor (tests/performance/_common.py). Canon split and
     # rugo split are the same files as FULL_SPLIT / FULL_SPLIT_RUGO_262K; canon single
     # is upstream's hits.parquet. Skene has no Iceberg form, so no remote skene.
@@ -60,6 +62,7 @@ VARIANT_DATASETS = {
     "": DATASET,
     "canon": Dataset.FULL_SPLIT,
     "skene": Dataset.FULL_SPLIT_SKENE,
+    "json": Dataset.FULL_SPLIT_JSON,
     "aistor-canon-split": Dataset.AISTOR_CANON_SPLIT,
     "aistor-canon-single": Dataset.AISTOR_CANON_SINGLE,
     "aistor-rugo-split": Dataset.AISTOR_RUGO_SPLIT,
@@ -101,7 +104,7 @@ STATEMENTS = [
         ("/* 00 */ SELECT COUNT(*) FROM {DATASET};", None),
         ("/* 01 */ SELECT COUNT(*) FROM {DATASET} WHERE AdvEngineID <> 0;", None),
         ("/* 02 */ SELECT SUM(AdvEngineID), COUNT(*), AVG(ResolutionWidth) FROM {DATASET};", None),
-        ("/* 03 */ SELECT AVG(UserID) FROM {DATASET};", None),
+        ("/* 03 */ SELECT AVG(UserID::INT64) FROM {DATASET};", None),
         ("/* 04 */ SELECT COUNT(DISTINCT UserID) FROM {DATASET};", None),
         ("/* 05 */ SELECT COUNT(DISTINCT SearchPhrase) FROM {DATASET};", None),
         ("/* 06 */ SELECT MIN(EventDate), MAX(EventDate) FROM {DATASET};", None),
@@ -117,7 +120,7 @@ STATEMENTS = [
         ("/* 16 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;", None),
         ("/* 17 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase LIMIT 10;", None),
         ("/* 18 */ SELECT UserID, extract(minute FROM EventTime::TIMESTAMP[s]) AS m, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, extract(minute FROM EventTime::TIMESTAMP[s]), SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;", None),
-        ("/* 19 */ SELECT UserID FROM {DATASET} WHERE UserID = 435090932899640449;", None),
+        ("/* 19 */ SELECT UserID FROM {DATASET} WHERE UserID::INT64 = 435090932899640449;", None),
         ("/* 20 */ SELECT COUNT(*) FROM {DATASET} WHERE URL LIKE '%google%';", None),
         ("/* 21 */ SELECT SearchPhrase, MIN(URL), COUNT(*) AS c FROM {DATASET} WHERE URL LIKE '%google%' AND SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
         ("/* 22 */ SELECT SearchPhrase, MIN(URL), MIN(Title), COUNT(*) AS c, COUNT(DISTINCT UserID) FROM {DATASET} WHERE Title LIKE '%Google%' AND URL NOT LIKE '%.google.%' AND SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;", None),
@@ -138,8 +141,8 @@ STATEMENTS = [
         ("/* 37 */ SELECT Title, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND DontCountHits = 0 AND IsRefresh = 0 AND Title <> '' GROUP BY Title ORDER BY PageViews DESC LIMIT 10;", None),
         ("/* 38 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND IsLink <> 0 AND IsDownload = 0 GROUP BY URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;", None),
         ("/* 39 */ SELECT TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END AS Src, URL AS Dst, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 GROUP BY TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END, URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;", None),
-        ("/* 40 */ SELECT URLHash, EventDate, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND TraficSourceID IN (-1, 6) AND RefererHash = 3594120000172545465 GROUP BY URLHash, EventDate ORDER BY PageViews DESC LIMIT 10 OFFSET 100;", None),
-        ("/* 41 */ SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND DontCountHits = 0 AND URLHash = 2868770270353813622 GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000;", None),
+        ("/* 40 */ SELECT URLHash, EventDate, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND TraficSourceID IN (-1, 6) AND RefererHash::INT64 = 3594120000172545465 GROUP BY URLHash, EventDate ORDER BY PageViews DESC LIMIT 10 OFFSET 100;", None),
+        ("/* 41 */ SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND DontCountHits = 0 AND URLHash::INT64 = 2868770270353813622 GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000;", None),
         ("/* 42 */ SELECT TRUNC(EventTime::TIMESTAMP[s], 'minute') AS M, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-14'::DATE AND EventDate::DATE <= '2013-07-15'::DATE AND IsRefresh = 0 AND DontCountHits = 0 GROUP BY TRUNC(EventTime::TIMESTAMP[s], 'minute') ORDER BY M LIMIT 10 OFFSET 1000;", None),
 ]
 # fmt:on
@@ -184,6 +187,7 @@ if __name__ == "__main__":  # pragma: no cover
     # Running in the IDE we do some formatting - it's not functional but helps when reading the outputs.
 
     import argparse
+    import csv
     import gc
     import json
     import statistics
@@ -236,6 +240,7 @@ if __name__ == "__main__":  # pragma: no cover
         choices=sorted(VARIANT_DATASETS),
         help="Dataset format variant: `canon` runs against the upstream 100-file "
         "split (scratch/hits); `skene` runs against the skene mirror; "
+        "`json` runs against upstream's hits.json.gz split into zstd shards (scratch/hits_json); "
         "`aistor-*` against the remote Iceberg tables on AIStor "
         "(default: the rugo 262k-row-group split, scratch/hits_rugo_262k)",
     )
@@ -320,14 +325,46 @@ if __name__ == "__main__":  # pragma: no cover
             duckdb_results = [result[2] for result in duckdb_data.get("result", [])]
             duckdb_machine = duckdb_data.get("machine", args.duckdb_baseline)
 
-    def format_ratio(opteryx_ms: float, duckdb_ms: float) -> str:
+    # The ratio column's baseline: per-query milliseconds (None = no ratio for
+    # that query). DuckDB-on-parquet for every variant except `json`, which is
+    # compared to OUR OWN canon run (the newest results/FULL_SPLIT CSV, best ok
+    # run per query): both are upstream's untuned data, so the ratio shows where
+    # the JSON path stops scaling with the work, not how far DuckDB is ahead.
+    # No canon CSV means no ratio column — a local canon run is never started.
+    baseline_ms = None
+    baseline_name = "DuckDB"
+    baseline_source = None
+    if args.variant == "json":
+        baseline_name = "canon"
+        canon_dir = os.path.join(_script_dir, "results", Dataset.FULL_SPLIT.name)
+        canon_csvs = sorted(
+            (os.path.join(canon_dir, name) for name in os.listdir(canon_dir) if name.endswith(".csv")),
+            key=os.path.getmtime,
+        ) if os.path.isdir(canon_dir) else []
+        if canon_csvs:
+            baseline_source = canon_csvs[-1]
+            best: dict = {}
+            with open(baseline_source, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row["status"] == "ok":
+                        ms = float(row["elapsed_ms"])
+                        best[row["query"]] = min(ms, best.get(row["query"], ms))
+            baseline_ms = [best.get(f"Q{index:02d}") for index in range(len(STATEMENTS))]
+    elif duckdb_results:
+        baseline_source = f"{duckdb_machine} (warm2 times)"
+        baseline_ms = [
+            duckdb_results[index] * 1000 if index < len(duckdb_results) else None
+            for index in range(len(STATEMENTS))
+        ]
+
+    def format_ratio(opteryx_ms: float, base_ms: float) -> str:
         """Format ratio with color coding based on performance."""
         # DuckDB records seconds to the millisecond, and answers some queries
         # (Q00's COUNT(*)) from metadata in under 1ms - a 0.0 baseline. There is
         # no ratio to a time below the baseline's resolution.
-        if duckdb_ms <= 0:
+        if base_ms <= 0:
             return "[n/a]"
-        ratio = opteryx_ms / duckdb_ms
+        ratio = opteryx_ms / base_ms
         ratio_str = f"[{ratio:.2f}x]"
 
         # Color codes based on ratio thresholds
@@ -381,7 +418,7 @@ if __name__ == "__main__":  # pragma: no cover
     passed: int = 0
     failed: int = 0
     sum_min_ms: float = 0.0  # Σ per-query best (minimum) time — the headline total
-    sum_duckdb_min_ms: float = 0.0  # Σ DuckDB baseline over the same queries
+    sum_base_min_ms: float = 0.0  # Σ ratio baseline over the same queries
     failures = []
 
     print(f"{'=' * 88}")
@@ -389,10 +426,10 @@ if __name__ == "__main__":  # pragma: no cover
     print(f"{'=' * 88}")
     for key, value in provenance.items():
         print(f"  {key:<20} {value}")
-    if duckdb_results:
-        print(f"  {'duckdb_baseline':<20} {duckdb_machine} (warm2 times)")
+    if baseline_ms is not None:
+        print(f"  {'ratio_baseline':<20} {baseline_name}: {os.path.relpath(baseline_source, repo_root) if baseline_name == 'canon' else baseline_source}")
         print(
-            "  ⚠ the DuckDB column is ORIENTATION ONLY — a stored baseline from another\n"
+            f"  ⚠ the {baseline_name} column is ORIENTATION ONLY — a stored baseline from another\n"
             "    session and thermal state. It is not an interleaved A/B and must not be\n"
             "    quoted as one."
         )
@@ -519,8 +556,8 @@ if __name__ == "__main__":  # pragma: no cover
                 cell = f"\033[38;2;255;69;69m{cell}\033[0m"
             cells.append(cell)
         line = f"\r\033[K  {query_num} {len(runs)} runs ({', '.join(cells)})"
-        if duckdb_results and index < len(duckdb_results):
-            line += f" {format_ratio(min(runs), duckdb_results[index] * 1000)}"
+        if baseline_ms is not None and baseline_ms[index] is not None:
+            line += f" {format_ratio(min(runs), baseline_ms[index])}"
         print(line)
 
     csv_handle.close()
@@ -528,8 +565,8 @@ if __name__ == "__main__":  # pragma: no cover
     print()
     print(f"History: {os.path.relpath(csv_path, repo_root)}\n")
     header = f"{'Query':<7} {'Min':>11} {'Median':>11} {'Max':>11} {'Spread':>9}  {'Rounds':<8}"
-    if duckdb_results:
-        header += " vs DuckDB"
+    if baseline_ms is not None:
+        header += f" vs {baseline_name}"
     print(header)
     print("-" * (len(header) + 4))
 
@@ -554,10 +591,9 @@ if __name__ == "__main__":  # pragma: no cover
             f"{query_num:<7} {min_time:>9.2f}ms {med_time:>9.2f}ms {max_time:>9.2f}ms "
             f"{spread_str}  {len(times):<8}"
         )
-        if duckdb_results and index < len(duckdb_results):
-            duckdb_ms = duckdb_results[index] * 1000  # baseline JSON is in seconds
-            row += f" {format_ratio(min_time, duckdb_ms)}"
-            sum_duckdb_min_ms += duckdb_ms
+        if baseline_ms is not None and baseline_ms[index] is not None:
+            row += f" {format_ratio(min_time, baseline_ms[index])}"
+            sum_base_min_ms += baseline_ms[index]
         print(row)
 
         sum_min_ms += min_time
@@ -729,10 +765,10 @@ if __name__ == "__main__":  # pragma: no cover
     summary = f"\n\033[38;2;139;233;253m\033[3mSUM OF MINIMUMS\033[0m  {sum_min_ms / 1000:.2f}s ({sum_min_ms:.0f}ms) over {passed}/{len(STATEMENTS)} queries"
     if failed > 0:
         summary += f"\n  \033[0;31m{failed} queries failed and contribute 0ms — this total is not comparable to a clean run\033[0m"
-    if sum_duckdb_min_ms > 0:
+    if sum_base_min_ms > 0:
         summary += (
-            f"\n  vs DuckDB {sum_duckdb_min_ms / 1000:.2f}s  "
-            f"{format_ratio(sum_min_ms, sum_duckdb_min_ms)}  (orientation only)"
+            f"\n  vs {baseline_name} {sum_base_min_ms / 1000:.2f}s  "
+            f"{format_ratio(sum_min_ms, sum_base_min_ms)}  (orientation only)"
         )
     print(summary)
 

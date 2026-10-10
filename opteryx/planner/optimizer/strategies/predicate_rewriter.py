@@ -51,11 +51,11 @@ from typing import Callable, Dict, Optional
 
 from draken.draken_native import DrakenType as _DrakenType
 
-from opteryx.exceptions import NotSupportedError
 from opteryx.expression import ExpressionColumn, NodeType, format_expression
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type, _STRING_CATEGORIES
+from opteryx.planner.binder.pattern_compile import fresh_literal
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
@@ -156,93 +156,6 @@ def reorder_interval_calc(predicate, *, plan_context):
     # SELECT lists, where a re-minted identity orphaned every reference to the
     # projected column. The input node is not modified.
     return predicate.replace(left=date_end, right=new_binary_op)
-
-
-def _rewrite_rlike_to_dfa(predicate, telemetry, *, plan_context):
-    """RLike/NotRLike with a literal pattern: compile the pattern into a byte
-    DFA at plan time (RE2's parser only — see vector_dfa_compile.pyx's module
-    docstring) and replace the pattern operand with the compiled blob.
-
-    A non-literal pattern, or a literal pattern outside the compiler's
-    supported scope (non-ASCII content, case-fold, nested anchors, or a
-    state-count blowup), raises NotSupportedError here rather than reaching
-    vector_rlike at runtime with a pattern it can no longer interpret —
-    vector_rlike expects a pre-compiled blob unconditionally now that RE2's
-    matcher has been removed from it, so there is no runtime fallback to
-    silently degrade to.
-    """
-    if predicate.value not in ("RLike", "NotRLike"):
-        return predicate
-    if predicate.right.node_type != NodeType.LITERAL:
-        raise NotSupportedError(
-            "**RLIKE**/REGEXP_LIKE requires a constant pattern — "
-            f"got a non-literal expression for {predicate.value}."
-        )
-
-    # Already compiled: the pattern operand IS the blob. Compiling it again would
-    # read the blob's bytes as a regex.
-    if predicate.right.rlike_compiled:
-        return predicate
-
-    pattern_value = predicate.right.value
-    if isinstance(pattern_value, str):
-        pattern_value = pattern_value.encode("utf8")
-    elif not isinstance(pattern_value, bytes):
-        raise NotSupportedError(
-            f"**RLIKE**/REGEXP_LIKE pattern must be a string constant, got {type(pattern_value)!r}."
-        )
-
-    from opteryx.compiled import vector_ops as compiled_vector_ops
-
-    # Prefer the SIMD op-program (blob version 2) when the pattern decomposes to
-    # ASCII literals joined by `.*`/`.+` with optional `^`/`$` anchors — it beats
-    # the transition-table DFA (blob version 1) on short and long columns alike.
-    # The blob's version byte tells compiled_expression which kernel to dispatch
-    # (draken_like_program vs draken_rlike). Non-decomposable patterns fall
-    # through to the DFA, which stays the correct, fully-general fallback.
-    compiled_blob = compiled_vector_ops.compile_rlike_program(pattern_value)
-    if compiled_blob is not None:
-        telemetry.optimization_predicate_rewriter_rlike_to_dfa += 1
-        return _with_compiled_pattern(predicate, compiled_blob, plan_context=plan_context)
-
-    compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
-    if compiled_blob is None:
-        raise NotSupportedError(
-            "**RLIKE**/REGEXP_LIKE pattern is outside the supported regex dialect "
-            "(no lookaround/backreferences/case-fold, ASCII pattern content only, "
-            "anchors only at the outermost start/end, and the compiled automaton "
-            f"must stay within the state-count cap): {pattern_value!r}"
-        )
-
-    telemetry.optimization_predicate_rewriter_rlike_to_dfa += 1
-    return _with_compiled_pattern(predicate, compiled_blob, plan_context=plan_context)
-
-
-def _fresh_literal(literal, *, plan_context):
-    """A NEW literal node with `literal`'s fields and its OWN ConstantColumn.
-
-    `build_literal_node(value, identity_of=X)` retypes `X.schema_column` in place,
-    and a literal's ConstantColumn can be shared between nodes. Handing it this copy
-    instead keeps the original untouched while the rebuilt literal keeps its display
-    name.
-    """
-    name = literal.schema_column.name if literal.schema_column is not None else None
-    return literal.replace(schema_column=plan_context.columns.constant(name))
-
-
-def _with_compiled_pattern(predicate, compiled_blob, *, plan_context):
-    """A NEW RLIKE node whose pattern operand is the compiled blob.
-
-    The input pattern literal used to be overwritten with the blob in place, so
-    any other holder of it, or of the RLIKE node, saw a blob where a regex was, and
-    a second rewrite of the same node compiled the blob bytes as a pattern.
-    """
-    blob = build_literal_node(
-        compiled_blob,
-        identity_of=_fresh_literal(predicate.right, plan_context=plan_context),
-        suggested_type=_lt.VARBINARY, plan_context=plan_context)
-    blob.rlike_compiled = True
-    return predicate.replace(right=blob)
 
 
 # Operand shapes eligible for LIKE-ANY / NOT-LIKE-ALL fusion. IDENTIFIER is the
@@ -1862,12 +1775,6 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
     if predicate.node_type == NodeType.FUNCTION:
         return _rewrite_function(predicate, telemetry, plan_context=plan_context)
 
-    if predicate.node_type == NodeType.COMPARISON_OPERATOR and predicate.value in (
-        "RLike",
-        "NotRLike",
-    ):
-        return _rewrite_rlike_to_dfa(predicate, telemetry, plan_context=plan_context)
-
     # Fuse OR'd LIKE/ILIKE on one column into a single native LIKE ANY, OR'd
     # point tests into one IN-list, OR'd `lit = ANY(col)` into one containment.
     # Each fusion neutralises the branches it absorbed to LITERAL False; prune
@@ -2262,7 +2169,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
                     function.parameters[0],
                     build_literal_node(
                         compiled_program,
-                        identity_of=_fresh_literal(function.parameters[1], plan_context=plan_context),
+                        identity_of=fresh_literal(function.parameters[1], plan_context=plan_context),
                         suggested_type=_lt.VARBINARY, plan_context=plan_context),
                 ],
             )

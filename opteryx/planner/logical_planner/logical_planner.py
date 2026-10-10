@@ -3590,7 +3590,14 @@ def process_join_tree(join: dict, *, plan_context) -> PlanStep:
                 logical_planner_builders.build(constraint["On"], plan_context=plan_context)
             )
         elif isinstance(constraint, dict) and "Using" in constraint:
-            join_step.using = [logical_planner_builders.build(i[0], plan_context=plan_context) for i in constraint["Using"]]
+            # ASOF takes its equality keys in ON (architect, 2026-10-10). USING was
+            # accepted without being designed, and it bypassed the type check ON
+            # applies: `USING (arr_str)` on an ARRAY column answered 0 rows where
+            # `ON a.arr_str = b.arr_str` is refused.
+            raise UnsupportedSyntaxError(
+                "**ASOF JOIN** takes its equality keys in **ON**, not **USING**. "
+                "Write `MATCH_CONDITION(...) ON left.key = right.key`."
+            )
     else:
         join_step.on, join_step.using = extract_join_condition(join, plan_context=plan_context)
 

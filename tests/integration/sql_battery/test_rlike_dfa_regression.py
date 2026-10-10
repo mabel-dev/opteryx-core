@@ -6,8 +6,8 @@ failed at plan time with NotSupportedError (the generic BC_COMPARE gate only
 admits op codes 1-6, and there was no draken_rlike kernel or bind-time
 lowering arm). Now:
 
-  - predicate_rewriter._rewrite_rlike_to_dfa compiles a *literal* pattern into
-    a byte-DFA blob at plan time (RE2 parser only — vector_dfa_compile.pyx),
+  - binder/pattern_compile.compile_rlike_pattern compiles a *literal* pattern
+    into a byte-DFA blob at bind time (RE2 parser only — vector_dfa_compile.pyx),
   - compiled_expression.pyx lowers RLike/NotRLike to the draken_rlike C-ABI
     kernel (BC_FUNCTION | BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL),
   - draken_rlike (function_rlike.cpp) walks the blob per row — no RE2, no
@@ -113,6 +113,68 @@ def test_rlike_over_real_column():
     for morsel in opteryx.session().execute_to_morsels(sql):
         out.extend(morsel.column(b"name").to_pylist())
     assert set(out) == {"Jupiter", "Saturn"}
+
+
+def _planets_ending_in_u_s():
+    # A parquet relation, so the predicate is pushed into the scan.
+    sql = "SELECT name FROM testdata.planets WHERE name RLIKE 'u+s$'"
+    out = []
+    for morsel in opteryx.session().execute_to_morsels(sql):
+        out.extend(morsel[i][0] for i in range(len(morsel)))
+    return sorted(out)
+
+
+def test_rlike_does_not_depend_on_predicate_rewrite():
+    """Pattern compilation is a lowering, done by the binder.
+
+    It used to live in PredicateRewriteStrategy, so with that strategy switched
+    off the raw regex reached the parquet scan's predicate kernel and EVERY RLIKE
+    failed: `NativeParquetScanSource: pass-1 predicate eval failed (rc=4, kernel
+    error)`.
+    """
+    from opteryx import config
+
+    previous = config.features.disable_predicate_rewrite
+    config.features.disable_predicate_rewrite = True
+    try:
+        assert _planets_ending_in_u_s() == ["Uranus", "Venus"]
+    finally:
+        config.features.disable_predicate_rewrite = previous
+
+
+def test_rlike_does_not_depend_on_constant_folding():
+    """ConstantFoldingStrategy carried its own copy of the compile step."""
+    from opteryx import config
+
+    previous = config.features.disable_constant_folding
+    config.features.disable_constant_folding = True
+    try:
+        assert _planets_ending_in_u_s() == ["Uranus", "Venus"]
+    finally:
+        config.features.disable_constant_folding = previous
+
+
+def test_rlike_as_a_projected_value():
+    """RLIKE in the SELECT list, bare and inside CASE.
+
+    The binder compiles the pattern on the node being bound. Replacing the node
+    instead orphaned the projection's own reference to it ("an output column the
+    engine could not resolve"); before the binder did it at all, the CASE form
+    reached the kernel uncompiled (err_op=15).
+    """
+    sql = (
+        "SELECT name, name RLIKE 'u' AS bare, "
+        "CASE WHEN name RLIKE '^M' THEN 1 ELSE 0 END AS in_case FROM $planets"
+    )
+    out = {}
+    for morsel in opteryx.session().execute_to_morsels(sql):
+        for i in range(len(morsel)):
+            name, bare, in_case = morsel[i]
+            out[name] = (bare, in_case)
+    assert out == {
+        name: ("u" in name, 1 if name.startswith("M") else 0)
+        for name in ("Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto")
+    }
 
 
 def test_rlike_null_row_propagates():

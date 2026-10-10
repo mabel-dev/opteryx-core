@@ -150,15 +150,8 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         node.asof_op = asof_cmp.value
         node.columns = list(get_all_nodes_of_type(node.asof_condition, (NodeType.IDENTIFIER,)))
 
-        # Optional equi-partition key via ON/USING — bind it normally
-        if node.using:
-            node.on = convert_using_to_on(
-                {n.value for n in node.using},
-                node.left_relation_names,
-                node.right_relation_names,
-                context.schemas,
-                arena=context.plan_context.expressions,
-            )
+        # Optional equi-partition key via ON — bind it normally. (USING is refused
+        # for ASOF in the logical planner.)
         if node.on:
             node.on, context = inner_binder(node.on, context)
             node.left_columns, node.right_columns, unkeyed = extract_join_fields(

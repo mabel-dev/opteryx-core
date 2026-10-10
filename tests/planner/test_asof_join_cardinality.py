@@ -49,7 +49,7 @@ SELECT p.name, p2.name AS m
 _WITH_KEY = """
 SELECT p.name, p2.name AS m
   FROM $planets AS p
-  ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity >= p2.gravity) USING (id)
+  ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity >= p2.gravity) ON p.id = p2.id
 """
 
 _CROSS = "SELECT p.name, p2.name FROM $planets AS p CROSS JOIN $planets AS p2"
@@ -103,7 +103,7 @@ def _join_and_child_rows(plan, plan_context):
     return join_nid, left_nid
 
 
-@pytest.mark.parametrize("sql", [_NO_ON, _WITH_KEY], ids=["no_on", "using_key"])
+@pytest.mark.parametrize("sql", [_NO_ON, _WITH_KEY], ids=["no_on", "on_key"])
 def test_asof_cardinality_is_the_left_row_count(sql):
     plan, _telemetry, plan_context = _bound(sql)
     join_nid, left_nid = _join_and_child_rows(plan, plan_context)

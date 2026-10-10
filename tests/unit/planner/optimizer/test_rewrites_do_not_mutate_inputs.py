@@ -103,7 +103,6 @@ _REWRITES = [
     # Patched where it is CALLED: splitting imports it under its own name, and the
     # two below are reached through the rewriter's `dispatcher` dict.
     (vars(splitting), "rewrite_anded_not_like_to_all", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low NOT LIKE 'a%' AND s_low NOT LIKE '%z' AND row_id > 3"),
-    (vars(rewriter), "_rewrite_rlike_to_dfa", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low RLIKE '^a'"),
     (rewriter.dispatcher, "rewrite_in_to_eq", (0,), f"SELECT row_id FROM {TABLE} WHERE i_group IN (3)"),
     (rewriter.dispatcher, "reorder_interval_calc", (0,), f"SELECT row_id FROM {TABLE} WHERE ts_value - ts_null > INTERVAL '1' DAY"),
     (vars(rewriter), "rewrite_int_vs_fractional_const", (0,), f"SELECT row_id FROM {TABLE} WHERE i_null != 4.5"),

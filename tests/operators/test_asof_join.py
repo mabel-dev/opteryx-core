@@ -5,7 +5,7 @@ Tests cover:
   - Basic ASOF with >= (most common: find nearest-before match)
   - Basic ASOF with <= (find nearest-after match)
   - LEFT semantics: left rows with no right match produce null right columns
-  - USING equi-partition key
+  - ON equi-partition key (USING is refused for ASOF)
   - Null ASOF column on left row → treated as no match (null right columns)
 """
 
@@ -147,10 +147,26 @@ def test_asof_basic_ltoreq_correctness():
 
 
 # ---------------------------------------------------------------------------
-# USING equi-partition: ASOF within a partition key
+# ON equi-partition: ASOF within a partition key
 # ---------------------------------------------------------------------------
 
-def test_asof_using_partition_row_count():
+def test_asof_using_is_refused():
+    # ASOF takes its equality keys in ON (architect, 2026-10-10). USING used to be
+    # accepted and skipped ON's type check: `USING (arr_str)` answered 0 rows.
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    sql = """
+        SELECT s.name
+        FROM testdata.satellites AS s
+        ASOF JOIN testdata.satellites AS s2
+            MATCH_CONDITION(s.id >= s2.id)
+            USING (planetId)
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="ON"):
+        row_count(sql)
+
+
+def test_asof_on_partition_row_count():
     # Partition by planetId so each satellite only matches quotes from same planet.
     # Self-join testdata.satellites using planetId, ASOF on id.
     sql = """
@@ -158,7 +174,7 @@ def test_asof_using_partition_row_count():
         FROM testdata.satellites AS s
         ASOF JOIN testdata.satellites AS s2
             MATCH_CONDITION(s.id >= s2.id)
-            USING (planetId)
+            ON s.planetId = s2.planetId
     """
     from opteryx.connectors import DiskConnector
     opteryx.register_workspace("testdata", DiskConnector)
@@ -168,11 +184,11 @@ def test_asof_using_partition_row_count():
     assert total > 0
 
 
-def test_asof_using_partition_confines_matches():
-    # The USING key is the correctness contract for a partitioned ASOF: a probe
+def test_asof_on_partition_confines_matches():
+    # The ON key is the correctness contract for a partitioned ASOF: a probe
     # row must NEVER match a build row from a different partition. `>` (not `>=`)
     # excludes the self-match, so an unpartitioned join would reach back into the
-    # previous planet — which is exactly what a dropped USING key looks like.
+    # previous planet — which is exactly what a dropped ON key looks like.
     from opteryx.connectors import DiskConnector
     opteryx.register_workspace("testdata", DiskConnector)
 
@@ -181,14 +197,14 @@ def test_asof_using_partition_confines_matches():
         FROM testdata.satellites AS s
         ASOF JOIN testdata.satellites AS s2
             MATCH_CONDITION(s.id > s2.id)
-            USING (planetId)
+            ON s.planetId = s2.planetId
     """
     rows = _collect(sql)
     matched = [r for r in rows if r[b"match_name"] is not None]
     assert matched, "expected some matches"
 
     cross = [r for r in matched if r[b"s.planetId"] != r[b"match_pid"]]
-    assert not cross, f"USING(planetId) must not match across partitions: {cross[:5]}"
+    assert not cross, f"ON s.planetId = s2.planetId must not match across partitions: {cross[:5]}"
 
     # And the partition must actually bite: the first satellite of each planet has
     # no earlier id within its own planet, so it must be unmatched. Unpartitioned,
