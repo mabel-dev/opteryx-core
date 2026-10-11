@@ -39,6 +39,9 @@ jellyfish  # SOUNDEX reference for tests/unit/functions/test_soundex.py
 fastavro
 avro
 python-snappy
+# Iceberg manifest oracle for tests/rugo/test_avro_iceberg_manifests.py and
+# test_avro_reader_schema.py (SqlCatalog needs the sqlite extra).
+pyiceberg[sql-sqlite]
 
 setuptools_rust
 

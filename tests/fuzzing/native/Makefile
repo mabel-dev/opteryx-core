@@ -39,7 +39,8 @@ FUZZ_SECONDS ?= 60
 
 # --- shared include roots -----------------------------------------------------
 DRAKEN_INC := -I$(ROOT)/draken -I$(ROOT)/draken/core -I$(ROOT)/draken/simd \
-              -I$(ROOT)/third_party/cyan4973 -I$(ROOT)/third_party/mabel/carchar
+              -I$(ROOT)/third_party/cyan4973 -I$(ROOT)/third_party/mabel/carchar \
+              -I$(ROOT)/third_party/ankerl
 
 # --- skene --------------------------------------------------------------------
 # zstd is compiled in because per-section compression is part of the format, so
@@ -68,6 +69,7 @@ SKENE_INC  := -I$(ROOT)/skene/include -I$(ROOT)/skene/src -I$(ZSTD_DIR) \
 # needs simd_env/cpu_features — the same three TUs skene/Makefile links.
 SKENE_SRCS := $(wildcard $(ROOT)/skene/src/*.cpp) \
               $(ROOT)/draken/core/vector_alloc.cpp \
+              $(ROOT)/draken/core/mem_account.cpp \
               $(ROOT)/draken/simd/simd_hash.cpp \
               $(ROOT)/draken/simd/simd_env.cpp \
               $(ROOT)/draken/simd/cpu_features.cpp \
@@ -88,17 +90,33 @@ SKENE_DEFS := -DSKENE_FUZZING_SKIP_CHECKSUM
 PARQUET_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/parquet $(DRAKEN_INC) \
                 -I$(ZSTD_DIR) -I$(ROOT)/third_party/bshoshany \
                 -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
-                -I$(ROOT)/third_party/miniz
+                -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/libdeflate \
+                -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu
 # %_test.cpp carries its own main() and would collide with replay_main.cpp's.
-PARQUET_SRCS := $(filter-out %_test.cpp,$(wildcard $(ROOT)/rugo/src/parquet/*.cpp)) \
+# _parquet_column_wrap.cpp is the Python edge (Python.h), excluded like the
+# JSONL/CSV column builders below.
+PARQUET_SRCS := $(filter-out %_test.cpp %/_parquet_column_wrap.cpp,$(wildcard $(ROOT)/rugo/src/parquet/*.cpp)) \
                 $(ROOT)/third_party/snappy/snappy.cc \
                 $(ROOT)/third_party/snappy/snappy-sinksource.cc \
                 $(ROOT)/third_party/snappy/snappy-stubs-internal.cc \
                 $(ROOT)/third_party/lz4/lz4.c \
                 $(ROOT)/third_party/miniz/miniz_tinfl.cpp \
                 $(ROOT)/draken/core/vector_alloc.cpp \
+                $(ROOT)/draken/core/mem_account.cpp \
+                $(ROOT)/draken/core/chunk_cache.cpp \
                 $(ROOT)/draken/core/trace_bridge.cpp \
                 $(ZSTD_SRCS)
+# C sources: libdeflate for the GZIP codec (compression.cpp), ryu + mabel base64
+# for the STRUCT/MAP JSON-text renderer (nested_json.cpp).
+PARQUET_CSRCS := $(ROOT)/third_party/libdeflate/lib/deflate_decompress.c \
+                 $(ROOT)/third_party/libdeflate/lib/gzip_decompress.c \
+                 $(ROOT)/third_party/libdeflate/lib/crc32.c \
+                 $(ROOT)/third_party/libdeflate/lib/utils.c \
+                 $(ROOT)/third_party/libdeflate/lib/arm/cpu_features.c \
+                 $(ROOT)/third_party/libdeflate/lib/x86/cpu_features.c \
+                 $(wildcard $(ROOT)/third_party/mabel/base64/*.c) \
+                 $(ROOT)/third_party/ulfjack/ryu/d2s.c \
+                 $(ROOT)/third_party/ulfjack/ryu/f2s.c
 PARQUET_DEFS := -DRUGO_PARQUET_CREATED_BY='"opteryx-fuzz"' -DHAVE_ZSTD
 
 # --- rugo jsonl / csv ---------------------------------------------------------
@@ -108,7 +126,11 @@ PARQUET_DEFS := -DRUGO_PARQUET_CREATED_BY='"opteryx-fuzz"' -DHAVE_ZSTD
 # arithmetic lives.
 TEXT_INC   := -I$(ROOT)/rugo/src $(DRAKEN_INC) -I$(ROOT)/third_party/fastfloat \
               -I$(ROOT)/third_party/bshoshany -I$(ROOT)/src/cpp
-JSONL_SRCS := $(filter-out %/column_builder.cpp,$(wildcard $(ROOT)/rugo/src/jsonl/core/*.cpp))
+# declared_type.cpp: explicit_schema / predicate-literal type names (interpreter.cpp).
+# mem_account.cpp: ByteArena allocates through draken_malloc (core/alloc.h).
+JSONL_SRCS := $(filter-out %/column_builder.cpp,$(wildcard $(ROOT)/rugo/src/jsonl/core/*.cpp)) \
+              $(ROOT)/rugo/src/declared_type.cpp \
+              $(ROOT)/draken/core/mem_account.cpp
 CSV_SRCS   := $(filter-out %/csv_column_builder.cpp,$(wildcard $(ROOT)/rugo/src/csv/core/*.cpp))
 
 # --- rugo avro ----------------------------------------------------------------
@@ -155,7 +177,7 @@ TARGETS ?= skene parquet jsonl csv avro
 # because they carry as much of these parsers as the .cpp files do.
 SKENE_DEPS   := $(SKENE_SRCS) $(wildcard $(ROOT)/skene/include/skene/*.h) \
                 $(wildcard $(ROOT)/skene/src/*.h)
-PARQUET_DEPS := $(PARQUET_SRCS) $(wildcard $(ROOT)/rugo/src/parquet/*.hpp)
+PARQUET_DEPS := $(PARQUET_SRCS) $(PARQUET_CSRCS) $(wildcard $(ROOT)/rugo/src/parquet/*.hpp)
 JSONL_DEPS   := $(JSONL_SRCS) $(wildcard $(ROOT)/rugo/src/jsonl/core/*.hpp)
 CSV_DEPS     := $(CSV_SRCS) $(wildcard $(ROOT)/rugo/src/csv/core/*.hpp)
 AVRO_DEPS    := $(filter-out %.S,$(AVRO_SRCS)) $(AVRO_CSRCS) $(wildcard $(ROOT)/rugo/src/avro/*.hpp)
@@ -174,7 +196,8 @@ $(BUILD)/skene_replay: fuzz_skene.cpp replay_main.cpp $(SKENE_DEPS) | $(BUILD)
 	$(CXX) $(BASE) $(SKENE_DEFS) $(SKENE_INC) fuzz_skene.cpp replay_main.cpp $(SKENE_SRCS) -o $@
 
 $(BUILD)/parquet_replay: fuzz_parquet.cpp replay_main.cpp $(PARQUET_DEPS) | $(BUILD)
-	$(CXX) $(BASE) $(PARQUET_DEFS) $(PARQUET_INC) fuzz_parquet.cpp replay_main.cpp $(PARQUET_SRCS) -o $@
+	$(call COBJS,parquet,$(PARQUET_CSRCS),$(PARQUET_INC))
+	$(CXX) $(BASE) $(PARQUET_DEFS) $(PARQUET_INC) fuzz_parquet.cpp replay_main.cpp $(PARQUET_SRCS) $(BUILD)/parquet_c/*.o -o $@
 
 $(BUILD)/jsonl_replay: fuzz_jsonl.cpp replay_main.cpp $(JSONL_DEPS) | $(BUILD)
 	$(CXX) $(BASE) $(TEXT_INC) fuzz_jsonl.cpp replay_main.cpp $(JSONL_SRCS) -o $@
@@ -182,11 +205,14 @@ $(BUILD)/jsonl_replay: fuzz_jsonl.cpp replay_main.cpp $(JSONL_DEPS) | $(BUILD)
 $(BUILD)/csv_replay: fuzz_csv.cpp replay_main.cpp $(CSV_DEPS) | $(BUILD)
 	$(CXX) $(BASE) $(TEXT_INC) fuzz_csv.cpp replay_main.cpp $(CSV_SRCS) -o $@
 
-AVRO_COBJS = @rm -rf $(BUILD)/avro_c && mkdir -p $(BUILD)/avro_c && for f in $(AVRO_CSRCS); do \
-	  $(CC) -std=c11 $(OPT) -g $(SAN) -w $(AVRO_INC) -c $$f -o $(BUILD)/avro_c/$$(basename $$(dirname $$f))_$$(basename $$f .c).o || exit 1; done
+# Compiles a target's C sources as C into $(BUILD)/<target>_c/.
+# $(1) = target, $(2) = C sources, $(3) = include flags. _GNU_SOURCE: libdeflate's
+# arm/cpu_features.c needs O_CLOEXEC, which glibc hides under strict -std=c11.
+COBJS = @rm -rf $(BUILD)/$(1)_c && mkdir -p $(BUILD)/$(1)_c && for f in $(2); do \
+	  $(CC) -std=c11 -D_GNU_SOURCE $(OPT) -g $(SAN) -w $(3) -c $$f -o $(BUILD)/$(1)_c/$$(basename $$(dirname $$f))_$$(basename $$f .c).o || exit 1; done
 
 $(BUILD)/avro_replay: fuzz_avro.cpp replay_main.cpp $(AVRO_DEPS) | $(BUILD)
-	$(AVRO_COBJS)
+	$(call COBJS,avro,$(AVRO_CSRCS),$(AVRO_INC))
 	$(CXX) $(BASE) $(AVRO_INC) fuzz_avro.cpp replay_main.cpp $(AVRO_SRCS) $(BUILD)/avro_c/*.o -o $@
 
 REPLAY_BINS := $(addprefix $(BUILD)/,$(addsuffix _replay,$(TARGETS)))
@@ -224,7 +250,8 @@ $(BUILD)/skene_fuzz: fuzz_skene.cpp $(SKENE_DEPS) | $(BUILD)
 	$(CXX) $(BASE) -fsanitize=fuzzer $(SKENE_DEFS) $(SKENE_INC) $< $(SKENE_SRCS) -o $@
 
 $(BUILD)/parquet_fuzz: fuzz_parquet.cpp $(PARQUET_DEPS) | $(BUILD)
-	$(CXX) $(BASE) -fsanitize=fuzzer $(PARQUET_DEFS) $(PARQUET_INC) $< $(PARQUET_SRCS) -o $@
+	$(call COBJS,parquet,$(PARQUET_CSRCS),$(PARQUET_INC))
+	$(CXX) $(BASE) -fsanitize=fuzzer $(PARQUET_DEFS) $(PARQUET_INC) $< $(PARQUET_SRCS) $(BUILD)/parquet_c/*.o -o $@
 
 $(BUILD)/jsonl_fuzz: fuzz_jsonl.cpp $(JSONL_DEPS) | $(BUILD)
 	$(CXX) $(BASE) -fsanitize=fuzzer $(TEXT_INC) $< $(JSONL_SRCS) -o $@
@@ -233,7 +260,7 @@ $(BUILD)/csv_fuzz: fuzz_csv.cpp $(CSV_DEPS) | $(BUILD)
 	$(CXX) $(BASE) -fsanitize=fuzzer $(TEXT_INC) $< $(CSV_SRCS) -o $@
 
 $(BUILD)/avro_fuzz: fuzz_avro.cpp $(AVRO_DEPS) | $(BUILD)
-	$(AVRO_COBJS)
+	$(call COBJS,avro,$(AVRO_CSRCS),$(AVRO_INC))
 	$(CXX) $(BASE) -fsanitize=fuzzer $(AVRO_INC) $< $(AVRO_SRCS) $(BUILD)/avro_c/*.o -o $@
 
 FUZZ_BINS := $(addprefix $(BUILD)/,$(addsuffix _fuzz,$(TARGETS)))

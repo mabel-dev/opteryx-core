@@ -1125,6 +1125,8 @@ extensions = [
             ("RUGO_ENABLE_HTTP", "1"),
             ("HAVE_ZSTD", "1"),
             ("ZSTD_STATIC_LINKING_ONLY", "1"),
+            # libdeflate arm/cpu_features.c needs O_CLOEXEC under -std=c11 on glibc.
+            ("_GNU_SOURCE", "1"),
         ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -1540,7 +1542,8 @@ extensions.append(
             ]
             + _curl_include_dirs
         ),
-        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1"), ("RUGO_ENABLE_HTTP", "1")],
+        # _GNU_SOURCE: libdeflate arm/cpu_features.c needs O_CLOEXEC under -std=c11 on glibc.
+        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1"), ("RUGO_ENABLE_HTTP", "1"), ("_GNU_SOURCE", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),

@@ -974,6 +974,9 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/avro/avro_reader.hpp",
                 "rugo/src/avro/_avro_column_wrap.hpp",
                 "rugo/src/avro/_avro_reader.pxi",
+                # Generated from the same string as -DRUGO_PARQUET_CREATED_BY;
+                # rewritten only on change (write_rugo_build_identity).
+                "rugo/_build_identity.py",
             ],
             define_macros=[
                 ("HAVE_SNAPPY", "1"),
@@ -981,6 +984,10 @@ def draken_rugo_extensions(parquet_created_by):
                 ("ZSTD_STATIC_LINKING_ONLY", "1"),
                 ("HAVE_CONFIG_H", "1"),
                 ("RUGO_PARQUET_CREATED_BY", '"%s"' % parquet_created_by),
+                # libdeflate's lib/arm/cpu_features.c opens /proc/self/auxv with
+                # O_CLOEXEC, which glibc hides under strict -std=c11 (upstream builds
+                # gnu99). Exposes it for the C TUs; g++ already predefines it for C++.
+                ("_GNU_SOURCE", "1"),
             ],
             language="c++",
             extra_compile_args=CPP_FLAGS,
@@ -1379,9 +1386,18 @@ def write_rugo_build_identity(created_by, distribution):
     content = _RUGO_BUILD_IDENTITY_MODULE.replace("@@CREATED_BY@@", created_by).replace(
         "@@DISTRIBUTION@@", distribution
     )
-    with open(
-        os.path.join(_REPO_ROOT, "rugo", "_build_identity.py"), "w", encoding="utf-8"
-    ) as handle:
+    # Written only when the content changes. rugo_native lists this file in its
+    # `depends`, so a changed identity (version/build bump, other distribution)
+    # makes an incremental `make c` recompile the extension with the new
+    # -DRUGO_PARQUET_CREATED_BY — otherwise the module would move and the
+    # compiled footer string would not. An unconditional write would instead
+    # force a rugo_native rebuild on every build.
+    path = os.path.join(_REPO_ROOT, "rugo", "_build_identity.py")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            if handle.read() == content:
+                return created_by
+    with open(path, "w", encoding="utf-8") as handle:
         handle.write(content)
 
     return created_by
