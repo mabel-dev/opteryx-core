@@ -153,6 +153,16 @@ public:
 
     const std::vector<AvroBatchRange>& batches() const;
 
+    // Two-pass decoding: `pass1` (a subset of the columns) is decoded for every record of
+    // a batch, the rest only for the records the caller keeps (Worker::decode_pass1 /
+    // decode_pass2). Call once, before any Worker exists. pass2_columns() is the rest,
+    // in column order; it may be empty.
+    void split(const std::vector<std::string>& pass1);
+    const std::vector<std::string>& pass2_columns() const;
+    // How many of `range`'s blocks hold its records `rows[0..n)` (indices into the
+    // batch, strictly ascending) - what decode_pass2 would decompress for them.
+    uint32_t blocks_with(const AvroBatchRange& range, const uint32_t* rows, uint32_t n) const;
+
     // Per-thread decode state (column sinks, JSON scratch, the codec's decompressor
     // and scratch). Not shareable between threads; reusable for any of its file's
     // batches.
@@ -163,6 +173,13 @@ public:
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
         AvroBatch decode(const AvroBatchRange& range);
+        // Split files: pass 1's columns for every record of `range`, remembering where
+        // each record is; then pass 2's columns for the records `rows[0..n)` of that
+        // batch (indices into it, strictly ascending), decompressing again only the
+        // blocks holding them. A decode_pass1 call replaces what the previous one kept.
+        AvroBatch decode_pass1(const AvroBatchRange& range);
+        AvroBatch decode_pass2(const uint32_t* rows, uint32_t n);
+
     private:
         struct Impl;
         std::unique_ptr<Impl> impl_;

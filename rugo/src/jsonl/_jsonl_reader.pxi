@@ -495,7 +495,11 @@ def read_jsonl(
             # typed, all-null, and listed in result['absent_columns'] — rather than a
             # morsel missing it. Column discovery for everything else is unchanged. The
             # list is final before the scan: the scan captures exactly these columns.
+            # A declaration types a column only when it is READ: under a projection, a
+            # declared column the caller did not request is not built (matches CSV).
             for col in declared_schema:
+                if columns and col not in columns:
+                    continue
                 col_bytes = col.encode('utf-8')
                 if not _names_contain(column_names_cpp, col_bytes):
                     column_names_cpp.push_back(col_bytes)

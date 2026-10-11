@@ -150,6 +150,110 @@ def test_one_file_many_batches_across_the_pool(tmp_path):
     )
 
 
+# ── a WHERE directly over READ_AVRO runs inside the scan, in two passes ──
+#
+# The scan decodes the predicate's columns for every record, evaluates the WHERE
+# itself and decodes the other columns only for the survivors (docs §26). Every
+# shape the two passes can take is checked against the records fastavro was given.
+
+def _project(r):
+    return (r["i"], r["l"], r["s"], r["tags"], None if r["nested"] is None else str(r["nested"]["x"]),
+            r["dec"], r["ts"])
+
+
+@pytest.mark.parametrize("codec", ["null", "deflate", "snappy", "zstandard"])
+def test_where_decodes_the_rest_for_survivors_only(tmp_path, codec):
+    recs = _typed_records(70_000)  # more than one batch
+    _write(tmp_path / "t.avro", TYPES, recs, codec=codec)
+    got = _rows(
+        f"SELECT i, l, s, tags, nested->>'x', dec, ts FROM READ_AVRO('{tmp_path}/t.avro') "
+        "WHERE i % 7 = 0 AND s IS NOT NULL AND b = TRUE"
+    )
+    want = sorted([_project(r) for r in recs if r["i"] % 7 == 0 and r["s"] is not None and r["b"]], key=repr)
+    assert len(want) > 1000
+    assert got == want
+
+
+def _avro_modes(session):
+    rows = [op for op in session.telemetry["operations"].values() if "avro_two_pass_batches" in op]
+    assert len(rows) == 1
+    return rows[0]["avro_two_pass_batches"], rows[0]["avro_single_pass_batches"]
+
+
+def test_where_picks_two_pass_or_single_pass_per_batch(tmp_path):
+    # ~35 batches, more than the decode pool: the first batches are single-pass until one
+    # reports; then a selective predicate (survivors in few blocks) turns two-pass and a
+    # weak one stays single-pass. Every batch gives the same rows either way.
+    n = 34 * 65_536
+    schema = _record([{"name": "id", "type": "long"}, {"name": "s", "type": "string"},
+                      {"name": "pad", "type": "string"}])
+    _write(tmp_path / "m.avro", schema, ({"id": i, "s": f"v{i % 97}", "pad": "x" * (i % 13)} for i in range(n)),
+           codec="deflate", sync_interval=64_000)
+    source = f"READ_AVRO('{tmp_path}/m.avro')"
+
+    session = opteryx.session()
+    got = sorted(
+        row for morsel in session.execute_to_morsels(f"SELECT id, s, pad FROM {source} WHERE id % 500_000 = 7")
+        for row in zip(*(morsel.column(c).to_pylist() for c in morsel.column_names))
+    )
+    assert got == [(i, f"v{i % 97}", "x" * (i % 13)) for i in range(7, n, 500_000)]
+    two, single = _avro_modes(session)
+    assert two > 0 and single > 0
+    batches = two + single
+
+    session = opteryx.session()
+    count = sum(m.num_rows for m in session.execute_to_morsels(f"SELECT id, pad FROM {source} WHERE s <> 'v3'"))
+    assert count == sum(1 for i in range(n) if i % 97 != 3)
+    assert _avro_modes(session) == (0, batches)
+
+
+def test_where_on_a_column_that_is_not_selected(tmp_path):
+    recs = _typed_records(5_000)
+    _write(tmp_path / "t.avro", TYPES, recs, codec="deflate")
+    got = _rows(f"SELECT l, e FROM READ_AVRO('{tmp_path}/t.avro') WHERE dt >= '2020-06-01'::DATE AND i % 13 = 0")
+    want = sorted(
+        [(r["l"], r["e"]) for r in recs if r["dt"] >= datetime.date(2020, 6, 1) and r["i"] % 13 == 0],
+        key=repr,
+    )
+    assert want
+    assert got == want
+
+
+def test_where_whose_columns_are_the_whole_projection(tmp_path):
+    # Pass 2 has nothing to decode.
+    recs = _typed_records(5_000)
+    _write(tmp_path / "t.avro", TYPES, recs)
+    got = _rows(f"SELECT i, s FROM READ_AVRO('{tmp_path}/t.avro') WHERE s LIKE 'sss%' AND i > 100")
+    assert got == sorted([(r["i"], r["s"]) for r in recs if r["s"] and r["s"].startswith("sss") and r["i"] > 100],
+                         key=repr)
+
+
+def test_where_that_keeps_nothing(tmp_path):
+    recs = _typed_records(70_000)
+    _write(tmp_path / "t.avro", TYPES, recs, codec="deflate")
+    assert _rows(f"SELECT i, s, tags FROM READ_AVRO('{tmp_path}/t.avro') WHERE i < 0") == []
+    assert _rows(f"SELECT COUNT(*) FROM READ_AVRO('{tmp_path}/t.avro') WHERE i < 0") == [(0,)]
+
+
+def test_where_over_a_glob_of_evolved_files(tmp_path):
+    first = _record([{"name": "id", "type": "long"}, {"name": "s", "type": "string"}])
+    later = _record([{"name": "s", "type": "string"}, {"name": "id", "type": "int"},
+                     {"name": "extra", "type": "double"}])
+    _write(tmp_path / "a.avro", first, [{"id": i, "s": f"a{i}"} for i in range(1000)])
+    _write(tmp_path / "b.avro", later, [{"id": i, "s": f"b{i}", "extra": 0.5} for i in range(1000)])
+    got = _rows(f"SELECT s FROM READ_AVRO('{tmp_path}/*.avro') WHERE id % 250 = 0")
+    assert got == sorted([(f"{p}{i}",) for p in "ab" for i in range(0, 1000, 250)], key=repr)
+
+
+def test_a_data_error_in_the_where_is_raised_as_the_filter_raises_it(tmp_path):
+    from opteryx.exceptions import DataError
+
+    _write(tmp_path / "t.avro", _record([{"name": "s", "type": "string"}, {"name": "n", "type": "long"}]),
+           [{"s": "12", "n": 1}, {"s": "not a number", "n": 2}])
+    with pytest.raises(DataError):
+        _rows(f"SELECT n FROM READ_AVRO('{tmp_path}/t.avro') WHERE CAST(s AS INT64) > 0")
+
+
 def test_empty_file_has_a_schema_and_no_rows(tmp_path):
     _write(tmp_path / "e.avro", TYPES, [])
     assert _rows(f"SELECT i, s FROM READ_AVRO('{tmp_path}/e.avro')") == []

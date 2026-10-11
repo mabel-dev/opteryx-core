@@ -120,6 +120,12 @@ struct Program {
     size_t                   n_out = 0;
 };
 
+// One decoded record's bytes: its first byte and the end of the payload it is in.
+struct RowSpan {
+    const uint8_t* p;
+    const uint8_t* end;
+};
+
 // A requested path, as a trie over field names.
 struct Req {
     std::map<std::string, Req> kids;
@@ -1008,7 +1014,9 @@ public:
     uint32_t rows() const { return rows_; }
 
     // Decode one block's `count` records from [p, end). The block must be consumed exactly.
-    void block(const uint8_t* p, size_t n, uint32_t count) {
+    // With `starts`, each record's offset in the block is also recorded there (one per
+    // record), so a second program can decode chosen records again (rows()).
+    void block(const uint8_t* p, size_t n, uint32_t count, uint32_t* starts = nullptr) {
         const uint32_t base = rows_;
         const uint32_t total = base + count;
         for (Sink& s : sinks_)
@@ -1016,9 +1024,32 @@ public:
         Cursor c{p, p + n};
         const Op* ops = p_.ops.data();
         const Op* end = ops + p_.ops.size();
-        for (uint32_t r = base; r < total; ++r) run(ops, end, c, r);
+        if (starts == nullptr) {
+            for (uint32_t r = base; r < total; ++r) run(ops, end, c, r);
+        } else {
+            for (uint32_t r = base; r < total; ++r) {
+                starts[r - base] = static_cast<uint32_t>(c.p - p);
+                run(ops, end, c, r);
+            }
+        }
         if (c.p != c.end) fail("a block has trailing bytes after its records (the file is corrupt)");
         rows_ = total;
+    }
+
+    // Decode the records at `spans[0..n)`, in that order, as the batch's next n rows. A
+    // span was recorded by block() over a payload that already decoded cleanly, so a
+    // record is read from its first byte.
+    void rows(const RowSpan* spans, uint32_t n) {
+        const uint32_t base = rows_;
+        for (Sink& s : sinks_)
+            if (!s.spec->hidden) grow(s, base + n);
+        const Op* ops = p_.ops.data();
+        const Op* end = ops + p_.ops.size();
+        for (uint32_t r = 0; r < n; ++r) {
+            Cursor c{spans[r].p, spans[r].end};
+            run(ops, end, c, base + r);
+        }
+        rows_ = base + n;
     }
 
     AvroBatch finish() {
@@ -1559,6 +1590,19 @@ struct AvroFile::Impl {
     std::vector<std::string> names;
     Program prog;
     bool count_only = false;   // no columns: rows come from the block headers alone
+    bool has_reader = false;   // `reader` holds a reader schema
+    // split(): the two-pass programs - pass 1's columns, then every other column.
+    std::unique_ptr<Program> prog1;
+    std::unique_ptr<Program> prog2;
+    std::vector<std::string> names1;
+    std::vector<std::string> names2;
+
+    void compile(const std::vector<std::string>& columns, Program& p) const {
+        Req req;
+        parse_columns(columns, req, p);
+        Compiler(p, has_reader ? "the reader schema" : "the file's schema")
+            .compile_root(writer.root(), has_reader ? reader.root() : writer.root(), req);
+    }
 
     // The framing pass (batches()), run once.
     mutable std::once_flag framed;
@@ -1596,6 +1640,7 @@ AvroFile::AvroFile(const uint8_t* data, size_t size, const std::vector<std::stri
     m.header = read_header(data, size);
     m.writer = Schema::parse(m.header.schema_json.data(), m.header.schema_json.size());
     if (!reader_schema_json.empty()) m.reader = Schema::parse(reader_schema_json.data(), reader_schema_json.size());
+    m.has_reader = !reader_schema_json.empty();
     const Node* r = reader_schema_json.empty() ? m.writer.root() : m.reader.root();
 
     m.names = columns;
@@ -1605,11 +1650,28 @@ AvroFile::AvroFile(const uint8_t* data, size_t size, const std::vector<std::stri
         for (const Field& f : r->fields) m.names.push_back(f.name);
     }
     m.count_only = m.names.empty();
+    m.compile(m.names, m.prog);
+}
 
-    Req req;
-    parse_columns(m.names, req, m.prog);
-    Compiler(m.prog, reader_schema_json.empty() ? "the file's schema" : "the reader schema")
-        .compile_root(m.writer.root(), r, req);
+void AvroFile::split(const std::vector<std::string>& pass1) {
+    Impl& m = *impl_;
+    if (m.prog1) fail("split() was already called");
+    if (pass1.empty()) fail("split() needs at least one pass-1 column");
+    for (const std::string& name : pass1)
+        if (std::find(m.names.begin(), m.names.end(), name) == m.names.end())
+            fail("split(): '" + name + "' is not one of the file's columns");
+    m.names1 = pass1;
+    for (const std::string& name : m.names)
+        if (std::find(pass1.begin(), pass1.end(), name) == pass1.end()) m.names2.push_back(name);
+    m.prog1 = std::make_unique<Program>();
+    m.compile(m.names1, *m.prog1);
+    m.prog2 = std::make_unique<Program>();
+    if (!m.names2.empty()) m.compile(m.names2, *m.prog2);
+}
+
+const std::vector<std::string>& AvroFile::pass2_columns() const {
+    if (!impl_->prog1) fail("pass2_columns() needs split()");
+    return impl_->names2;
 }
 
 AvroFile::~AvroFile() = default;
@@ -1646,7 +1708,22 @@ struct AvroFile::Worker::Impl {
     const AvroFile::Impl& file;
     Decoder dec;
     BlockDecoder codec;   // the codec's decompressor + scratch, reused across blocks
-    explicit Impl(const AvroFile::Impl& f) : file(f), dec(f.prog) {}
+    // Two-pass (split files only): pass 1's and pass 2's decoders, and where each record
+    // of the last pass-1 batch is - its block (file index) and offset in that block's
+    // payload. Nothing decompressed is kept: pass 2 decompresses again the blocks it
+    // needs (measured: holding a batch's blocks cost ~20% on every batch).
+    std::unique_ptr<Decoder> dec1;
+    std::unique_ptr<Decoder> dec2;
+    AvroBatchRange last;
+    std::vector<uint32_t> block_of;   // per record of `last`
+    std::vector<uint32_t> offset;     // per record of `last`
+    std::vector<RowSpan> spans;       // pass 2 scratch
+    explicit Impl(const AvroFile::Impl& f) : file(f), dec(f.prog) {
+        if (f.prog1) {
+            dec1 = std::make_unique<Decoder>(*f.prog1);
+            dec2 = std::make_unique<Decoder>(*f.prog2);
+        }
+    }
 };
 
 AvroFile::Worker::Worker(const AvroFile& file) : impl_(std::make_unique<Impl>(*file.impl_)) {}
@@ -1666,6 +1743,67 @@ AvroBatch AvroFile::Worker::decode(const AvroBatchRange& range) {
         w.dec.block(payload.first, payload.second, static_cast<uint32_t>(b.count));
     }
     return w.dec.finish();
+}
+
+AvroBatch AvroFile::Worker::decode_pass1(const AvroBatchRange& range) {
+    Impl& w = *impl_;
+    if (!w.dec1) fail("decode_pass1() needs a split() file");
+    w.dec1->begin_batch(range.rows);
+    w.last = range;
+    w.block_of.resize(range.rows);
+    w.offset.resize(range.rows);
+    uint32_t at = 0;
+    for (uint32_t k = 0; k < range.block_count; ++k) {
+        const uint32_t bi = range.first_block + k;
+        const Block& b = w.file.blocks[bi];
+        const uint32_t count = static_cast<uint32_t>(b.count);
+        const auto payload = w.codec.payload(b, w.file.header.codec);
+        w.dec1->block(payload.first, payload.second, count, w.offset.data() + at);
+        std::fill(w.block_of.begin() + at, w.block_of.begin() + at + count, bi);
+        at += count;
+    }
+    return w.dec1->finish();
+}
+
+AvroBatch AvroFile::Worker::decode_pass2(const uint32_t* rows, uint32_t n) {
+    Impl& w = *impl_;
+    if (!w.dec2) fail("decode_pass2() needs a split() file");
+    if (w.file.names2.empty()) fail("decode_pass2(): every column was decoded in pass 1");
+    const size_t limit = w.block_of.size();
+    for (uint32_t i = 0; i < n; ++i) {
+        if (rows[i] >= limit) fail("decode_pass2(): a row is outside the last pass-1 batch");
+        if (i > 0 && rows[i] <= rows[i - 1]) fail("decode_pass2(): rows must be strictly ascending");
+    }
+    w.dec2->begin_batch(n);
+    // A block's survivors are consecutive in `rows`: decompress each such block once.
+    for (uint32_t i = 0; i < n;) {
+        const uint32_t bi = w.block_of[rows[i]];
+        const auto payload = w.codec.payload(w.file.blocks[bi], w.file.header.codec);
+        const uint8_t* end = payload.first + payload.second;
+        w.spans.clear();
+        for (; i < n && w.block_of[rows[i]] == bi; ++i)
+            w.spans.push_back(RowSpan{payload.first + w.offset[rows[i]], end});
+        w.dec2->rows(w.spans.data(), static_cast<uint32_t>(w.spans.size()));
+    }
+    return w.dec2->finish();
+}
+
+uint32_t AvroFile::blocks_with(const AvroBatchRange& range, const uint32_t* rows, uint32_t n) const {
+    const Impl& m = *impl_;
+    uint32_t touched = 0;
+    uint32_t k = 0;                        // block within the range
+    uint64_t block_end = range.block_count ? static_cast<uint64_t>(m.blocks[range.first_block].count) : 0;
+    uint32_t counted = UINT32_MAX;         // the last block counted
+    for (uint32_t i = 0; i < n; ++i) {
+        if (rows[i] >= range.rows) fail("blocks_with(): a row is outside the batch");
+        if (i > 0 && rows[i] <= rows[i - 1]) fail("blocks_with(): rows must be strictly ascending");
+        while (rows[i] >= block_end) {
+            ++k;
+            block_end += static_cast<uint64_t>(m.blocks[range.first_block + k].count);
+        }
+        if (k != counted) { ++touched; counted = k; }
+    }
+    return touched;
 }
 
 void read_avro_buffer(const uint8_t* data, size_t size, const std::vector<std::string>& columns,

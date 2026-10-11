@@ -23,6 +23,11 @@ class Dataset(enum.Enum):
     FULL_SPLIT_SKENE = "scratch.hits_skene"
     # Upstream's hits.json.gz split into 1M-row zstd shards (dev/clickbench/split_hits_json.sh).
     FULL_SPLIT_JSON = "scratch.hits_json"
+    # FULL_SPLIT_RUGO_262K converted to 1M-row Avro shards
+    # (dev/clickbench/parquet_to_avro.py). Avro is not a stored-dataset format, so
+    # this name only locates the directory: the queries read it through
+    # READ_AVRO (see `relation_sql`).
+    FULL_SPLIT_AVRO = "scratch.hits_avro"
     # Remote Iceberg tables on AIStor (tests/performance/_common.py). Canon split and
     # rugo split are the same files as FULL_SPLIT / FULL_SPLIT_RUGO_262K; canon single
     # is upstream's hits.parquet. Skene has no Iceberg form, so no remote skene.
@@ -63,6 +68,7 @@ VARIANT_DATASETS = {
     "canon": Dataset.FULL_SPLIT,
     "skene": Dataset.FULL_SPLIT_SKENE,
     "json": Dataset.FULL_SPLIT_JSON,
+    "avro": Dataset.FULL_SPLIT_AVRO,
     "aistor-canon-split": Dataset.AISTOR_CANON_SPLIT,
     "aistor-canon-single": Dataset.AISTOR_CANON_SINGLE,
     "aistor-rugo-split": Dataset.AISTOR_RUGO_SPLIT,
@@ -97,6 +103,32 @@ def resolve_dataset_path(dataset: Dataset) -> str:
             f"dataset {dataset.name} ({dataset.value}) resolves to {path}, which is empty"
         )
     return path
+
+def relation_sql(dataset: Dataset, dataset_path: str) -> str:
+    """What `{DATASET}` becomes in a statement: the relation name, or for Avro -
+    readable only through READ_AVRO - a READ_AVRO over the directory's files."""
+    if dataset == Dataset.FULL_SPLIT_AVRO:
+        return f"READ_AVRO('{dataset_path}/*.avro')"
+    return dataset.value
+
+
+# Variants whose ratio column is OUR OWN run of another dataset (its newest
+# results CSV), not DuckDB: (dataset, label). `json` against canon - both are
+# upstream's untuned data.
+OWN_BASELINES = {
+    "json": (Dataset.FULL_SPLIT, "canon"),
+}
+
+# Variants whose ratio column is another engine reading the SAME files, not
+# DuckDB on parquet: (label, results file relative to this directory, in the
+# DuckDB runner's format; each query's BEST try is used). `avro` against
+# `make clickbench-clickhouse-avro` (ClickHouse local over scratch/hits_avro), so
+# the ratio compares engines, not formats. No such file means no ratio column -
+# never the parquet baseline. (`make clickbench-duckdb-avro` writes the DuckDB
+# equivalent; at ~50s a query it is not the default.)
+SAME_FILES_BASELINES = {
+    "avro": ("ClickHouse", "../clickhouse/results.local.avro.json"),
+}
 
 # fmt:off
 STATEMENTS = [
@@ -241,6 +273,7 @@ if __name__ == "__main__":  # pragma: no cover
         help="Dataset format variant: `canon` runs against the upstream 100-file "
         "split (scratch/hits); `skene` runs against the skene mirror; "
         "`json` runs against upstream's hits.json.gz split into zstd shards (scratch/hits_json); "
+        "`avro` runs READ_AVRO over the rugo split converted to deflate Avro shards (scratch/hits_avro); "
         "`aistor-*` against the remote Iceberg tables on AIStor "
         "(default: the rugo 262k-row-group split, scratch/hits_rugo_262k)",
     )
@@ -260,6 +293,7 @@ if __name__ == "__main__":  # pragma: no cover
         # cannot locate.
         dataset_path = resolve_dataset_path(DATASET)
         dataset_entries = len(os.listdir(dataset_path))
+    RELATION = relation_sql(DATASET, dataset_path)
 
     if args.query_index is not None:
         # Child: one query in its own process, the shape ClickBench's own driver
@@ -268,10 +302,10 @@ if __name__ == "__main__":  # pragma: no cover
         # cache — therefore only ever holds THIS query's working set; one process
         # running the whole battery measures cross-query cache churn instead.
         # One "RESULT <json>" line per run; a failing run ends the child.
-        statement = STATEMENTS[args.query_index][0].replace("{DATASET}", f"{DATASET.value}")
+        statement = STATEMENTS[args.query_index][0].replace("{DATASET}", RELATION)
         warm_session = opteryx.session()
         try:
-            for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET.value};"):
+            for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {RELATION};"):
                 pass
         finally:
             warm_session.close()
@@ -318,7 +352,7 @@ if __name__ == "__main__":  # pragma: no cover
     # Load DuckDB baseline results
     duckdb_results = None
     duckdb_machine = None
-    if os.path.exists(args.duckdb_baseline):
+    if args.variant not in SAME_FILES_BASELINES and os.path.exists(args.duckdb_baseline):
         with open(args.duckdb_baseline, "r") as f:
             duckdb_data = json.load(f)
             # Use the warm2 (second warm run) for comparison
@@ -326,23 +360,25 @@ if __name__ == "__main__":  # pragma: no cover
             duckdb_machine = duckdb_data.get("machine", args.duckdb_baseline)
 
     # The ratio column's baseline: per-query milliseconds (None = no ratio for
-    # that query). DuckDB-on-parquet for every variant except `json`, which is
-    # compared to OUR OWN canon run (the newest results/FULL_SPLIT CSV, best ok
-    # run per query): both are upstream's untuned data, so the ratio shows where
-    # the JSON path stops scaling with the work, not how far DuckDB is ahead.
-    # No canon CSV means no ratio column — a local canon run is never started.
+    # that query). DuckDB-on-parquet for every variant except those in
+    # OWN_BASELINES, which are compared to OUR OWN run of another dataset (its
+    # newest results CSV, best ok run per query): `json` to canon - both are
+    # upstream's untuned data, so the ratio shows where the JSON path stops
+    # scaling with the work, not how far DuckDB is ahead. No such CSV means no
+    # ratio column — that run is never started from here. `avro` is compared to
+    # another engine reading the same Avro files (SAME_FILES_BASELINES).
     baseline_ms = None
     baseline_name = "DuckDB"
     baseline_source = None
-    if args.variant == "json":
-        baseline_name = "canon"
-        canon_dir = os.path.join(_script_dir, "results", Dataset.FULL_SPLIT.name)
-        canon_csvs = sorted(
-            (os.path.join(canon_dir, name) for name in os.listdir(canon_dir) if name.endswith(".csv")),
+    if args.variant in OWN_BASELINES:
+        baseline_dataset, baseline_name = OWN_BASELINES[args.variant]
+        own_dir = os.path.join(_script_dir, "results", baseline_dataset.name)
+        own_csvs = sorted(
+            (os.path.join(own_dir, name) for name in os.listdir(own_dir) if name.endswith(".csv")),
             key=os.path.getmtime,
-        ) if os.path.isdir(canon_dir) else []
-        if canon_csvs:
-            baseline_source = canon_csvs[-1]
+        ) if os.path.isdir(own_dir) else []
+        if own_csvs:
+            baseline_source = own_csvs[-1]
             best: dict = {}
             with open(baseline_source, newline="") as f:
                 for row in csv.DictReader(f):
@@ -350,6 +386,20 @@ if __name__ == "__main__":  # pragma: no cover
                         ms = float(row["elapsed_ms"])
                         best[row["query"]] = min(ms, best.get(row["query"], ms))
             baseline_ms = [best.get(f"Q{index:02d}") for index in range(len(STATEMENTS))]
+    elif args.variant in SAME_FILES_BASELINES:
+        baseline_name, relative = SAME_FILES_BASELINES[args.variant]
+        same_files = os.path.normpath(os.path.join(_script_dir, relative))
+        if os.path.exists(same_files):
+            with open(same_files, "r") as f:
+                same_data = json.load(f)
+            baseline_source = f"{same_files} ({same_data.get('system')}, best try)"
+            tries = same_data.get("result", [])
+            baseline_ms = [
+                min(t for t in tries[index] if t is not None) * 1000
+                if index < len(tries) and any(t is not None for t in tries[index])
+                else None
+                for index in range(len(STATEMENTS))
+            ]
     elif duckdb_results:
         baseline_source = f"{duckdb_machine} (warm2 times)"
         baseline_ms = [
@@ -404,7 +454,7 @@ if __name__ == "__main__":  # pragma: no cover
         "gil_enabled": sys._is_gil_enabled(),
         "cpu_count": os.cpu_count(),
         "dataset": DATASET.name,
-        "dataset_relation": DATASET.value,
+        "dataset_relation": RELATION,
         "dataset_path": dataset_path,
         "dataset_entries": dataset_entries,
         "rounds": args.iterations,
@@ -427,7 +477,7 @@ if __name__ == "__main__":  # pragma: no cover
     for key, value in provenance.items():
         print(f"  {key:<20} {value}")
     if baseline_ms is not None:
-        print(f"  {'ratio_baseline':<20} {baseline_name}: {os.path.relpath(baseline_source, repo_root) if baseline_name == 'canon' else baseline_source}")
+        print(f"  {'ratio_baseline':<20} {baseline_name}: {os.path.relpath(baseline_source, repo_root) if args.variant in OWN_BASELINES else baseline_source}")
         print(
             f"  ⚠ the {baseline_name} column is ORIENTATION ONLY — a stored baseline from another\n"
             "    session and thermal state. It is not an interleaved A/B and must not be\n"
@@ -442,7 +492,7 @@ if __name__ == "__main__":  # pragma: no cover
     start = time.monotonic_ns()
     warm_session = opteryx.session()
     try:
-        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET.value};"):
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {RELATION};"):
             pass
         cold_time_ms = (time.monotonic_ns() - start) / 1e6
         print(f"Cold start: {cold_time_ms:.2f}ms\n")
@@ -501,7 +551,7 @@ if __name__ == "__main__":  # pragma: no cover
         "--query-index",
     ]
     for index, (statement, _err) in enumerate(STATEMENTS):
-        statement = statement.replace("{DATASET}", f"{DATASET.value}")
+        statement = statement.replace("{DATASET}", RELATION)
         query_num = f"Q{index:02d}"
         # Stream the child's RESULT lines so each run's time is printed as it
         # lands; the finished line is then rewritten in place (CR) with colour.
@@ -649,7 +699,7 @@ if __name__ == "__main__":  # pragma: no cover
         suite_pq_phase = collections.defaultdict(float)  # parquet decode phase -> seconds
 
         for index, (statement, _err) in enumerate(STATEMENTS):
-            statement = statement.replace("{DATASET}", f"{DATASET.value}")
+            statement = statement.replace("{DATASET}", RELATION)
             query_num = f"Q{index:02d}"
             gc.collect()
             session = None

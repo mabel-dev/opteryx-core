@@ -32,6 +32,20 @@
 // naming the file: a corrupt file, a refused construct, or a file whose schema does
 // not resolve against the reader schema.
 //
+// Prefilter (docs/AVRO_READER_DESIGN.md §26): when the compiler arms one (set_prefilter,
+// a WHERE directly over READ_AVRO), the scan runs the predicate itself - the program
+// ExprFilter would have run - and the Filter above is not compiled. Each batch is
+// decoded one of two ways, the same answer either way:
+//   two-pass    the predicate's columns for every record (pass 1); the predicate; the
+//               other columns for the survivors only (pass 2), decompressing again just
+//               the blocks that hold them;
+//   single-pass every projected column for every record, then the predicate.
+// Two-pass saves decoding the rest for non-survivors but pays a second decompression of
+// every block holding a survivor, so it is chosen for a batch when the scan's last
+// finished batch had survivors in at most kTwoPassBlockShare of its blocks; until one
+// has finished, batches are single-pass. A scan whose predicate reads every projected
+// column has no pass 2 and is always two-pass (pass 1 is then the whole decode).
+//
 // Vectors: rugo's AvroColumn is a carrier of plain draken_malloc'd buffers, so
 // columns are built straight into VectorOwner/CxxColumn as the JSONL Source builds
 // them — no PyObject. A reader-only field is a constant (one value, positions all 0 —
@@ -61,6 +75,7 @@
 #include "native_varchar_pool_decode.hpp"  // emit_dense_string_column, string_arena_block
 #include "disk_io.h"                       // read_all_mmap / unmap_memory_c
 #include "http_client.hpp"                 // HttpClient — remote files, whole-object GET
+#include "native_expression.hpp"           // ExprProgram / ExprFilterFn — the prefilter
 
 // rugo's Avro reader (rugo/src/avro) — pure C++.
 #include "avro/avro_reader.hpp"
@@ -92,6 +107,8 @@ struct AvroScanSpec {
     mutable int64_t bytes_read = -1;   // file bytes loaded
     mutable int64_t files_read = -1;
     mutable int64_t batches_read = -1;
+    mutable int64_t two_pass_batches = -1;     // prefilter only: batches decoded each way
+    mutable int64_t single_pass_batches = -1;
 };
 
 namespace avro_detail {
@@ -227,6 +244,7 @@ struct NativeAvroScanGlobal : GlobalSourceState {
     bool stop = false;
     bool failed = false;
     std::string err;                    // ErrCtx::msg points here
+    int err_code = kErrCodeReadError;   // ErrCtx::code with it
 
     // Batch cursor (under `claim_mtx`): per-file open state. `first_live` skips files
     // already DONE; `next_pending` is the next file nobody has started opening.
@@ -244,6 +262,13 @@ struct NativeAvroScanGlobal : GlobalSourceState {
     std::atomic<int64_t> bytes{0};
     std::atomic<int64_t> files{0};
     std::atomic<int64_t> batches{0};
+    std::atomic<int64_t> two_pass{0};
+    std::atomic<int64_t> single_pass{0};
+    // Prefilter: the survivor block share of the last filtered batch, in millionths.
+    // Starts at "every block": the batches decoded before any has reported - one per
+    // decode worker - are single-pass, the cost of a plain filter, so a weak predicate
+    // never pays two passes while the scan learns.
+    std::atomic<uint32_t> last_block_share{1000000};
 
     std::vector<std::thread> workers;
 
@@ -263,12 +288,45 @@ struct NativeAvroScanGlobal : GlobalSourceState {
         spec->bytes_read = bytes.load();
         spec->files_read = files.load();
         spec->batches_read = batches.load();
+        spec->two_pass_batches = two_pass.load();
+        spec->single_pass_batches = single_pass.load();
     }
 };
 
 class NativeAvroScanSource : public Source {
 public:
     explicit NativeAvroScanSource(const AvroScanSpec* spec) : spec_(spec) {}
+
+    // Arm the prefilter. `pass1` flags, per decode_names entry, the columns the predicate
+    // reads. The predicate comes resolved twice: `pass1_prog` against the pass-1 morsel
+    // (every emitted column, emit order, whose decoded column is pass 1, then the record
+    // index kPrefilterRowColumn, INT32) and `full_prog` against the single-pass morsel
+    // (every emitted column, then the record index). The compiler builds both layouts.
+    void set_prefilter(ExprProgram pass1_prog, ExprProgram full_prog, ExprFilterFn fn,
+                       std::vector<uint8_t> pass1) {
+        if (pass1.size() != spec_->decode_names.size())
+            throw std::runtime_error("set_prefilter: one pass-1 flag per decoded column");
+        pass1_prog_ = std::move(pass1_prog);
+        full_prog_ = std::move(full_prog);
+        prefilter_fn_ = fn;
+        pass1_names_.clear();
+        decode_pos_.assign(pass1.size(), 0);
+        uint32_t n1 = 0, n2 = 0;
+        for (size_t d = 0; d < pass1.size(); ++d) {
+            if (pass1[d]) {
+                pass1_names_.push_back(spec_->decode_names[d]);
+                decode_pos_[d] = n1++;
+            } else {
+                decode_pos_[d] = n2++;
+            }
+        }
+        if (n1 == 0) throw std::runtime_error("set_prefilter: the predicate reads no column");
+        pass1_ = std::move(pass1);
+        pass1_emit_.clear();
+        for (size_t k = 0; k < spec_->emit_index.size(); ++k)
+            if (pass1_[spec_->emit_index[k]]) pass1_emit_.push_back(static_cast<uint32_t>(k));
+    }
+    static constexpr const char* kPrefilterRowColumn = "$avro_record";
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         auto g = std::make_unique<NativeAvroScanGlobal>();
@@ -301,7 +359,7 @@ public:
             return g.failed || !g.ready.empty() || g.live_workers == 0;
         });
         if (g.failed) {
-            err.code = kErrCodeReadError;
+            err.code = g.err_code;
             err.msg = g.err.c_str();
             return SourceResult::FINISHED;
         }
@@ -315,13 +373,15 @@ public:
     }
 
 private:
-    // First failure wins; every waiter is released.
-    static void fail(NativeAvroScanGlobal& g, std::string message) {
+    // First failure wins; every waiter is released. `code` is the ErrCtx code: a read
+    // error unless the prefilter's predicate failed (decode_two_pass).
+    static void fail(NativeAvroScanGlobal& g, std::string message, int code = kErrCodeReadError) {
         {
             std::lock_guard<std::mutex> lock(g.mtx);
             if (!g.failed) {
                 g.failed = true;
                 g.err = std::move(message);
+                g.err_code = code;
             }
         }
         g.abort.store(true);
@@ -400,6 +460,7 @@ private:
         try {
             f->avro = std::make_unique<rugo::avro::AvroFile>(f->bytes.ptr, f->bytes.len, spec_->decode_names,
                                                              false, spec_->reader_schema);
+            if (prefilter_fn_ != nullptr) f->avro->split(pass1_names_);
             f->avro->batches();
         } catch (const std::exception& e) {
             return "READ_AVRO('" + spec_->files[i] + "'): " + e.what();
@@ -475,21 +536,28 @@ private:
                 break;
             }
             MorselPtr morsel;
+            int error_code = kErrCodeReadError;
             try {
                 if (unit.file != current) {
                     worker.reset();
                     current = unit.file;
                     worker = std::make_unique<rugo::avro::AvroFile::Worker>(*current->avro);
                 }
-                morsel = decode(g, *current, *worker, unit.batch);
+                morsel = prefilter_fn_ != nullptr
+                             ? decode_filtered(g, *current, *worker, unit.batch, error, error_code)
+                             : decode(g, *current, *worker, unit.batch);
             } catch (const std::exception& e) {
                 error = "READ_AVRO('" + spec_->files[unit.file->index] + "'): " + e.what();
             }
             unit.file.reset();
             if (!error.empty()) {
                 release_slot(g);
-                fail(g, std::move(error));
+                fail(g, std::move(error), error_code);
                 break;
+            }
+            if (morsel == nullptr) {   // the prefilter kept no record of this batch
+                release_slot(g);
+                continue;
             }
             {
                 std::lock_guard<std::mutex> lock(g.mtx);
@@ -527,7 +595,145 @@ private:
         return morsel;
     }
 
+    // The share of a batch's blocks holding a survivor at or under which the next batch
+    // is decoded two-pass: two-pass decompresses those blocks a second time, single-pass
+    // decodes every projected column of every record. On ClickBench's hits the measured
+    // shares sit near 0% (selective predicates) or near 100% (weak ones), so this value
+    // is not tuned between them (docs §26).
+    static constexpr uint32_t kTwoPassBlockShare = 250000;   // millionths
+
+    // A morsel's columns plus the record index, as the prefilter programs read them.
+    static void add_record_index(CxxMorsel& m, uint32_t n) {
+        auto* index = static_cast<int32_t*>(draken_malloc(static_cast<size_t>(n ? n : 1) * sizeof(int32_t)));
+        if (index == nullptr) throw std::bad_alloc();
+        for (uint32_t r = 0; r < n; ++r) index[r] = static_cast<int32_t>(r);
+        CxxColumn col;
+        col.own = std::make_shared<VectorOwner>(draken_vector_from_dense(index, n, DRAKEN_INT32, nullptr),
+                                                OwnedBuffer<void>(index), OwnedBuffer<uint8_t>(nullptr));
+        col.view = col.own->vec;
+        m.columns.push_back(std::move(col));
+        m.names.push_back(kPrefilterRowColumn);
+    }
+
+    // Run `prog` over `probe`. Null when no row survives, or on failure with `error` /
+    // `code` set exactly as the Filter would have reported it (set_span_error).
+    std::unique_ptr<CxxMorsel> run_predicate(const ExprProgram& prog, CxxMorsel& probe,
+                                             std::string& error, int& code) {
+        CxxMorsel* filtered = nullptr;
+        int err_op = 0;
+        const char* kernel_msg = nullptr;
+        const int rc = prefilter_fn_(prog.instrs, prog.count, &probe, const_cast<int*>(prog.col_idx.data()),
+                                     const_cast<void**>(prog.lit_dv.data()), nullptr, nullptr, 0,
+                                     &filtered, &err_op, &kernel_msg);
+        if (rc != 0) {
+            ErrCtx span;
+            set_span_error(span, "ExprFilterOperator: predicate evaluation failed", rc, err_op, kernel_msg);
+            error = span.msg;
+            code = span.code;
+            return nullptr;
+        }
+        std::unique_ptr<CxxMorsel> kept(filtered);
+        if (kept == nullptr || kept->num_rows() == 0) return nullptr;
+        return kept;
+    }
+
+    // The surviving records' indices: the filtered morsel's last column (§11 access).
+    static std::vector<uint32_t> survivors(const CxxMorsel& kept) {
+        const DrakenVector& iv = kept.columns.back().view;
+        const auto* idata = static_cast<const int32_t*>(iv.data);
+        std::vector<uint32_t> rows(iv.length);
+        for (uint32_t i = 0; i < iv.length; ++i) rows[i] = static_cast<uint32_t>(idata[iv.selection[i]]);
+        return rows;
+    }
+
+    // Decode one batch and apply the prefilter (set_prefilter), two-pass or single-pass.
+    // Null when no record survives, or on a predicate failure (`error` / `code` set).
+    MorselPtr decode_filtered(NativeAvroScanGlobal& g, const avro_detail::OpenFile& file,
+                              rugo::avro::AvroFile::Worker& worker, size_t batch_index,
+                              std::string& error, int& code) {
+        const rugo::avro::AvroBatchRange& range = file.avro->batches()[batch_index];
+        const bool has_pass2 = !file.avro->pass2_columns().empty();
+        const bool two_pass = !has_pass2 || g.last_block_share.load(std::memory_order_relaxed) <= kTwoPassBlockShare;
+        g.rows.fetch_add(range.rows, std::memory_order_relaxed);
+        g.batches.fetch_add(1, std::memory_order_relaxed);
+        (two_pass ? g.two_pass : g.single_pass).fetch_add(1, std::memory_order_relaxed);
+
+        auto morsel = std::make_shared<CxxMorsel>();
+        morsel->columns.reserve(spec_->emit_index.size());
+        std::unique_ptr<CxxMorsel> kept;
+        if (two_pass) {
+            rugo::avro::AvroBatch first = worker.decode_pass1(range);
+            std::vector<CxxColumn> decoded1(first.columns.size());
+            for (size_t c = 0; c < first.columns.size(); ++c)
+                avro_detail::build_column(first.columns[c], decoded1[c]);
+            CxxMorsel probe;
+            probe.columns.reserve(pass1_emit_.size() + 1);
+            for (const uint32_t k : pass1_emit_) {
+                probe.columns.push_back(decoded1[decode_pos_[spec_->emit_index[k]]]);
+                probe.names.push_back(spec_->out_identities[k]);
+            }
+            add_record_index(probe, first.rows);
+            kept = run_predicate(pass1_prog_, probe, error, code);
+            if (kept == nullptr) {
+                if (error.empty()) g.last_block_share.store(0, std::memory_order_relaxed);
+                return nullptr;
+            }
+            const std::vector<uint32_t> rows = survivors(*kept);
+            if (has_pass2)
+                g.last_block_share.store(block_share(file, range, rows), std::memory_order_relaxed);
+            std::vector<CxxColumn> decoded2;
+            if (has_pass2) {
+                rugo::avro::AvroBatch second = worker.decode_pass2(rows.data(), static_cast<uint32_t>(rows.size()));
+                decoded2.resize(second.columns.size());
+                for (size_t c = 0; c < second.columns.size(); ++c)
+                    avro_detail::build_column(second.columns[c], decoded2[c]);
+            }
+            size_t at1 = 0;
+            for (size_t k = 0; k < spec_->emit_index.size(); ++k) {
+                const uint32_t d = spec_->emit_index[k];
+                if (pass1_[d]) morsel->columns.push_back(kept->columns[at1++]);
+                else morsel->columns.push_back(decoded2[decode_pos_[d]]);
+            }
+        } else {
+            rugo::avro::AvroBatch batch = worker.decode(range);
+            std::vector<CxxColumn> decoded(batch.columns.size());
+            for (size_t c = 0; c < batch.columns.size(); ++c)
+                avro_detail::build_column(batch.columns[c], decoded[c]);
+            CxxMorsel probe;
+            probe.columns.reserve(spec_->emit_index.size() + 1);
+            for (size_t k = 0; k < spec_->emit_index.size(); ++k) {
+                probe.columns.push_back(decoded[spec_->emit_index[k]]);
+                probe.names.push_back(spec_->out_identities[k]);
+            }
+            add_record_index(probe, batch.rows);
+            kept = run_predicate(full_prog_, probe, error, code);
+            if (kept == nullptr) {
+                if (error.empty()) g.last_block_share.store(0, std::memory_order_relaxed);
+                return nullptr;
+            }
+            g.last_block_share.store(block_share(file, range, survivors(*kept)), std::memory_order_relaxed);
+            for (size_t k = 0; k < spec_->emit_index.size(); ++k) morsel->columns.push_back(kept->columns[k]);
+        }
+        morsel->names = spec_->out_identities;
+        return morsel;
+    }
+
+    // Share of `range`'s blocks holding one of `rows`, in millionths.
+    static uint32_t block_share(const avro_detail::OpenFile& file, const rugo::avro::AvroBatchRange& range,
+                                const std::vector<uint32_t>& rows) {
+        const uint32_t touched = file.avro->blocks_with(range, rows.data(), static_cast<uint32_t>(rows.size()));
+        return static_cast<uint32_t>(uint64_t{touched} * 1000000u / (range.block_count ? range.block_count : 1));
+    }
+
     const AvroScanSpec* spec_;
+    // Prefilter (set_prefilter); unarmed when prefilter_fn_ is null.
+    ExprProgram pass1_prog_;
+    ExprProgram full_prog_;
+    ExprFilterFn prefilter_fn_ = nullptr;
+    std::vector<uint8_t> pass1_;          // per decode_names: decoded in pass 1
+    std::vector<std::string> pass1_names_;
+    std::vector<uint32_t> decode_pos_;    // per decode_names: position in its pass's batch
+    std::vector<uint32_t> pass1_emit_;    // emitted columns (emit order) decoded in pass 1
 };
 
 }  // namespace opteryx::engine

@@ -768,6 +768,24 @@ clickbench-json: ## Run ClickBench on upstream's hits.json.gz split into 100 x 1
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (json) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant json --iterations 3
 
+clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split converted to 1M-row deflate Avro shards (converts scratch/hits_rugo_262k to scratch/hits_avro on first run, ~5 min)
+	@# Avro is reachable only through READ_AVRO, never as a stored dataset, so the
+	@# runner's `avro` variant rewrites each query's relation to
+	@# READ_AVRO('scratch/hits_avro/*.avro'). Its ratio column is ClickHouse local
+	@# reading the SAME Avro files (`make clickbench-clickhouse-avro`,
+	@# clickhouse/results.local.avro.json, best try) - engine against engine; no
+	@# ratio column until that has been run.
+	@#
+	@# Gated on a stamp naming the codec and converter version, not on the
+	@# directory: the converter writes <dir>.partial and renames it only when every
+	@# source row is accounted for, and a mirror written another way (another
+	@# codec, block size or shard size) must not satisfy the gate. Changing any of
+	@# those in dev/clickbench/parquet_to_avro.py means bumping the stamp.
+	@test -f scratch/hits_avro.deflate-v1 || { rm -rf scratch/hits_avro scratch/hits_avro.partial && $(PYTHON) dev/clickbench/parquet_to_avro.py scratch/hits_rugo_262k scratch/hits_avro deflate && touch scratch/hits_avro.deflate-v1; }
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (avro) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant avro
+
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile
@@ -787,6 +805,20 @@ clickbench-interleave: ## Interleaved Opteryx vs DuckDB ClickBench (O,D / D,O pe
 
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
+
+clickbench-duckdb-avro: ## DuckDB (avro extension) over the clickbench-avro shards (regenerates duckdb/results.local.avro.json; run `make clickbench-avro` first to build scratch/hits_avro)
+	@test -f scratch/hits_avro.deflate-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
+	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --avro-dir scratch/hits_avro
+
+CLICKHOUSE ?= scratch/clickhouse/clickhouse
+clickbench-clickhouse-avro: ## ClickHouse local over the clickbench-avro shards, 1 try per query (writes clickhouse/results.local.avro.json; needs a clickhouse binary at CLICKHOUSE and scratch/hits_avro built by make clickbench-avro)
+	@test -f scratch/hits_avro.deflate-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
+	@test -x $(CLICKHOUSE) || { echo "no clickhouse binary at $(CLICKHOUSE) (set CLICKHOUSE=...)" >&2; exit 1; }
+	@$(PYTHON) tests/performance/clickbench/clickhouse/runner.py --binary $(CLICKHOUSE) --avro-dir scratch/hits_avro
+
+clickbench-odata: ## ClickBench against opteryx.app as OData reads of benchmarks.clickbench.q_00..q_42 (writes odata/results.local.json; CLIENT_ID/CLIENT_SECRET from env or the gitignored .env)
+	@test -f .env || { echo "no .env - set CLIENT_ID/CLIENT_SECRET in .env (gitignored) or call the runner directly with them in the environment" >&2; exit 1; }
+	@$(PYTHON) tests/performance/clickbench/odata/runner.py --env-file .env
 
 jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
 	@clear || true

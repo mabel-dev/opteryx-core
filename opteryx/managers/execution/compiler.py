@@ -255,6 +255,17 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         if runtime_pruned is not None:
             entry["row_groups_pruned_runtime"] = runtime_pruned
 
+    # READ_AVRO with a prefilter: how many batches were decoded each way (two-pass /
+    # single-pass, native_avro_scan_source.hpp). Absent when no prefilter was armed or
+    # the scan never ran (-1), so "not armed" stays distinguishable from "armed".
+    for plan in nplan.avro_scan_plans:
+        two, single = plan.two_pass_batches, plan.single_pass_batches
+        entry = facts.get(plan.scan_identity)
+        if entry is None or two < 0 or (two == 0 and single == 0):
+            continue
+        entry["avro_two_pass_batches"] = two
+        entry["avro_single_pass_batches"] = single
+
     # The parquet twin. Separate loop, not a shared one: the two plan types
     # report DIFFERENT things at compile time. A skene scan's `row_groups_pruned`
     # is unknown until the claim builder runs, so the fold above writes both
@@ -1020,6 +1031,9 @@ class _Compiler:
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
         # node identity: "NativeParquetScanSource" or "LatmatScanSource".
         self.scan_sources: dict = {}
+        # READ_AVRO pipelines: p -> (emitted identities, their decoded field names),
+        # for _arm_avro_prefilter.
+        self._avro_scan_columns: dict = {}
         # WP-02: per-native-scan relocated residual filter, keyed by scan node
         # identity. When a pushed predicate is lowered to a c-native span and its
         # scan admitted natively, this carries the wiring from _native_scan_plan to
@@ -2391,6 +2405,7 @@ class _Compiler:
         in_edges = list(self.plan.ingoing_edges(nid))
 
         if kind == "FilterNode":
+            child = self.plan[in_edges[0][0]] if len(in_edges) == 1 else None
             (p, layout) = self._compile_only_child(in_edges, kind, node)
             # A computed ARRAY operand inside the predicate (e.g. `SPLIT(x)[i] = ...`)
             # needs the same materialize-and-reference hoist projections get — see
@@ -2420,6 +2435,9 @@ class _Compiler:
             # hoists above added as well as the ones the child produced.
             predicate = self._bind_precomputed_subexpressions(condition, hoisted_layout)
             bc = self._lower_expression(predicate, "a filter predicate")
+            if (child is not None and child.kind == "AvroReadNode" and hoisted_layout == layout
+                    and self._arm_avro_prefilter(p, predicate, bc)):
+                return p, layout
             const_col_idx, const_scalar_vecs = self._resolve_const_replacements(condition, hoisted_layout)
             self.nplan.add_expr_filter(p, bc, hoisted_layout, const_col_idx, const_scalar_vecs)
             if hoisted_layout != layout:
@@ -6473,6 +6491,35 @@ class _Compiler:
         self._remember_types(scan.columns)
         return p, identities
 
+    def _arm_avro_prefilter(self, p, predicate, bc) -> bool:
+        """READ_AVRO prefilter (docs/AVRO_READER_DESIGN.md §26): the WHERE directly over
+        the scan in pipeline `p` runs inside the scan, which decodes each batch either
+        two-pass (the predicate's columns for every record, the others only for the
+        survivors) or single-pass. The Filter is then not compiled. Decided here, once, at plan time; nothing is decided at run
+        time. False (nothing armed) when the predicate reads a column the scan does not
+        decode."""
+        from opteryx.expression import get_all_nodes_of_type
+
+        identities, physical = self._avro_scan_columns[p]
+        read = {
+            ident.schema_column.identity
+            for ident in get_all_nodes_of_type(predicate, select_nodes=(NodeType.IDENTIFIER,))
+        }
+        if not read or not read <= set(identities):
+            return False
+        pass1_names = {physical[k] for k, identity in enumerate(identities) if identity in read}
+        decode_names = list(dict.fromkeys(physical))
+        # The pass-1 morsel the scan builds: every emitted pass-1 column, emit order,
+        # then the record index (NativeAvroScanSource::kPrefilterRowColumn).
+        pass1_layout = [
+            identity for k, identity in enumerate(identities) if physical[k] in pass1_names
+        ] + [b"$avro_record"]
+        self.nplan.set_native_avro_scan_prefilter(
+            p, bc, pass1_layout, list(identities) + [b"$avro_record"],
+            [name in pass1_names for name in decode_names],
+        )
+        return True
+
     def _compile_avro_scan(self, scan):
         """READ_AVRO: an AvroScanPlan and a NativeAvroScanSource.
 
@@ -6516,6 +6563,7 @@ class _Compiler:
         }
         p = self.nplan.new_pipeline()
         self.nplan.set_native_avro_scan_source(p, plan)
+        self._avro_scan_columns[p] = (identities, physical)
         self._remember_types(scan.columns)
         return p, identities
 

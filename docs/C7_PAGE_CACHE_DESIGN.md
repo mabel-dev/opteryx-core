@@ -1034,7 +1034,19 @@ outside the account. Recorded as a fact, not a defect to fix.
   no caller involvement. MERGE, which shares that branch, caches normally.
   Test: tests/integration/test_optimize_local.py::test_optimize_never_fills_the_chunk_cache
   (fails with the change reverted).
-- Leave-one-out: TEMPORARY switch `DRAKEN_CC_ABLATE` (comma list of
-  `probation`, `remember`, `cost`; unknown name aborts), read once per process.
-  Each switch verified to break exactly its own policy test. Remove after the
-  runs are banked.
+- Leave-one-out: TEMPORARY switch `DRAKEN_CC_ABLATE` (removed 2026-10-11 after
+  the runs below were banked).
+
+**Leave-one-out, banked 2026-10-10/11** (i5, official shape, budget squeezed to
+40% → 2.18 GiB so Q23/Q28/Q29/Q34/Q35 evict; 3 rounds per arm; Σ hot over those
+five queries; every part KEPT — turning it off measured slower):
+
+| Part turned off | Local files | Remote (hadro: 120 ms + 30 ms jitter, 480 / 2000 Mbps) |
+|---|---|---|
+| remember | 1.105 (hits 519 → 173) | — |
+| probation | 1.024 | — |
+| cost weighting | 0.994 — inert: local chunks all weight 0 | **1.010** (32.35 → 32.68 s, rounds separate) |
+
+Cost weighting only acts on remote chunks (the modelled re-fetch); on hadro with
+no latency it gave +13% hits but no time (re-fetch free), with GCS-like latency
+it is 1.0% faster.

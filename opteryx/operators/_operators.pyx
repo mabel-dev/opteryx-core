@@ -336,6 +336,8 @@ cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine
         int64_t bytes_read
         int64_t files_read
         int64_t batches_read
+        int64_t two_pass_batches
+        int64_t single_pass_batches
 
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
@@ -538,6 +540,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_native_scan_prefilter(size_t p, void* instrs, int count,
                                        cppvector[int] col_idx, cppvector[void*] lit_dv,
                                        ExprFilterFn fn, cppvector[uint8_t] is_pred) except +
+        void set_native_avro_scan_prefilter(size_t p, void* instrs, int count,
+                                            cppvector[int] pass1_col_idx, cppvector[void*] pass1_lit_dv,
+                                            cppvector[int] full_col_idx, cppvector[void*] full_lit_dv,
+                                            ExprFilterFn fn, cppvector[uint8_t] pass1) except +
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_scan_admission(size_t p, RowAdmission* admission) except +
@@ -2632,7 +2638,19 @@ cdef class AvroScanPlan:
         self.spec.bytes_read = -1
         self.spec.files_read = -1
         self.spec.batches_read = -1
+        self.spec.two_pass_batches = -1
+        self.spec.single_pass_batches = -1
         self.scan_identity = None
+
+    @property
+    def two_pass_batches(self):
+        """Prefilter: batches decoded two-pass; -1 until the scan has run."""
+        return self.spec.two_pass_batches
+
+    @property
+    def single_pass_batches(self):
+        """Prefilter: batches decoded single-pass; -1 until the scan has run."""
+        return self.spec.single_pass_batches
 
     @property
     def rows_read(self):
@@ -3695,6 +3713,35 @@ cdef class NativePlan:
             c_is_pred.push_back(<uint8_t>(1 if is_pred[k] else 0))
         self._e.set_native_scan_prefilter(p, <void*>bc.instrs, <int>bc.count, col_idx,
                                           lit_dv, _expr_filter_tramp, c_is_pred)
+
+    def set_native_avro_scan_prefilter(self, size_t p, CompiledBytecode bc, list pass1_layout,
+                                       list full_layout, list pass1):
+        """READ_AVRO prefilter (docs/AVRO_READER_DESIGN.md §26): pipeline `p`'s native
+        Avro scan runs the WHERE directly above it itself, per batch either two-pass
+        (the predicate's columns first, the rest for survivors) or single-pass.
+        `pass1` flags, per decoded column, the ones the predicate reads. `bc` - the
+        program the ExprFilter would have run, held for the run - is resolved against
+        both morsels the scan builds: `pass1_layout` (the emitted pass-1 columns in
+        emit order, then the record index) and `full_layout` (every emitted column,
+        then the record index)."""
+        if not bytecode_is_c_native_predicate(bc):
+            raise ValueError("set_native_avro_scan_prefilter requires a c-native "
+                             "bool-final program — the compiler must reject earlier")
+        cdef cppvector[int] pass1_col_idx
+        cdef cppvector[void*] pass1_lit_dv
+        cdef cppvector[int] full_col_idx
+        cdef cppvector[void*] full_lit_dv
+        cdef cppvector[uint8_t] c_pass1
+        _resolve_bc_for_layout(bc, pass1_layout, pass1_col_idx, pass1_lit_dv)
+        _resolve_bc_for_layout(bc, full_layout, full_col_idx, full_lit_dv)
+        self.held.append(bc)
+        cdef Py_ssize_t k
+        for k in range(len(pass1)):
+            c_pass1.push_back(<uint8_t>(1 if pass1[k] else 0))
+        self._e.set_native_avro_scan_prefilter(p, <void*>bc.instrs, <int>bc.count,
+                                               pass1_col_idx, pass1_lit_dv,
+                                               full_col_idx, full_lit_dv,
+                                               _expr_filter_tramp, c_pass1)
 
     def add_expr_project(self, size_t p, CompiledBytecode bc, list layout, name,
                          logical=None, bint preserve_shape=False):

@@ -8,6 +8,12 @@ Output: duckdb/results.local.json
 
 Usage:
     python tests/performance/clickbench/duckdb/runner.py [--parquet-dir scratch/hits]
+    python tests/performance/clickbench/duckdb/runner.py --avro-dir scratch/hits_avro
+
+`--avro-dir` reads the Avro shards `make clickbench-avro` converts
+(dev/clickbench/parquet_to_avro.py) through DuckDB's avro extension
+(`INSTALL avro` once; it is not built in) and writes results.local.avro.json -
+the like-for-like engine comparison for `make clickbench-avro`.
 
 The result file is written to the same directory as this script so that
 opteryx/runner.py can reference it as the local baseline.
@@ -127,19 +133,31 @@ def machine_description() -> str:
     return f"{node} ({cpu})"
 
 
-def run_benchmark(parquet_glob: str) -> list:
+def run_benchmark(parquet_glob: str = None, avro_glob: str = None) -> list:
     """
-    Run all queries TRIES times each.
+    Run all queries TRIES times each, over the parquet OR the Avro files.
     Returns a list of [cold, warm1, warm2] timing tuples (seconds, 3 d.p.).
     """
     con = duckdb.connect()
-    # Mirror the upstream create.sql setup
-    con.execute("SET parquet_metadata_cache=true")
-    con.execute(f"""
-        CREATE VIEW hits AS
-        SELECT * REPLACE (make_date(EventDate) AS EventDate)
-        FROM read_parquet('{parquet_glob}', binary_as_string=True)
-    """)
+    if avro_glob is not None:
+        # The shards keep the source's binary strings as Avro `bytes` (BLOB here);
+        # decode() is read_parquet's binary_as_string=True, so the queries see
+        # the same VARCHAR columns as the parquet view.
+        con.execute("LOAD avro")
+        columns = con.execute(f"DESCRIBE SELECT * FROM read_avro('{avro_glob}')").fetchall()
+        blobs = [name for name, column_type, *_ in columns if column_type == "BLOB"]
+        replace = ", ".join(
+            ["make_date(EventDate) AS EventDate"] + [f"decode({name}) AS {name}" for name in blobs]
+        )
+        con.execute(f"CREATE VIEW hits AS SELECT * REPLACE ({replace}) FROM read_avro('{avro_glob}')")
+    else:
+        # Mirror the upstream create.sql setup
+        con.execute("SET parquet_metadata_cache=true")
+        con.execute(f"""
+            CREATE VIEW hits AS
+            SELECT * REPLACE (make_date(EventDate) AS EventDate)
+            FROM read_parquet('{parquet_glob}', binary_as_string=True)
+        """)
     con.execute("CREATE MACRO toDateTime(t) AS epoch_ms(CAST(t AS BIGINT) * 1000)")
 
     results = []
@@ -173,11 +191,53 @@ def main():
         help="Directory containing hits_*.parquet files (default: scratch/hits)",
     )
     parser.add_argument(
+        "--avro-dir",
+        default=None,
+        help="Read hits_*.avro from this directory through DuckDB's avro extension instead of parquet "
+        "(default output: results.local.avro.json)",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Output JSON path (default: same dir as this script / duckdb.local.json)",
     )
     args = parser.parse_args()
+
+    if args.avro_dir is not None:
+        avro_dir = os.path.realpath(args.avro_dir)
+        avro_files = [f for f in os.listdir(avro_dir) if f.startswith("hits_") and f.endswith(".avro")]
+        if not avro_files:
+            print(f"ERROR: No hits_*.avro files found in {avro_dir}", file=sys.stderr)
+            sys.exit(1)
+        data_size = sum(os.path.getsize(os.path.join(avro_dir, f)) for f in avro_files)
+        output_path = args.output or os.path.join(os.path.dirname(__file__), "results.local.avro.json")
+        print("DuckDB ClickBench — local benchmark (Avro)")
+        print(f"  DuckDB version : {duckdb.__version__}")
+        print(f"  Machine        : {machine_description()}")
+        print(f"  Avro dir       : {avro_dir}  ({len(avro_files)} files, {data_size / 1e9:.1f} GB)")
+        print(f"  Tries per query: {TRIES}")
+        print(f"  Output         : {output_path}")
+        print()
+        start = time.monotonic()
+        results = run_benchmark(avro_glob=os.path.join(avro_dir, "hits_*.avro"))
+        print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
+        payload = {
+            "system": "DuckDB (Avro, avro extension)",
+            "date": __import__("datetime").date.today().isoformat(),
+            "machine": machine_description(),
+            "cluster_size": 1,
+            "proprietary": "no",
+            "hardware": "cpu",
+            "tuned": "no",
+            "tags": ["C++", "column-oriented", "embedded", "stateless"],
+            "load_time": 0,
+            "data_size": data_size,
+            "result": results,
+        }
+        with open(output_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"Results written to {output_path}")
+        return
 
     # Resolve parquet glob relative to the repo root (cwd when running via make)
     parquet_dir = args.parquet_dir
@@ -216,7 +276,7 @@ def main():
     print()
 
     start = time.monotonic()
-    results = run_benchmark(parquet_glob)
+    results = run_benchmark(parquet_glob=parquet_glob)
     total_elapsed = time.monotonic() - start
 
     print(f"\nTotal benchmark time: {total_elapsed:.1f}s")

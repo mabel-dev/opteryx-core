@@ -6,7 +6,7 @@
 // length, count and union/enum index in an Avro file is a varint the reader did not
 // write, so this is where the bounds arithmetic lives.
 //
-// Two reads per input: every top-level column (exercises the read and JSON ops), and
+// Several reads per input: every top-level column (exercises the read and JSON ops), and
 // a dotted projection (exercises the skip ops and the nullable-record null path).
 // The column buffers are owned by AvroRead and freed when it goes out of scope.
 //
@@ -61,6 +61,28 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     try {
         AvroRead out;
         read_avro_buffer(data, size, {}, true, reader, 1, out);
+    } catch (const std::exception&) {
+    } catch (...) {
+    }
+
+    // Two-pass decoding (AvroFile::split, the READ_AVRO prefilter): the first column in
+    // pass 1 for every record, then the rest for every other record - pass 2 decompresses
+    // those records' blocks again and decodes from the offsets pass 1 recorded.
+    try {
+        AvroFile file(data, size, {}, true, std::string());
+        const std::vector<std::string> names = file.column_names();
+        if (!names.empty()) {
+            file.split({names.front()});
+            AvroFile::Worker worker(file);
+            for (const AvroBatchRange& range : file.batches()) {
+                AvroBatch first = worker.decode_pass1(range);
+                std::vector<uint32_t> rows;
+                for (uint32_t r = 0; r < first.rows; r += 2) rows.push_back(r);
+                (void)file.blocks_with(range, rows.data(), static_cast<uint32_t>(rows.size()));
+                if (!file.pass2_columns().empty())
+                    AvroBatch second = worker.decode_pass2(rows.data(), static_cast<uint32_t>(rows.size()));
+            }
+        }
     } catch (const std::exception&) {
     } catch (...) {
     }

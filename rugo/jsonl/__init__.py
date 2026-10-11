@@ -133,7 +133,9 @@ def read_jsonl(
 
         A named column is parsed STRICTLY as that type — no speculative inference, no
         widening, no fallback — and raises ValueError naming the column, row and value if
-        anything doesn't fit. Declared columns are always reported back in the returned
+        anything doesn't fit. A declaration types a column only when it is READ: with
+        `columns` given, a declared column not in `columns` is not returned (as CSV).
+        Every declared column that is read is always reported back in the returned
         schema dict (see read_metadata / get_jsonl_schema), independent of infer_schema.
 
         VARIANT and ARRAY<T> exist so a schema pinned from one chunk's inference can name
@@ -158,8 +160,8 @@ def read_jsonl(
             as CAST does — so the '+00:00' write_jsonl emits reads back.
     infer_schema: whether non-declared columns appear in the returned schema dict at all
         (the underlying Draken vectors are always typed the same way regardless — this
-        only gates the reported metadata). Declared (explicit_schema) columns are always
-        reported.
+        only gates the reported metadata). Declared (explicit_schema) columns that are
+        read are always reported.
     infer_sample_size: how many leading records are consulted to decide BOTH which columns
         exist and what type each one is. Must be a positive integer; defaults to 5.
 

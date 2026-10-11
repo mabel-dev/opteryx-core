@@ -767,3 +767,44 @@ refusing wrong-length values and (ruled 2026-10-11) string bounds that are not v
 Timing (local, cold process, median of 9 rotated rounds, full manifest build):
 100 manifests / 300 files: pyiceberg 56.6 ms, rugo + Python bounds 19.2, native 14.0;
 1 manifest / 2,000 files: 101.8, 51.5, 14.4 ms.
+
+## 26. READ_AVRO prefilter: two-pass or single-pass per batch (2026-10-11)
+
+The §20 build pushed projection only, with predicates deferred ("can come later"). Asked
+2026-10-11 ("1 - do it"): a WHERE directly over READ_AVRO now runs inside the scan
+(`NativeAvroScanSource::set_prefilter`, armed by `compiler._arm_avro_prefilter`), and the
+Filter above is not compiled. Arming needs no hoisted helper columns; the program is the
+one the ExprFilter would have run, resolved against the scan's two morsel layouts.
+
+Each batch is decoded one of two ways - the same answer either way:
+- **two-pass**: pass 1 decodes the predicate's columns for every record and records each
+  record's (block, offset); the predicate runs; pass 2 decodes the other columns for the
+  survivors only, decompressing again just the blocks holding them
+  (`AvroFile::split`, `Worker::decode_pass1` / `decode_pass2`);
+- **single-pass**: every projected column for every record, then the predicate.
+
+The choice per batch: two-pass when the scan's last finished batch had survivors in at
+most 25% of its blocks (`kTwoPassBlockShare`), else single-pass. Until a batch has
+finished (one per decode worker) batches are single-pass - the plain filter's cost - so a
+weak predicate never pays two passes while the scan learns. A predicate that reads every
+projected column has no pass 2: pass 1 is the whole decode, always.
+
+Measured, ClickBench over 103 deflate shards (min of 3 alternating rounds, separate
+processes):
+- **Holding the decompressed blocks between passes was ~20% slower on every batch** that
+  used pass 2 (a batch's ~36 MB of payloads written out of cache instead of reusing one
+  64 KB buffer), even for selective predicates. Deleted; pass 2 re-decompresses instead.
+- **Re-decompressing alone loses on weak predicates** (`SearchPhrase <> ''` keeps 13% of
+  rows, so nearly every 116-row block holds a survivor). Hence the per-batch choice.
+- **Final: Q23 12.2 s → 3.8 s (0.31×); every other WHERE query within ±3% of the Filter
+  path** (controls 0.99-1.02; Q11 1.05, Q39 0.92); 25 WHERE queries + 2 controls total
+  108.7 s → 100.6 s (0.925×). Equivalence: all 43 queries identical on 4M rows (six LIMIT
+  queries over ties compared in full without LIMIT).
+- Block shares on hits sit near 0% (Q22, Q23, Q38-Q42) or near 100% (weak predicates;
+  Q10/Q11 switch a few batches), so 25% is not tuned between them.
+
+Telemetry: the scan's operation row carries `avro_two_pass_batches` /
+`avro_single_pass_batches` when a prefilter is armed. The plan's FILTER row then reports
+no calls - the scan did that work. A predicate failure is reported exactly as the Filter
+would have (`set_span_error`: a data error stays a DataError). Fuzz: the `avro` target
+runs split + both passes + `blocks_with`; corpus and 5,000 mutants clean under ASan/UBSan.
