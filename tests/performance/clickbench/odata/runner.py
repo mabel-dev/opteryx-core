@@ -32,6 +32,7 @@ import argparse
 import datetime
 import json
 import os
+import statistics
 import sys
 import time
 import urllib.error
@@ -45,6 +46,8 @@ TRIES = 3
 TIMEOUT = 600
 # Re-authenticate this many seconds before the token says it expires.
 TOKEN_EXPIRY_SKEW = 60
+# Same threshold as the opteryx runner: (max - min) / min above this is UNSTABLE.
+UNSTABLE_SPREAD = 0.45
 
 
 def load_env_file(path: str) -> None:
@@ -117,27 +120,111 @@ def describe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def run_benchmark(token: Token) -> tuple[list, int]:
+def run_benchmark(token: Token) -> tuple[list, list]:
+    """Returns (per-query try times in seconds, None for a failed try; failure messages)."""
     results = []
-    failures = 0
+    failures = []
     for idx in range(QUERY_COUNT):
+        query_num = f"Q{idx:02d}"
         url = f"{ODATA_BASE}/q_{idx:02d}"
         times = []
-        print(f"  Q{idx:02d}/{QUERY_COUNT} ", end="", flush=True)
+        errors = []
+        # Each try's time is printed as it lands; the finished line is then
+        # rewritten in place (CR) with the fastest/slowest coloured.
+        print(f"  {query_num} {TRIES} runs (", end="", flush=True)
         for attempt in range(TRIES):
             t0 = time.monotonic()
             try:
                 read_view(url, token)
                 elapsed = round(time.monotonic() - t0, 3)
             except (urllib.error.URLError, TimeoutError) as exc:
-                print(f"\n    ERROR on attempt {attempt + 1}: {describe_error(exc)}")
+                errors.append(f"{query_num} try {attempt + 1}: {describe_error(exc)}")
                 elapsed = None
-                failures += 1
             times.append(elapsed)
-            status = f"{elapsed:.3f}s" if elapsed is not None else "ERR"
-            print(status, end="  " if attempt < TRIES - 1 else "\n", flush=True)
+            status = f"{elapsed:5.2f}" if elapsed is not None else "  ERR"
+            print(f"{', ' if attempt else ''}{status}", end="", flush=True)
         results.append(times)
+        if errors:
+            # A query with any failed try is a failure, never a fast time.
+            failures.extend(errors)
+            print(f"\r\033[K  {query_num} FAILED: {errors[0][:90]}")
+            continue
+        fastest = times.index(min(times))
+        slowest = times.index(max(times))
+        cells = []
+        for try_ix, seconds in enumerate(times):
+            cell = f"{seconds:5.2f}"
+            if try_ix == fastest:
+                cell = f"\033[38;2;34;197;94m{cell}\033[0m"
+            elif try_ix == slowest:
+                cell = f"\033[38;2;255;69;69m{cell}\033[0m"
+            cells.append(cell)
+        print(f"\r\033[K  {query_num} {TRIES} runs ({', '.join(cells)})")
     return results, failures
+
+
+def print_summary(results: list, failures: list, wall_seconds: float) -> None:
+    """Same summary shape as the opteryx runner: per-query table, unstable list, SUM OF MINIMUMS."""
+    print()
+    header = f"{'Query':<7} {'Min':>11} {'Median':>11} {'Max':>11} {'Spread':>9}  {'Rounds':<8}"
+    print(header)
+    print("-" * (len(header) + 4))
+
+    passed = 0
+    failed = 0
+    sum_min_ms = 0.0
+    unstable = []
+    for idx, times in enumerate(results):
+        query_num = f"Q{idx:02d}"
+        if None in times:
+            print(f"{query_num:<7} {'FAILED':>11}")
+            failed += 1
+            continue
+        ms = [t * 1000 for t in times]
+        min_ms = min(ms)
+        max_ms = max(ms)
+        med_ms = statistics.median(ms)
+        spread = (max_ms - min_ms) / min_ms if min_ms > 0 else 0.0
+        spread_str = f"{spread * 100:>8.1f}%"
+        if spread > UNSTABLE_SPREAD:
+            unstable.append((query_num, spread))
+            spread_str = f"\033[38;2;255;165;0m{spread * 100:>8.1f}%\033[0m"
+        print(f"{query_num:<7} {min_ms:>9.2f}ms {med_ms:>9.2f}ms {max_ms:>9.2f}ms {spread_str}  {len(ms):<8}")
+        sum_min_ms += min_ms
+        passed += 1
+
+    print("--- ✅ \033[0;32mdone\033[0m")
+
+    if unstable:
+        print(
+            f"\n\033[38;2;255;165;0m{len(unstable)} UNSTABLE QUERIES\033[0m "
+            f"(spread > {UNSTABLE_SPREAD * 100:.0f}% of their own minimum — the service moved "
+            f"under them, so their minimum is not a usable signal):"
+        )
+        for query_num, spread in sorted(unstable, key=lambda x: -x[1]):
+            print(f"  {query_num}  {spread * 100:.1f}%")
+
+    if failures:
+        print("\n\033[38;2;139;233;253m\033[3mFAILURES\033[0m")
+        for err in failures:
+            print(err)
+
+    # Headline total: the sum of each query's BEST (minimum) time — OUR metric,
+    # not the published ClickBench one. Failed queries contribute nothing, so a
+    # run with failures is not comparable to a clean one.
+    summary = (
+        f"\n\033[38;2;139;233;253m\033[3mSUM OF MINIMUMS\033[0m  {sum_min_ms / 1000:.2f}s "
+        f"({sum_min_ms:.0f}ms) over {passed}/{QUERY_COUNT} queries"
+    )
+    if failed:
+        summary += f"\n  \033[0;31m{failed} queries failed and contribute 0ms — this total is not comparable to a clean run\033[0m"
+    print(summary)
+
+    print(
+        f"\n\033[38;2;139;233;253m\033[3mCOMPLETE\033[0m ({wall_seconds:.2f} seconds wall)\n"
+        f"  \033[38;2;26;185;67m{passed} passed ({(passed * 100) // QUERY_COUNT}%)\033[0m\n"
+        f"  \033[38;2;255;121;198m{failed} failed\033[0m"
+    )
 
 
 def main() -> int:
@@ -168,7 +255,7 @@ def main() -> int:
 
     start = time.monotonic()
     results, failures = run_benchmark(token)
-    print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
+    wall_seconds = time.monotonic() - start
 
     payload = {
         "system": "Opteryx (opteryx.app, OData)",
@@ -185,10 +272,12 @@ def main() -> int:
     }
     with open(args.output, "w") as f:
         json.dump(payload, f, indent=2)
-    print(f"Results written to {args.output}")
+    print(f"\nresults written to {args.output}")
+
+    print_summary(results, failures, wall_seconds)
 
     if failures:
-        print(f"ERROR: {failures} of {QUERY_COUNT * TRIES} tries failed", file=sys.stderr)
+        print(f"ERROR: {len(failures)} of {QUERY_COUNT * TRIES} tries failed", file=sys.stderr)
         return 1
     return 0
 
