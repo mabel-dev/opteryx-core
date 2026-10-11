@@ -189,7 +189,6 @@ _logger = get_logger(__name__)
 
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
-_FOOTER_PREFETCH = 65536
 
 # Process-global cache for parsed Parquet footers, shared by reference and bounded
 # by config.PARQUET_FOOTER_CACHE_BYTES. Avoids repeated Thrift deserialization when

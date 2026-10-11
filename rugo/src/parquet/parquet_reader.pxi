@@ -1583,7 +1583,9 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
 
     for col_idx in range(<Py_ssize_t>row_group_columns.size()):
         cp = &row_group_columns[col_idx]
-        if not cp[0].success:
+        # DecodeRowGroupColumns raises on every failure, so a column that did
+        # not decode here can only be one absent from this row group.
+        if cp[0].absent:
             continue
 
         _t0 = _time.perf_counter()
@@ -1984,8 +1986,9 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         chunk_bytes: bytes / bytearray / memoryview — the raw column chunk.
         col_stats:   dict — one column entry from read_metadata()['row_groups'][rg]['columns'][i].
 
-    Returns a Draken Vector (Integer64Vector, StringVector, Float64Vector, BoolVector, or ArrayVector),
-    or None on failure.
+    Returns a Draken Vector (Integer64Vector, StringVector, Float64Vector, BoolVector, or ArrayVector).
+    Raises RuntimeError when the chunk does not decode — a single chunk has no
+    "absent" outcome.
     """
     cdef const uint8_t[::1] mem_view
     cdef size_t size
@@ -2086,7 +2089,10 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         _TEL["parquet_pages_decoded"] += <int32_t>result.pages_decoded
 
     if not result.success:
-        return None
+        raise RuntimeError(
+            "column '" + (col_stats.get('name') or '') + "': " +
+            (result.error_message.decode("utf-8") if result.error_message.size() > 0
+             else "decode failed (no reason recorded)"))
 
     num_rows = <int32_t>result.num_rows
 

@@ -115,6 +115,11 @@ struct DecodedColumnMeta {
   int32_t max_rep_level = 0;  // from ColumnStats (needed by Cython for list offset reconstruction)
   int32_t max_def_level = 0;  // from ColumnStats (needed by Cython for list offset reconstruction)
   bool success = false;
+  // The requested column is not in this row group. The ONLY success == false
+  // outcome that is not an error — set solely by DecodeColumnFromMemory's name
+  // lookup. Every other success == false is a failure, whether or not it
+  // recorded an error_message; it is never to be read as absence.
+  bool absent = false;
   uint8_t code_width = 0;                     // bytes per code (1, 2, 4) for dict_indices
   bool dict_ordered = false;                  // dictionary page is_sorted flag
   // Zero-copy output pointers (optional). When non-null, numeric decode writes
@@ -486,8 +491,3 @@ std::vector<DecodedColumn> DecodeRowGroupColumns(
     const std::vector<std::string>& column_names,
     const RowGroupStats& row_group, int row_group_index);
 
-// Legacy file-based functions (kept for backward compatibility)
-DecodedColumn DecodeColumn(const std::string &path, const std::string &column_name, 
-                           const RowGroupStats &row_group, int row_group_index);
-
-DecodedColumn DecodeColumn(const std::string &path, const std::string &column_name);

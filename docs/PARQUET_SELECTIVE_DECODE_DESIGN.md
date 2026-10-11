@@ -359,9 +359,7 @@ Removal cost (FULL−X total ÷ FULL total; above 1 means the part pays):
 ## 6. Found in passing (not in scope; for direction)
 
 - **Suspected correctness defect.** In the LIST post-decode mask walk (`dc:2922-2978`), the rep/def levels, strings and `dict_indices` are filtered, but **numeric and boolean `*_values` are not**. A masked `list<int>`/`list<bool>` column may return misaligned values. Unverified by a query.
-- **Dead code.**
-  - `rugo/src/parquet/page_task.hpp` is included nowhere; its struct is duplicated at `dc:324`.
-  - `PageDecompressed` (`dc:338`) is unused.
-  - `PreScanPages`' mask scan (`dc:403-423`) is only ever called with `nullptr`.
-  - `_FOOTER_PREFETCH` (`pool_reader.pyx:131`) is dead.
+- **Dead code.** Removed 2026-10-10: `rugo/src/parquet/page_task.hpp`, `PageDecompressed`,
+  `PreScanPages`' row-mask scan (with `PageTask`'s `skip_page` / `page_row_offset` and the
+  never-set `rep_bit_width` / `def_bit_width`), and `_FOOTER_PREFETCH`.
 - **Other parse sites.** `fetch_column_chunk_info` (`pool_reader.pyx:1050`) and `mabel_connector.py:294` parse footers outside the shared cache.

@@ -26,14 +26,23 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     try {
         AvroRead out;
-        read_avro_buffer(data, size, {}, true, std::string(), out);
+        read_avro_buffer(data, size, {}, true, std::string(), 1, out);
     } catch (const std::exception&) {
     } catch (...) {
     }
 
     try {
         AvroRead out;
-        read_avro_buffer(data, size, {"data_file.file_path", "data_file.lower_bounds", "c"}, false, std::string(), out);
+        read_avro_buffer(data, size, {"data_file.file_path", "data_file.lower_bounds", "c"}, false, std::string(), 1, out);
+    } catch (const std::exception&) {
+    } catch (...) {
+    }
+
+    // The same read with its batches decoded on several threads: a corrupt block met
+    // by one thread must end the read cleanly while the others are mid-decode.
+    try {
+        AvroRead out;
+        read_avro_buffer(data, size, {}, true, std::string(), 4, out);
     } catch (const std::exception&) {
     } catch (...) {
     }
@@ -51,7 +60,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             {"name":"n","type":["null","long"],"default":null}]}]}]})";
     try {
         AvroRead out;
-        read_avro_buffer(data, size, {}, true, reader, out);
+        read_avro_buffer(data, size, {}, true, reader, 1, out);
     } catch (const std::exception&) {
     } catch (...) {
     }

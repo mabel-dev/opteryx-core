@@ -59,10 +59,11 @@ class _AvroReader:
 
     A batch is whole Avro blocks packed up to 65,536 rows (a block is never split)."""
 
-    def __init__(self, source, columns, reader_schema):
+    def __init__(self, source, columns, reader_schema, max_threads):
         self._source = source
         self._columns = columns
         self._reader_schema = reader_schema
+        self._max_threads = max_threads
 
     def __enter__(self) -> "_AvroReader":
         return self
@@ -75,6 +76,7 @@ class _AvroReader:
             _load(self._source),
             None if self._columns is None else list(self._columns),
             _schema_text(self._reader_schema),
+            self._max_threads,
         )
         from draken.morsels.morsel import Morsel
 
@@ -86,6 +88,7 @@ def read_avro(
     source: Source,
     columns: Optional[Sequence[str]] = None,
     reader_schema: Optional[Union[str, dict]] = None,
+    max_threads: int = 0,
 ) -> _AvroReader:
     """Open an Avro object container file (path or bytes) for reading.
 
@@ -100,6 +103,9 @@ def read_avro(
         lacks is its default as a constant, or NULL; int->long/float/double,
         long->float/double, float->double and string<->bytes promote. Logical types
         follow the FILE, as fastavro and the Apache implementation do.
+    max_threads: the file's batches (independent runs of whole Avro blocks) are
+        decompressed and decoded on up to this many threads; 0 = every core. Morsels
+        are yielded in file order either way.
 
     Types: boolean BOOL · int INT32 · long INT64 · float FLOAT32 · double FLOAT64 ·
     string VARCHAR · bytes / fixed VARBINARY · enum VARCHAR (one entry per symbol,
@@ -111,7 +117,7 @@ def read_avro(
     other than [null, T], recursive types, uuid, decimal precision > 38,
     timestamp-nanos, local-timestamp-*, duration.
     """
-    return _AvroReader(source, columns, reader_schema)
+    return _AvroReader(source, columns, reader_schema, max_threads)
 
 
 def read_metadata(source: Source) -> AvroMetadata:

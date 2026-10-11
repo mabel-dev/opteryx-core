@@ -8,7 +8,7 @@
 #include "snappy.h"   // third_party/snappy (on the include path)
 #include "zstd.h"           // canonical vendored copy: third_party/zstd
 #include "lz4.h"            // LZ4 block codec: LZ4_decompress_safe (third_party/lz4)
-#include "miniz_tinfl.h"      // miniz raw-DEFLATE inflate: tinfl_decompress
+#include "libdeflate.h"      // gzip member inflate + CRC32/ISIZE check (third_party/libdeflate)
 
 namespace rugo {
 namespace compression {
@@ -56,58 +56,24 @@ namespace {
         }
     }
 
-    // Parse one RFC 1952 gzip member header starting at data[pos] and return the
-    // offset of its DEFLATE payload. Throws on a malformed/truncated header.
-    // Header layout: 10 fixed bytes (ID1 ID2 CM FLG MTIME[4] XFL OS) then, per the
-    // FLG bits, optional FEXTRA / FNAME / FCOMMENT / FHCRC fields.
-    size_t parse_gzip_header(const uint8_t* data, size_t size, size_t pos) {
-        if (pos + 10 > size) {
-            throw std::runtime_error("GZIP decompression: truncated member header");
+    // libdeflate decompressor, one per OS thread like the ZSTD context above. It
+    // holds no stream state between calls, only the decode tables it rebuilds.
+    libdeflate_decompressor* get_thread_inflater() {
+        static thread_local libdeflate_decompressor* d = libdeflate_alloc_decompressor();
+        if (d == nullptr) {
+            throw std::runtime_error("GZIP decompression: out of memory");
         }
-        if (data[pos] != 0x1f || data[pos + 1] != 0x8b) {
-            throw std::runtime_error(
-                "GZIP decompression: bad magic (expected 1f 8b, parquet GZIP "
-                "must be RFC 1952 gzip)");
-        }
-        if (data[pos + 2] != 8) {
-            throw std::runtime_error(
-                "GZIP decompression: unsupported compression method (not DEFLATE)");
-        }
-        const uint8_t flg = data[pos + 3];
-        pos += 10;  // fixed header size
-        if (flg & 0x04) {  // FEXTRA
-            if (pos + 2 > size)
-                throw std::runtime_error("GZIP decompression: truncated FEXTRA field");
-            size_t xlen = static_cast<size_t>(data[pos]) |
-                          (static_cast<size_t>(data[pos + 1]) << 8);
-            pos += 2 + xlen;
-        }
-        if (flg & 0x08) {  // FNAME (NUL-terminated)
-            while (pos < size && data[pos] != 0) ++pos;
-            ++pos;  // skip the NUL
-        }
-        if (flg & 0x10) {  // FCOMMENT (NUL-terminated)
-            while (pos < size && data[pos] != 0) ++pos;
-            ++pos;
-        }
-        if (flg & 0x02) {  // FHCRC
-            pos += 2;
-        }
-        if (pos + 8 > size) {  // header fields + 8-byte trailer must still fit
-            throw std::runtime_error(
-                "GZIP decompression: truncated header or trailer");
-        }
-        return pos;
+        return d;
     }
 
     // -----------------------------------------------------------------------
     // GZIP (parquet codec 2): an RFC 1952 gzip stream — one OR MORE concatenated
     // members, each a header + raw DEFLATE payload + 8-byte CRC32/ISIZE trailer.
     // Some writers (notably Hadoop/Java) emit multi-member pages, so we loop:
-    // parse each member's header, inflate its DEFLATE body into `out` at the
-    // running offset, then advance past the DEFLATE bytes tinfl consumed plus the
-    // 8-byte trailer to the next member. The low-level tinfl_decompress reports
-    // input-bytes-consumed (member boundaries aren't otherwise discoverable).
+    // libdeflate_gzip_decompress_ex inflates one whole member into `out` at the
+    // running offset — parsing its header and verifying its CRC32 and ISIZE —
+    // and reports the input bytes it consumed, which is where the next member
+    // starts (member boundaries aren't otherwise discoverable).
     // -----------------------------------------------------------------------
     void gzip_decode(const uint8_t* data, size_t size,
                      uint8_t* out, size_t out_size) {
@@ -116,31 +82,28 @@ namespace {
             throw std::runtime_error(
                 "GZIP decompression: input too short to be a gzip stream");
         }
-        tinfl_decompressor decomp;
+        libdeflate_decompressor* d = get_thread_inflater();
         size_t total_out = 0;  // bytes written to `out` across all members
         size_t pos = 0;        // input cursor over the whole gzip stream
         while (pos < size) {
-            size_t deflate_start = parse_gzip_header(data, size, pos);
-
-            tinfl_init(&decomp);
-            size_t in_bytes  = size - deflate_start;      // in: available; out: consumed
-            size_t out_bytes = out_size - total_out;      // in: space;     out: produced
-            // Each gzip member has an independent DEFLATE window, so the LZ
-            // back-reference base is this member's own output start, not the
-            // global buffer start (a member must not reference a prior member).
-            uint8_t* member_out = out + total_out;
-            tinfl_status st = tinfl_decompress(
-                &decomp,
-                data + deflate_start, &in_bytes,
-                member_out, member_out, &out_bytes,
-                TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-            if (st != TINFL_STATUS_DONE) {
-                throw std::runtime_error(
-                    "GZIP decompression failed (malformed DEFLATE stream)");
+            size_t in_used = 0;
+            size_t produced = 0;
+            libdeflate_result rc = libdeflate_gzip_decompress_ex(
+                d, data + pos, size - pos,
+                out + total_out, out_size - total_out, &in_used, &produced);
+            if (rc == LIBDEFLATE_INSUFFICIENT_SPACE) {
+                std::ostringstream oss;
+                oss << "GZIP decompressed size mismatch: the page decompresses to "
+                       "more than the expected " << out_size << " bytes";
+                throw std::runtime_error(oss.str());
             }
-            total_out += out_bytes;
-            // Advance past this member's DEFLATE bytes + 8-byte CRC32/ISIZE trailer.
-            pos = deflate_start + in_bytes + 8;
+            if (rc != LIBDEFLATE_SUCCESS) {
+                throw std::runtime_error(
+                    "GZIP decompression failed (malformed gzip member: bad header, "
+                    "corrupt DEFLATE data, or CRC32/length mismatch)");
+            }
+            total_out += produced;
+            pos += in_used;
 
             // Fast path / normal termination: once the page's expected output is
             // fully produced, stop — trailing bytes belong to no further member.

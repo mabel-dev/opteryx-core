@@ -136,6 +136,20 @@ def test_every_type_and_codec(tmp_path, codec):
     assert got == want
 
 
+def test_one_file_many_batches_across_the_pool(tmp_path):
+    # One file of many batches: the Source's unit of work is a batch, so the whole
+    # decode pool works on it; every row arrives exactly once.
+    recs = [{"id": i, "s": f"v{i % 1000}"} for i in range(400_000)]
+    _write(tmp_path / "big.avro", _record([{"name": "id", "type": "long"}, {"name": "s", "type": "string"}]),
+           recs, codec="deflate", sync_interval=200_000)
+    assert _rows(f"SELECT COUNT(*), SUM(id), COUNT(DISTINCT s) FROM READ_AVRO('{tmp_path}/big.avro')") == [
+        (400_000, sum(range(400_000)), 1000)
+    ]
+    assert _rows(f"SELECT id FROM READ_AVRO('{tmp_path}/big.avro') WHERE id % 99_991 = 0") == sorted(
+        [(i,) for i in range(0, 400_000, 99_991)], key=repr
+    )
+
+
 def test_empty_file_has_a_schema_and_no_rows(tmp_path):
     _write(tmp_path / "e.avro", TYPES, [])
     assert _rows(f"SELECT i, s FROM READ_AVRO('{tmp_path}/e.avro')") == []

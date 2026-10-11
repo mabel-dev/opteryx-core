@@ -76,6 +76,19 @@
 #define SNAPPY_HAVE_SSSE3 0
 #endif
 
+// RISC-V Vector literal copy in the decompression loop (Snappy 1.3.0+).
+//   - Enabled when the target advertises V (-march=rv64gcv) and the compiler
+//     provides the ratified, __riscv_-prefixed intrinsics (v0.11+), which is
+//     the only spelling snappy-internal.h maps to.
+//   - SNAPPY_RVV_0_7 (unprefixed draft intrinsics) is never used: Snappy maps
+//     both macros to the __riscv_ names, so it cannot compile there anyway.
+#if defined(__riscv_vector) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 11000
+#define SNAPPY_RVV_1 1
+#else
+#define SNAPPY_RVV_1 0
+#endif
+#define SNAPPY_RVV_0_7 0
+
 // Byte order — both targets are little-endian.
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define SNAPPY_IS_BIG_ENDIAN 1

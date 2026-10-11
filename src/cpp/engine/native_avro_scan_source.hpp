@@ -10,19 +10,23 @@
 // here touches Python.
 //
 // Decode: the Source owns its own decode pool (as the JSONL and parquet readers do).
-// The unit of work is a FILE: a worker claims the next file, loads it (a local file
-// is memory-mapped; a remote one is fetched whole with one GET, no credentials — the
-// READ_JSONL rules) and streams its batches through rugo's C++ Avro reader
-// (rugo::avro::AvroStream: whole blocks up to 65,536 rows per batch). Each batch is
+// The unit of work is a BATCH — a run of whole Avro blocks, at most 65,536 rows — so
+// one large file spreads across the whole pool (Avro blocks are independent). A file
+// is OPENED once, by the first worker that needs it and outside the cursor lock:
+// loaded (a local file is memory-mapped; a remote one is fetched whole with one GET,
+// no credentials — the READ_JSONL rules), compiled (rugo::avro::AvroFile: header,
+// schemas, decode program) and framed (its block headers walked into batches, no
+// decompression). Every worker then claims that file's batches and decodes each
+// through its own AvroFile::Worker (decoder state + decompressor). A finished batch is
 // one morsel on a ready queue the engine's workers drain, so decode overlaps
-// execution. At most `decode_workers + 2` morsels are decoded-but-unconsumed at any
-// time, which bounds resident memory. Parallelism inside one file (Avro blocks are
-// independent) is a follow-up, not built.
+// execution. At most `decode_workers + 2` batches are claimed-but-unconsumed at any
+// time, which bounds resident memory; a file is released when its last batch is done.
 //
-// Order: morsel order is NOT guaranteed across files.
+// Order: morsel order is NOT guaranteed, within a file or across files.
 //
-// A zero-column projection (COUNT(*)) decodes nothing: rugo sums the block headers'
-// record counts and the Source emits zero-column morsels carrying `zero_col_rows`.
+// A zero-column projection (COUNT(*)) decodes nothing: each batch's row count comes
+// from the block headers and the Source emits zero-column morsels carrying
+// `zero_col_rows`.
 //
 // Errors fail fast through ErrCtx with kErrCodeReadError (-> DatasetReadError),
 // naming the file: a corrupt file, a refused construct, or a file whose schema does
@@ -87,6 +91,7 @@ struct AvroScanSpec {
     mutable int64_t rows_read  = -1;
     mutable int64_t bytes_read = -1;   // file bytes loaded
     mutable int64_t files_read = -1;
+    mutable int64_t batches_read = -1;
 };
 
 namespace avro_detail {
@@ -100,6 +105,28 @@ struct Loaded {
     ~Loaded() {
         if (mapped && ptr != nullptr) unmap_memory_c(ptr, len);
     }
+};
+
+// An opened file: its bytes and the compiled, framed AvroFile over them. Shared by
+// every batch claimed from it; released when the last of them is decoded. `bytes` is
+// declared first so it outlives `avro` (members are destroyed in reverse order).
+struct OpenFile {
+    Loaded bytes;
+    std::unique_ptr<rugo::avro::AvroFile> avro;
+    size_t index = 0;
+};
+
+enum class FileStatus : uint8_t { PENDING, OPENING, READY, DONE };
+
+struct FileState {
+    FileStatus status = FileStatus::PENDING;
+    std::shared_ptr<OpenFile> open;
+    size_t next_batch = 0;
+};
+
+struct Unit {
+    std::shared_ptr<OpenFile> file;
+    size_t batch = 0;
 };
 
 inline const LogicalType* logical_for(DrakenType type, uint8_t precision, uint8_t scale) {
@@ -201,12 +228,22 @@ struct NativeAvroScanGlobal : GlobalSourceState {
     bool failed = false;
     std::string err;                    // ErrCtx::msg points here
 
-    std::atomic<size_t> next_file{0};
+    // Batch cursor (under `claim_mtx`): per-file open state. `first_live` skips files
+    // already DONE; `next_pending` is the next file nobody has started opening.
+    std::mutex claim_mtx;
+    std::condition_variable cv_opened;  // a file finished opening, or the scan ended
+    std::vector<avro_detail::FileState> states;
+    size_t first_live = 0;
+    size_t next_pending = 0;
+    int opening = 0;
+    std::atomic<bool> abort{false};     // stop / failure: claimers stop waiting
+
     std::unique_ptr<HttpClient> http;   // created only when some file is remote
 
     std::atomic<int64_t> rows{0};
     std::atomic<int64_t> bytes{0};
     std::atomic<int64_t> files{0};
+    std::atomic<int64_t> batches{0};
 
     std::vector<std::thread> workers;
 
@@ -215,11 +252,17 @@ struct NativeAvroScanGlobal : GlobalSourceState {
             std::lock_guard<std::mutex> lock(mtx);
             stop = true;
         }
+        abort.store(true);
+        {
+            std::lock_guard<std::mutex> lock(claim_mtx);
+        }
         cv_room.notify_all();
+        cv_opened.notify_all();
         for (auto& t : workers) t.join();
         spec->rows_read = rows.load();
         spec->bytes_read = bytes.load();
         spec->files_read = files.load();
+        spec->batches_read = batches.load();
     }
 };
 
@@ -230,11 +273,10 @@ public:
     std::unique_ptr<GlobalSourceState> make_global() override {
         auto g = std::make_unique<NativeAvroScanGlobal>();
         g->spec = spec_;
-        // No more decoders than files: the unit of work is a whole file.
-        const int n = std::max(1, std::min(spec_->decode_workers > 0 ? spec_->decode_workers : 1,
-                                           static_cast<int>(spec_->files.size())));
+        const int n = spec_->decode_workers > 0 ? spec_->decode_workers : 1;
         g->window = static_cast<size_t>(n) + 2;
         g->live_workers = n;
+        g->states.resize(spec_->files.size());
         for (const auto& url : spec_->urls) {
             if (!url.empty()) {
                 g->http = std::make_unique<HttpClient>();
@@ -282,8 +324,13 @@ private:
                 g.err = std::move(message);
             }
         }
+        g.abort.store(true);
+        {
+            std::lock_guard<std::mutex> lock(g.claim_mtx);
+        }
         g.cv_ready.notify_all();
         g.cv_room.notify_all();
+        g.cv_opened.notify_all();
     }
 
     // Load file `i`: map it, or GET it whole with no credentials. Empty on success,
@@ -342,12 +389,116 @@ private:
         g.cv_room.notify_one();
     }
 
-    void decode_loop(NativeAvroScanGlobal& g) {
-        for (;;) {
-            const size_t i = g.next_file.fetch_add(1);
-            if (i >= spec_->files.size()) break;
-            if (!decode_file(g, i)) break;
+    // Open file `i`: load it, compile it against the reader schema and frame it into
+    // batches. Called WITHOUT the cursor lock. Empty on success, else the query-ending
+    // message naming the file.
+    std::string open_file(NativeAvroScanGlobal& g, size_t i, std::shared_ptr<avro_detail::OpenFile>& out) {
+        auto f = std::make_shared<avro_detail::OpenFile>();
+        f->index = i;
+        std::string error = load(g, i, f->bytes);
+        if (!error.empty()) return error;
+        try {
+            f->avro = std::make_unique<rugo::avro::AvroFile>(f->bytes.ptr, f->bytes.len, spec_->decode_names,
+                                                             false, spec_->reader_schema);
+            f->avro->batches();
+        } catch (const std::exception& e) {
+            return "READ_AVRO('" + spec_->files[i] + "'): " + e.what();
         }
+        g.bytes.fetch_add(static_cast<int64_t>(f->bytes.len), std::memory_order_relaxed);
+        g.files.fetch_add(1, std::memory_order_relaxed);
+        out = std::move(f);
+        return std::string();
+    }
+
+    // Claim the next batch. Prefers batches of files already open; only when none
+    // remain does it open the next file (outside the lock), and when every file is
+    // open-or-opening it waits for an open to land. False at the end, or with `error`
+    // set when a file cannot be opened.
+    bool claim(NativeAvroScanGlobal& g, avro_detail::Unit& unit, std::string& error) {
+        using avro_detail::FileStatus;
+        std::unique_lock<std::mutex> lock(g.claim_mtx);
+        const size_t n = g.states.size();
+        for (;;) {
+            if (g.abort.load()) return false;
+            for (size_t i = g.first_live; i < n; ++i) {
+                avro_detail::FileState& f = g.states[i];
+                if (f.status != FileStatus::READY) continue;
+                if (f.next_batch >= f.open->avro->batches().size()) {
+                    f.status = FileStatus::DONE;
+                    f.open.reset();   // the file is released once its claimed batches finish
+                    continue;
+                }
+                unit.file = f.open;
+                unit.batch = f.next_batch++;
+                return true;
+            }
+            while (g.first_live < n && g.states[g.first_live].status == FileStatus::DONE)
+                g.first_live += 1;
+            if (g.next_pending < n) {
+                const size_t i = g.next_pending++;
+                g.states[i].status = FileStatus::OPENING;
+                g.opening += 1;
+                lock.unlock();
+                std::shared_ptr<avro_detail::OpenFile> opened;
+                error = open_file(g, i, opened);
+                lock.lock();
+                g.opening -= 1;
+                if (!error.empty()) return false;
+                g.states[i].open = std::move(opened);
+                g.states[i].status = FileStatus::READY;
+                g.cv_opened.notify_all();
+                continue;
+            }
+            if (g.opening == 0) return false;
+            g.cv_opened.wait(lock, [&]() { return g.abort.load() || g.opening == 0 || any_ready(g); });
+        }
+    }
+
+    static bool any_ready(const NativeAvroScanGlobal& g) {
+        for (size_t i = g.first_live; i < g.states.size(); ++i)
+            if (g.states[i].status == avro_detail::FileStatus::READY) return true;
+        return false;
+    }
+
+    void decode_loop(NativeAvroScanGlobal& g) {
+        // The Worker for the file this thread last decoded from: reused while the thread
+        // keeps claiming batches of the same file.
+        std::shared_ptr<avro_detail::OpenFile> current;
+        std::unique_ptr<rugo::avro::AvroFile::Worker> worker;
+        for (;;) {
+            if (!reserve_slot(g)) break;
+            avro_detail::Unit unit;
+            std::string error;
+            if (!claim(g, unit, error)) {
+                release_slot(g);
+                if (!error.empty()) fail(g, std::move(error));
+                break;
+            }
+            MorselPtr morsel;
+            try {
+                if (unit.file != current) {
+                    worker.reset();
+                    current = unit.file;
+                    worker = std::make_unique<rugo::avro::AvroFile::Worker>(*current->avro);
+                }
+                morsel = decode(g, *current, *worker, unit.batch);
+            } catch (const std::exception& e) {
+                error = "READ_AVRO('" + spec_->files[unit.file->index] + "'): " + e.what();
+            }
+            unit.file.reset();
+            if (!error.empty()) {
+                release_slot(g);
+                fail(g, std::move(error));
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(g.mtx);
+                g.ready.push_back(std::move(morsel));   // the slot now belongs to the morsel
+            }
+            g.cv_ready.notify_one();
+        }
+        worker.reset();
+        current.reset();
         {
             std::lock_guard<std::mutex> lock(g.mtx);
             g.live_workers -= 1;
@@ -355,55 +506,25 @@ private:
         g.cv_ready.notify_all();
     }
 
-    // Stream file `i`'s batches onto the ready queue. False when the scan must stop
-    // (this file failed, another one did, or the scan is being torn down).
-    bool decode_file(NativeAvroScanGlobal& g, size_t i) {
-        const std::string& path = spec_->files[i];
-        avro_detail::Loaded file;
-        std::string error = load(g, i, file);
-        if (!error.empty()) {
-            fail(g, std::move(error));
-            return false;
+    // Decode one batch into a morsel.
+    MorselPtr decode(NativeAvroScanGlobal& g, const avro_detail::OpenFile& file,
+                     rugo::avro::AvroFile::Worker& worker, size_t batch_index) {
+        const rugo::avro::AvroBatchRange& range = file.avro->batches()[batch_index];
+        rugo::avro::AvroBatch batch = worker.decode(range);
+        auto morsel = std::make_shared<CxxMorsel>();
+        if (spec_->zero_columns) {
+            morsel->zero_col_rows = batch.rows;
+        } else {
+            std::vector<CxxColumn> decoded(batch.columns.size());
+            for (size_t c = 0; c < batch.columns.size(); ++c)
+                avro_detail::build_column(batch.columns[c], decoded[c]);
+            morsel->columns.reserve(spec_->emit_index.size());
+            for (const uint32_t d : spec_->emit_index) morsel->columns.push_back(decoded[d]);
+            morsel->names = spec_->out_identities;
         }
-        g.bytes.fetch_add(static_cast<int64_t>(file.len), std::memory_order_relaxed);
-        g.files.fetch_add(1, std::memory_order_relaxed);
-        bool holding = false;   // an in-flight slot is reserved and not yet handed on
-        try {
-            rugo::avro::AvroStream stream(file.ptr, file.len, spec_->decode_names, false,
-                                          spec_->reader_schema);
-            for (;;) {
-                if (!reserve_slot(g)) return false;
-                holding = true;
-                rugo::avro::AvroBatch batch;
-                if (!stream.next(batch)) {
-                    holding = false;
-                    release_slot(g);
-                    return true;
-                }
-                auto morsel = std::make_shared<CxxMorsel>();
-                if (spec_->zero_columns) {
-                    morsel->zero_col_rows = batch.rows;
-                } else {
-                    std::vector<CxxColumn> decoded(batch.columns.size());
-                    for (size_t c = 0; c < batch.columns.size(); ++c)
-                        avro_detail::build_column(batch.columns[c], decoded[c]);
-                    morsel->columns.reserve(spec_->emit_index.size());
-                    for (const uint32_t d : spec_->emit_index) morsel->columns.push_back(decoded[d]);
-                    morsel->names = spec_->out_identities;
-                }
-                g.rows.fetch_add(batch.rows, std::memory_order_relaxed);
-                {
-                    std::lock_guard<std::mutex> lock(g.mtx);
-                    g.ready.push_back(std::move(morsel));
-                }
-                holding = false;   // the slot now belongs to the queued morsel
-                g.cv_ready.notify_one();
-            }
-        } catch (const std::exception& e) {
-            if (holding) release_slot(g);
-            fail(g, "READ_AVRO('" + path + "'): " + e.what());
-            return false;
-        }
+        g.rows.fetch_add(batch.rows, std::memory_order_relaxed);
+        g.batches.fetch_add(1, std::memory_order_relaxed);
+        return morsel;
     }
 
     const AvroScanSpec* spec_;

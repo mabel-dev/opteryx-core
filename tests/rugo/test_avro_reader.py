@@ -201,6 +201,64 @@ def test_dotted_projection_through_nullable_records(codec):
     assert got["inner.deep.y"] == [None if r["inner"] is None else r["inner"]["deep"]["y"] for r in recs]
 
 
+SKIP_SHAPES = _record([
+    {"name": "head", "type": "long"},
+    {"name": "v1", "type": "long"},
+    {"name": "v2", "type": "int"},
+    {"name": "e", "type": {"type": "enum", "name": "E2", "symbols": ["a", "b", "c"]}},
+    {"name": "b", "type": "boolean"},
+    {"name": "f", "type": "float"},
+    {"name": "fx", "type": {"type": "fixed", "name": "F5", "size": 5}},
+    {"name": "s", "type": "string"},
+    {"name": "ol", "type": ["null", "long"]},
+    {"name": "os", "type": ["string", "null"]},
+    {"name": "od", "type": ["null", "double"]},
+    {"name": "al", "type": {"type": "array", "items": "long"}},
+    {"name": "as_", "type": {"type": "array", "items": "string"}},
+    {"name": "ad", "type": {"type": "array", "items": "double"}},
+    {"name": "ab", "type": {"type": "array", "items": "boolean"}},
+    {"name": "ml", "type": {"type": "map", "values": "long"}},
+    {"name": "ms", "type": {"type": "map", "values": "bytes"}},
+    {"name": "mf", "type": {"type": "map", "values": {"type": "fixed", "name": "F3", "size": 3}}},
+    {"name": "tail", "type": "long"},
+])
+
+
+def _skip_records(n):
+    big = [0, 1, -1, 63, -64, 2**31 - 1, -(2**31), 2**62, -(2**63), 2**63 - 1]  # 1..10-byte varints
+    out = []
+    for i in range(n):
+        v = big[i % len(big)]
+        out.append({
+            "head": i, "v1": v, "v2": (v % 2**31) - (i % 2) * 2**30, "e": "abc"[i % 3], "b": i % 2 == 0,
+            "f": i / 2, "fx": bytes([i % 256]) * 5, "s": "x" * (i % 40),
+            "ol": None if i % 3 == 0 else v, "os": None if i % 4 == 0 else "y" * (i % 15),
+            "od": None if i % 5 == 0 else i / 7,
+            "al": [v, -v // 3, i] * (i % 3), "as_": ["z" * j for j in range(i % 4)],
+            "ad": [i / 3] * (i % 3), "ab": [j % 2 == 0 for j in range(i % 5)],
+            "ml": {f"k{j}": v for j in range(i % 3)}, "ms": {f"k{j}": b"q" * j for j in range(i % 3)},
+            "mf": {f"k{j}": b"abc" for j in range(i % 2)},
+            "tail": -i * 1_000_003,
+        })
+    return out
+
+
+@pytest.mark.parametrize("codec", ["null", "deflate"])
+def test_fused_skips_land_on_the_next_field(codec):
+    # Every fused skip shape (nullable / array / map of varint, bytes, fixed, boolean),
+    # with varints of every length 1..10 bytes (so the 8-byte fast path both hits and
+    # falls back) and small blocks (so varints sit within 8 bytes of a block's end).
+    recs = _skip_records(5000)
+    data = _write(SKIP_SHAPES, recs, codec, sync_interval=500)
+    _, got = _rugo_rows(data, ["head", "tail"])
+    assert got["head"] == [r["head"] for r in recs]
+    assert got["tail"] == [r["tail"] for r in recs]
+    # and read directly, every one matches what was written
+    _, all_cols = _rugo_rows(data)
+    for name in ("v1", "v2", "ol", "os", "al", "as_", "ad", "ab", "tail"):
+        assert all_cols[name] == [r[name] for r in recs], name
+
+
 def _zz(v):
     # zigzag varint
     v = (v << 1) ^ (v >> 63)
@@ -378,6 +436,29 @@ def test_whole_blocks_pack_into_batches_up_to_65536_rows():
     assert len(res["batches"]) > 1
     for batch in res["batches"]:
         assert len(batch[0]) <= 65536
+
+
+@pytest.mark.parametrize("codec", ["null", "deflate", "zstandard"])
+def test_threads_decode_in_file_order(codec):
+    # Batches are decoded on several threads; the result must be the single-threaded
+    # one, in file order.
+    recs = [{"c": i, "s": "s" * (i % 17)} for i in range(300_000)]
+    data = _write(_record([{"name": "c", "type": "long"}, {"name": "s", "type": "string"}]),
+                  recs, codec, sync_interval=50_000)
+    one = read_avro(data, None, None, 1)
+    many = read_avro(data, None, None, 8)
+    assert len(many["batches"]) > 2
+    as_rows = lambda res: [[v.to_pylist() for v in b] for b in res["batches"]]
+    assert as_rows(one) == as_rows(many)
+    assert [x for b in many["batches"] for x in b[0].to_pylist()] == list(range(300_000))
+
+
+def test_threads_report_a_corrupt_late_block():
+    recs = [{"c": i} for i in range(300_000)]
+    data = bytearray(_write(_record([{"name": "c", "type": "long"}]), recs, "deflate", sync_interval=50_000))
+    data[-40] ^= 0xFF  # inside the last block's compressed payload
+    with pytest.raises(RuntimeError, match="deflate|trailing bytes|truncated"):
+        read_avro(bytes(data), None, None, 8)
 
 
 def test_metadata_and_schema():

@@ -335,6 +335,7 @@ cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine
         int64_t rows_read
         int64_t bytes_read
         int64_t files_read
+        int64_t batches_read
 
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
@@ -2630,6 +2631,7 @@ cdef class AvroScanPlan:
         self.spec.rows_read = -1
         self.spec.bytes_read = -1
         self.spec.files_read = -1
+        self.spec.batches_read = -1
         self.scan_identity = None
 
     @property
@@ -2646,6 +2648,11 @@ cdef class AvroScanPlan:
     def files_read(self):
         """Files decoded; -1 until the scan has run."""
         return self.spec.files_read
+
+    @property
+    def batches_read(self):
+        """Batches decoded (runs of whole Avro blocks); -1 until the scan has run."""
+        return self.spec.batches_read
 
 
 cdef class NativePlan:

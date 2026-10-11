@@ -195,6 +195,8 @@ cdef extern from "decode.hpp":
         int32_t pages_skipped
         int32_t pages_decoded
         bint success
+        bint absent    # column not in this row group: the one non-error success == false
+        string error_message   # failure reason when success == false (may be empty)
         # Zero-copy output pointers (set by caller before decode)
         int64_t* ext_int64
         double*  ext_float64

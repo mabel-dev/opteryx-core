@@ -1,5 +1,10 @@
 #include "avro_reader.hpp"
 
+#include <atomic>
+#include <exception>
+#include <mutex>
+#include <thread>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -54,7 +59,13 @@ enum Code : uint8_t {
     R_ARRAY,         // ARRAY column `col`; its items are read into child column `arg`
     R_JSON,          // render the `sub` J_* ops that follow as JSON text into `col`
     // skips
-    S_VARINT, S_BOOL, S_FIXED, S_BYTES, S_ARRAY, S_MAP,
+    S_VARINTS,       // `arg` consecutive varints (int / long / enum fields)
+    S_FIXED, S_BYTES, S_ARRAY, S_MAP,
+    // fused skips (docs §24): a nullable simple value, and an array / map whose items
+    // are a simple value — skipped in place, with no sub-program and no recursion
+    S_OPT_VARINT, S_OPT_BYTES, S_OPT_FIXED,
+    S_ARRAY_VARINT, S_ARRAY_BYTES, S_ARRAY_FIXED,
+    S_MAP_VARINT, S_MAP_BYTES, S_MAP_FIXED,
     // ["null", T]: on the null branch, NULL the listed columns and jump past T's ops
     OPT,
     // JSON rendering (inside R_JSON), the parquet NESTEDJSON rules
@@ -877,13 +888,49 @@ private:
         }
     }
 
+    // A value skipped with one fixed action: a varint, a length-prefixed run, or a
+    // fixed number of bytes (`n`). False for anything with structure.
+    enum class Simple : uint8_t { Varint, Bytes, Fixed };
+    static bool simple_skip(const Node* t, Simple& k, uint32_t& n) {
+        switch (t->kind) {
+            case Kind::Int: case Kind::Long: case Kind::Enum: k = Simple::Varint; return true;
+            case Kind::Bytes: case Kind::String: k = Simple::Bytes; return true;
+            case Kind::Boolean: k = Simple::Fixed; n = 1; return true;
+            case Kind::Float: k = Simple::Fixed; n = 4; return true;
+            case Kind::Double: k = Simple::Fixed; n = 8; return true;
+            case Kind::Fixed: k = Simple::Fixed; n = t->fixed_size; return true;
+            default: return false;
+        }
+    }
+
+    // Consecutive skipped varints fuse: one op skips them all.
+    void skip_varints() {
+        if (can_fuse(S_VARINTS)) { p_.ops.back().arg += 1; return; }
+        push(Op{S_VARINTS, 0, 0, 1, 0});
+    }
+
     void emit_skip(const Node* t) {
+        Simple k;
+        uint32_t n = 0;
+        if (t->kind == Kind::Union && simple_skip(t->value_branch(), k, n)) {
+            push(Op{k == Simple::Varint ? S_OPT_VARINT : k == Simple::Bytes ? S_OPT_BYTES : S_OPT_FIXED,
+                    t->null_branch, 0, n, 0});
+            return;
+        }
+        if (t->kind == Kind::Array && simple_skip(t->items, k, n)) {
+            push(Op{k == Simple::Varint ? S_ARRAY_VARINT : k == Simple::Bytes ? S_ARRAY_BYTES : S_ARRAY_FIXED, 0, 0, n, 0});
+            return;
+        }
+        if (t->kind == Kind::Map && simple_skip(t->values, k, n)) {
+            push(Op{k == Simple::Varint ? S_MAP_VARINT : k == Simple::Bytes ? S_MAP_BYTES : S_MAP_FIXED, 0, 0, n, 0});
+            return;
+        }
         switch (t->kind) {
             case Kind::Null: return;
-            case Kind::Boolean: push(Op{S_BOOL, 0, 0, 0, 0}); return;
+            case Kind::Boolean: skip_fixed(1); return;
             case Kind::Int:
             case Kind::Long:
-            case Kind::Enum: push(Op{S_VARINT, 0, 0, 0, 0}); return;
+            case Kind::Enum: skip_varints(); return;
             case Kind::Float: skip_fixed(4); return;
             case Kind::Double: skip_fixed(8); return;
             case Kind::Fixed: skip_fixed(t->fixed_size); return;
@@ -934,12 +981,27 @@ class Decoder {
 public:
     Decoder(const Program& p) : p_(p) {}
 
-    void begin_batch() {
+    // `expected_rows` is the batch's row count, known from framing before any block is
+    // decoded: every per-row buffer is reserved once, at its final size, rather than
+    // regrown (and recopied) block by block. A string column's byte buffer and an
+    // ARRAY's element buffers cannot be sized exactly without a second pass, so they
+    // are reserved from the previous batch's bytes / elements per row, plus 10%, and
+    // still grow normally if this batch runs over. Capacity only — no output changes.
+    void begin_batch(uint32_t expected_rows) {
         sinks_.clear();
         sinks_.resize(p_.cols.size());
+        arena_per_unit_.resize(p_.cols.size(), 0.0);
+        elems_per_row_.resize(p_.cols.size(), 0.0);
         for (size_t i = 0; i < sinks_.size(); ++i) {
             sinks_[i].spec = &p_.cols[i];
             if (p_.cols[i].kind == OutKind::Array) sinks_[i].offsets.push_back(0);
+        }
+        for (size_t i = 0; i < sinks_.size(); ++i) {
+            const ColSpec& cs = p_.cols[i];
+            if (cs.hidden) continue;
+            reserve(i, expected_rows);
+            if (cs.kind == OutKind::Array)
+                reserve(cs.child, static_cast<size_t>(elems_per_row_[i] * expected_rows * kHeadroom));
         }
         rows_ = 0;
     }
@@ -960,6 +1022,18 @@ public:
     }
 
     AvroBatch finish() {
+        // Learn this batch's per-row sizes for the next batch's reservations (before
+        // finish_col hands the buffers to the columns).
+        if (rows_ > 0) {
+            for (size_t i = 0; i < sinks_.size(); ++i) {
+                const Sink& sk = sinks_[i];
+                const uint32_t units = p_.cols[i].hidden ? sk.n : rows_;
+                if (p_.cols[i].kind == OutKind::String && units > 0)
+                    arena_per_unit_[i] = static_cast<double>(sk.arena.size()) / units;
+                if (p_.cols[i].kind == OutKind::Array)
+                    elems_per_row_[i] = static_cast<double>(sinks_[p_.cols[i].child].n) / rows_;
+            }
+        }
         AvroBatch b;
         b.rows = rows_;
         b.columns.resize(p_.n_out);
@@ -972,10 +1046,36 @@ private:
     const Program& p_;
     std::vector<Sink> sinks_;
     uint32_t rows_ = 0;
+    // Per column, learned from the previous batch: string bytes per row (or per element,
+    // for an ARRAY's child) and ARRAY elements per row. Zero before the first batch.
+    std::vector<double> arena_per_unit_;
+    std::vector<double> elems_per_row_;
     std::string json_;               // the JSON column value being rendered (one at a time)
     std::string* out_ = &json_;      // where J_* ops write: json_, or a J_SLOT's slot
     std::vector<std::vector<std::string>> frames_;  // J_REC_BEGIN .. J_REC_END, nested
     size_t depth_ = 0;
+
+    static constexpr double kHeadroom = 1.1;
+
+    // Reserve capacity for `units` rows (an output column) or elements (an ARRAY's child).
+    void reserve(size_t col, size_t units) {
+        Sink& s = sinks_[col];
+        const ColSpec& cs = *s.spec;
+        switch (cs.kind) {
+            case OutKind::String:
+                s.slots.reserve(units);
+                s.arena.reserve(static_cast<size_t>(arena_per_unit_[col] * units * kHeadroom));
+                break;
+            case OutKind::Dict:  s.codes.reserve(units); break;
+            case OutKind::Array: s.offsets.reserve(units + 1); break;
+            case OutKind::ConstRaw:
+            case OutKind::ConstString: break;
+            default:
+                if (cs.type == DRAKEN_BOOL) s.data.reserve(pad8((units + 7) / 8));
+                else s.data.reserve(units * cs.width);
+        }
+        if (cs.nullable) s.validity.reserve(pad8((units + 7) / 8));
+    }
 
     static void grow(Sink& s, uint32_t total) {
         const ColSpec& cs = *s.spec;
@@ -1030,6 +1130,25 @@ private:
         bintob64(&o[at], p, n);
         o.resize(at + b64_encoded_size(n) - 1);
         o.push_back('"');
+    }
+
+    // Skip an array's or map's blocks whose items are one simple value (`one` skips
+    // it; a map item's string key is skipped first). A block given with its byte size
+    // (negative count) is skipped whole.
+    template <typename F>
+    static void skip_items(Cursor& c, bool is_map, F&& one) {
+        for (;;) {
+            int64_t n = read_long(c);
+            if (n == 0) return;
+            if (n < 0) {
+                c.p += read_length(c);
+                continue;
+            }
+            for (int64_t i = 0; i < n; ++i) {
+                if (is_map) c.p += read_length(c);
+                one();
+            }
+        }
     }
 
     void run(const Op* op, const Op* end, Cursor& c, uint32_t r) {
@@ -1124,8 +1243,9 @@ private:
                     op += op->sub;
                     break;
                 }
-                case S_VARINT: skip_varint(c); break;
-                case S_BOOL: need(c, 1); ++c.p; break;
+                case S_VARINTS:
+                    for (uint32_t k = 0; k < op->arg; ++k) skip_varint(c);
+                    break;
                 case S_FIXED: need(c, op->arg); c.p += op->arg; break;
                 case S_BYTES: c.p += read_length(c); break;
                 case S_ARRAY:
@@ -1145,6 +1265,31 @@ private:
                         }
                     }
                     op += op->sub;  // past the item program
+                    break;
+                }
+                case S_OPT_VARINT:
+                case S_OPT_BYTES:
+                case S_OPT_FIXED: {
+                    const int64_t b = read_long(c);
+                    if (b == op->null_branch) break;
+                    if (b != 1 - op->null_branch) fail("a union branch index is out of range");
+                    if (op->code == S_OPT_VARINT) skip_varint(c);
+                    else if (op->code == S_OPT_BYTES) c.p += read_length(c);
+                    else { need(c, op->arg); c.p += op->arg; }
+                    break;
+                }
+                case S_ARRAY_VARINT: skip_items(c, false, [&]() { skip_varint(c); }); break;
+                case S_ARRAY_BYTES:  skip_items(c, false, [&]() { c.p += read_length(c); }); break;
+                case S_ARRAY_FIXED: {
+                    const uint32_t w = op->arg;
+                    skip_items(c, false, [&]() { need(c, w); c.p += w; });
+                    break;
+                }
+                case S_MAP_VARINT: skip_items(c, true, [&]() { skip_varint(c); }); break;
+                case S_MAP_BYTES:  skip_items(c, true, [&]() { c.p += read_length(c); }); break;
+                case S_MAP_FIXED: {
+                    const uint32_t w = op->arg;
+                    skip_items(c, true, [&]() { need(c, w); c.p += w; });
                     break;
                 }
                 case OPT: {
@@ -1403,9 +1548,9 @@ void read_avro_header(const uint8_t* data, size_t size, AvroRead& out) {
     out.metadata = std::move(h.metadata);
 }
 
-// ── AvroStream ──────────────────────────────────────────────────────────────
+// ── AvroFile ────────────────────────────────────────────────────────────────
 
-struct AvroStream::Impl {
+struct AvroFile::Impl {
     const uint8_t* data;
     size_t size;
     Header header;
@@ -1413,31 +1558,37 @@ struct AvroStream::Impl {
     Schema reader;
     std::vector<std::string> names;
     Program prog;
-    std::unique_ptr<Decoder> dec;
-    std::unique_ptr<BlockReader> blocks;
-    BlockDecoder blocks_decoder;   // codec state + decompression scratch, reused per block
     bool count_only = false;   // no columns: rows come from the block headers alone
-    uint32_t counted = 0;      // count_only: rows in the batch being built
-    Block pending;             // a block that did not fit the previous batch
-    bool has_pending = false;
 
-    uint32_t rows() const { return count_only ? counted : dec->rows(); }
+    // The framing pass (batches()), run once.
+    mutable std::once_flag framed;
+    mutable std::vector<Block> blocks;
+    mutable std::vector<AvroBatchRange> ranges;
 
-    AvroBatch finish() {
-        if (!count_only) {
-            AvroBatch b = dec->finish();
-            dec->begin_batch();
-            return b;
+    void frame() const {
+        BlockReader reader(data, size, header);
+        Block b;
+        AvroBatchRange cur;
+        while (reader.next(b)) {
+            if (b.count > static_cast<int64_t>(UINT32_MAX)) fail("a block holds more than 2^32 records");
+            const uint32_t count = static_cast<uint32_t>(b.count);
+            if (count == 0) continue;
+            if (blocks.size() >= UINT32_MAX) fail("a file holds more than 2^32 blocks");
+            if (cur.rows > 0 && static_cast<uint64_t>(cur.rows) + count > kBatchRows) {
+                ranges.push_back(cur);
+                cur = AvroBatchRange{static_cast<uint32_t>(blocks.size()), 0, 0};
+            }
+            if (cur.block_count == 0) cur.first_block = static_cast<uint32_t>(blocks.size());
+            blocks.push_back(b);
+            cur.block_count += 1;
+            cur.rows += count;
         }
-        AvroBatch b;
-        b.rows = counted;
-        counted = 0;
-        return b;
+        if (cur.rows > 0) ranges.push_back(cur);
     }
 };
 
-AvroStream::AvroStream(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
-                       bool all_columns, const std::string& reader_schema_json)
+AvroFile::AvroFile(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
+                   bool all_columns, const std::string& reader_schema_json)
     : impl_(std::make_unique<Impl>()) {
     Impl& m = *impl_;
     m.data = data;
@@ -1459,18 +1610,15 @@ AvroStream::AvroStream(const uint8_t* data, size_t size, const std::vector<std::
     parse_columns(m.names, req, m.prog);
     Compiler(m.prog, reader_schema_json.empty() ? "the file's schema" : "the reader schema")
         .compile_root(m.writer.root(), r, req);
-    m.dec = std::make_unique<Decoder>(m.prog);
-    m.dec->begin_batch();
-    m.blocks = std::make_unique<BlockReader>(data, size, m.header);
 }
 
-AvroStream::~AvroStream() = default;
+AvroFile::~AvroFile() = default;
 
-const std::string& AvroStream::schema_json() const { return impl_->header.schema_json; }
-const std::vector<std::pair<std::string, std::string>>& AvroStream::metadata() const { return impl_->header.metadata; }
-const std::vector<std::string>& AvroStream::column_names() const { return impl_->names; }
+const std::string& AvroFile::schema_json() const { return impl_->header.schema_json; }
+const std::vector<std::pair<std::string, std::string>>& AvroFile::metadata() const { return impl_->header.metadata; }
+const std::vector<std::string>& AvroFile::column_names() const { return impl_->names; }
 
-std::vector<AvroColumnType> AvroStream::column_types() const {
+std::vector<AvroColumnType> AvroFile::column_types() const {
     const Program& p = impl_->prog;
     std::vector<AvroColumnType> out(p.n_out);
     for (size_t i = 0; i < p.n_out; ++i) {
@@ -1489,47 +1637,79 @@ std::vector<AvroColumnType> AvroStream::column_types() const {
     return out;
 }
 
-bool AvroStream::next(AvroBatch& out) {
-    Impl& m = *impl_;
-    for (;;) {
-        Block b;
-        if (m.has_pending) {
-            b = m.pending;
-            m.has_pending = false;
-        } else if (!m.blocks->next(b)) {
-            if (m.rows() == 0) return false;
-            out = m.finish();
-            return true;
-        }
-        if (b.count > static_cast<int64_t>(UINT32_MAX)) fail("a block holds more than 2^32 records");
-        const uint32_t count = static_cast<uint32_t>(b.count);
-        if (count == 0) continue;
-        if (m.rows() > 0 && static_cast<uint64_t>(m.rows()) + count > kBatchRows) {
-            // This block starts the next batch; the one built so far is done.
-            m.pending = b;
-            m.has_pending = true;
-            out = m.finish();
-            return true;
-        }
-        if (static_cast<uint64_t>(m.rows()) + count > UINT32_MAX) fail("a batch exceeds 2^32 rows");
-        if (m.count_only) {
-            m.counted += count;
-            continue;
-        }
-        const auto payload = m.blocks_decoder.payload(b, m.header.codec);
-        m.dec->block(payload.first, payload.second, count);
+const std::vector<AvroBatchRange>& AvroFile::batches() const {
+    std::call_once(impl_->framed, [this]() { impl_->frame(); });
+    return impl_->ranges;
+}
+
+struct AvroFile::Worker::Impl {
+    const AvroFile::Impl& file;
+    Decoder dec;
+    BlockDecoder codec;   // the codec's decompressor + scratch, reused across blocks
+    explicit Impl(const AvroFile::Impl& f) : file(f), dec(f.prog) {}
+};
+
+AvroFile::Worker::Worker(const AvroFile& file) : impl_(std::make_unique<Impl>(*file.impl_)) {}
+AvroFile::Worker::~Worker() = default;
+
+AvroBatch AvroFile::Worker::decode(const AvroBatchRange& range) {
+    Impl& w = *impl_;
+    if (w.file.count_only) {
+        AvroBatch b;
+        b.rows = range.rows;
+        return b;
     }
+    w.dec.begin_batch(range.rows);
+    for (uint32_t i = range.first_block; i < range.first_block + range.block_count; ++i) {
+        const Block& b = w.file.blocks[i];
+        const auto payload = w.codec.payload(b, w.file.header.codec);
+        w.dec.block(payload.first, payload.second, static_cast<uint32_t>(b.count));
+    }
+    return w.dec.finish();
 }
 
 void read_avro_buffer(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
-                      bool all_columns, const std::string& reader_schema_json, AvroRead& out) {
-    AvroStream stream(data, size, columns, all_columns, reader_schema_json);
-    out.schema_json = stream.schema_json();
-    out.metadata = stream.metadata();
-    out.column_names = stream.column_names();
+                      bool all_columns, const std::string& reader_schema_json, size_t max_threads,
+                      AvroRead& out) {
+    const AvroFile file(data, size, columns, all_columns, reader_schema_json);
+    out.schema_json = file.schema_json();
+    out.metadata = file.metadata();
+    out.column_names = file.column_names();
+    const std::vector<AvroBatchRange>& ranges = file.batches();
     out.batches.clear();
-    AvroBatch batch;
-    while (stream.next(batch)) out.batches.push_back(std::move(batch));
+    out.batches.resize(ranges.size());
+
+    const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+    const size_t threads = std::min(max_threads ? max_threads : hw, ranges.size());
+    if (threads <= 1) {
+        AvroFile::Worker worker(file);
+        for (size_t i = 0; i < ranges.size(); ++i) out.batches[i] = worker.decode(ranges[i]);
+        return;
+    }
+    // Batches are independent: each thread claims the next one and decodes it with its
+    // own Worker. Results land at their batch's index, so the file order is kept. The
+    // first failure is rethrown once every thread has stopped.
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::exception_ptr error;
+    std::mutex error_mtx;
+    std::vector<std::thread> pool;
+    pool.reserve(threads);
+    for (size_t t = 0; t < threads; ++t) {
+        pool.emplace_back([&]() {
+            try {
+                AvroFile::Worker worker(file);
+                for (size_t i = next.fetch_add(1); i < ranges.size() && !failed.load(); i = next.fetch_add(1))
+                    out.batches[i] = worker.decode(ranges[i]);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(error_mtx);
+                if (!error) error = std::current_exception();
+                failed.store(true);
+            }
+        });
+    }
+    for (auto& th : pool) th.join();
+    if (error) std::rethrow_exception(error);
 }
 
 }  // namespace rugo::avro

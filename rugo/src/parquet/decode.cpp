@@ -4,8 +4,6 @@
 // Functions implemented here:
 //   CanDecode(path), CanDecode(data, size)
 //   ReadParquet(data, size, column_names), ReadParquet(data, size)
-//   DecodeColumn(path, name, row_group, idx)  -- legacy file-based
-//   DecodeColumn(path, name)                  -- backward-compat wrapper
 
 #include "decode.hpp"
 #include "decode_primitives.hpp"
@@ -13,7 +11,6 @@
 #include "compression.hpp"
 #include "metadata.hpp"
 #include "telemetry.hpp"
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -147,15 +144,15 @@ std::vector<DecodedColumn> DecodeRowGroupColumns(
   for (size_t col_idx = 0; col_idx < column_names.size(); col_idx++) {
     DecodedColumn col = DecodeColumnFromMemory(
         data, size, column_names[col_idx], row_group, row_group_index);
-    // A column that failed with a specific reason (decompression error,
-    // corruption) is a hard error — fail loud with that reason rather than
-    // silently dropping the column. A reason-less success==false (e.g. a
-    // column absent from this row group) is an honest outcome this API
-    // tolerates, so it does not throw.
-    if (!col.success && !col.error_message.empty()) {
+    // A column absent from this row group is the one non-result this API
+    // tolerates (the column is left out). Any other failure is a hard error,
+    // with its reason when the decoder recorded one — never a dropped column.
+    if (!col.success && !col.absent) {
       throw std::runtime_error(
           "row group " + std::to_string(row_group_index) + ", column '" +
-          column_names[col_idx] + "': " + col.error_message);
+          column_names[col_idx] + "': " +
+          (col.error_message.empty() ? std::string("decode failed (no reason recorded)")
+                                     : col.error_message));
     }
     out[col_idx] = std::move(col);
   }
@@ -181,69 +178,4 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size) {
     table.error = "unknown error decoding parquet";
   }
   return table;
-}
-
-// ---------------------------------------------------------------------------
-// DecodeColumn -- legacy file-based entry points
-// ---------------------------------------------------------------------------
-
-DecodedColumn DecodeColumn(const std::string &path,
-                           const std::string &column_name,
-                           const RowGroupStats &row_group,
-                           int row_group_index) {
-  DecodedColumn result;
-
-  try {
-    const ColumnStats *target_col = nullptr;
-    for (const auto &col : row_group.columns) {
-      if (col.name == column_name) { target_col = &col; break; }
-    }
-    if (!target_col) return result;
-
-    bool has_supported_encoding = false;
-    for (int32_t enc : target_col->encodings) {
-      if (enc == 0 || enc == 4 || enc == 6 || enc == 2 || enc == 7 || enc == 8) {
-        has_supported_encoding = true;
-        break;
-      }
-    }
-    if (!has_supported_encoding) return result;
-
-    result.type = target_col->physical_type;
-
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) return result;
-
-    int64_t offset     = target_col->data_page_offset;
-    int64_t total_size = target_col->total_compressed_size;
-    if (offset < 0 || total_size <= 0) return result;
-
-    file.seekg(offset);
-    std::vector<uint8_t> chunk_data((size_t)total_size);
-    file.read(reinterpret_cast<char *>(chunk_data.data()), total_size);
-    if (file.gcount() != total_size) return result;
-
-    // Delegate to the memory-based decoder.
-    // NOTE: This legacy path passes only the column chunk as the data buffer.
-    // Absolute offsets in target_col are only valid when the full file is
-    // passed.  Kept as-is for backward compatibility.
-    return DecodeColumnFromMemory(chunk_data.data(), chunk_data.size(),
-                                  column_name, row_group, row_group_index);
-
-  } catch (...) {
-    result.success = false;
-  }
-
-  return result;
-}
-
-DecodedColumn DecodeColumn(const std::string &path,
-                           const std::string &column_name) {
-  try {
-    FileStats metadata = ReadParquetMetadata(path);
-    if (metadata.row_groups.empty()) return DecodedColumn{};
-    return DecodeColumn(path, column_name, metadata.row_groups[0], 0);
-  } catch (...) {
-    return DecodedColumn{};
-  }
 }

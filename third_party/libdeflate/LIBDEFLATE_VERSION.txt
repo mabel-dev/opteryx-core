@@ -2,7 +2,7 @@ libdeflate-tag: v1.26 (2026-08-22)
 source: https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.26.tar.gz (upstream; NOT the ClickHouse fork)
 license: MIT (COPYING)
 vendored: libdeflate.h, common_defs.h, lib/ (the whole upstream lib tree, unmodified), COPYING, README.md, NEWS.md
-compiled: decompression only — lib/deflate_decompress.c, lib/utils.c, lib/arm/cpu_features.c, lib/x86/cpu_features.c
-purpose: raw DEFLATE inflate for rugo's Avro `deflate` codec (rugo/src/avro/avro_container.cpp).
-measured: 1.65x (random-ish 16 KB blocks) to 2.37x (compressible 64 KB blocks) faster than miniz tinfl on Avro deflate blocks, byte-identical output (2026-10-10, Apple M-series).
+compiled: decompression only — lib/deflate_decompress.c, lib/utils.c, lib/arm/cpu_features.c, lib/x86/cpu_features.c; plus lib/gzip_decompress.c, lib/crc32.c where the parquet GZIP codec is built (rugo_native, pool_reader)
+purpose: raw DEFLATE inflate for rugo's Avro `deflate` codec (rugo/src/avro/avro_container.cpp); gzip member inflate with CRC32/ISIZE verification for the parquet GZIP codec (rugo/src/parquet/compression.cpp).
+measured: 1.65x (random-ish 16 KB blocks) to 2.37x (compressible 64 KB blocks) faster than miniz tinfl on Avro deflate blocks, byte-identical output (2026-10-10, Apple M-series). Parquet GZIP pages (954 hits pages, gzip L1/L6/L9): 1.94-1.96x faster than miniz tinfl including CRC32 verification (2026-10-10, Apple M5 Pro).
 include-path: third_party/libdeflate

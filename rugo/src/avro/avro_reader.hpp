@@ -118,30 +118,55 @@ struct AvroColumnType {
     DrakenType child_type = DRAKEN_INT64;
 };
 
-// A whole container file decoded batch by batch, so a caller holds one batch at a
-// time rather than the decoded file. Construction parses the header and the
-// schema(s) and compiles the decode program; it throws exactly as read_avro_buffer
-// does. `data` must outlive the stream.
-//
-// With no columns (`columns` empty and not `all_columns`) nothing is decoded: each
-// batch carries only its row count, summed from the block headers (the same
-// framing checks — counts, sizes, sync markers — still run).
-class AvroStream {
-public:
-    AvroStream(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
-               bool all_columns, const std::string& reader_schema_json);
-    ~AvroStream();
-    AvroStream(const AvroStream&) = delete;
-    AvroStream& operator=(const AvroStream&) = delete;
+// One batch of a file: a run of whole blocks, at most kBatchRows rows (a larger single
+// block is its own batch). Indexes AvroFile's framed block list.
+struct AvroBatchRange {
+    uint32_t first_block = 0;
+    uint32_t block_count = 0;
+    uint32_t rows = 0;
+};
 
-    // The next batch; false at the end of the file.
-    bool next(AvroBatch& out);
+// A container file opened for decoding: header, schema(s) and the compiled decode
+// program, built once and then READ-ONLY, so any number of threads can decode its
+// batches at once, each through its own Worker. Construction throws exactly as
+// read_avro_buffer does. `data` must outlive the file and every Worker.
+//
+// batches() frames the file — walks the block headers, checking counts, sizes and
+// sync markers, and groups whole blocks into batches — without decompressing
+// anything. It runs once, on first call, and is safe to call from several threads.
+//
+// With no columns (`columns` empty and not `all_columns`) nothing is decoded: a
+// batch carries only its row count, from the block headers.
+class AvroFile {
+public:
+    AvroFile(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
+             bool all_columns, const std::string& reader_schema_json);
+    ~AvroFile();
+    AvroFile(const AvroFile&) = delete;
+    AvroFile& operator=(const AvroFile&) = delete;
 
     const std::string& schema_json() const;
     const std::vector<std::pair<std::string, std::string>>& metadata() const;
     const std::vector<std::string>& column_names() const;
     // Parallel to column_names(); known from the header alone, before any block.
     std::vector<AvroColumnType> column_types() const;
+
+    const std::vector<AvroBatchRange>& batches() const;
+
+    // Per-thread decode state (column sinks, JSON scratch, the codec's decompressor
+    // and scratch). Not shareable between threads; reusable for any of its file's
+    // batches.
+    class Worker {
+    public:
+        explicit Worker(const AvroFile& file);
+        ~Worker();
+        Worker(const Worker&) = delete;
+        Worker& operator=(const Worker&) = delete;
+        AvroBatch decode(const AvroBatchRange& range);
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> impl_;
+    };
 
 private:
     struct Impl;
@@ -151,9 +176,11 @@ private:
 // Decode `data` (a whole container file). `columns` are dotted paths; empty with
 // `all_columns` = every top-level field (of the reader schema when one is given). Throws std::runtime_error on a corrupt
 // file, a refused schema construct, or a column that is missing or not built yet.
-// `reader_schema_json` empty = read with the file's own schema.
+// `reader_schema_json` empty = read with the file's own schema. The file's batches are
+// decoded on up to `max_threads` threads (0 = every core), and returned in file order.
 void read_avro_buffer(const uint8_t* data, size_t size, const std::vector<std::string>& columns,
-                      bool all_columns, const std::string& reader_schema_json, AvroRead& out);
+                      bool all_columns, const std::string& reader_schema_json, size_t max_threads,
+                      AvroRead& out);
 
 // Header only: the writer schema and the metadata map.
 void read_avro_header(const uint8_t* data, size_t size, AvroRead& out);

@@ -849,8 +849,8 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet/decode_column.cpp",
                     "rugo/src/parquet/decode.cpp",
                     "rugo/src/parquet/compression.cpp",
-                    # miniz raw-DEFLATE inflate (tinfl_decompress): the parquet GZIP
-                    # codec and the gzip stream decoder of the JSONL / CSV readers.
+                    # miniz raw-DEFLATE inflate (tinfl_decompress): the gzip stream
+                    # decoder of the JSONL / CSV readers (compression/stream_decompress.hpp).
                     # Self-contained in this TU (no malloc, no other miniz object needed).
                     "third_party/miniz/miniz_tinfl.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
@@ -890,10 +890,14 @@ def draken_rugo_extensions(parquet_created_by):
                     # Python edge of the avro reader (wrap_avro_column); rugo_native only.
                     "rugo/src/avro/_avro_column_wrap.cpp",
                     # libdeflate (third_party/libdeflate, upstream v1.26): raw DEFLATE
-                    # inflate for Avro's `deflate` codec — 1.65-2.37x faster than miniz
-                    # tinfl, byte-identical (LIBDEFLATE_VERSION.txt). Decompression TUs
-                    # only; C sources, compiled as C by the mixed-extension path.
+                    # inflate for Avro's `deflate` codec and gzip member inflate (with
+                    # CRC32/ISIZE verification) for the parquet GZIP codec — ~2x faster
+                    # than miniz tinfl, byte-identical (LIBDEFLATE_VERSION.txt).
+                    # Decompression TUs only; C sources, compiled as C by the
+                    # mixed-extension path.
                     "third_party/libdeflate/lib/deflate_decompress.c",
+                    "third_party/libdeflate/lib/gzip_decompress.c",
+                    "third_party/libdeflate/lib/crc32.c",
                     "third_party/libdeflate/lib/utils.c",
                     "third_party/libdeflate/lib/arm/cpu_features.c",
                     "third_party/libdeflate/lib/x86/cpu_features.c",
@@ -917,14 +921,14 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/jsonl/core",
                     "rugo/src/csv/core",
                     "third_party/yyjson/src",       # avro schema parsing (symbols from draken_native)
-                    "third_party/libdeflate",       # avro deflate codec (libdeflate.h)
+                    "third_party/libdeflate",       # libdeflate.h: avro deflate + parquet GZIP codecs
                     "third_party/snappy",
                     "third_party/zstd",
                     "third_party/zstd/common",
                     "third_party/zstd/decompress",
                     "third_party/zstd/compress",
                     "third_party/lz4",              # lz4.h
-                    "third_party/miniz",            # miniz_tinfl.h / miniz.h
+                    "third_party/miniz",            # miniz_tinfl.h (JSONL / CSV gzip stream decoder)
                     # parquet_writer.pxi's VECTOR_FP16 branch -> core/fp16.h -> <fp16/fp16.h>.
                     # draken_native and _kernel_registry already carry this; every extension
                     # that touches core/fp16.h needs the same include.

@@ -6476,8 +6476,9 @@ class _Compiler:
     def _compile_avro_scan(self, scan):
         """READ_AVRO: an AvroScanPlan and a NativeAvroScanSource.
 
-        The Source's own decode pool streams whole files' batches through rugo's C++
-        Avro reader while execution consumes them. Fixed here, once: the files and
+        The Source's own decode pool claims batches (runs of whole Avro blocks) across
+        every file and decodes them through rugo's C++ Avro reader while execution
+        consumes them. Fixed here, once: the files and
         where each is read from (AvroReadNode.native_file_locations — the READ_JSONL
         rules), the reader schema every file is read as (the first file's writer
         schema, so evolved files resolve onto the bound relation), and the top-level
@@ -6500,8 +6501,8 @@ class _Compiler:
             identities,
             [decode_index[name] for name in physical],
             zero_columns,
-            # The Source's own decode pool, as the JSONL Source's: every core. It never
-            # starts more decoders than there are files (the unit of work is a file).
+            # The Source's own decode pool, as the JSONL Source's: every core. The unit
+            # of work is a batch of whole blocks, so even one file uses the whole pool.
             max(1, os.cpu_count() or 1),
         )
         plan.scan_identity = scan.identity

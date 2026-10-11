@@ -143,6 +143,7 @@ static void test_scalars_defaulted() {
     d.num_rows = 12345;            d.pages_skipped = 7;
     d.pages_decoded = 9;           d.max_rep_level = 3;
     d.max_def_level = 4;           d.success = true;
+    d.absent = true;
     d.code_width = 4;              d.dict_ordered = true;
     d.dict_all_filtered = true;    d.payloads_stubbed = true;
     d.ext_written = 99;            d.rle_total_length = 4096;
@@ -164,6 +165,7 @@ static void test_scalars_defaulted() {
     check(d.max_rep_level == fresh.max_rep_level, "max_rep_level defaulted");
     check(d.max_def_level == fresh.max_def_level, "max_def_level defaulted");
     check(d.success == fresh.success, "success defaulted");
+    check(d.absent == fresh.absent, "absent defaulted");
     check(d.code_width == fresh.code_width, "code_width defaulted");
     check(d.dict_ordered == fresh.dict_ordered, "dict_ordered defaulted");
     check(d.dict_all_filtered == fresh.dict_all_filtered, "dict_all_filtered defaulted");

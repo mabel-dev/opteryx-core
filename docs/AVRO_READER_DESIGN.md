@@ -647,3 +647,123 @@ Measured: isolated inflate 1.65x (benchmark file, 16 KB blocks) to 2.37x (compre
 Next candidates (by the profile): within-file block parallelism; per-block arena
 sizing to remove realloc copies; skip-path specialisation. Other miniz users (Parquet
 GZIP, streamed gzip JSONL/CSV) are being assessed separately.
+
+## 22. Faster reads, step 2: parallel batches within a file (2026-10-10)
+
+`rugo::avro::AvroFile` replaces `AvroStream`: a file is opened once (header, schemas,
+compiled program — then read-only) and FRAMED lazily and thread-safely (`batches()`:
+block headers walked, sync markers checked, whole blocks grouped into ≤65,536-row
+batches, nothing decompressed — 0.2 ms for the 1M-row file). Each thread decodes
+batches through its own `AvroFile::Worker` (decoder sinks + JSON scratch + codec state).
+- rugo: `read_avro_buffer(..., max_threads, ...)` / `read_avro(..., max_threads=0)` /
+  `rugo.avro.read_avro(..., max_threads=0)` — 0 = every core; batches return in file
+  order; the first failure is rethrown after all threads stop.
+- engine: `NativeAvroScanSource`'s unit of work is now a (file, batch): a file is
+  opened outside the cursor lock by the first worker that needs it, then every worker
+  claims its batches; files are released when their last batch finishes. Pool =
+  every core regardless of file count. New counter `batches_read`.
+- Tests: threaded == single-threaded in file order (3 codecs); a corrupt late block
+  under 8 threads raises; engine single file × many batches. Fuzz harness gained a
+  4-thread read; ASan/UBSan (5,000 mutants) and TSan (606 inputs) clean.
+
+Measured (rugo, 1M rows, one file, threads 1 / 6 / all 18 = 6P+12E, Mac; medians of 4
+rotated rounds): deflate all 0.502 / 0.117 / 0.052 s (4.3x / 9.8x); deflate 3-col
+0.338 / 0.069 / 0.025 s (4.9x / 13.5x); uncompressed all 0.289 / 0.075 / 0.036 s
+(3.8x / 8.0x); uncompressed 3-col 0.095 / 0.022 / 0.008 s (4.3x / 11.7x). Beyond ~6
+threads this Mac's E-cores make ratios hardware-specific. The multi-thread figures
+were taken while another session's sort benchmark ran on the same machine.
+
+Single-thread re-measured on a quiet machine (6 processes per case, rotated order):
+deflate all 0.461 s, deflate 3-col 0.292 s — identical to §21 (0.461 / 0.296), so the
+restructuring costs nothing on one thread; the 7–8% seen during the noisy run was the
+other benchmark. Uncompressed all 0.250 s / 3-col 0.083 s (§21's noisy control read
+0.288 / 0.090 — not claimed as a gain). Compared against recorded figures: the
+pre-change build was not kept.
+
+## 23. Faster reads, step 3: per-batch buffer pre-sizing (2026-10-10)
+
+Re-profile (single thread, after §21–22): uncompressed all-columns 38.5% memory copies /
+31.8% decode loop / 18.1% JSON / 8.7% varints; deflate all-columns 49.1% libdeflate /
+20.9% copies; 3-column reads are the skip walk (uncompressed 82% decode loop) or
+inflate (deflate 73%). Copy sites (uncompressed all): string bytes into the arena (the
+one necessary copy), arena/slot REGROWTH (`realloc` incl. its copies, 4.0%), inline
+short-string `memcpy` per slot (draken's str_init_inline), JSON appends, Python-edge
+own_string re-copy.
+
+Built: `Decoder::begin_batch(expected_rows)` — the batch's row count is known from
+framing — reserves every per-row buffer once (values, slots, enum codes, validity,
+ARRAY offsets); string arenas and ARRAY element buffers are reserved from the previous
+batch's bytes/elements per row × 1.1 and still grow if exceeded. Capacity only.
+
+Measured (A/B vs the §22 build kept in scratch/avro_ab_base, 1 thread, 8 alternating
+rounds, quiet Mac): uncompressed all 0.2541 → 0.2450 s (−3.6%); deflate all −0.4%
+(noise); 3-column control neutral. Knob proven: `realloc` 4.0% → 0.2% of samples.
+
+## 24. Faster reads, step 4: fused skip instructions (2026-10-10)
+
+The 3-column read of the benchmark file skips 17 fields per row; uncompressed it was
+82% decode loop (dispatch, union branch bytes, per-item recursion into the interpreter
+for the skipped `tags` array and `metrics` map) and 15% varints.
+
+Built — new opcodes in the closed set, chosen by the compiler (still no per-row schema
+consultation): `S_OPT_{VARINT,BYTES,FIXED}` (a nullable simple value), `S_ARRAY_*` /
+`S_MAP_*` (array / map whose items are one simple value, skipped in a tight loop with
+no sub-program and no recursion; byte-size blocks still skipped whole), and
+`S_VARINTS` (consecutive skipped varints in one op, replacing `S_VARINT`). Booleans now
+skip as one fixed byte and fuse with neighbouring fixed-width skips (`S_BOOL` removed;
+the skip path never validated the byte).
+
+Ablated (build-all-then-leave-one-out, 4 builds, 6 rotated rounds, 1 thread): fused
+skips alone 0.849× on uncompressed 3-col; a word-at-a-time `skip_varint` (8-byte load,
+first clear high bit via ctz) alone was 1.083× — SLOWER, because these varints are
+mostly 1–3 bytes and the byte loop exits on a predictable branch — and with both on
+it cancelled the fused gain. The fast varint was deleted.
+
+Final A/B (shipping build vs §23 build in scratch/avro_ab_base, 8 alternating rounds):
+uncompressed 3-col 0.0847 → 0.0721 s (−14.9%), deflate 3-col 0.2968 → 0.2850 s
+(−4.0%), uncompressed all-columns neutral (0.993). Test: every fused shape with 1–10
+byte varints and small blocks, skipped then read.
+
+## 25. opteryx-iceberg wiring (2026-10-10)
+
+D4 as ruled, "Python in the backend for starters". `opteryx_iceberg/manifests.py`
+(`plan_data_files`) replaces `table.scan().plan_files()` in
+`IcebergDataset._manifest_entries`: the manifest list and manifests are fetched through
+the table's FileIO (OpteryxFileIO) and decoded with `rugo.avro`. pyiceberg stays the
+catalog client (metadata.json, snapshots, schemas) and still decodes bound values
+(`from_bytes`).
+
+- One reader schema per file: the file's own schema plus the v2-only fields as
+  defaults where absent (list: `content` 0, `sequence_number`/`min_sequence_number` 0;
+  entry: `sequence_number` null; data_file: `content` 0), so v1, v2 and upgraded tables
+  read the same way. Maps (bounds, null counts) arrive as JSON, bounds base64.
+- Mirrors pyiceberg's local planner with no row filter: delete manifests below the
+  minimum data sequence number are not opened; DELETED entries and empty files are
+  dropped; sequence numbers inherited for ADDED entries; position deletes matched by
+  referenced path or (spec id, partition) + sequence number + file_path bounds; any
+  matching delete refuses the table (merge-on-read), any live equality delete refuses.
+  Partitions are read only when a delete manifest is open.
+- Manifests decoded on a thread pool (one file per thread, `max_threads=1` each), as
+  pyiceberg fetches them in parallel.
+- Tests (opteryx-iceberg `tests/test_manifest_planning.py`): every snapshot of v1/v2,
+  partitioned/unpartitioned, upgraded v1→v2 tables equals pyiceberg's plan; synthetic
+  delete manifests (written with pyiceberg's own manifest writer) refuse exactly when
+  pyiceberg attaches a delete. Mutation-checked: each planning rule has a test that
+  fails without it.
+
+### 25.1 Native bound decoding (2026-10-10)
+
+Ruled: rugo keeps rendering Iceberg's `map<int,*>` as JSON (no parallel arrays); the
+decode is native in opteryx-core. `native_manifest.iceberg_bounds`
+(`src/cpp/planner/iceberg_bounds.hpp`) reads the `lower_bounds` / `upper_bounds` /
+`null_value_counts` JSON vectors straight from rugo's morsels (yyjson + mabel base64,
+both from draken_native), decodes Iceberg's single-value bytes by the bound column's
+DrakenType and produces draken's ordinal keys (`ops/ordinalize.h`), returning per entry
+the opteryx manifest's `field_ids` / `min_values` / `max_values` / `null_counts`. It
+gives the same answers as pyiceberg `from_bytes` + `ColumnType.ordinalize`, including
+refusing wrong-length values and (ruled 2026-10-11) string bounds that are not valid UTF-8 (Python's `bytes.decode` rule, via `py::utf8_code_points`). DECIMAL128 (precision > 18) has no ordinal key; ruled 2026-10-11: opteryx-iceberg leaves those columns out of the type table, so their bounds are skipped (no pruning on them) instead of failing the scan. The decoder itself still refuses a DECIMAL128 bound it is handed. Delete manifests keep the Python JSON path
+(only their `file_path` bounds are needed, as bytes).
+
+Timing (local, cold process, median of 9 rotated rounds, full manifest build):
+100 manifests / 300 files: pyiceberg 56.6 ms, rugo + Python bounds 19.2, native 14.0;
+1 manifest / 2,000 files: 101.8, 51.5, 14.4 ms.

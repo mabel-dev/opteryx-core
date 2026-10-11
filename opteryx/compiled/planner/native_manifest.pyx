@@ -1932,3 +1932,67 @@ def aggregate_skene_blobs(list row_groups, list positions, list sketches):
             floors[k] = cell["distinct_floor"]
     families = {entry["hash_family"] for entry in sketches if entry is not None}
     return lower, upper, nulls, distincts, file_sketches, (families.pop() if families else None), floors
+
+
+cdef extern from "planner/iceberg_bounds.hpp" namespace "opteryx::planner::iceberg":
+    cdef cppclass IcebergFileBounds "opteryx::planner::iceberg::FileBounds":
+        vector[int32_t] field_ids
+        vector[int64_t] min_values
+        vector[int64_t] max_values
+        vector[int64_t] null_counts
+        vector[uint8_t] has_min
+        vector[uint8_t] has_max
+        vector[uint8_t] has_null_count
+
+    cdef cppclass IcebergScratch "opteryx::planner::iceberg::Scratch":
+        pass
+
+    void iceberg_decode_row "opteryx::planner::iceberg::decode_row"(
+        const DrakenVector* lower,
+        const DrakenVector* upper,
+        const DrakenVector* nulls,
+        uint32_t row,
+        const unordered_map[int32_t, DrakenType]& types,
+        IcebergScratch& scratch,
+        IcebergFileBounds& out,
+    ) except +
+
+
+cdef inline const DrakenVector* _json_column(vector_object, uint32_t rows) except? NULL:
+    if vector_object is None:
+        return NULL
+    cdef const DrakenVector* v = draken_vector_unwrap(<PyObject*>vector_object._nb)
+    if v.length != rows:
+        raise ValueError("the bounds columns must have one row per manifest entry")
+    return v
+
+
+def iceberg_bounds(uint32_t rows, lower, upper, null_counts, dict ordinal_types):
+    """An Iceberg manifest's per-entry bounds as the opteryx manifest's lists.
+
+    `lower` / `upper` / `null_counts` are rugo's vectors for `data_file.lower_bounds`
+    / `upper_bounds` / `null_value_counts` (JSON text; None when the manifest lacks
+    the column). `ordinal_types` maps a field id to the DrakenType of the column it
+    is bound to; a field id it lacks gets no bound. Returns one
+    (field_ids, min_values, max_values, null_counts) tuple per entry, None where a
+    value is absent (src/cpp/planner/iceberg_bounds.hpp)."""
+    cdef const DrakenVector* lower_v = _json_column(lower, rows)
+    cdef const DrakenVector* upper_v = _json_column(upper, rows)
+    cdef const DrakenVector* nulls_v = _json_column(null_counts, rows)
+    cdef unordered_map[int32_t, DrakenType] types
+    for field_id, draken_type in ordinal_types.items():
+        types[<int32_t?>field_id] = <DrakenType><int>draken_type.value
+    cdef IcebergScratch scratch
+    cdef IcebergFileBounds bounds
+    cdef list out = []
+    cdef uint32_t row
+    cdef size_t k, n
+    for row in range(rows):
+        iceberg_decode_row(lower_v, upper_v, nulls_v, row, types, scratch, bounds)
+        n = bounds.field_ids.size()
+        field_ids = [bounds.field_ids[k] for k in range(n)]
+        min_values = [bounds.min_values[k] if bounds.has_min[k] else None for k in range(n)]
+        max_values = [bounds.max_values[k] if bounds.has_max[k] else None for k in range(n)]
+        nulls = [bounds.null_counts[k] if bounds.has_null_count[k] else None for k in range(n)]
+        out.append((field_ids, min_values, max_values, nulls))
+    return out

@@ -929,6 +929,7 @@ extensions = [
             "src/cpp/planner/manifest_encode.hpp",
             "src/cpp/planner/file_stats.hpp",
             "src/cpp/planner/skene_stats.hpp",
+            "src/cpp/planner/iceberg_bounds.hpp",
             "opteryx/third_party/maki_nage/_distogram.hpp",
             "src/cpp/planner/py_numeric.hpp",
             "src/cpp/planner/expr_arena.hpp",
@@ -1489,8 +1490,16 @@ extensions.append(
                 "rugo/src/parquet/decode_column.cpp",
                 "rugo/src/parquet/decode.cpp",
                 "rugo/src/parquet/compression.cpp",
-                # miniz raw-DEFLATE inflate for the parquet GZIP codec.
-                "third_party/miniz/miniz_tinfl.cpp",
+                # libdeflate (third_party/libdeflate, upstream v1.26) for the parquet
+                # GZIP codec: whole-member gzip inflate with CRC32/ISIZE verification.
+                # Decompression TUs only. Own copy, stateless apart from a per-.so
+                # CPU-feature cache.
+                "third_party/libdeflate/lib/deflate_decompress.c",
+                "third_party/libdeflate/lib/gzip_decompress.c",
+                "third_party/libdeflate/lib/crc32.c",
+                "third_party/libdeflate/lib/utils.c",
+                "third_party/libdeflate/lib/arm/cpu_features.c",
+                "third_party/libdeflate/lib/x86/cpu_features.c",
                 "rugo/src/parquet/metadata.cpp",
                 "rugo/src/parquet/bloom_filter.cpp",
                 "rugo/src/parquet/decode_encodings.cpp",
@@ -1525,7 +1534,7 @@ extensions.append(
                 "third_party/zstd/common",
                 "third_party/zstd/decompress",
                 "third_party/lz4",              # lz4.h
-                "third_party/miniz",            # miniz_tinfl.h / miniz.h
+                "third_party/libdeflate",       # libdeflate.h (parquet GZIP codec)
                 "third_party/bshoshany",
                 "third_party/moodycamel",
             ]

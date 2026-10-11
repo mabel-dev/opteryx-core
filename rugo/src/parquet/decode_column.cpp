@@ -341,24 +341,87 @@ inline bool MaterializeDictPrefixToDense(
 // During pre-scan phase, we collect these without decoding.
 // Then in parallel phase, each task decodes its own page independently.
 struct PageTask {
-  const uint8_t* compressed_data;  // Points into file_data
-  size_t         compressed_size;
-  uint32_t       uncompressed_size;
+  const uint8_t* compressed_data;  // The page's values region (past any V2 levels)
+  size_t         compressed_size;  // Bytes of the values region
+  uint32_t       uncompressed_size;  // Values region once decompressed
+  bool           values_compressed;  // Values region is compressed with the chunk codec
   int32_t        num_values;       // page_header.num_values
   int32_t        encoding;         // page_header.encoding
-  uint8_t        rep_bit_width;    // Computed from repetition levels (if present)
-  uint8_t        def_bit_width;    // Computed from definition levels (if present)
-  int32_t        page_row_offset;  // Offset into row_mask (for filtering)
   int32_t        out_offset;       // Where this page's values start in output vectors
-  bool           skip_page = false; // Set to true if row_mask indicates no selected rows
 };
 
-// Decompression result for a single page (used in parallel decompression)
-struct PageDecompressed {
-  int page_index;
-  std::vector<uint8_t> data;  // Decompressed data for this page
-  bool success = true;         // Set to false if decompression failed
+// ─────────────────────────────────────────────────────────────────────────
+// Per-page checks shared by the sequential page walk and the parallel (Tier 3)
+// page walk. Both walks must give the same answer for the same page — a page
+// one refuses, the other refuses with the same reason — so these rules live
+// here once instead of being restated (and drifting) in each walk.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Where a data page's encoded values sit inside its payload. V1: the whole
+// payload, compressed iff the chunk has a codec (any levels are inside the
+// compressed payload). V2: after the uncompressed repetition + definition
+// level regions, compressed iff the chunk has a codec AND is_compressed.
+struct PageValuesRegion {
+  size_t levels_len = 0;    // V2 level bytes preceding the values (0 for V1)
+  bool   compressed = false;
 };
+
+// Empty on success, else the reason the page's layout is unusable.
+std::string ResolvePageValuesRegion(const PageHeader& h, int32_t codec,
+                                    size_t compressed_size, PageValuesRegion& out) {
+  if (!h.is_v2) {
+    out.levels_len = 0;
+    out.compressed = (codec != 0);
+    return std::string();
+  }
+  const int32_t rep_len = h.repetition_levels_byte_length;
+  const int32_t def_len = h.definition_levels_byte_length;
+  if (rep_len < 0 || def_len < 0) {
+    return "parquet DATA_PAGE_V2: negative level byte length";
+  }
+  const size_t levels_len = (size_t)rep_len + (size_t)def_len;
+  if (levels_len > compressed_size) {
+    return "parquet DATA_PAGE_V2: level bytes exceed compressed page size";
+  }
+  out.levels_len = levels_len;
+  out.compressed = (codec != 0 && h.is_compressed);
+  return std::string();
+}
+
+// Value encodings no walk can decode. An unhandled encoding is not a no-op —
+// read as PLAIN its bytes produce plausible garbage with success=true — so it
+// is refused by name. Empty when the encoding is admitted.
+//   6 = DELTA_LENGTH_BYTE_ARRAY, 9 = BYTE_STREAM_SPLIT: real encodings we do
+//       not implement.
+//   1 = GROUP_VAR_INT (obsolete), 4 = BIT_PACKED (deprecated, levels only):
+//       never valid as a data-page value encoding.
+// 2/8 (dictionary) reach the value decoders only for the all-null dictionary
+// page shape of the sequential walk, so they stay admitted.
+std::string PageValueEncodingError(int32_t encoding, const std::string& col_name) {
+  if (encoding == 0 || encoding == 2 || encoding == 3 || encoding == 5 ||
+      encoding == 7 || encoding == 8) {
+    return std::string();
+  }
+  const char* enc_name = encoding == 6   ? "DELTA_LENGTH_BYTE_ARRAY"
+                         : encoding == 9 ? "BYTE_STREAM_SPLIT"
+                         : encoding == 1 ? "GROUP_VAR_INT"
+                         : encoding == 4 ? "BIT_PACKED"
+                                         : "unknown";
+  return "unsupported page encoding " + std::to_string(encoding) + " (" + enc_name +
+         ") for column '" + col_name + "'";
+}
+
+// A fixed-width page read value-by-value (anything but DELTA_BINARY_PACKED)
+// must hold every value it declares.
+std::string FixedWidthPageTooShort(int32_t values, size_t bytes, size_t width) {
+  return "page holds " + std::to_string(bytes) + " value bytes, too few for " +
+         std::to_string(values) + " values of " + std::to_string(width) + " bytes";
+}
+
+std::string DeltaPageTooShort(int32_t decoded, int32_t values) {
+  return "DELTA_BINARY_PACKED page decoded " + std::to_string(decoded) + " of " +
+         std::to_string(values) + " values";
+}
 
 }  // namespace
 
@@ -366,16 +429,18 @@ struct PageDecompressed {
 // Pre-Scan Helper (Tier 3A)
 // ---------------------------------------------------------------------------
 // Walk through all pages and collect metadata without decoding.
-// Returns total number of values across all data pages.
+// Returns total number of values across all data pages. Applies the shared
+// per-page checks (values region, value encoding) up front and throws with the
+// same reason the sequential walk would report.
 
 int32_t PreScanPages(
     const uint8_t* cursor,
     const uint8_t* chunk_limit,
-    const uint8_t* row_mask,
+    int32_t codec,
+    const std::string& col_name,
     std::vector<PageTask>& pages_out)
 {
   int32_t total_values = 0;
-  int32_t page_row_offset = 0;
 
   while (cursor < chunk_limit) {
     // Parse page header
@@ -395,14 +460,6 @@ int32_t PreScanPages(
     // report a short/empty column (a silent-degrade); throw instead so the
     // reason surfaces to the caller (§ fail fast, fail clean).
     //
-    // The Tier-3 parallel path only reaches PreScanPages for non-nullable,
-    // non-nested, fixed-width columns (max_def_level == 0 && max_rep_level == 0),
-    // so any V2 page here carries no repetition/definition levels: its values
-    // region is the entire compressed payload and the page-boundary advance
-    // (compressed_data + compressed_size) is identical to V1. If a V2 page were
-    // ever marked is_compressed == false with a real codec, the parallel worker's
-    // decompress throws and the whole column falls back to the (V2-aware)
-    // sequential loop — never a wrong answer.
     if (page_header.page_type != 0 && page_header.page_type != 3) {
       throw std::runtime_error(
           "unsupported parquet page type " +
@@ -419,42 +476,31 @@ int32_t PreScanPages(
     size_t avail = (size_t)(chunk_limit - compressed_data);
     if (compressed_size > avail) compressed_size = avail;
 
-    // Check row_mask: determine if page should be skipped (Tier 1D)
-    bool should_skip = false;
-    if (row_mask != nullptr) {
-      const uint8_t* mp = row_mask + page_row_offset;
-      const size_t pv = static_cast<size_t>(page_values);
-      bool any_selected = false;
-
-      // Word-at-a-time scan (8 bytes at once)
-      size_t si = 0;
-      for (; si + 8 <= pv; si += 8) {
-        uint64_t w;
-        std::memcpy(&w, mp + si, 8);
-        if (w) { any_selected = true; break; }
-      }
-      if (!any_selected) {
-        for (; si < pv; ++si) {
-          if (mp[si]) { any_selected = true; break; }
-        }
-      }
-      should_skip = !any_selected;
+    PageValuesRegion region;
+    std::string page_error =
+        ResolvePageValuesRegion(page_header, codec, compressed_size, region);
+    if (page_error.empty()) page_error = PageValueEncodingError(page_header.encoding, col_name);
+    if (!page_error.empty()) throw std::runtime_error(page_error);
+    const int64_t values_usize =
+        (int64_t)page_header.uncompressed_page_size - (int64_t)region.levels_len;
+    if (region.compressed && values_usize < 0) {
+      throw std::runtime_error(
+          "parquet DATA_PAGE_V2: level bytes exceed uncompressed page size");
     }
 
     // Record this page's metadata for later parallel decoding
     PageTask task;
-    task.compressed_data = compressed_data;
-    task.compressed_size = compressed_size;
-    task.uncompressed_size = page_header.uncompressed_page_size;
+    task.compressed_data = compressed_data + region.levels_len;
+    task.compressed_size = compressed_size - region.levels_len;
+    task.uncompressed_size = region.compressed ? (uint32_t)values_usize
+                                               : (uint32_t)task.compressed_size;
+    task.values_compressed = region.compressed;
     task.num_values = page_values;
     task.encoding = page_header.encoding;
-    task.page_row_offset = page_row_offset;
     task.out_offset = total_values;
-    task.skip_page = should_skip;
     pages_out.push_back(task);
 
     total_values += page_values;
-    page_row_offset += page_values;
     cursor = compressed_data + compressed_size;
   }
 
@@ -1509,8 +1555,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // ── Tier 3: Parallel page decode ──────────────────────────────────────
     // For non-nullable, non-dict, non-nested, fixed-width columns with more
     // than 2 pages, pre-scan → pre-allocate → parallel decompress + decode.
-    // This path is strictly additive: falls back to sequential on any error,
-    // or when the column doesn't meet the eligibility criteria.
+    // Columns that don't meet the eligibility criteria take the sequential
+    // walk. An eligible column's pages are refused here exactly as the
+    // sequential walk would refuse them (the shared per-page checks), and the
+    // first failure's reason is reported directly — there is no re-walk.
     //
     // Eligible types:
     //   - dict_size == 0          (no dictionary; no interning, pages independent)
@@ -1542,7 +1590,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         RUGO_TEL_START(_ps_t0);
         std::vector<PageTask> page_tasks;
         page_tasks.reserve(64);
-        const int32_t prescan_total = PreScanPages(cursor, chunk_limit, nullptr, page_tasks);
+        const int32_t prescan_total = PreScanPages(cursor, chunk_limit,
+                                                   target_col->codec, target_col->name,
+                                                   page_tasks);
         RUGO_TEL_ACCUM(rugo_tel::prescan_ns, _ps_t0);
 
         if (page_tasks.size() > 2 && prescan_total > 0) {
@@ -1566,12 +1616,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
           std::atomic<bool>    any_error{false};
           std::atomic<int32_t> decoded_count{0};
+          // The first failing page's reason (first writer wins, under its mutex).
+          std::mutex  error_mutex;
+          std::string first_error;
 
           // Per-batch completion tracking.
           // Shared pool requires batch-scoped sync — cannot use pool's global wait
           // as multiple callers may submit concurrently to the same pool.
-          int32_t active_task_count = 0;
-          for (const auto& pt : page_tasks) { if (!pt.skip_page) ++active_task_count; }
+          const int32_t active_task_count = (int32_t)page_tasks.size();
           std::atomic<int32_t> batch_remaining{active_task_count};
           std::mutex batch_mutex;
           std::condition_variable batch_cv;
@@ -1592,21 +1644,21 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           RUGO_TEL_START(_pp_t0);
           ChunkPageSource* pages_ptr = &pages;
           for (const PageTask& ptask : page_tasks) {
-            if (ptask.skip_page) { ++result.pages_skipped; continue; }
-
             // Chunk cache (C7): resolved HERE, on the calling thread — the cached
             // page pointer, or this page's fill slot. Workers never touch the
             // cache's bookkeeping; a fill slot is disjoint memory per page.
             const uint8_t* cc_ptr = nullptr;
             size_t         cc_len = 0;
             uint8_t*       cc_dst = nullptr;
-            if (!pages.cached(ptask.compressed_data, &cc_ptr, &cc_len))
+            // Only a compressed values region has a decompressed form to cache.
+            if (ptask.values_compressed &&
+                !pages.cached(ptask.compressed_data, &cc_ptr, &cc_len))
               cc_dst = pages.reserve(ptask.compressed_data, ptask.uncompressed_size);
 
             pool.push_task([ptask, col_type, col_codec, cc_ptr, cc_len, cc_dst, pages_ptr,
                             xint64, xfloat64, xint32, xfloat32,
                             ivec_i32, ivec_i64, ivec_f32, ivec_f64,
-                            &any_error, &decoded_count,
+                            &any_error, &decoded_count, &error_mutex, &first_error,
                             &batch_remaining, &batch_mutex, &batch_cv]() {
               // Signal this task complete. The decrement and the notify happen
               // under batch_mutex: the waiter checks batch_remaining while holding
@@ -1617,6 +1669,17 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               auto finish_task = [&batch_remaining, &batch_mutex, &batch_cv]() {
                 std::lock_guard<std::mutex> lk(batch_mutex);
                 if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+              };
+              // Record this page's failure (the first one is the one reported)
+              // and stop the remaining pages from doing work.
+              auto fail_task = [&any_error, &error_mutex, &first_error, &finish_task](
+                                   std::string reason) {
+                {
+                  std::lock_guard<std::mutex> lk(error_mutex);
+                  if (first_error.empty()) first_error = std::move(reason);
+                }
+                any_error.store(true, std::memory_order_relaxed);
+                finish_task();
               };
               if (!any_error.load(std::memory_order_relaxed)) {
 
@@ -1633,7 +1696,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               const uint8_t* dp;
               size_t         ds;
 
-              if (col_codec == 0) {
+              if (!ptask.values_compressed) {
                 dp = ptask.compressed_data;
                 ds = ptask.compressed_size;
               } else if (cc_ptr != nullptr) {
@@ -1652,9 +1715,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                       std::chrono::steady_clock::now() - c0).count());
                   dp = cc_dst;
                   ds = ptask.uncompressed_size;
-                } catch (...) {
-                  any_error.store(true, std::memory_order_relaxed);
-                  finish_task();
+                } catch (const std::exception& e) {
+                  fail_task(e.what());
                   return;
                 }
               } else {
@@ -1667,64 +1729,67 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pt_t0);
                   dp = decomp_buf.data();
                   ds = decomp_buf.size();
-                } catch (...) {
-                  any_error.store(true, std::memory_order_relaxed);
-                  finish_task();
+                } catch (const std::exception& e) {
+                  fail_task(e.what());
                   return;
                 }
               }
 
               const int32_t nv  = ptask.num_values;
               const size_t  off = (size_t)ptask.out_offset;
-              const uint8_t* dend = dp + ds;
+              const bool is_int = (col_type == "int32" || col_type == "int64");
+              const bool delta  = is_int && ptask.encoding == 5;
+              if (!delta) {
+                const size_t width = (col_type == "int32" || col_type == "float32") ? 4 : 8;
+                if (ds < (size_t)nv * width) {
+                  fail_task(FixedWidthPageTooShort(nv, ds, width));
+                  return;
+                }
+              }
 
               if (col_type == "int32") {
                 int32_t* dst = xint32 ? (xint32 + off) : (ivec_i32 + off);
-                if (ptask.encoding == 5) {  // DELTA
-                  if (DecodeDeltaBinaryPacked(dp, ds, nv, dst) != nv) {
-                    any_error.store(true, std::memory_order_relaxed);
-                    finish_task();
+                if (delta) {
+                  const int32_t decoded = DecodeDeltaBinaryPacked(dp, ds, nv, dst);
+                  if (decoded != nv) {
+                    fail_task(DeltaPageTooShort(decoded, nv));
                     return;
                   }
                 } else {
-                  int32_t safe = std::min(nv, (int32_t)((dend - dp) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                  std::memcpy(dst, dp, (size_t)safe * sizeof(int32_t));
+                  std::memcpy(dst, dp, (size_t)nv * sizeof(int32_t));
 #else
-                  for (int32_t i = 0; i < safe; i++) dst[i] = ReadLE32(dp + i * 4);
+                  for (int32_t i = 0; i < nv; i++) dst[i] = ReadLE32(dp + i * 4);
 #endif
                 }
               } else if (col_type == "int64") {
                 int64_t* dst = xint64 ? (xint64 + off) : (ivec_i64 + off);
-                if (ptask.encoding == 5) {  // DELTA
-                  if (DecodeDeltaBinaryPacked(dp, ds, nv, dst) != nv) {
-                    any_error.store(true, std::memory_order_relaxed);
-                    finish_task();
+                if (delta) {
+                  const int32_t decoded = DecodeDeltaBinaryPacked(dp, ds, nv, dst);
+                  if (decoded != nv) {
+                    fail_task(DeltaPageTooShort(decoded, nv));
                     return;
                   }
                 } else {
-                  int32_t safe = std::min(nv, (int32_t)((dend - dp) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                  std::memcpy(dst, dp, (size_t)safe * sizeof(int64_t));
+                  std::memcpy(dst, dp, (size_t)nv * sizeof(int64_t));
 #else
-                  for (int32_t i = 0; i < safe; i++) dst[i] = ReadLE64(dp + i * 8);
+                  for (int32_t i = 0; i < nv; i++) dst[i] = ReadLE64(dp + i * 8);
 #endif
                 }
               } else if (col_type == "float32") {
                 float* dst = xfloat32 ? (xfloat32 + off) : (ivec_f32 + off);
-                int32_t safe = std::min(nv, (int32_t)((dend - dp) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                std::memcpy(dst, dp, (size_t)safe * sizeof(float));
+                std::memcpy(dst, dp, (size_t)nv * sizeof(float));
 #else
-                for (int32_t i = 0; i < safe; i++) dst[i] = ReadFloat32(dp + i * 4);
+                for (int32_t i = 0; i < nv; i++) dst[i] = ReadFloat32(dp + i * 4);
 #endif
               } else if (col_type == "float64") {
                 double* dst = xfloat64 ? (xfloat64 + off) : (ivec_f64 + off);
-                int32_t safe = std::min(nv, (int32_t)((dend - dp) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                std::memcpy(dst, dp, (size_t)safe * sizeof(double));
+                std::memcpy(dst, dp, (size_t)nv * sizeof(double));
 #else
-                for (int32_t i = 0; i < safe; i++) dst[i] = ReadFloat64(dp + i * 8);
+                for (int32_t i = 0; i < nv; i++) dst[i] = ReadFloat64(dp + i * 8);
 #endif
               }
 
@@ -1744,18 +1809,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           }
           RUGO_TEL_ACCUM(rugo_tel::page_parallel_ns, _pp_t0);
 
-          // A failed parallel pass falls back to the sequential loop, which
-          // would reserve the same pages again: drop this call's fill.
-          if (any_error.load()) pages.abandon();
-          if (!any_error.load()) {
-            total_collected = prescan_total;
-            result.pages_decoded += decoded_count.load();
-            if (has_ext) {
-              result.ext_written = prescan_total;
-            }
-            used_parallel_path = true;
+          // A failed page fails the column with that page's reason, as the
+          // sequential walk would; the partial cache fill is dropped.
+          if (any_error.load()) {
+            pages.abandon();
+            result.error_message = first_error;
+            return;
           }
-          // If any_error: used_parallel_path stays false → fall through to sequential recovery
+          total_collected = prescan_total;
+          result.pages_decoded += decoded_count.load();
+          if (has_ext) {
+            result.ext_written = prescan_total;
+          }
+          used_parallel_path = true;
         }
       }
     }  // end Tier 3 parallel scope
@@ -1934,7 +2000,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
       if (!page_header.is_v2) {
         // ── DATA_PAGE v1 ────────────────────────────────────────────────────
-        if (target_col->codec == 0) {
+        PageValuesRegion region;
+        {
+          std::string region_error = ResolvePageValuesRegion(
+              page_header, target_col->codec, compressed_size, region);
+          if (!region_error.empty()) {
+            result.error_message = std::move(region_error);
+            break;
+          }
+        }
+        if (!region.compressed) {
           data_ptr  = compressed_data;
           data_size = compressed_size;
         } else {
@@ -2006,17 +2081,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         //         [values: compressed iff is_compressed]
         const int32_t rep_len = page_header.repetition_levels_byte_length;
         const int32_t def_len = page_header.definition_levels_byte_length;
-        if (rep_len < 0 || def_len < 0) {
-          result.error_message =
-              "parquet DATA_PAGE_V2: negative level byte length";
-          break;
+        PageValuesRegion region;
+        {
+          std::string region_error = ResolvePageValuesRegion(
+              page_header, target_col->codec, compressed_size, region);
+          if (!region_error.empty()) {
+            result.error_message = std::move(region_error);
+            break;
+          }
         }
-        const size_t levels_len = (size_t)rep_len + (size_t)def_len;
-        if (levels_len > compressed_size) {
-          result.error_message =
-              "parquet DATA_PAGE_V2: level bytes exceed compressed page size";
-          break;
-        }
+        const size_t levels_len = region.levels_len;
         const uint8_t* rep_region    = compressed_data;
         const uint8_t* def_region    = compressed_data + rep_len;
         const uint8_t* values_region = compressed_data + levels_len;
@@ -2052,7 +2126,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
         // Values region only: decompress iff is_compressed (never the level
         // prefix). The uncompressed values size excludes the level regions.
-        if (target_col->codec == 0 || !page_header.is_compressed) {
+        if (!region.compressed) {
           data_ptr  = values_region;
           data_size = values_csize;
         } else {
@@ -2585,30 +2659,15 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         // PLAIN or DELTA encoding
         int32_t page_encoding = page_header.encoding;
 
-        // Reject value encodings this branch cannot decode. Everything below
-        // either dispatches on a known encoding or falls through to the PLAIN
-        // reader, so an unhandled encoding is not a no-op — its bytes would be
-        // read as PLAIN and produce plausible garbage with success=true.
-        //   6 = DELTA_LENGTH_BYTE_ARRAY, 9 = BYTE_STREAM_SPLIT: real encodings
-        //       we do not implement; a chunk listing RLE(3) for its def levels
-        //       clears the chunk-level gate, so they reach here.
-        //   1 = GROUP_VAR_INT (obsolete), 4 = BIT_PACKED (deprecated, levels
-        //       only): never valid as a data-page value encoding.
-        // 2/8 reach here only for the all-null dictionary page shape handled
-        // above (dict_size == 0, present_count == 0), so they stay admitted.
-        if (page_encoding != 0 && page_encoding != 2 && page_encoding != 3 &&
-            page_encoding != 5 && page_encoding != 7 && page_encoding != 8) {
-          const char *enc_name =
-              page_encoding == 6   ? "DELTA_LENGTH_BYTE_ARRAY"
-              : page_encoding == 9 ? "BYTE_STREAM_SPLIT"
-              : page_encoding == 1 ? "GROUP_VAR_INT"
-              : page_encoding == 4 ? "BIT_PACKED"
-                                   : "unknown";
-          result.error_message = "unsupported page encoding " +
-                                 std::to_string(page_encoding) + " (" +
-                                 enc_name + ") for column '" +
-                                 target_col->name + "'";
-          return;
+        // Reject value encodings no walk can decode (shared with the parallel
+        // walk's pre-scan: PageValueEncodingError).
+        {
+          std::string encoding_error =
+              PageValueEncodingError(page_encoding, target_col->name);
+          if (!encoding_error.empty()) {
+            result.error_message = std::move(encoding_error);
+            return;
+          }
         }
 
         // ── Mixed-encoding transition ──────────────────────────────────────
@@ -2776,6 +2835,24 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         }
         // ──────────────────────────────────────────────────────────────────
 
+        // A fixed-width page read value-by-value must hold every present value
+        // it declares (shared with the parallel walk: FixedWidthPageTooShort).
+        {
+          const bool is_int = (result.type == "int32" || result.type == "int64");
+          size_t width = 0;
+          if (result.type == "int32" || result.type == "float32") width = 4;
+          else if (result.type == "float64") width = 8;
+          else if (result.type == "int64")
+            width = int96_stride > 0 ? (size_t)int96_stride
+                    : flba_byte_width > 0 ? (size_t)flba_byte_width : 8;
+          const size_t value_bytes = (size_t)(data_end - data_ptr);
+          if (width > 0 && !(is_int && page_encoding == 5) &&
+              value_bytes < (size_t)present_count * width) {
+            result.error_message = FixedWidthPageTooShort(present_count, value_bytes, width);
+            return;
+          }
+        }
+
         // sel_mode: fixed-width PLAIN/DELTA values are appended whole for the
         // page and compacted to the selection immediately (cache-hot); strings
         // skip unselected values while reading (below).
@@ -2791,7 +2868,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (page_encoding == 5) {
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.ext_int32 + result.ext_written);
-              if (decoded != present_count) return;
+              if (decoded != present_count) {
+                result.error_message = DeltaPageTooShort(decoded, present_count);
+                return;
+              }
               result.ext_written += decoded;
             } else {
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
@@ -2817,6 +2897,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.int32_values.data() + old_sz);
               if (decoded != present_count) {
+                result.error_message = DeltaPageTooShort(decoded, present_count);
                 result.int32_values.resize_uninit(old_sz);
                 return;
               }
@@ -2841,7 +2922,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (page_encoding == 5) {
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.ext_int64 + result.ext_written);
-              if (decoded != present_count) return;
+              if (decoded != present_count) {
+                result.error_message = DeltaPageTooShort(decoded, present_count);
+                return;
+              }
               result.ext_written += decoded;
             } else if (int96_stride > 0) {
               int32_t safe_count = std::min(
@@ -2893,6 +2977,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.int64_values.data() + old_sz);
               if (decoded != present_count) {
+                result.error_message = DeltaPageTooShort(decoded, present_count);
                 result.int64_values.resize_uninit(old_sz);
                 return;
               }
@@ -3394,9 +3479,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     if (total_needed > 0) {
       result.success = (total_rows_all_pages == total_needed);
       if (result.success) pages.commit(file_size);
-      if (!result.success) {
+      if (!result.success && result.error_message.empty()) {
         // A short page walk is a corrupt chunk or a decoder bug, never an
         // "absent column": say how short, so it cannot be misread as the latter.
+        // A walk that stopped on a specific failure (a decompression error, a
+        // malformed page) already carries that reason; it is not overwritten.
         result.error_message =
             "page walk collected " + std::to_string(total_rows_all_pages) +
             " of " + std::to_string(total_needed) + " values" +
@@ -3487,18 +3574,33 @@ DecodedColumn DecodeColumnFromMemory(const uint8_t *data, size_t size,
         break;
       }
     }
-    if (!target_col) return result;
+    if (!target_col) {
+      result.absent = true;
+      return result;
+    }
 
+    // An empty chunk (num_values == 0) may have no pages and so no meaningful
+    // offsets; DecodeColumnFromChunk turns it into an empty column.
     int64_t offset     = target_col->data_page_offset;
     int64_t total_size = target_col->total_compressed_size;
-    if (offset < 0 || total_size <= 0) return result;
-    if (offset >= (int64_t)size) return result;
+    if (target_col->num_values != 0 &&
+        (offset < 0 || total_size <= 0 || offset >= (int64_t)size)) {
+      result.error_message =
+          "column chunk metadata out of range (data_page_offset " + std::to_string(offset) +
+          ", total_compressed_size " + std::to_string(total_size) + ", file size " +
+          std::to_string(size) + ")";
+      return result;
+    }
 
     return DecodeColumnFromChunk(data, size, target_col,
                                  ext_int64, ext_float64, ext_int32, ext_float32);
 
+  } catch (const std::exception &e) {
+    result.success = false;
+    result.error_message = e.what();
   } catch (...) {
     result.success = false;
+    result.error_message = "unknown error decoding the column";
   }
 
   return result;

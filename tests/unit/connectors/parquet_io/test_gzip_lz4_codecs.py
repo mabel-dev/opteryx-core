@@ -1,14 +1,14 @@
 """
 Regression test: GZIP and LZ4 parquet decompression.
 
-rugo vendors LZ4 (block codec) and miniz (raw DEFLATE), but for a long time the
+rugo vendors LZ4 (block codec) and libdeflate (gzip), but for a long time the
 `DecompressInto` switch only handled UNCOMPRESSED/SNAPPY/ZSTD and the codec
 whitelist (decode.cpp / decode_column.cpp) admitted only 0/1/6 — so any parquet
 file written with GZIP or LZ4 was silently rejected by the native scan.
 
 This exercises the full native scan path end-to-end for both codecs:
 
-  * GZIP  (parquet codec 2)     -> miniz raw-DEFLATE inflate after gzip-header skip
+  * GZIP  (parquet codec 2)     -> libdeflate gzip member inflate, CRC32/ISIZE verified
   * LZ4    (parquet 'lz4')      -> Arrow emits LZ4_RAW (codec 7)
   * LZ4_RAW (parquet 'lz4_raw') -> LZ4_RAW (codec 7)
 
@@ -19,8 +19,10 @@ the known-good SNAPPY/ZSTD paths so a divergence is unambiguous.
 import os
 import sys
 import tempfile
+import zlib
 
 import pyarrow as pa
+import pytest
 import pyarrow.parquet as pq
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
@@ -87,7 +89,7 @@ def _roundtrip_for_codec(codec):
 
 
 def test_gzip_roundtrip():
-    """GZIP (parquet codec 2) decodes via miniz raw-DEFLATE inflate."""
+    """GZIP (parquet codec 2) decodes via libdeflate gzip member inflate."""
     _roundtrip_for_codec("gzip")
 
 
@@ -121,9 +123,33 @@ def test_gzip_matches_snappy():
     assert results["lz4_raw"] == results["snappy"]
 
 
+def test_gzip_crc_mismatch_refused():
+    """A GZIP page whose CRC32 trailer does not match its data is refused, not decoded."""
+    table = pa.table({"a": pa.array(list(range(N_ROWS)), type=pa.int64())})
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = f"ws_gzcrc_{os.getpid()}"
+        data_dir = os.path.join(tmp, workspace, "t")
+        os.makedirs(data_dir)
+        path = os.path.join(data_dir, "data.parquet")
+        pq.write_table(table, path, compression="gzip", use_dictionary=False)
+        raw = bytearray(open(path, "rb").read())
+        # The first gzip member is a page body; inflating it shows where it ends,
+        # and its CRC32 is the first 4 of the 8 trailer bytes before that end.
+        start = raw.index(b"\x1f\x8b\x08")
+        inflater = zlib.decompressobj(wbits=31)
+        inflater.decompress(bytes(raw[start:]))
+        end = len(raw) - len(inflater.unused_data)
+        raw[end - 8] ^= 0xFF
+        with open(path, "wb") as f:
+            f.write(raw)
+        with pytest.raises(Exception, match="CRC32/length mismatch"):
+            _scan_all(tmp, workspace, "a")
+
+
 if __name__ == "__main__":
     test_gzip_roundtrip()
     test_lz4_roundtrip()
     test_lz4_raw_roundtrip()
     test_gzip_matches_snappy()
+    test_gzip_crc_mismatch_refused()
     print("✅ okay")

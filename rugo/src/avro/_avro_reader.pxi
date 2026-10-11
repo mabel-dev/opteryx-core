@@ -24,7 +24,7 @@ cdef extern from "avro/avro_reader.hpp" namespace "rugo::avro":
     # throws std::runtime_error -> RuntimeError.
     void read_avro_buffer(const uint8_t* data, size_t size, const vector[string]& columns,
                           cbool all_columns, const string& reader_schema_json,
-                          AvroRead& out) except + nogil
+                          size_t max_threads, AvroRead& out) except + nogil
     void read_avro_header(const uint8_t* data, size_t size, AvroRead& out) except + nogil
 
     cdef struct AvroColumnType:
@@ -34,9 +34,9 @@ cdef extern from "avro/avro_reader.hpp" namespace "rugo::avro":
         uint8_t scale
         DrakenType child_type
 
-    cppclass AvroStream:
-        AvroStream(const uint8_t* data, size_t size, const vector[string]& columns,
-                   cbool all_columns, const string& reader_schema_json) except +
+    cppclass AvroFile:
+        AvroFile(const uint8_t* data, size_t size, const vector[string]& columns,
+                 cbool all_columns, const string& reader_schema_json) except +
         vector[string] column_names()
         vector[AvroColumnType] column_types()
 
@@ -55,7 +55,7 @@ cdef dict _avro_metadata(AvroRead& res):
     return meta
 
 
-def read_avro(data, columns=None, reader_schema=None):
+def read_avro(data, columns=None, reader_schema=None, size_t max_threads=0):
     """
     Read an Avro object container file into Draken vectors.
 
@@ -68,6 +68,8 @@ def read_avro(data, columns=None, reader_schema=None):
       reader_schema: an Avro schema (JSON text) to read the file as: fields match by
         field-id when both sides carry one, else by name; a field the file lacks is
         its default (or NULL). None = the file's own schema.
+      max_threads: the file's batches are decoded on up to this many threads (0 =
+        every core); the result keeps the file's order.
 
     Returns:
       dict with keys:
@@ -92,7 +94,7 @@ def read_avro(data, columns=None, reader_schema=None):
     if reader_schema is not None:
         rschema = reader_schema.encode("utf-8")
     with nogil:
-        read_avro_buffer(ptr, n, cols, all_columns, rschema, res)
+        read_avro_buffer(ptr, n, cols, all_columns, rschema, max_threads, res)
 
     batches = []
     num_rows = 0
@@ -143,10 +145,10 @@ def read_avro_column_types(data, reader_schema=None):
     cdef string rschema
     if reader_schema is not None:
         rschema = reader_schema.encode("utf-8")
-    cdef AvroStream* stream = new AvroStream(ptr, n, no_columns, True, rschema)
-    cdef vector[AvroColumnType] types = stream.column_types()
-    names = [name.decode("utf-8") for name in stream.column_names()]
-    del stream
+    cdef AvroFile* avro_file = new AvroFile(ptr, n, no_columns, True, rschema)
+    cdef vector[AvroColumnType] types = avro_file.column_types()
+    names = [name.decode("utf-8") for name in avro_file.column_names()]
+    del avro_file
     out = []
     cdef size_t i
     for i in range(types.size()):
