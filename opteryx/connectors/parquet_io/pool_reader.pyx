@@ -3075,9 +3075,13 @@ cdef class NativeScanPlan:
             return
         self._closed = True
         if self.pipeline_ptr != NULL:
-            self.pipeline_ptr.cancel()
-            self.pipeline_ptr.wait_shutdown()
-            del self.pipeline_ptr
+            # GIL released: wait_shutdown blocks until in-flight fetch/decode work
+            # drains, which on GCS took >5s at teardown - holding the GIL froze the
+            # whole process and uvicorn killed the worker as hung (odata 503s).
+            with nogil:
+                self.pipeline_ptr.cancel()
+                self.pipeline_ptr.wait_shutdown()
+                del self.pipeline_ptr
             self.pipeline_ptr = NULL
         if self.footer_map != NULL:
             del self.footer_map
