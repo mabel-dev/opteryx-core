@@ -217,6 +217,7 @@ q:
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
 	@$(PYTEST) tests/integration/test_row_identity_native_scan_local.py -q
 	@$(MAKE) --no-print-directory chunk-cache-test
+	@$(MAKE) --no-print-directory gb-block-store-test
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
@@ -341,6 +342,20 @@ chunk-cache-test: ## Build and run the chunk cache policy tests (S3-FIFO admissi
 	    -o chunk_cache_test
 	@/tmp/opteryx-tests/chunk_cache_test
 	$(call print_green,"✓ chunk cache policy tests passed")
+
+gb-block-store-test: ## Build and run the GROUP BY block store tests (pool, segmented arrays, arena) for both segment geometries, under ASan
+	$(call print_blue,"Building and running GROUP BY block store tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@for fx in 0 1; do \
+	  clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -DOPTERYX_GB_SEG_FIXED=$$fx \
+	    -I$(CURDIR)/draken -I$(CURDIR)/draken/core -I$(CURDIR)/src/cpp/engine \
+	    $(CURDIR)/src/cpp/engine/test_gb_block_store.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
+	    -o /tmp/opteryx-tests/test_gb_block_store_$$fx && \
+	  /tmp/opteryx-tests/test_gb_block_store_$$fx || exit 1; \
+	done
+	$(call print_green,"✓ GROUP BY block store tests passed")
 
 page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse + page-predicate tests
 	$(call print_blue,"Building and running PageIndex tests...")

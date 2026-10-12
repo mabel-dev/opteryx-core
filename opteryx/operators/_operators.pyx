@@ -220,6 +220,12 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_da_rejects "opteryx::engine::groupby_tel::da_rejects_count" ()
     long long gb_tel_da_fallbacks "opteryx::engine::groupby_tel::da_fallbacks_count" ()
     long long gb_tel_dict_codepass "opteryx::engine::groupby_tel::dict_codepass_count" ()
+    long long gb_pool_hits "opteryx::engine::groupby_tel::gb_pool_hits_count" ()
+    long long gb_pool_misses "opteryx::engine::groupby_tel::gb_pool_misses_count" ()
+    long long gb_pool_os_bytes "opteryx::engine::groupby_tel::gb_pool_os_bytes_count" ()
+    long long gb_pool_freed_bytes "opteryx::engine::groupby_tel::gb_pool_freed_bytes_count" ()
+    long long gb_pool_retained "opteryx::engine::groupby_tel::gb_pool_retained_bytes" ()
+    void gb_pool_tel_reset "opteryx::engine::groupby_tel::gb_pool_tel_reset" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
 cdef extern from "engine/scan_tel.hpp" namespace "opteryx::engine::scan_tel" nogil:
@@ -860,6 +866,7 @@ def reset_groupby_telemetry():
     """Zero the GroupBySink hash/probe/apply phase accumulators (groupby_tel.hpp).
     Diagnostic only — call before a traced query to attribute the reading to it."""
     gb_tel_reset()
+    gb_pool_tel_reset()
 
 
 def get_groupby_telemetry():
@@ -886,6 +893,13 @@ def get_groupby_telemetry():
         "da_rejects":         gb_tel_da_rejects(),
         "da_fallbacks":       gb_tel_da_fallbacks(),
         "dict_codepass":      gb_tel_dict_codepass(),
+        # GROUP BY block pool (gb_block_store.hpp): blocks served from the pool vs
+        # allocated from the system, bytes allocated/freed, bytes the pool now holds.
+        "pool_hits":          gb_pool_hits(),
+        "pool_misses":        gb_pool_misses(),
+        "pool_os_bytes":      gb_pool_os_bytes(),
+        "pool_freed_bytes":   gb_pool_freed_bytes(),
+        "pool_retained_bytes": gb_pool_retained(),
     }
 
 

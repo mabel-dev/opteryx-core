@@ -72,6 +72,15 @@ class CarcharIndex {
         }
     }
 
+    // Forget every entry, keeping the capacity. A GROUP BY flush window re-uses its
+    // table instead of allocating a fresh one (docs/GROUPBY_REDESIGN_2026_10_12.md R3).
+    // Only control_ is reset: an empty slot's hash/payload are never read (see
+    // initialize_storage), so slots_ keeps whatever it held.
+    void clear() noexcept {
+        std::fill(control_.begin(), control_.end(), kEmpty);
+        size_ = 0;
+    }
+
     void tighten() {
         tighten(load_factor_);
     }

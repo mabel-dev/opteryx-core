@@ -98,6 +98,14 @@ inline long long da_layouts_prescan_count() { return da_layouts_prescan.load(std
 inline long long da_rejects_count()         { return da_rejects.load(std::memory_order_relaxed); }
 inline long long da_fallbacks_count()       { return da_fallbacks.load(std::memory_order_relaxed); }
 inline long long dict_codepass_count()      { return dict_codepass.load(std::memory_order_relaxed); }
+// GROUP BY block pool (gb_block_store.hpp) — defined there, read here for the Cython
+// surface. Declared, not included, so this header stays dependency-free.
+inline long long gb_pool_hits_count();
+inline long long gb_pool_misses_count();
+inline long long gb_pool_os_bytes_count();
+inline long long gb_pool_freed_bytes_count();
+inline long long gb_pool_retained_bytes();
+inline void gb_pool_tel_reset();
 
 }  // namespace opteryx::engine::groupby_tel
 
