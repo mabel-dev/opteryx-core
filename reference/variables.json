@@ -531,6 +531,28 @@
         "default": null,
         "default_source": "host"
     },
+    "opteryx_access_version": {
+        "name": "opteryx_access_version",
+        "type": "VARCHAR",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "literal"
+    },
+    "opteryx_catalog_version": {
+        "name": "opteryx_catalog_version",
+        "type": "VARCHAR",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "literal"
+    },
     "opteryx_debug": {
         "name": "opteryx_debug",
         "type": "BOOL",
@@ -542,6 +564,17 @@
         "default": null,
         "default_source": "environment",
         "environment_key": "OPTERYX_DEBUG"
+    },
+    "opteryx_iceberg_version": {
+        "name": "opteryx_iceberg_version",
+        "type": "VARCHAR",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "literal"
     },
     "parquet_gcs_io_workers": {
         "name": "parquet_gcs_io_workers",
