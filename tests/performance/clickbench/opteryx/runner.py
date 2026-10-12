@@ -28,17 +28,21 @@ class Dataset(enum.Enum):
     # this name only locates the directory: the queries read it through
     # READ_AVRO (see `relation_sql`).
     FULL_SPLIT_AVRO = "scratch.hits_avro"
-    # Remote Iceberg tables on AIStor (tests/performance/_common.py). Canon split and
-    # rugo split are the same files as FULL_SPLIT / FULL_SPLIT_RUGO_262K; canon single
-    # is upstream's hits.parquet. Skene has no Iceberg form, so no remote skene.
+    # Remote Iceberg tables on AIStor (tests/performance/_common.py). Canon split is
+    # the same files as FULL_SPLIT; canon single is upstream's hits.parquet. The rugo
+    # split is FULL_SPLIT rewritten file by file (hits_N kept), 64k-row row groups in
+    # blocks of 4, time columns typed - `dev/rewrite_parquet_layout.py
+    # --retype-clickbench`, the ClickBench rewritten entry's load - so NOT the same
+    # files as FULL_SPLIT_RUGO_262K (a repack into part-NNN). Skene has no Iceberg
+    # form, so no remote skene.
     AISTOR_CANON_SPLIT = "aistor.clickbench.hits_canon_split"
     AISTOR_CANON_SINGLE = "aistor.clickbench.hits_canon_single"
-    AISTOR_RUGO_SPLIT = "aistor.clickbench.hits_rugo_split"
+    AISTOR_RUGO_SPLIT = "aistor.clickbench.hits_rugo_typed_split"
     # Quick remote variants: files hits_0..hits_9 of each split (10M rows, the
     # same rows in both), for iteration in minutes rather than hours. Compare
     # against duckdb/results.local.hits10.json, not the full-dataset baseline.
     AISTOR_CANON_SPLIT_10 = "aistor.clickbench.hits_canon_split_10"
-    AISTOR_RUGO_SPLIT_10 = "aistor.clickbench.hits_rugo_split_10"
+    AISTOR_RUGO_SPLIT_10 = "aistor.clickbench.hits_rugo_typed_split_10"
 
 
 REMOTE_DATASETS = {

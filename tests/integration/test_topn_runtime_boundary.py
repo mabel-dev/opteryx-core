@@ -235,8 +235,18 @@ def test_oracle_row_groups_without_statistics(tmp_path, label, template, source)
         (pa.int64(), [-(2**62) + i for i in range(N)]),
         (pa.date32(), [datetime.date(2000, 1, 1) + datetime.timedelta(days=i // 10)
                        for i in range(N)]),
+        # TIMESTAMP in each stored unit: the native scans retag a timestamp without
+        # rescaling it, so the footer statistic and the decoded value are the same
+        # int64 whatever the unit (compiler._topn_boundary_type_ok).
+        (pa.timestamp("ms"), [datetime.datetime(2000, 1, 1) + datetime.timedelta(seconds=i)
+                              for i in range(N)]),
+        (pa.timestamp("us"), [datetime.datetime(2000, 1, 1) + datetime.timedelta(seconds=i)
+                              for i in range(N)]),
+        (pa.timestamp("ns"), [datetime.datetime(2000, 1, 1) + datetime.timedelta(seconds=i)
+                              for i in range(N)]),
     ],
-    ids=["int32", "int16", "uint32", "uint32_high", "int64_negative", "date32"],
+    ids=["int32", "int16", "uint32", "uint32_high", "int64_negative", "date32",
+         "timestamp_ms", "timestamp_us", "timestamp_ns"],
 )
 @pytest.mark.parametrize("direction", ["", " DESC"])
 def test_oracle_admitted_types(tmp_path, key_type, keys, direction):
@@ -267,13 +277,11 @@ def test_oracle_multi_key_leading_key_only(tmp_path):
     "key_type,keys",
     [
         (pa.float64(), [float(i) for i in range(N)]),
-        (pa.timestamp("ms"), [datetime.datetime(2000, 1, 1) + datetime.timedelta(seconds=i)
-                              for i in range(N)]),
         (pa.string(), ["%08d" % i for i in range(N)]),
         (pa.decimal128(12, 2), [decimal.Decimal(i) / 100 for i in range(N)]),
         (pa.uint64(), list(range(N))),
     ],
-    ids=["float64", "timestamp", "string", "decimal", "uint64"],
+    ids=["float64", "string", "decimal", "uint64"],
 )
 def test_refused_types(tmp_path, key_type, keys):
     """Types outside the allow-list (§6): refusing costs a read, never an answer —

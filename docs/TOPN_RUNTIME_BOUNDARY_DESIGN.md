@@ -329,8 +329,13 @@ byte-for-byte as they are today.
    - `FLOAT32/64`: NaN ordering. `sort_num_key` puts NaN highest, while parquet keeps NaN out of
      min/max. That is the `_nan_invisible_to_bounds` problem, and `TopNManifestPruningStrategy`
      refuses floats for the same reason.
-   - `TIMESTAMP64`, `TIME32/64`: unit lives in the logical type, and decode may rescale.
-     Admissible later if condition 4 is proven to cover it.
+   - `TIME32/64`: not decoded as a temporal type from a scan (a TIME column reaches the
+     plain int path), so there is nothing to admit.
+   - *[admitted 2026-10-12]* `TIMESTAMP64` was refused here ("decode may rescale"). It does
+     not: the native scans' LC_TIMESTAMP is a bit-reinterpret of the stored int64 that
+     attaches the declared unit, so the decoded value is the footer's int64 whatever the
+     units, and draken ordinalizes TIMESTAMP64 with INT64's kernel. Refusing it cost
+     ClickBench Q23/Q24/Q26 ~5x once the corpus declared EventTime as TIMESTAMP.
    - `DECIMAL`, `DECIMAL128`: scale and missing kernel, as in the join filter's D6.
    - Strings: parquet has no string stat converter (`parquet_stat_ordinal.hpp` v1 limits). Skene
      could use its prefix ordinal, which is sound because it is monotone, but no measured query
@@ -369,7 +374,7 @@ single-key latmat spec. That is Decision D4.
   groups, and n or more NULLs; row groups without statistics; ties at the boundary spanning row
   groups; LIMIT larger than the match count; a predicate matching nothing; UINT64 values at or
   above 2^63; INT32; DATE32; multi-key with the leading key tied across row groups.
-- **Refusals asserted not armed:** FLOAT, TIMESTAMP, DECIMAL, string leading key, coerced column,
+- **Refusals asserted not armed:** FLOAT, DECIMAL, string leading key, coerced column,
   a Filter node between scan and HeapSort. (OFFSET moved to the oracle set: it arms, see §6.)
 - **Accounting:** a scan where every unit after the first block is skipped must finish,
   and must not hang or return early.
@@ -465,8 +470,8 @@ check for the tracker's cost on queries that arm and skip nothing.
 - `test_topn_runtime_boundary.py`: 53 cases, stable over six repeated runs. They cover both
   paths; ASC and DESC; NULLS FIRST and LAST with scattered and whole-row-group NULLs; ties
   across row groups; LIMIT beyond the match count; zero matches; no statistics; INT16, INT32,
-  INT64 negative, UINT32 above 2³¹, and DATE32; multi-key; OFFSET; refusals for FLOAT64,
-  TIMESTAMP, VARCHAR, DECIMAL, UINT64, a computed key and the switch; and positive controls
+  INT64 negative, UINT32 above 2³¹, DATE32, and (2026-10-12) TIMESTAMP in ms/us/ns;
+  multi-key; OFFSET; refusals for FLOAT64, VARCHAR, DECIMAL, UINT64, a computed key and the switch; and positive controls
   with skip counts and telemetry.
 - `make q` green. Full serial suite with `VALIDATE_OPTIMIZER_PLANS=1`: 39 failures, every one
   in the 2026-09-26 pre-existing baseline categories, with no new failure.

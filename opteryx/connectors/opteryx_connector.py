@@ -29,6 +29,7 @@ from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
 from opteryx.exceptions import (
     CollectionNotEmptyError,
+    DatasetMetadataReadError,
     DatasetNotFoundError,
     DatasetReadError,
     InvalidInternalStateError,
@@ -229,8 +230,17 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                 schema.name = relation_name
             return schema
 
+        # A catalog that hands over no schema, or something that is not one, is
+        # refused here rather than read as "no columns": defaulting `.columns`
+        # to empty turned a raw stored column LIST into a relation with zero
+        # columns, so `SELECT *` bound nothing and a named column was "not
+        # found" - the real failure surfaced three layers later.
+        if schema is None:
+            raise DatasetReadError(
+                f"The catalog returned no schema for {relation_name or 'the dataset'}."
+            )
         columns = []
-        for column in getattr(schema, "columns", []) or []:
+        for column in schema.columns:
             if isinstance(column, SchemaColumn):
                 raise DatasetReadError(
                     f"The catalog described column {column.name} of "
@@ -244,7 +254,10 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                 if name is None and isinstance(column, dict):
                     name = column.get("name")
                 if name is None:
-                    continue
+                    raise DatasetReadError(
+                        f"The catalog described a column of "
+                        f"{relation_name or getattr(schema, 'name', 'dataset')} with no name."
+                    )
 
                 raw_type = getattr(column, "type", None)
                 if raw_type is None and isinstance(column, dict):
@@ -371,7 +384,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         """
         raw_schema = self.table.schema()
         if raw_schema is None:
-            raise DatasetReadError(
+            raise DatasetMetadataReadError(
                 f"The dataset {self.dataset} has no registered schema."
             )
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
@@ -792,7 +805,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
             # below - falling through to that would answer a question about
             # February with "this relation has never been written to".
             if self.snapshot is None:
-                raise DatasetReadError(
+                raise DatasetMetadataReadError(
                     f"Snapshot {self.snapshot_id} of {self.dataset} is in the relation's "
                     "history but could not be read."
                 )
@@ -905,7 +918,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
 
         data = self.table.manifest_bytes(self.snapshot.snapshot_id)
         if data is None:
-            raise DatasetReadError(
+            raise DatasetMetadataReadError(
                 f"Snapshot {self.snapshot.snapshot_id} of {self.dataset} names the manifest "
                 f"{location} but the catalog served none."
             )

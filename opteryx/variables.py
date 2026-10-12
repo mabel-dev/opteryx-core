@@ -42,6 +42,7 @@ feature flag, name the variable for the state the user probably doesn't want -
 e.g. disable_optimizer (default to False)
 """
 
+import importlib.metadata
 import sys
 import sysconfig
 from enum import Enum
@@ -163,6 +164,18 @@ def _python_version() -> str:
     if sysconfig.get_config_var("Py_GIL_DISABLED"):
         return version + "t"
     return version
+
+
+def _installed_version(distribution: str) -> Optional[str]:
+    """The installed version of a companion distribution, or None when it is absent.
+
+    opteryx-core depends on none of these - a deployment installs them beside the
+    engine - so absence is a legitimate answer, not a failure, and None says "not
+    installed" rather than inventing a version. `distributions(name=...)` is a
+    lookup that yields nothing for a missing name, where `version()` would raise.
+    """
+    found = next(iter(importlib.metadata.distributions(name=distribution)), None)
+    return None if found is None else found.version
 
 # fmt: off
 SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
@@ -463,6 +476,14 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # DEPLOYMENT, not the caller's query, and an ordinary caller learning the host's
     # RAM or interpreter build learns nothing about their own data.
     "python_version": (VARCHAR, _python_version(), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # The companion libraries a deployment installs beside the engine, read from
+    # their installed metadata. The engine's own version is `version`/`build`; these
+    # answer "which access/catalog/iceberg code is this process running", which
+    # neither of those can. RESTRICTED alongside `python_version`: they describe the
+    # DEPLOYMENT. None when the distribution is not installed.
+    "opteryx_access_version": (VARCHAR, _installed_version("opteryx-access"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "opteryx_catalog_version": (VARCHAR, _installed_version("opteryx-catalog"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "opteryx_iceberg_version": (VARCHAR, _installed_version("opteryx-iceberg"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # `sys.platform` rather than the native is_linux/is_macos probes in
     # opteryx.compiled.platform: those answer two yes/no questions and collapse
     # everything else (BSD, Windows) to a silent "neither", which would report a

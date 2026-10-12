@@ -22,7 +22,9 @@ The unit of measurement is the PAIR: the O and D runs adjacent in one slot, the
 ratio taken inside the pair so machine drift common to both cancels. A query's
 figure is the median of its paired ratios.
 
-Both engines read the SAME files (default: scratch/hits_rugo_262k). The Opteryx
+Both engines read the SAME files (default: scratch/hits, upstream's untyped
+split - the DuckDB queries read EventTime/EventDate as integers, so they do not
+run on the typed rugo mirror scratch/hits_rugo_262k). The Opteryx
 queries and the DuckDB queries are imported from their own runners, so there is
 one definition of the suite.
 
@@ -104,8 +106,8 @@ def main() -> int:
                         help="Idle seconds before EVERY pair, so first-movers see identical idle (default: 5)")
     parser.add_argument("--max-ratio", type=float, default=1.05,
                         help="Fail if the upper 95%% bound of geomean(opteryx/duckdb) exceeds this (default: 1.05)")
-    parser.add_argument("--data", default="scratch/hits_rugo_262k",
-                        help="Directory of parquet files both engines read (default: scratch/hits_rugo_262k)")
+    parser.add_argument("--data", default="scratch/hits",
+                        help="Directory of parquet files both engines read (default: scratch/hits)")
     parser.add_argument("--queries", default="",
                         help="Comma-separated zero-based query numbers to run (default: all)")
     args = parser.parse_args()

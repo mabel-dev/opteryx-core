@@ -4,10 +4,11 @@
 # Runs natively on a macOS runner (no docker, arm64 only — see release.yaml).
 # The interpreter is whatever `python` resolves to (set up by actions/setup-python).
 # Unlike rugo, opteryx_core needs Rust (opteryx.compute) and libcurl (http_client).
-# We use system libcurl via Homebrew + pkg-config rather than the vendored static
-# build — that path exists for manylinux containers with no package manager, but
-# on a macOS runner `brew install curl pkg-config` is simpler and is the path
-# setup.py's own error message documents for macOS.
+# On darwin setup.py ALWAYS builds the vendored static libcurl with select()
+# unbounded (see setup.py _DARWIN_CURL_FD_SETSIZE): every darwin libcurl —
+# Apple's and Homebrew's — is select()-only and fails connections on fd >= 1024.
+# It needs OpenSSL via pkg-config; curl's configure also picks up Homebrew's
+# nghttp2/nghttp3 if present, which delocate then bundles.
 set -ex
 
 # repo root = parent of this script's dir (dev/). setup.py self-roots here.

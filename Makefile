@@ -1013,8 +1013,8 @@ job-aistor: ## Run Join Order Benchmark (JOB) against the parquet corpus on AISt
 
 # ── Quick remote variants: SF0.1-sized, for iteration in minutes ─────────────
 #
-# The full remote suites take hours (ClickBench alone runs for most of a day at
-# 30ms latency). These carry the same shapes at about a tenth of the data:
+# The full remote suites take hours. These carry the same shapes at about a
+# tenth of the data:
 # TPC-H/TPC-DS SF0.1 (testdata/tpch_01, tpcds_01), H2O small (1e7 rows), and
 # ClickBench files hits_0..hits_9 of each split (10M rows, identical rows in
 # both). JOB has no scale - its IMDB corpus is fixed - so it has no quick variant.

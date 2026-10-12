@@ -526,9 +526,10 @@ constexpr int64_t kRemoteFetchBytesPerSec = 60000000;
 
 class ChunkPageSource {
  public:
-  // `skips_pages`: the decode is masked or follows a page jump plan, so it skips
-  // pages by design — never fill. `predicated`: a dictionary skip / page search
-  // may stop early; fill, but remember a chunk that came out incomplete.
+  // `skips_pages`: the decode follows a page jump plan, so it skips pages by
+  // design — never fill. `predicated`: a dictionary skip / page search / row mask
+  // may stop early or pass pages by; fill, but remember a chunk that came out
+  // incomplete.
   ChunkPageSource(const ChunkCacheRequest* req, const ColumnStats* col,
                   const uint8_t* data, bool skips_pages, bool predicated)
       : req_(req), data_(data), predicated_(predicated) {
@@ -699,9 +700,17 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                     bool length_only,
                                     const ChunkCacheRequest* cache) {
   result.reset();
+  // A masked decode (a later column of a multi-predicate scan, pass 2) fills too:
+  // it still decompresses every page it walks, and commit() refuses a chunk with a
+  // page missing, so a fill is complete or not inserted. It counts as predicated so
+  // a chunk that came out incomplete is remembered and not re-filled every query.
+  // Keeping masked decodes out left every non-leading predicate column of ClickBench
+  // Q22 (URL, SearchPhrase) decompressed afresh on every run. A page JUMP skips
+  // pages by design, so it still never fills.
   ChunkPageSource pages(cache, target_col, file_data,
-                        /*skips_pages=*/row_mask != nullptr || jump != nullptr,
-                        /*predicated=*/skip_pred != nullptr || search != nullptr);
+                        /*skips_pages=*/jump != nullptr,
+                        /*predicated=*/skip_pred != nullptr || search != nullptr ||
+                                       row_mask != nullptr);
   if (search != nullptr) {
     search->row_mask.clear();
     search->applied = false;

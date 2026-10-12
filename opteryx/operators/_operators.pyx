@@ -219,7 +219,6 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_da_layouts_prescan "opteryx::engine::groupby_tel::da_layouts_prescan_count" ()
     long long gb_tel_da_rejects "opteryx::engine::groupby_tel::da_rejects_count" ()
     long long gb_tel_da_fallbacks "opteryx::engine::groupby_tel::da_fallbacks_count" ()
-    long long gb_tel_da_dict_first "opteryx::engine::groupby_tel::da_dict_first_count" ()
     long long gb_tel_dict_codepass "opteryx::engine::groupby_tel::dict_codepass_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
@@ -886,7 +885,6 @@ def get_groupby_telemetry():
         "da_layouts_prescan": gb_tel_da_layouts_prescan(),
         "da_rejects":         gb_tel_da_rejects(),
         "da_fallbacks":       gb_tel_da_fallbacks(),
-        "da_dict_first":      gb_tel_da_dict_first(),
         "dict_codepass":      gb_tel_dict_codepass(),
     }
 
@@ -4239,11 +4237,12 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
         from opteryx.exceptions import DataError
         return DataError(errslot.message() or "unknown data error")
     # Code 3 (kErrCodeReadError, operator.hpp) marks a STORAGE read failure - a scan
-    # could not fetch bytes it was planned to read. Raised as DatasetReadError, the
-    # class every non-native read path raises for the same failure.
+    # could not fetch bytes it was planned to read. Raised as DatasetDataReadError
+    # (a DatasetReadError, the class every non-native read path raises for the same
+    # failure) because by this point the metadata was read and the plan was built.
     if errslot.code == 3:
-        from opteryx.exceptions import DatasetReadError
-        return DatasetReadError(errslot.message() or "unknown read error")
+        from opteryx.exceptions import DatasetDataReadError
+        return DatasetDataReadError(errslot.message() or "unknown read error")
     return RuntimeError(
         "[%d]: %s" % (errslot.code, errslot.message() or "unknown")
     )

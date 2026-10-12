@@ -1793,9 +1793,9 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
     except DatabaseError as err:
         raise err
     except Exception as e:
-        from opteryx.exceptions import DatasetReadError
+        from opteryx.exceptions import DatasetMetadataReadError
 
-        raise DatasetReadError(f"Cannot read information for dataset '{node.relation}': {e}") from e
+        raise DatasetMetadataReadError(f"Cannot read information for dataset '{node.relation}': {e}") from e
     finally:
         if context.telemetry is not None:
             context.telemetry.time_binding_metadata += (

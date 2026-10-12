@@ -23,7 +23,8 @@ from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.pair cimport pair
-from libcpp.memory cimport shared_ptr
+from libcpp.memory cimport shared_ptr, weak_ptr
+from libcpp.unordered_map cimport unordered_map
 from cython.operator cimport dereference as deref
 import time
 import struct
@@ -182,7 +183,7 @@ from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchP
 # fetched, keyed by data-file path. Envelope bytes only — reconstructed through the same
 # parser as a cold fetch, so a hit can never disagree with a cold read.
 from opteryx.connectors.parquet_io.footer_remote_cache import remote_footer_cache
-from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import DatasetDataReadError
 from opteryx.logging import get_logger
 
 _logger = get_logger(__name__)
@@ -199,6 +200,24 @@ _PARQUET_FOOTER_SUFFIX = 8
 from opteryx import config as _config
 cdef ParquetParsedFooterCache _PARSED_FOOTER_CACHE = ParquetParsedFooterCache(
     _config.PARQUET_FOOTER_CACHE_BYTES)
+
+# Per-file ADMIT verdicts of `native_scan_rejection`, keyed by path + request
+# signature (projected names, kinds, declared types, whether absent columns are
+# fillable). The gate's per-file walk is a pure function of the parsed footer and
+# that signature, and it ran on every query over every row group (Q41: 1.5 ms of a
+# 10 ms query on 1526 row groups). An entry holds a WEAK reference to the footer it
+# was proven against: a hit requires that exact parsed object still to be live and
+# to be the one the footer cache serves now, so a re-parse or an eviction
+# invalidates it without the entry pinning an evicted footer in memory.
+# Rejections are never cached — they are rare, and their reason names the file and
+# row group. Only touched with the GIL held (the gate is a cpdef that never
+# releases it), which is what serialises access.
+ctypedef weak_ptr[const FileStats] _WeakFooterRef
+ctypedef pair[_WeakFooterRef, vector[int]] _AdmitEntry
+cdef unordered_map[string, _AdmitEntry] _ADMIT_CACHE
+# Bound on entries (files x distinct request signatures). Overflow clears the whole
+# map: the cost is one re-proof per file, never a wrong answer.
+cdef size_t _ADMIT_CACHE_MAX_ENTRIES = 1 << 15
 
 
 cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
@@ -1475,7 +1494,7 @@ cdef list _pread_runs(str path, list runs):
     with nogil:
         fd = posix_open(cpath, O_RDONLY)
     if fd < 0:
-        raise DatasetReadError(f"Unable to open '{path}' to read its bloom filters")
+        raise DatasetDataReadError(f"Unable to open '{path}' to read its bloom filters")
     try:
         for start, end in runs:
             buf = bytearray(end - start)
@@ -1485,7 +1504,7 @@ cdef list _pread_runs(str path, list runs):
                 with nogil:
                     n = pread(fd, dst + got, <size_t>(end - start - got), <off_t>(start + got))
                 if n <= 0:
-                    raise DatasetReadError(
+                    raise DatasetDataReadError(
                         f"Short read of bloom filters in '{path}' at offset {start + got}"
                     )
                 got += n
@@ -1842,7 +1861,7 @@ cdef class IpcRowGroupSource:
                 "Parquet pipeline error: %s",
                 result.error.decode('utf-8'),
             )
-            raise DatasetReadError(
+            raise DatasetDataReadError(
                 "Unable to read data from storage, the read did not complete. "
                 "The cause has been logged."
             )
@@ -3676,6 +3695,10 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     cdef string stored_int
     cdef dict orig_to_cpp
     cdef str fetch_url
+    cdef string request_sig
+    cdef string admit_key
+    cdef ParquetFooterRef admitted_footer
+    cdef vector[int] admitted_missing
 
     # An EMPTY read set is admitted: a zero-projection scan reads no column, so the
     # per-column checks below are vacuous and only the path/footer checks apply —
@@ -3696,6 +3719,13 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
         kinds.append(kind)
         declared_types.append(declared_type)
         declared.push_back(<string>(<str>declared_type).encode("utf-8"))
+        # Request signature for _ADMIT_CACHE: every input the per-file walk reads
+        # besides the footer. NUL-separated — no column name or kind holds a NUL.
+        request_sig.append(wanted[<size_t>k])
+        request_sig.push_back(0)
+        request_sig.append(<string>(<str>expected_kinds[k]).encode("utf-8"))
+        request_sig.push_back(0)
+    request_sig.append(<string>(b"A" if absent is not None else b"R"))
 
     # Transport eligibility, before any footer work: local, or remote-and-signable.
     # An unsignable remote path fails the gate — the pipeline's libcurl fetches carry
@@ -3764,6 +3794,21 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             buf_size = <size_t>len(envelope)
             footer = _PARSED_FOOTER_CACHE.put(path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
         fsp = footer.get()
+        # A file already proven against THIS parsed footer for THIS request is
+        # admitted without the walk. `lock()` yields NULL once the footer is freed,
+        # and a live object's address cannot be reused, so pointer equality is
+        # object identity.
+        admit_key = <string>(<str>path).encode("utf-8")
+        admit_key.push_back(0)
+        admit_key.append(request_sig)
+        if _ADMIT_CACHE.count(admit_key):
+            admitted_footer = _ADMIT_CACHE[admit_key].first.lock()
+            if admitted_footer.get() == fsp:
+                admitted_missing = _ADMIT_CACHE[admit_key].second
+                if admitted_missing.size():
+                    absent[path] = [m for m in admitted_missing]
+                continue
+            _ADMIT_CACHE.erase(admit_key)
         file_missing = None
         for rg_i in range(fsp.row_groups.size()):
             rgp = &fsp.row_groups[rg_i]
@@ -3930,6 +3975,13 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                         f"{rg_missing})")
         if file_missing:
             absent[path] = file_missing
+        if _ADMIT_CACHE.size() >= _ADMIT_CACHE_MAX_ENTRIES:
+            _ADMIT_CACHE.clear()
+        admitted_missing.clear()
+        if file_missing:
+            for k in file_missing:
+                admitted_missing.push_back(k)
+        _ADMIT_CACHE[admit_key] = _AdmitEntry(_WeakFooterRef(footer), admitted_missing)
     return None
 
 

@@ -48,12 +48,17 @@ LIBRARY = "opteryx"
 
 
 # Build vendored libcurl as static library
-def build_vendored_libcurl():
-    """Build vendored libcurl as a static library for http_client extension."""
+def build_vendored_libcurl(build_subdir="curl", cppflags=""):
+    """Build vendored libcurl as a static library for http_client extension.
+
+    `build_subdir` names the directory under build/ and is the cache key, so a
+    build with different `cppflags` must use a different subdir — the cache
+    below is keyed on the archive existing, not on how it was configured.
+    """
     import subprocess
 
     curl_src = os.path.join(os.path.dirname(__file__), "third_party", "curl")
-    curl_build = os.path.join(os.path.dirname(__file__), "build", "curl")
+    curl_build = os.path.join(os.path.dirname(__file__), "build", build_subdir)
 
     if not os.path.exists(curl_src):
         print("Warning: vendored curl source not found, skipping libcurl build")
@@ -120,10 +125,16 @@ def build_vendored_libcurl():
     if openssl_prefix:
         configure_cmd.append(f"--with-openssl={openssl_prefix}")
 
+    configure_env = dict(os.environ)
+    if cppflags:
+        configure_env["CPPFLAGS"] = (configure_env.get("CPPFLAGS", "") + " " + cppflags).strip()
+        print(f"  CPPFLAGS={configure_env['CPPFLAGS']}")
+
     try:
         print(f"  Running: {' '.join(configure_cmd)}")
         result = subprocess.run(
-            configure_cmd, cwd=curl_build, check=False, capture_output=True, text=True
+            configure_cmd, cwd=curl_build, check=False, capture_output=True, text=True,
+            env=configure_env,
         )
         if result.returncode != 0:
             print(f"  Configure failed with code {result.returncode}")
@@ -341,17 +352,86 @@ def resolve_openssl():
     )
 
 
+# libcurl's configure refuses poll() on darwin, so every socket wait inside
+# libcurl goes through select() and Curl_socket_check() fails any fd >= FD_SETSIZE
+# (third_party/curl/lib/select.c). cf-socket.c then reports that as
+# CURLE_COULDNT_CONNECT with os_errno=0 and no packet problem at all: with the
+# default FD_SETSIZE of 1024, a process holding ~1000 descriptors (hundreds of
+# engine threads, each with its own CURLM wakeup pipe and connection cache) fails
+# every new connection. Apple's /usr/lib/libcurl and Homebrew's curl are both
+# built that way, so darwin always links the vendored build with select() made
+# unbounded (_DARWIN_UNLIMITED_SELECT) and fd_set sized to this.
+_DARWIN_CURL_FD_SETSIZE = 65536
+# glibc's fixed FD_SETSIZE — the limit if a vendored Linux build ever lacked poll().
+_LINUX_FD_SETSIZE = 1024
+
+
+def _vendored_curl_select_fd_limit(curl_build, fd_setsize):
+    """The fd ceiling of the vendored libcurl just built in `curl_build`.
+
+    0 when its configure enabled poll() (HAVE_POLL_FINE) — no FD_SETSIZE ceiling;
+    otherwise `fd_setsize`, the size its select() fallback was compiled with. Read
+    from the generated curl_config.h, so the value states what was built.
+    """
+    config_h = os.path.join(curl_build, "lib", "curl_config.h")
+    with open(config_h, "r") as f:
+        has_poll = re.search(r"^#define HAVE_POLL_FINE 1$", f.read(), re.MULTILINE) is not None
+    return 0 if has_poll else fd_setsize
+
+
+def _vendored_curl_static_libs(curl_build):
+    """Link args for the vendored static libcurl, from its own curl-config.
+
+    Includes the TLS library's -L path and any frameworks libcurl needs on this
+    platform (CoreFoundation/SystemConfiguration on darwin).
+    """
+    import subprocess
+
+    curl_config = os.path.join(curl_build, "bin", "curl-config")
+    result = subprocess.run(
+        [curl_config, "--static-libs"], capture_output=True, text=True, check=True
+    )
+    return result.stdout.split()
+
+
 def resolve_libcurl():
-    """Return (include_dirs, link_args) for libcurl, preferring system over vendored.
+    """Return (include_dirs, link_args, select_fd_limit) for libcurl.
+
+    `select_fd_limit` is compiled into http_client.cpp as
+    OPTERYX_CURL_SELECT_FD_LIMIT: the descriptor number at and above which the
+    linked libcurl cannot wait on a socket (0 = no such limit, libcurl uses poll()).
 
     Resolution order:
-      1. OPTERYX_VENDOR_CURL=1 → force vendored static (CI/wheel builds).
-      2. System libcurl via pkg-config → use it (fast, reliable for local dev).
-      3. Vendored static build → fallback.
+      darwin: ALWAYS the vendored static build, select() unbounded — see
+              _DARWIN_CURL_FD_SETSIZE. No system-libcurl path: it is the bug.
+      other:  1. OPTERYX_VENDOR_CURL=1 → force vendored static (CI/wheel builds).
+              2. System libcurl via pkg-config → use it (fast, reliable for local dev).
+                 Assumed to use poll() (every Linux distro libcurl does), limit 0.
+              3. Vendored static build → fallback.
     Hard-fails if none succeed; the http_client extension is mandatory.
 
     Both paths are gated on a thread-safe OpenSSL — see assert_openssl_thread_safe.
     """
+    if is_mac():
+        assert_openssl_thread_safe(fail_when_unknown=True)
+        subdir = f"curl-fdsetsize-{_DARWIN_CURL_FD_SETSIZE}"
+        libcurl_a = build_vendored_libcurl(
+            build_subdir=subdir,
+            cppflags=f"-D_DARWIN_UNLIMITED_SELECT -DFD_SETSIZE={_DARWIN_CURL_FD_SETSIZE}",
+        )
+        if not (libcurl_a and os.path.exists(libcurl_a)):
+            raise RuntimeError(
+                "Failed to build the vendored libcurl, which darwin REQUIRES: the system "
+                "libcurl fails every connection on a socket fd >= 1024 (select()-only). "
+                "See the build output above; it needs OpenSSL headers "
+                "(brew install openssl@3 pkg-config)."
+            )
+        curl_build = os.path.join(os.path.dirname(__file__), "build", subdir)
+        fd_limit = _vendored_curl_select_fd_limit(curl_build, _DARWIN_CURL_FD_SETSIZE)
+        link_args = _vendored_curl_static_libs(curl_build)
+        print(f"Using vendored libcurl (darwin, select fd limit {fd_limit}): {' '.join(link_args)}")
+        return ["third_party/curl/include"], link_args, fd_limit
+
     force_vendor = os.environ.get("OPTERYX_VENDOR_CURL", "0").lower() in ("1", "true", "yes")
 
     if not force_vendor:
@@ -360,7 +440,7 @@ def resolve_libcurl():
         if sys_curl is not None:
             sys_inc, sys_libs = sys_curl
             print(f"Using system libcurl (pkg-config): {' '.join(sys_libs)}")
-            return sys_inc, sys_libs
+            return sys_inc, sys_libs, 0
 
     # Fall back to vendored static build. This path links -lssl -lcrypto from the
     # pkg-config prefix that build_vendored_libcurl() passes to --with-openssl, so
@@ -368,7 +448,9 @@ def resolve_libcurl():
     assert_openssl_thread_safe(fail_when_unknown=True)
     libcurl_a = build_vendored_libcurl()
     if libcurl_a and os.path.exists(libcurl_a):
-        return ["third_party/curl/include"], [libcurl_a, "-lssl", "-lcrypto"]
+        curl_build = os.path.join(os.path.dirname(__file__), "build", "curl")
+        fd_limit = _vendored_curl_select_fd_limit(curl_build, _LINUX_FD_SETSIZE)
+        return ["third_party/curl/include"], [libcurl_a, "-lssl", "-lcrypto"], fd_limit
 
     raise RuntimeError(
         "Failed to resolve libcurl. The http_client extension is REQUIRED.\n\n"
@@ -417,10 +499,14 @@ _skip_build = not any(
 )
 _curl_include_dirs: list[str] = []
 _curl_link_args: list[str] = []
+# Every extension that compiles src/cpp/http_client.cpp takes this; the source
+# #errors without it, so a site that forgets it cannot build.
+_curl_define_macros: list[tuple[str, str]] = []
 _openssl_include_dirs: list[str] = []
 _openssl_link_args: list[str] = []
 if not _skip_build and not _DRAKEN_BUILD:
-    _curl_include_dirs, _curl_link_args = resolve_libcurl()
+    _curl_include_dirs, _curl_link_args, _curl_select_fd_limit = resolve_libcurl()
+    _curl_define_macros = [("OPTERYX_CURL_SELECT_FD_LIMIT", str(_curl_select_fd_limit))]
     _openssl_include_dirs, _openssl_link_args = resolve_openssl()
 
 
@@ -1127,7 +1213,8 @@ extensions = [
             ("ZSTD_STATIC_LINKING_ONLY", "1"),
             # libdeflate arm/cpu_features.c needs O_CLOEXEC under -std=c11 on glibc.
             ("_GNU_SOURCE", "1"),
-        ],
+        ]
+        + _curl_define_macros,
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA
@@ -1212,6 +1299,7 @@ if not _skip_build and not _DRAKEN_BUILD:
                 "src/cpp/http_client.cpp",
             ],
             include_dirs=include_dirs + ["src/cpp"] + _curl_include_dirs,
+            define_macros=_curl_define_macros,
             # CPP_FLAGS, not a hand-rolled -std=c++17 — see morsel_queue above.
             extra_compile_args=CPP_FLAGS,
             extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
@@ -1543,7 +1631,8 @@ extensions.append(
             + _curl_include_dirs
         ),
         # _GNU_SOURCE: libdeflate arm/cpu_features.c needs O_CLOEXEC under -std=c11 on glibc.
-        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1"), ("RUGO_ENABLE_HTTP", "1"), ("_GNU_SOURCE", "1")],
+        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1"), ("RUGO_ENABLE_HTTP", "1"), ("_GNU_SOURCE", "1")]
+        + _curl_define_macros,
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),

@@ -6659,7 +6659,7 @@ class _Compiler:
     _TOPN_BOUNDARY_TYPES = frozenset({
         DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
         DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32,
-        DrakenType.DATE32,
+        DrakenType.DATE32, DrakenType.TIMESTAMP64,
     })
 
     def _topn_boundary_type_ok(self, schema_column):
@@ -6668,9 +6668,18 @@ class _Compiler:
 
         * The type is on `_TOPN_BOUNDARY_TYPES`. Refused, and why: FLOAT32/64
           (NaN is highest to the sort, invisible to parquet's min/max);
-          TIMESTAMP64 / TIME32 / TIME64 (the unit lives in the logical type);
-          DECIMAL / DECIMAL128 (scale; no ordinal kernel); strings (no parquet
-          stat converter); BOOL (admissible, pointless).
+          TIME32 / TIME64 (not decoded as a temporal type from a scan — see
+          `_wp11_logical_coerce`); DECIMAL / DECIMAL128 (scale; no ordinal kernel);
+          strings (no parquet stat converter); BOOL (admissible, pointless).
+        * TIMESTAMP64 is admitted (2026-10-12). The native scans — the only
+          consumers a boundary arms on — never rescale a timestamp: LC_TIMESTAMP
+          is a bit-REINTERPRET of the stored int64 that attaches the DECLARED unit
+          (pool_reader.pyx's footer gate, native_parquet_scan_source.hpp
+          build_column). So the decoded value IS the footer's int64 whatever the
+          two units are, and draken ordinalizes TIMESTAMP64 with INT64's kernel
+          (ops/hash.h) while stat_bytes_to_ordinal widens the int64 statistic the
+          same way. Refusing it cost ClickBench Q23/Q24/Q26 ~5x once the corpus
+          declared EventTime as TIMESTAMP instead of INT64.
         * UINT64 is refused too, because of width widening. A file may store the
           column narrower than declared and the Source widens it losslessly — which
           keeps the VALUE, and for every other integer type the ORDINAL, since both
@@ -6679,9 +6688,10 @@ class _Compiler:
           widened (stat_bytes_to_ordinal), so the two would be in different spaces.
           Admitting it needs the consumer to know the declared type.
         * The decode does not otherwise change the value: `logical_coerce` must be 0,
-          except DATE32's LC_DATE retag, which preserves it — a 32-bit DATE is
-          retagged only, a 64-bit one is cast to 32 bits, and either way the day
-          count the footer records is the day count decoded. (`widen_types` is not
+          except DATE32's LC_DATE retag and TIMESTAMP64's LC_TIMESTAMP retag (any
+          unit), which preserve it — a 32-bit DATE is retagged only, a 64-bit one is
+          cast to 32 bits, and either way the day count the footer records is the
+          day count decoded; a timestamp is retagged only. (`widen_types` is not
           tested: it is the DECLARED width for every integer column, not a flag that
           widening happens — see the UINT64 note for why widening is sound here.)
           `_classify_scan_columns` is the SAME classifier the scan's own plan used,
@@ -6697,8 +6707,13 @@ class _Compiler:
          bad_type) = self._classify_scan_columns([schema_column])
         if bad_type is not None:
             return False
+        coerce = logical_coerce[0]
+        if physical == DrakenType.TIMESTAMP64:
+            # The packing carries the declared unit above the kind (LC_* packing);
+            # the retag is unit-blind to the value, so only the kind is tested.
+            return (coerce & 0xF) == _LC_TIMESTAMP
         allowed_coerce = _LC_DATE if physical == DrakenType.DATE32 else 0
-        return logical_coerce[0] in (0, allowed_coerce)
+        return coerce in (0, allowed_coerce)
 
     def _arm_topn_boundary(self, p, child_nid, node, limit):
         """Arm the Top-N runtime boundary for the HeapSort `node` just compiled

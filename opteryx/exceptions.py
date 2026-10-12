@@ -23,6 +23,8 @@ Exception
              ├── DataError *
              │   ├── InconsistentSchemaError
              │   ├── DatasetReadError
+             │   │   ├── DatasetMetadataReadError
+             │   │   └── DatasetDataReadError
              │   ├── EmptyDatasetError
              │   └── EmptyResultSetError
              ├── ExecutionError *
@@ -965,6 +967,22 @@ class InconsistentSchemaError(DataError):
 
 class DatasetReadError(DataError):
     """Raised when we can't read the data we're pretty sure is there"""
+
+
+class DatasetMetadataReadError(DatasetReadError):
+    """A dataset's description - its schema, snapshot or manifest - could not be read.
+
+    Raised before any data file is touched: the catalog or the metadata it points
+    at failed. Distinct from DatasetDataReadError so a caller can say WHICH half of
+    the read failed; both stay DatasetReadError so existing handlers still catch
+    them."""
+
+
+class DatasetDataReadError(DatasetReadError):
+    """A data file the plan was going to read could not be read from storage.
+
+    The dataset's metadata was read and the plan was built; fetching the bytes of
+    a planned file (or of its bloom filters) then failed."""
 
 
 class EmptyDatasetError(DataError):

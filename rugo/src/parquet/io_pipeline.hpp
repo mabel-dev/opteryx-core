@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 #include <algorithm>
 #include <limits>
@@ -32,6 +33,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <map>
 #include <unordered_map>
@@ -58,6 +60,7 @@
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
 #include "ops/string_hash.h"    // E37: draken_build_string_slot_seed — slot + carried hash seed
 #include "core/buffers.h"       // DrakenVector / DrakenStringArena — worker-side pass-1 predicate view
+#include "core/bitmap_ops.h"    // simd_popcount — survivor-mask counts
 #include "ops/float_ops.h"      // fp_canon — ingestion canonicalisation of -0.0 / NaN
 #include "core/vector_alloc.h"  // draken_identity_sel — dense selection for the view
 // docs/EXECUTION_TRACING_DESIGN.md: rugo calls the extern "C" bridge
@@ -459,6 +462,34 @@ static inline bool pass1_build_dv_view(ColumnOut& co, uint32_t nrows,
     // data[sel[i]] contract).
     v = draken_vector_from_dense(co.data, nrows, t, co.validity);
     return true;
+}
+
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "survivor_bits_to_bytes stores 8 row bytes per mask byte little-endian"
+#endif
+
+// Set bits among the first n of a bit-packed survivor mask. Bits past n in the
+// last byte are not counted — the predicate callback owns that byte.
+static inline uint32_t survivor_bits_count(const uint8_t* sm, uint32_t n) {
+    const size_t full = n >> 3;
+    uint32_t c = static_cast<uint32_t>(simd_popcount(sm, full));
+    const uint32_t tail = n & 7u;
+    if (tail) c += static_cast<uint32_t>(__builtin_popcount(sm[full] & ((1u << tail) - 1u)));
+    return c;
+}
+
+// Unpack the first n bits of a survivor mask to one 0/1 byte per row. Each mask
+// byte becomes 8 row bytes in one multiply: broadcast, isolate bit j in byte j,
+// then normalise each byte's nonzero to 1 (+0x7F carries into bit 7, never out).
+static inline void survivor_bits_to_bytes(const uint8_t* sm, uint32_t n, uint8_t* out) {
+    const size_t full = n >> 3;
+    for (size_t b = 0; b < full; ++b) {
+        uint64_t w = (static_cast<uint64_t>(sm[b]) * 0x0101010101010101ULL) & 0x8040201008040201ULL;
+        w = ((w + 0x7F7F7F7F7F7F7F7FULL) >> 7) & 0x0101010101010101ULL;
+        std::memcpy(out + (b << 3), &w, 8);
+    }
+    for (uint32_t r = static_cast<uint32_t>(full << 3); r < n; ++r)
+        out[r] = (sm[r >> 3] >> (r & 7)) & 1u;
 }
 
 // Run the pushed pass-1 predicate over a fully-decoded row group, filling
@@ -1995,6 +2026,91 @@ class ParquetIOPipeline {
         local_mmap_cache_.emplace(path, m);
         return m;
     }
+
+    // Local file descriptors held for the pipeline's (= the query's) life. Every
+    // small-chunk pread and every per-row-group span mmap used to open() and close()
+    // the file itself — one open per CHUNK, ~166 ms CPU of a hot ClickBench Q10, most
+    // of it kernel contention on the same vnodes. Files are immutable for the life
+    // of a query, so one descriptor per file serves every read of it.
+    //
+    // Bounded: at most local_fd_cap_ descriptors are held — RLIMIT_NOFILE/16 of the
+    // soft limit, so concurrent queries and the HTTP client's sockets keep headroom.
+    // Over the cap, IDLE descriptors (no lease) are closed least-recently-used first;
+    // a leased descriptor is never closed under its reader.
+    struct LocalFd {
+        int      fd = -1;
+        uint32_t leases = 0;
+        uint64_t last_use = 0;
+    };
+    std::unordered_map<std::string, LocalFd> local_fds_;
+    std::mutex local_fd_mutex_;
+    uint64_t local_fd_tick_ = 0;
+    const size_t local_fd_cap_ = []() -> size_t {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+            throw std::runtime_error("getrlimit(RLIMIT_NOFILE) failed");
+        const rlim_t soft = rl.rlim_cur == RLIM_INFINITY ? static_cast<rlim_t>(1) << 20 : rl.rlim_cur;
+        return std::max<size_t>(1, static_cast<size_t>(soft / 16));
+    }();
+
+    int acquire_local_fd(const std::string& path) {
+        {
+            std::lock_guard<std::mutex> lk(local_fd_mutex_);
+            auto it = local_fds_.find(path);
+            if (it != local_fds_.end()) {
+                ++it->second.leases;
+                return it->second.fd;
+            }
+        }
+        // open() outside the lock: concurrent first opens of different files must
+        // not serialise on the table. -1 on failure, no lease taken — the caller
+        // reports it (the pread path raises "Cannot open file" inside the decode's
+        // error capture, exactly as before).
+        const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return -1;
+        std::lock_guard<std::mutex> lk(local_fd_mutex_);
+        auto [it, inserted] = local_fds_.try_emplace(path);
+        if (!inserted) close(fd);  // another worker opened it first: use theirs
+        else it->second.fd = fd;
+        ++it->second.leases;
+        return it->second.fd;
+    }
+
+    void release_local_fd(const std::string& path) {
+        std::lock_guard<std::mutex> lk(local_fd_mutex_);
+        auto it = local_fds_.find(path);
+        if (it == local_fds_.end() || it->second.leases == 0)
+            throw std::logic_error("release_local_fd: no lease held on " + path);
+        --it->second.leases;
+        it->second.last_use = ++local_fd_tick_;
+        while (local_fds_.size() > local_fd_cap_) {
+            auto victim = local_fds_.end();
+            for (auto j = local_fds_.begin(); j != local_fds_.end(); ++j)
+                if (j->second.leases == 0 &&
+                    (victim == local_fds_.end() || j->second.last_use < victim->second.last_use))
+                    victim = j;
+            if (victim == local_fds_.end()) break;  // every held descriptor is leased
+            close(victim->second.fd);
+            local_fds_.erase(victim);
+        }
+    }
+
+    // One row group's hold on its file's descriptor: opened on first use, released
+    // when the row group's decode ends (any return path). get() is -1 when the
+    // file cannot be opened.
+    struct LocalFdLease {
+        ParquetIOPipeline* owner;
+        const std::string path;  // a copy: the item may be moved from before release
+        int fd = -1;
+        int get() {
+            if (fd < 0) fd = owner->acquire_local_fd(path);
+            return fd;
+        }
+        ~LocalFdLease() {
+            if (fd >= 0) owner->release_local_fd(path);
+        }
+    };
+
     // Q24 latmat: pushed pass-1 predicate (opteryx callback). Set once before any
     // submit; workers read it const, no sync.
     Pass1Pred pass1_pred_;
@@ -2608,6 +2724,38 @@ class ParquetIOPipeline {
     }
 #endif
 
+    static ssize_t pread_into(int fd, int64_t offset, int64_t size, std::vector<uint8_t>& bytes) {
+        bytes.resize(size);
+        return pread(fd, bytes.data(), size, offset);
+    }
+
+    static void check_local_read(int fd, ssize_t n, const std::string& path, int64_t size) {
+        if (fd < 0) {
+            throw std::runtime_error("Cannot open file: " + path);
+        }
+        if (n < 0) {
+            throw std::runtime_error("Read error: " + path);
+        }
+        if (static_cast<size_t>(n) != static_cast<size_t>(size)) {
+            throw std::runtime_error("Short read: " + path +
+                " (expected " + std::to_string(size) +
+                ", got " + std::to_string(n) + ")");
+        }
+    }
+
+    // A local range read on a descriptor the caller holds (LocalFdLease); fd -1 is
+    // the lease's open failure and raises the same "Cannot open file" read_range does.
+    std::pair<std::vector<uint8_t>, uint64_t> read_local_range(
+            int fd, const std::string& path, int64_t offset, int64_t size) {
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<uint8_t> bytes;
+        const ssize_t n = fd < 0 ? -1 : pread_into(fd, offset, size, bytes);
+        check_local_read(fd, n, path, size);
+        uint64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        return {std::move(bytes), elapsed};
+    }
+
     std::pair<std::vector<uint8_t>, uint64_t> read_range(
             const std::string& path, int64_t offset, int64_t size) {
 
@@ -2639,22 +2787,11 @@ class ParquetIOPipeline {
         } else
 #endif
         {
-            // Local file: POSIX pread
-            bytes.resize(size);
+            // Local file: POSIX pread on a descriptor opened for this one read.
             int fd = open(path.c_str(), O_RDONLY);
-            if (fd < 0) {
-                throw std::runtime_error("Cannot open file: " + path);
-            }
-            ssize_t n = pread(fd, bytes.data(), size, offset);
-            close(fd);
-            if (n < 0) {
-                throw std::runtime_error("Read error: " + path);
-            }
-            if (static_cast<size_t>(n) != static_cast<size_t>(size)) {
-                throw std::runtime_error("Short read: " + path +
-                    " (expected " + std::to_string(size) +
-                    ", got " + std::to_string(n) + ")");
-            }
+            const ssize_t n = fd < 0 ? -1 : pread_into(fd, offset, size, bytes);
+            if (fd >= 0) close(fd);
+            check_local_read(fd, n, path, size);
         }
 
         uint64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -3014,6 +3151,8 @@ class ParquetIOPipeline {
         }();
 
         bool per_rg_mapped = false;  // true when THIS row group owns the mapping
+        // Declared before anything that reads the file, so it outlives every read.
+        LocalFdLease fd_lease{this, item.path};
         if (is_local && !item.column_stats.empty()) {
             auto t_map = std::chrono::steady_clock::now();
             if (use_mmap_cache) {
@@ -3033,11 +3172,9 @@ class ParquetIOPipeline {
                 long page_size  = sysconf(_SC_PAGESIZE);
                 mmap_offset     = (span_min / page_size) * page_size;
                 mmap_len        = static_cast<size_t>(span_max - mmap_offset);
-                int fd = open(item.path.c_str(), O_RDONLY | O_CLOEXEC);
-                if (fd >= 0) {
+                const int fd = fd_lease.get();
+                if (fd >= 0)
                     mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_SHARED, fd, mmap_offset);
-                    close(fd);
-                }
                 per_rg_mapped = (mmap_base != MAP_FAILED);
                 // H13 REJECTED 2026-08-14 — do not re-attempt without new evidence.
                 // The read amplification is real: AdvEngineID is 0.96 MB compressed
@@ -3559,7 +3696,8 @@ class ParquetIOPipeline {
                 } else {
                     // Local file, reached either because the mmap failed OR because
                     // H15 chose a pread for a small chunk (see small_chunk_pread).
-                    auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
+                    auto [raw_bytes, read_ns] =
+                        read_local_range(fd_lease.get(), item.path, base_offset, chunk_size);
                     result.bytes_fetched += chunk_size;
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
@@ -3857,8 +3995,7 @@ class ParquetIOPipeline {
                             for (size_t i = 0; i < ncols_total; ++i)
                                 if (is_pred[i]) { np = result.columns[i].length; break; }
                             const uint8_t* sm = result.survivor_mask.data();
-                            uint32_t kept = 0;
-                            for (uint32_t r = 0; r < np; ++r) kept += (sm[r >> 3] >> (r & 7)) & 1u;
+                            const uint32_t kept = survivor_bits_count(sm, np);
                             prefilter_rows_in_.fetch_add(np, std::memory_order_relaxed);
                             prefilter_rows_out_.fetch_add(kept, std::memory_order_relaxed);
                             if (kept == 0) {
@@ -3871,10 +4008,15 @@ class ParquetIOPipeline {
                                     ? p_mask_rows : static_cast<size_t>(np);
                                 d_mask.assign(rg_rows, 0);
                                 uint32_t rank = 0;
-                                for (size_t r = 0; r < rg_rows; ++r) {
-                                    if (p_mask != nullptr && !p_mask[r]) continue;
-                                    d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
-                                    ++rank;
+                                if (p_mask == nullptr) {
+                                    survivor_bits_to_bytes(sm, np, d_mask.data());
+                                    rank = np;
+                                } else {
+                                    for (size_t r = 0; r < rg_rows; ++r) {
+                                        if (!p_mask[r]) continue;
+                                        d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
+                                        ++rank;
+                                    }
                                 }
                                 if (rank != np)
                                     throw std::logic_error("scan prefilter: page mask and predicate "
@@ -4209,6 +4351,9 @@ class ParquetIOPipeline {
         }
         local_mmap_cache_.clear();
         MappingReaper::instance().submit(std::move(to_reap));
+        // Every lease ended with its decode; the descriptors close with the query.
+        for (auto& kv : local_fds_) close(kv.second.fd);
+        local_fds_.clear();
     }
 
     // Wire the destination MemoryPool. Must be called before any submit; the
