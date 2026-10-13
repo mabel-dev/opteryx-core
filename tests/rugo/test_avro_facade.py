@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from rugo import avro, parquet  # noqa: E402
 
 AVRO = str(REPO_ROOT / "testdata" / "avro" / "space_missions.avro")
-PARQUET = str(REPO_ROOT / "testdata" / "flat" / "space_missions" / "space_missions.parquet")
+PARQUET = str(REPO_ROOT / "testdata" / "missions" / "space_missions.parquet")
 
 
 def _columns(reader):

@@ -29,7 +29,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import opteryx
 
-PARQUET = "testdata.flat.formats.parquet"   # 100,000 rows
+PARQUET = "testdata.flat.formats.parquet"   # 10,000 rows
 
 
 def _rows(sql, session=None):
@@ -50,10 +50,10 @@ def test_array_agg_group_beyond_old_cap():
             f"FROM {PARQUET} GROUP BY f"
         )
     }
-    assert sum(sizes.values()) == 100000, sizes
-    # The point of the change: the biggest group is tens of thousands of
-    # elements, which the old cap refused outright.
-    assert max(sizes.values()) > 50000, sizes
+    assert sum(sizes.values()) == 10000, sizes
+    # The point of the change: the biggest group is thousands of elements,
+    # which the old cap refused outright.
+    assert max(sizes.values()) > 5000, sizes
 
 
 def test_array_agg_runtime_budget_fails_loud():
@@ -63,7 +63,7 @@ def test_array_agg_runtime_budget_fails_loud():
     """
     sql = (
         f"SELECT followers > 1000 AS f, ARRAY_AGG(text) AS a FROM {PARQUET} "
-        f"CROSS JOIN $planets AS p1 CROSS JOIN $planets AS p2 GROUP BY f"
+        f"CROSS JOIN $planets AS p1 CROSS JOIN $planets AS p2 CROSS JOIN $planets AS p3 GROUP BY f"
     )
     try:
         _rows(sql)

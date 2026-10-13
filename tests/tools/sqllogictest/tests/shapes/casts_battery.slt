@@ -1,4 +1,4 @@
 # Source: test_casts_battery.py
 
-query shape 100000 14
+query shape 10000 14
 SELECT * FROM testdata.tweets

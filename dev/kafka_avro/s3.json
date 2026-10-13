@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "kafkaavro",
+      "credentials": [{"accessKey": "kafkaavro", "secretKey": "kafkaavro-local-only"}],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

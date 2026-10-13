@@ -31,7 +31,7 @@ def test_readme_quick_start():
     session = opteryx.session()
 
     for morsel in session.execute_to_morsels(
-        "SELECT Company, Mission FROM testdata.flat.space_missions LIMIT 5"
+        "SELECT Company, Mission FROM testdata.missions LIMIT 5"
     ):
         print(morsel)
 
@@ -104,7 +104,7 @@ def test_connectors_usage_pattern():
     session = opteryx.session()
     rows = sum(
         morsel.num_rows
-        for morsel in session.execute_to_morsels("SELECT * FROM testdata.flat.space_missions")
+        for morsel in session.execute_to_morsels("SELECT * FROM testdata.missions")
     )
 
     assert rows == 4630

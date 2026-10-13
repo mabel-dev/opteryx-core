@@ -215,7 +215,6 @@ tmp/**
 *.html
 opteryx/compiled/**/*.c*
 opteryx/compiled/**/*.h*
-testdata/parquet_tests/hits_51.parquet
 testdata/_downloads/jsonbench/**
 
 hits/**

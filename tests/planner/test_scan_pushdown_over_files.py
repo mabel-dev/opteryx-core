@@ -77,9 +77,9 @@ def test_filtered_limit_is_pushed_and_every_row_satisfies_the_predicate():
 
 
 def test_filtered_limit_larger_than_the_match_count_returns_every_match():
-    matches = run(f"SELECT tweet_id FROM {TABLE} WHERE followers > 5000000")
+    matches = run(f"SELECT tweet_id FROM {TABLE} WHERE followers > 250000")
     assert 0 < len(matches) < 1000
-    limited = run(f"SELECT tweet_id FROM {TABLE} WHERE followers > 5000000 LIMIT 1000")
+    limited = run(f"SELECT tweet_id FROM {TABLE} WHERE followers > 250000 LIMIT 1000")
     assert sorted(limited) == sorted(matches)
 
 

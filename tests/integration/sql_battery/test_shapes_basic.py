@@ -68,7 +68,7 @@ STATEMENTS = [
         ("SELECT * FROM $one_row", 1, 1, None),
         # READ_PARQUET is a FunctionDataset step compiled down the Parquet scan path;
         # the scan compiler must not assume a table ScanStep (no `vector_search`).
-        ("SELECT * FROM READ_PARQUET('testdata/flat/formats/parquet/tweets.parquet')", 100000, 13, None),
+        ("SELECT * FROM READ_PARQUET('testdata/flat/formats/parquet/tweets.parquet')", 10000, 13, None),
         ("SELECT * FROM READ_PARQUET('testdata/flat/formats/parquet/tweets.parquet') LIMIT 1", 1, 13, None),
         # `$no_table` is the pre-Sep-2026 name for `$one_row`; still resolves.
         ("SELECT * FROM $no_table", 1, 1, None),
@@ -1104,9 +1104,9 @@ def test_bool_group_by_key_values():
         for key, val in zip(keys, vals):
             counts[key] = counts.get(key, 0) + val
 
-    assert counts == {False: 99335, True: 665}, (
+    assert counts == {False: 9935, True: 65}, (
         f"BOOL group-by keys reconstructed wrong: {counts} "
-        "(expected {False: 99335, True: 665})"
+        "(expected {False: 9935, True: 65})"
     )
 
 

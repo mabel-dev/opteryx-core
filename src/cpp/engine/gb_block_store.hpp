@@ -45,13 +45,18 @@
 
 namespace opteryx::engine {
 
-// First-segment rows (log2) of an unhinted doubling column. A local partition holds
-// ~1,024 groups per flush window (65,536 groups over 64 partitions), so a 2,048-row
-// first segment holds a whole window and every access takes the first-segment fast
-// path (at()). 256 was MEASURED slower (ClickBench Q32/Q18, 2026-10-12): three
-// segments per window put the merge's combine loops on the segment arithmetic.
-// Slack equals a doubling std::vector's. A per-arch sweep candidate.
-constexpr int kGBSegFirstLog2 = 11;
+// First-segment rows (log2) of an UNHINTED doubling column: the first flush window,
+// and every partition of a low-cardinality query (which never flushes). 2,048 rows of
+// an 8-byte lane is 16 KiB — one macOS ARM page — so every such lane came back
+// page-aligned and the hot first rows of every lane of every partition aliased in L1
+// (MEASURED 2026-10-13, M5: H2O g1 1.69x / g9 1.57x pre-redesign; 512 rows: g1 0.86,
+// g9 1.03; x86 neutral). Hinted windows keep 2,048 (kGBSegHintMaxLog2).
+constexpr int kGBSegFirstLog2 = 9;
+// Largest first segment the flush-window hint may ask for. A local partition holds
+// ~1,024 groups per window (65,536 groups over 64 partitions), so 2,048 rows hold a
+// whole window on the first-segment fast path (at()). Capping it at the unhinted 512
+// instead MEASURED g10 +15% (2.2x pool allocations, 2026-10-13).
+constexpr int kGBSegHintMaxLog2 = 11;
 // Smallest first segment a HINT may ask for (64 rows). A flush window's partition is
 // hinted from the size its predecessor reached, and a low-cardinality partition holds
 // tens of groups: 2,048 empty rows per lane per partition per window cost a fresh page
@@ -396,32 +401,20 @@ class GBSegArray {
             const size_t k = nseg();
             if (k == kMaxSegs)
                 throw std::length_error("GBSegArray: column exceeds 2^kGBSegMaxLog2 rows");
-            if (k == 0) color_ = next_color(seg_bytes(0));
-            auto* p = static_cast<uint8_t*>(GBBlockPool::instance().acquire(seg_bytes(k) + color_))
-                      + color_;
-            push_seg(p);
+            push_seg(static_cast<uint8_t*>(GBBlockPool::instance().acquire(seg_bytes(k))));
             cap_ += seg_rows(k);
         }
     }
 
+    // No cache colouring: an offset into each block costs either a next-class block
+    // (2x pool bytes) or a non-power-of-two malloc size, and on macOS any such size
+    // raises peak RSS (MEASURED 2026-10-13: Q32 12.4 -> 15.1 GB with a pad and a ZERO
+    // offset). The aliasing it targeted is fixed by the first-segment size instead.
     void release_all() noexcept {
         const size_t n = nseg();
         for (size_t k = 0; k < n; ++k)
-            GBBlockPool::instance().release(seg_ptr(k) - color_, seg_bytes(k) + color_);
+            GBBlockPool::instance().release(seg_ptr(k), seg_bytes(k));
         nseg_ = 0;
-    }
-
-    // CACHE COLOURING. Pool blocks are power-of-two sized, and the large ones come back
-    // page-aligned, so the hot first rows of every lane of every partition would start
-    // at the same offset and contend for the same cache sets. Each array's segments
-    // start `color_` bytes into their block instead: a rotating multiple of one cache
-    // line, at most a quarter of the first segment (so the block grows by at most a
-    // quarter, usually staying in its class).
-    static size_t next_color(size_t first_seg_bytes) noexcept {
-        static thread_local uint32_t ctr = 0;
-        const size_t cap = first_seg_bytes / 4;
-        const size_t lines = cap / 64 < 64 ? cap / 64 : 64;
-        return lines == 0 ? 0 : static_cast<size_t>(ctr++ % lines) * 64;
     }
 
     void take(GBSegArray& o) noexcept {
@@ -433,7 +426,6 @@ class GBSegArray {
         b_ = o.b_;
         tail_ = o.tail_;
         tail_left_ = o.tail_left_;
-        color_ = o.color_;
         if constexpr (kStride == 0) stride_ = o.stride_;
         o.size_ = 0;
         o.cap_ = 0;
@@ -450,7 +442,6 @@ class GBSegArray {
     size_t tail_left_ = 0;      // rows left in tail_'s segment
     size_t stride_ = kStride;   // only read when kStride == 0
     uint8_t b_ = kDefaultLog2;
-    uint32_t color_ = 0;        // bytes each segment starts into its pool block
 };
 
 // Typed view of a segmented array: the per-group lanes (hashes, grows, sums, …).

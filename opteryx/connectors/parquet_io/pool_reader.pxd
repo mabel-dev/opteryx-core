@@ -142,6 +142,10 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t page_index_row_groups_pruned() nogil
         uint64_t page_index_rows_all_pass() nogil
         uint64_t page_index_fetches() nogil
+        uint64_t cc_get_skipped_chunks() nogil
+        uint64_t cc_get_skipped_bytes() nogil
+        uint64_t cc_pread_skipped_chunks() nogil
+        uint64_t cc_pread_skipped_bytes() nogil
         uint64_t page_index_bytes_fetched() nogil
         uint64_t page_index_gate_declines() nogil
         uint64_t spin_iterations() nogil

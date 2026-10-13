@@ -1,4 +1,4 @@
-"""Build testdata/avro/space_missions.avro from testdata/flat/space_missions (dev tooling).
+"""Build testdata/avro/space_missions.avro from testdata/missions (dev tooling).
 
 The same 4,630 launches as the parquet sample, written as an Avro object container
 file by fastavro (an independent writer — rugo has no Avro writer) with the deflate
@@ -21,7 +21,7 @@ import fastavro
 
 from rugo import parquet
 
-SRC = "testdata/flat/space_missions/space_missions.parquet"
+SRC = "testdata/missions/space_missions.parquet"
 OUT = "testdata/avro/space_missions.avro"
 
 SCHEMA = {

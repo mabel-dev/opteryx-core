@@ -23,7 +23,7 @@ import pytest
 
 import opteryx
 
-SOURCE = "testdata.flat.space_missions"
+SOURCE = "testdata.missions"
 
 
 def _row_count(sql):

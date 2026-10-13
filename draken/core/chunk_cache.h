@@ -5,8 +5,12 @@
 // resolved at load like draken_mem_*. Design and rulings:
 // docs/C7_PAGE_CACHE_DESIGN.md (§12-§23).
 //
-// An entry is ONE column chunk: every page of it, decompressed, in one buffer,
-// plus an index from each page's absolute body offset in the file to its bytes.
+// An entry is ONE column chunk in one buffer, plus an index from each page's
+// offset in the caller's chunk to that page's bytes in the buffer. For parquet
+// the buffer is the chunk IMAGE: the chunk re-laid as an uncompressed column
+// chunk (rewritten page headers + decompressed bodies), so a hit decodes without
+// the fetched bytes and the IO planner can skip the GET
+// (docs/C7_GET_SKIP_AND_DECODED_CACHE_DESIGN.md, Part A).
 // Only complete chunks are inserted (ruling: partial chunks are not cached).
 // Files are immutable for the life of the process (ruling), so the key is the
 // file path plus the chunk's first byte offset.
@@ -41,12 +45,23 @@ int draken_cc_enabled(void);
 const DrakenChunkEntry* draken_cc_lookup(const char* path, size_t path_len, int64_t chunk_offset,
                                          int predicated, int* fill_ok);
 
+// Pinned entry for (path, chunk_offset), or NULL — a probe that counts a hit but
+// never a miss. The IO planner asks this before it fetches (a hit skips the GET);
+// a miss there is followed by the decoder's own draken_cc_lookup, which counts it.
+const DrakenChunkEntry* draken_cc_lookup_hit(const char* path, size_t path_len,
+                                             int64_t chunk_offset);
+
+// The whole entry buffer: for parquet, the chunk IMAGE (decode_column.cpp
+// ChunkPageSource::commit) — the chunk re-laid as an UNCOMPRESSED column chunk.
+void draken_cc_entry_bytes(const DrakenChunkEntry* entry, const uint8_t** data, int64_t* len);
+
 // Remember that a predicate decode of this chunk did not touch every page.
 void draken_cc_mark_incomplete(const char* path, size_t path_len, int64_t chunk_offset);
 
-// Decompressed bytes of the page whose (decompressed region) starts at
-// `body_offset` in the file. Returns 1 and sets data/len, or 0 if the entry has
-// no such page (a caller bug: complete entries hold every page).
+// The bytes of the page indexed at `body_offset` (for parquet: the page HEADER's
+// offset within the original chunk; the bytes are the page's rewritten header +
+// body in the image). Returns 1 and sets data/len, or 0 if the entry has no such
+// page.
 int draken_cc_page(const DrakenChunkEntry* entry, int64_t body_offset,
                    const uint8_t** data, int64_t* len);
 
@@ -55,7 +70,7 @@ void draken_cc_unpin(const DrakenChunkEntry* entry);
 // Fill path. The buffer comes from malloc (draken_cc_fill_alloc) and is NOT
 // charged as query memory. draken_cc_insert takes ownership in every case:
 // admitted, it becomes the entry; refused, it is freed. `page_index` is
-// 3 * npages int64s: (body_offset, start_in_buffer, length) per page.
+// 3 * npages int64s: (offset in the caller's chunk, start_in_buffer, length) per page.
 // `cost_ns` is the chunk's cost to rebuild: its measured decompression time plus,
 // for a remote chunk, a modelled re-fetch. Per byte it sets how many extra CLOCK
 // sweeps a hit buys (chunk_cache.cpp). A new chunk goes on probation, or straight

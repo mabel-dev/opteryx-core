@@ -2,7 +2,7 @@
 08_read_avro.py — Read an Avro file with rugo: header, projection into nested records,
 nested JSON, and reading with a reader schema.
 
-The sample is the 4,630 space launches from testdata/flat/space_missions, written as
+The sample is the 4,630 space launches from testdata/missions, written as
 Avro (deflate) by fastavro — see dev/generate_avro_sample.py.
 
 To run, execute:

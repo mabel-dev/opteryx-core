@@ -1,4 +1,4 @@
-make clickbench-rugo    5.11s     (13-OCT) [0.48x]
+make clickbench-rugo    5.01s     (13-OCT) [0.47x]
 make clickbench-skene   6.64s     (12-OCT) [0.62x]
 make clickbench-canon   6.69s     (12-OCT) [0.63x]
 make clickbench-json    427.18s   (12-OCT) [3-runs only]

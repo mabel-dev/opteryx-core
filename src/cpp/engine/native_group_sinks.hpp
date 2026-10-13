@@ -57,6 +57,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -4236,7 +4237,7 @@ struct GroupBySink : Sink {
             // next one up — MEASURED, Q32 peak RSS 12.1 -> 16.7 GB when it did. Big
             // windows keep the default doubling geometry.
             P.seg_hint = std::min(window_groups + window_groups / 4,
-                                  size_t(1) << kGBSegFirstLog2);
+                                  size_t(1) << kGBSegHintMaxLog2);
             P.hint_rows(P.seg_hint);
 #else
             (void)window_groups;
@@ -5192,9 +5193,12 @@ struct GroupBySink : Sink {
                 }
                 continue;
             }
-            GBLanes& D = dst.lanes[s];
-            const GBLanes& S = src.lanes[s];
-            bool want_max = specs[s].fn == AggFn::Max;
+            const bool want_max = specs[s].fn == AggFn::Max;
+            // The fold runs over raw lane pointers when the merged lanes and the
+            // source's are each one segment (the merged table is hinted to its final
+            // size; a source window to its predecessor's), else over the segmented
+            // lanes. Same member names, so the arms below compile over either.
+            auto fold = [&](auto& D, const auto& S) -> bool {
             switch (kind) {
                 case GBKind::Valid:
                     for (uint32_t ii = 0; ii < n; ++ii) {
@@ -5385,6 +5389,13 @@ struct GroupBySink : Sink {
                 case GBKind::Rows:
                     break;
             }
+            return true;
+            };
+            GBFlatLanes fd, fs;
+            const bool flat = gb_flat_lanes(dst.lanes[s], dst.size(), fd)
+                              && gb_flat_lanes(src.lanes[s], src.size(), fs);
+            if (!(flat ? fold(fd, fs) : fold(dst.lanes[s], std::as_const(src.lanes[s]))))
+                return false;
         }
         return true;
     }

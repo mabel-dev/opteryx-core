@@ -35,7 +35,7 @@ from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import NotSupportedError
 
 SAMPLE = "testdata/avro/space_missions.avro"
-PARQUET = "testdata/flat/space_missions/space_missions.parquet"
+PARQUET = "testdata/missions/space_missions.parquet"
 UTC = datetime.timezone.utc
 
 

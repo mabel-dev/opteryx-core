@@ -400,14 +400,18 @@ DecodedTable ReadParquet(const uint8_t* data, size_t size,
 // Cross-query chunk cache request (docs/C7_PAGE_CACHE_DESIGN.md; the cache is
 // draken/core/chunk_cache.h). `data` handed to DecodeColumnFromChunk must be
 // the chunk itself (chunk-relative offsets in `target_col`), as the IO pipeline
-// passes it; page bytes are cached by their offset within that buffer.
+// passes it; pages are indexed by their header's offset within that buffer.
 // nullptr = no cache (standalone rugo, the Python reader, the patcher).
+typedef struct DrakenChunkEntry DrakenChunkEntry;
 struct ChunkCacheRequest {
   const char* path;
   size_t      path_len;
   int64_t     chunk_offset;  // absolute file offset of the chunk's first byte
   bool        admit;         // false: use hits, never fill (compaction)
   bool        remote;        // fetched over the network: a refill pays a re-fetch
+  // A hit the IO planner already pinned (it skipped the GET, so `data` may hold
+  // no bytes for this chunk). Borrowed: the planner owns the pin and releases it.
+  const DrakenChunkEntry* pinned = nullptr;
 };
 
 void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,

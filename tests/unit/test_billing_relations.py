@@ -28,7 +28,7 @@ import opteryx
 from opteryx.managers.billing import BillingEventType
 
 ASTRONAUTS = "testdata.astronauts"
-MISSIONS = "testdata.flat.space_missions"
+MISSIONS = "testdata.missions"
 
 
 def _run(sql: str):

@@ -1101,6 +1101,12 @@ cdef class CppIOPipeline:
             "page_index_fetches": self.pipeline.page_index_fetches(),
             "page_index_bytes_fetched": self.pipeline.page_index_bytes_fetched(),
             "page_index_gate_declines": self.pipeline.page_index_gate_declines(),
+            # C7 chunk cache hits that cost no IO: remote chunks never requested
+            # (compressed bytes) and local small chunks never pread.
+            "chunk_cache_get_skipped_chunks": self.pipeline.cc_get_skipped_chunks(),
+            "chunk_cache_get_skipped_bytes": self.pipeline.cc_get_skipped_bytes(),
+            "chunk_cache_pread_skipped_chunks": self.pipeline.cc_pread_skipped_chunks(),
+            "chunk_cache_pread_skipped_bytes": self.pipeline.cc_pread_skipped_bytes(),
         }
 
 
@@ -3007,6 +3013,12 @@ cdef class NativeScanPlan:
             "page_index_fetches": self.pipeline_ptr.page_index_fetches(),
             "page_index_bytes_fetched": self.pipeline_ptr.page_index_bytes_fetched(),
             "page_index_gate_declines": self.pipeline_ptr.page_index_gate_declines(),
+            # C7 chunk cache hits that cost no IO: remote chunks never requested
+            # (compressed bytes) and local small chunks never pread.
+            "chunk_cache_get_skipped_chunks": self.pipeline_ptr.cc_get_skipped_chunks(),
+            "chunk_cache_get_skipped_bytes": self.pipeline_ptr.cc_get_skipped_bytes(),
+            "chunk_cache_pread_skipped_chunks": self.pipeline_ptr.cc_pread_skipped_chunks(),
+            "chunk_cache_pread_skipped_bytes": self.pipeline_ptr.cc_pread_skipped_bytes(),
             # Scan prefilter: rows reaching the worker-side predicate / surviving it.
             "prefilter_rows_in": self.pipeline_ptr.prefilter_rows_in(),
             "prefilter_rows_out": self.pipeline_ptr.prefilter_rows_out(),

@@ -1,0 +1,107 @@
+Warming up (cold start)...
+Cold start: 908.01ms
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  TPC-H BENCHMARK — Opteryx 0.9.166
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  Scale factor   10  (testdata.tpch_10_skene)
+  Format         skene
+  Queries        22
+  Iterations     3 warm runs per query
+  Baseline       DuckDB on Justins-MacBook-Pro.local (22 queries)
+════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Query        Run 1     Run 2     Run 3         Min       Avg       Max      DuckDB  vs       
+───────────────────────────────────────────────────────────────────────────────────────────────────
+Q01        227.6ms   217.9ms   210.9ms     210.9ms   218.8ms   227.6ms     277.4ms  [38;2;34;197;94m[0.76x][0m
+Q02         85.5ms    56.7ms    56.2ms      56.2ms    66.1ms    85.5ms      57.2ms  [38;2;34;197;94m[0.98x][0m
+Q03        136.6ms   110.9ms   107.9ms     107.9ms   118.5ms   136.6ms     165.9ms  [38;2;34;197;94m[0.65x][0m
+Q04        107.3ms    89.8ms    94.0ms      89.8ms    97.0ms   107.3ms      63.5ms  [38;2;255;165;0m[1.41x][0m
+Q05        177.7ms   162.3ms   165.0ms     162.3ms   168.3ms   177.7ms     192.9ms  [38;2;34;197;94m[0.84x][0m
+Q06         42.5ms    41.5ms    41.6ms      41.5ms    41.8ms    42.5ms     138.8ms  [38;2;34;197;94m[0.30x][0m
+Q07        121.1ms   118.8ms   118.9ms     118.8ms   119.6ms   121.1ms     199.8ms  [38;2;34;197;94m[0.59x][0m
+Q08        133.1ms   123.7ms   121.6ms     121.6ms   126.2ms   133.1ms     237.0ms  [38;2;34;197;94m[0.51x][0m
+Q09        328.5ms   312.4ms   309.1ms     309.1ms   316.7ms   328.5ms     432.8ms  [38;2;34;197;94m[0.71x][0m
+Q10        225.3ms   212.5ms   213.0ms     212.5ms   216.9ms   225.3ms     209.5ms  [38;2;72;209;204m[1.01x][0m
+Q11         22.6ms    19.8ms    18.8ms      18.8ms    20.4ms    22.6ms      21.5ms  [38;2;34;197;94m[0.88x][0m
+Q12         91.9ms    89.9ms    91.2ms      89.9ms    91.0ms    91.9ms      76.1ms  [38;2;255;165;0m[1.18x][0m
+Q13        214.0ms   187.8ms   180.2ms     180.2ms   194.0ms   214.0ms     242.6ms  [38;2;34;197;94m[0.74x][0m
+Q14         54.9ms    55.0ms    56.2ms      54.9ms    55.4ms    56.2ms     165.2ms  [38;2;34;197;94m[0.33x][0m
+Q15         70.9ms    70.9ms    75.3ms      70.9ms    72.4ms    75.3ms     160.6ms  [38;2;34;197;94m[0.44x][0m
+Q16         39.6ms    38.7ms    37.4ms      37.4ms    38.6ms    39.6ms      42.1ms  [38;2;34;197;94m[0.89x][0m
+Q17        115.8ms   114.6ms   114.7ms     114.6ms   115.0ms   115.8ms     253.6ms  [38;2;34;197;94m[0.45x][0m
+Q18        228.1ms   190.7ms   187.7ms     187.7ms   202.2ms   228.1ms     276.8ms  [38;2;34;197;94m[0.68x][0m
+Q19         86.5ms    80.5ms    81.2ms      80.5ms    82.7ms    86.5ms     276.3ms  [38;2;34;197;94m[0.29x][0m
+Q20         85.4ms    88.0ms    86.9ms      85.4ms    86.8ms    88.0ms     178.7ms  [38;2;34;197;94m[0.48x][0m
+Q21        379.5ms   364.9ms   361.8ms     361.8ms   368.7ms   379.5ms     446.3ms  [38;2;34;197;94m[0.81x][0m
+Q22         71.8ms    71.2ms    70.0ms      70.0ms    71.0ms    71.8ms      59.2ms  [38;2;255;165;0m[1.18x][0m
+────────────────────────────────────────────────────────────────────────────────────────────────────
+TOTAL                                     2782.6ms                        4173.8ms  [38;2;34;197;94m[0.67x][0m  (22 compared)
+
+[38;2;26;185;67m22 passed[0m, [38;2;255;121;198m0 failed[0m   (9.1s)
+  results: tests/performance/tpch/results/41162225-20261012T140558.csv
+
+--- stderr ---
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=63.0ms keys=9.9ms lanes=4.5ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=27.0ms keys=0.4ms lanes=1.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=30.0ms keys=1.9ms lanes=1.3ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=6.2ms keys=0.2ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=6.6ms keys=0.1ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=5.8ms keys=0.1ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.6ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.4ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.5ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=234.0ms keys=0.3ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=62.4ms keys=0.3ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=61.9ms keys=0.3ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=10.0ms keys=0.5ms lanes=0.5ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=9.8ms keys=0.4ms lanes=0.5ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=9.1ms keys=0.5ms lanes=0.6ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=326.6ms keys=0.1ms lanes=0.7ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.3ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=309.8ms keys=0.1ms lanes=0.6ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.3ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=296.9ms keys=0.1ms lanes=0.5ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.3ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=19.3ms keys=0.1ms lanes=0.4ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=15.4ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=16.3ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=29.0ms keys=0.4ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=29.9ms keys=0.3ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=28.4ms keys=0.3ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.8ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.9ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.9ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=892.8ms keys=148.7ms lanes=16.3ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.3ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=414.5ms keys=113.6ms lanes=16.4ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.3ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=409.5ms keys=112.8ms lanes=15.9ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.3ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=4.4ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=4.3ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=4.5ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=1.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.7ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.7ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.0ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)

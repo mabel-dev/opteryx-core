@@ -572,3 +572,25 @@ comparisons all pass).
 Measurement notes: arms must differ in `_operators` only (sharing BASE's
 `pool_reader`/`thread_pool`) — tree-built copies shifted the controls by 4%. Three-round
 runs drift ±4% arm-to-arm on the controls; sub-5% calls need ≥ 5 rounds.
+
+### 9.1 First-segment size and flat merge combine (2026-10-13, uncommitted)
+
+- **No cache colouring.** A per-array byte offset into pool blocks was tried and removed:
+  offsetting into a power-of-two block bumps it into the next class (Q32 pool bytes 2×,
+  RSS 13.7 → 25.4 GB), and any non-power-of-two malloc size raises macOS peak RSS even
+  with a zero offset (Q32 12.4 → 15.1 GB).
+- **Root cause of the H2O g1/g9 regression:** the unhinted first segment, 2,048 rows ×
+  8 B = 16 KiB = one macOS ARM page, so every low-cardinality lane was page-aligned and
+  aliased in L1. Unhinted columns now start at **512 rows** (`kGBSegFirstLog2 = 9`); the
+  flush-window hint keeps its **2,048** cap (`kGBSegHintMaxLog2 = 11`) — capping it at
+  512 too cost g10 +15% (2.2× pool allocations).
+- **Merge combine over flat lanes:** `combine_into` folds over `GBFlatLanes` when the
+  merged and source lanes are each one segment (the merged table is hinted; source
+  windows usually are), else over the segmented lanes — same arms, generic lambda.
+  Profile: the segmented `operator[]` in the combine loop was ~19% of g3's busy time.
+
+Measured (5 interleaved rounds, vs pre-redesign BASE; M5): ClickBench 16 GROUP BY
+targets 0.903 (controls 0.993), peak RSS 0.96, TPC-H SF10 0.999, H2O g1 0.89 / g9 1.02 /
+g3 1.08 (total 1.042). x86 (.60, vs colouring removed): first-segment change 1.001 / RSS
+1.000, flat combine 0.996 (controls 0.996) — neutral. H2O medium OOMs on the 15 GB x86
+box in every arm, so x86 has no H2O numbers. Open: g3 still 8% behind BASE.

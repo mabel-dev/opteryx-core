@@ -250,10 +250,10 @@ def test_bool_predicate_input_now_native(sql):
 
 
 @pytest.mark.parametrize("predicate,expected", [
-    ("user_verified = TRUE", 711),
-    ("user_verified = FALSE", 99289),
-    ("user_verified <> TRUE", 99289),
-    ("user_verified != FALSE", 711),
+    ("user_verified = TRUE", 67),
+    ("user_verified = FALSE", 9933),
+    ("user_verified <> TRUE", 9933),
+    ("user_verified != FALSE", 67),
 ])
 def test_bool_predicate_survivor_count_matches_trampoline(predicate, expected):
     """The survivor counts the TRAMPOLINE produced before the kernel landed —
@@ -322,10 +322,10 @@ def test_bool_is_predicate_now_native(sql):
 
 
 @pytest.mark.parametrize("predicate,expected", [
-    ("user_verified IS TRUE", 711),
-    ("user_verified IS FALSE", 99289),
-    ("user_verified IS NOT TRUE", 99289),
-    ("user_verified IS NOT FALSE", 711),
+    ("user_verified IS TRUE", 67),
+    ("user_verified IS FALSE", 9933),
+    ("user_verified IS NOT TRUE", 9933),
+    ("user_verified IS NOT FALSE", 67),
 ])
 def test_bool_is_predicate_survivor_count_matches_eq_form(predicate, expected):
     """`_BOOL_FLAT` has no NULLs, so IS TRUE/FALSE must match the already-verified

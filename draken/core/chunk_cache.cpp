@@ -259,6 +259,25 @@ const DrakenChunkEntry* draken_cc_lookup(const char* path, size_t path_len, int6
     return e;
 }
 
+const DrakenChunkEntry* draken_cc_lookup_hit(const char* path, size_t path_len,
+                                             int64_t chunk_offset) {
+    Key k{std::string(path, path_len), chunk_offset};
+    Shard& sh = shard_for(k);
+    std::lock_guard<std::mutex> lk(sh.mu);
+    auto it = sh.map.find(k);
+    if (it == sh.map.end()) return nullptr;
+    DrakenChunkEntry* e = it->second;
+    e->state.fetch_add(1, std::memory_order_acq_rel);
+    e->ref.store(1, std::memory_order_relaxed);
+    g_hits.fetch_add(1, std::memory_order_relaxed);
+    return e;
+}
+
+void draken_cc_entry_bytes(const DrakenChunkEntry* entry, const uint8_t** data, int64_t* len) {
+    *data = entry->buffer;
+    *len = entry->bytes;
+}
+
 int draken_cc_page(const DrakenChunkEntry* entry, int64_t body_offset,
                    const uint8_t** data, int64_t* len) {
     const std::vector<int64_t>& ix = entry->index;

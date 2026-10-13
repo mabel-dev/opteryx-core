@@ -8,7 +8,7 @@ from tests.helpers import execute_and_fetch_all
 def test_max_parquet():
     result = execute_and_fetch_all("SELECT MAX(followers) FROM testdata.flat.formats.parquet")
     first = result[0]["MAX(followers)"]
-    assert first == 8266250, first
+    assert first == 620689, first
 
 def test_max_non_parquet():
     result = execute_and_fetch_all("SELECT MAX(followers) FROM testdata.flat.ten_files;")

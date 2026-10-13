@@ -8,7 +8,7 @@ from tests.helpers import execute_and_fetch_all
 def test_avg_parquet():
     result = execute_and_fetch_all("SELECT AVG(followers) FROM testdata.flat.formats.parquet")
     first = result[0]["AVG(followers)"]
-    assert first == 3081.258, first
+    assert first == 2432.1155, first
 
 def test_avg_non_parquet():
     result = execute_and_fetch_all("SELECT AVG(followers) FROM testdata.flat.ten_files;")

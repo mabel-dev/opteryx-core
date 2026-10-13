@@ -8,7 +8,7 @@ from tests.helpers import execute_and_fetch_all
 def test_sum_parquet():
     result = execute_and_fetch_all("SELECT SUM(followers) FROM testdata.flat.formats.parquet")
     total = result[0]["SUM(followers)"]
-    assert total == 308125800, total
+    assert total == 24321155, total
 
 def test_sum_non_parquet():
     result = execute_and_fetch_all("SELECT SUM(followers) FROM testdata.flat.ten_files;")

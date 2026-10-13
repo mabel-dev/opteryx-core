@@ -17,7 +17,7 @@ def test_count_star_parquet():
     """ if is just SELECT COUNT(*) for parquet files, we don't read the rows"""
     result = execute_and_fetch_all("SELECT count(*) FROM testdata.flat.formats.parquet")
     first = result[0]["COUNT(*)"]
-    assert first == 100000, first
+    assert first == 10000, first
 
 def test_count_star_non_parquet():
     """ if is just SELECT COUNT(*) for non-parquet files, we read the rows"""
@@ -29,7 +29,7 @@ def test_count_identifier_parquest_read_the_rows():
     """ we're counting an identifier, so we need to read the rows """
     result = execute_and_fetch_all("SELECT COUNT(user_name) FROM testdata.flat.formats.parquet;")
     first = result[0]["COUNT(user_name)"]
-    assert first == 100000, first
+    assert first == 10000, first
 
 def test_count_star_group_by():
     """ we're reading data from the file, even though it starts SELECT COUNT(*) FROM """

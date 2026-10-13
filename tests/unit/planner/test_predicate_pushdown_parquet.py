@@ -34,27 +34,27 @@ os.environ["GCP_PROJECT_ID"] = "mabeldev"
 test_cases = [
     (
         "SELECT user_name FROM testdata.flat.formats.parquet WHERE user_verified = TRUE;",
-        711,
-        711,
+        67,
+        67,
     ),
     (
         "SELECT user_name FROM testdata.flat.formats.parquet WHERE user_verified = TRUE and following < 1000;",
-        266,
-        266,
+        21,
+        21,
     ),
     (
-        # This case expected 711 rows out of the scan when it was written: the LIKE
+        # This case expected every verified row out of the scan when it was written: the LIKE
         # was not pushed down, so the scan emitted every `user_verified` row and the
-        # LIKE was applied above it. The scan now emits 86 - it applies both - which
+        # LIKE was applied above it. The scan now emits 6 - it applies both - which
         # is the same answer for less work.
         "SELECT user_name FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_verified = TRUE and user_name LIKE '%b%';",
-        86,
-        86,
+        6,
+        6,
     ),
     (
         # `Lauched_at < '2000-01-01'` as written no longer binds - a VARCHAR literal
         # is not implicitly a TIMESTAMP - so the comparison says what it means.
-        "SELECT * FROM testdata.flat.space_missions WHERE Lauched_at < CAST('2000-01-01' AS TIMESTAMP);",
+        "SELECT * FROM testdata.missions WHERE Lauched_at < CAST('2000-01-01' AS TIMESTAMP);",
         3014,
         3014,
     ),

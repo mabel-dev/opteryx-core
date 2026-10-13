@@ -243,7 +243,7 @@ SELECT * FROM testdata.satellites
 query shape 1 1
 SELECT @@version
 
-query shape 74765 1
+query shape 7452 1
 SELECT is_reply_to FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE COALESCE(is_reply_to, -1) < 0
 
 query shape 9 20

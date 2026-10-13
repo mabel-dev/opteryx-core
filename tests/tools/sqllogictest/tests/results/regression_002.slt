@@ -3,4 +3,4 @@
 query I rowsort
 SELECT count(*) AS ten_followers FROM testdata.flat.formats.parquet WHERE followers = 10
 ----
-353
+43

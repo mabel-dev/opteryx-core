@@ -1,0 +1,49 @@
+Warming up (cold start)...
+Cold start: 137.40ms
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  H2O db-benchmark — Opteryx 0.9.166
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  Size           medium
+  Workloads      groupby
+  Iterations     2 per query (1=cold, 2=warm)
+  Timeout        600s/query
+  Baseline       (no DuckDB baseline available)
+════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Workload/Query     Run 1     Run 2         Min       Avg       Max
+──────────────────────────────────────────────────────────────────
+gro/g1      45.0ms    35.2ms      35.2ms    40.1ms    45.0ms
+gro/g2     120.7ms   117.1ms     117.1ms   118.9ms   120.7ms
+gro/g3     912.7ms   623.7ms     623.7ms   768.2ms   912.7ms
+gro/g4      71.0ms    56.9ms      56.9ms    63.9ms    71.0ms
+gro/g5     894.1ms   867.9ms     867.9ms   881.0ms   894.1ms
+gro/g6     534.0ms   323.0ms     323.0ms   428.5ms   534.0ms
+gro/g7     869.5ms   643.8ms     643.8ms   756.6ms   869.5ms
+gro/g8    1103.2ms  1087.4ms    1087.4ms  1095.3ms  1103.2ms
+gro/g9     145.5ms   145.9ms     145.5ms   145.7ms   145.9ms
+gro/g10   1982.4ms  1969.3ms    1969.3ms  1975.9ms  1982.4ms
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[38;2;26;185;67m20 passed[0m, [38;2;255;121;198m0 failed[0m, [38;2;255;165;0m0 timeout[0m   (12.7s)
+  results: tests/performance/h2o/results/41162225-20261012T140608.csv
+
+--- stderr ---
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.1ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=19.3ms keys=0.2ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=4.5ms keys=0.2ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=6564.1ms keys=62.0ms lanes=37.5ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=3948.8ms keys=40.6ms lanes=7.8ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.6ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=1 merge=0.6ms keys=0.0ms lanes=0.0ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=545.3ms keys=5.6ms lanes=2.8ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=520.5ms keys=5.4ms lanes=2.6ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=490.6ms keys=0.1ms lanes=740.8ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=480.7ms keys=0.2ms lanes=756.2ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=7466.7ms keys=41.9ms lanes=9.2ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=4703.4ms keys=40.3ms lanes=8.9ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=10.9ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=5.3ms keys=0.1ms lanes=0.1ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=3656.1ms keys=17895.3ms lanes=120.8ms (cpu-sums across threads)
+[gb-finalize-prof] threads=16 merge=3173.0ms keys=17786.1ms lanes=116.7ms (cpu-sums across threads)

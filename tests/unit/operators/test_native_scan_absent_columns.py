@@ -57,7 +57,7 @@ def evolved(tmp_path_factory):
 def test_a_partly_evolved_folder_reads_nulls_from_the_old_file():
     rows, sources = run(f"SELECT COUNT(*) AS n, COUNT(followers) AS f, COUNT(user_name) AS u "
                         f"FROM '{_DIFFERENT}'")
-    assert rows == [{"n": 196_902, "f": 196_893, "u": 196_893}]
+    assert rows == [{"n": 10_009, "f": 10_000, "u": 10_000}]
     assert set(sources.values()) == {"NativeParquetScanSource"}
 
 

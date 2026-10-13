@@ -71,6 +71,7 @@
 // boundaries. See src/cpp/engine/trace.hpp's header comment for the same
 // rule on the engine side, and trace_bridge_c.h for why the bridge exists.
 #include "core/trace_bridge_c.h"
+#include "core/chunk_cache.h"     // C7: the planner pins cached chunks and skips their GET
 
 // H6 (2026-08-14, unratified): per-architecture default for the whole-file
 // local mmap cache — see the use_mmap_cache lambda in decode_row_group for the
@@ -1843,6 +1844,21 @@ class ParquetIOPipeline {
         std::vector<WorkItem> followers;
         // Cancel: the block's bytes are counted as discarded ONCE, not per member.
         std::atomic<bool> discard_counted{false};
+        // C7 chunk cache hits pinned by plan_block, per slot (member*ncols + col):
+        // those chunks are decoded from the cached image and never fetched. The
+        // pins live as long as the block — a member that never decodes (top-N
+        // skip, an all-filtered dictionary, cancel) still releases them here.
+        std::vector<const DrakenChunkEntry*> cc_pins;
+        // plan_block has run (the fetch stage plans BEFORE its admission wait, so
+        // the wait is sized by the bytes it will actually fetch).
+        bool planned = false;
+        FetchBlock() = default;
+        FetchBlock(const FetchBlock&) = delete;
+        FetchBlock& operator=(const FetchBlock&) = delete;
+        ~FetchBlock() {
+            for (const DrakenChunkEntry* p : cc_pins)
+                if (p != nullptr) draken_cc_unpin(p);
+        }
     };
 
 
@@ -2152,6 +2168,12 @@ class ParquetIOPipeline {
     std::unordered_map<std::string, std::pair<int64_t, int64_t>> page_index_extent_;
     std::mutex page_index_mutex_;
     std::atomic<uint64_t> page_index_fetches_{0};
+    // C7 chunk cache hits that cost no IO: remote chunks pinned at plan time (no
+    // range bought) and local small chunks served without their pread.
+    std::atomic<uint64_t> cc_get_skipped_chunks_{0};
+    std::atomic<uint64_t> cc_get_skipped_bytes_{0};     // compressed bytes not requested
+    std::atomic<uint64_t> cc_pread_skipped_chunks_{0};
+    std::atomic<uint64_t> cc_pread_skipped_bytes_{0};
     std::atomic<uint64_t> page_index_bytes_fetched_{0};
     std::atomic<uint64_t> page_index_pages_pruned_{0};
     std::atomic<uint64_t> page_index_bytes_pruned_{0};
@@ -2262,15 +2284,11 @@ class ParquetIOPipeline {
         if (memory_budget_bytes_ <= 0) return;
         item.charged_decoded = item.est_decoded_bytes;
         ledger_charge(held_decoded_, item.charged_decoded);
-        // Coupled remote path: the compressed bytes are fetched inside decode and
-        // live until it returns, so they are charged here rather than by a fetch
-        // stage that does not exist for this item. A member whose block was
-        // already fetched (by the fetch stage, or by the lead's decode) was
-        // charged by whoever fetched it.
-        if (item.block && !item.block->fetched && !path_is_local(item.path)) {
-            item.charged_compressed = item.est_compressed_bytes;
-            ledger_charge(held_prefetch_, item.charged_compressed);
-        }
+        // A remote item's compressed bytes are charged by the fetch that buys
+        // them (fetch_block) — on the coupled path that is this item's own decode
+        // (ensure_block_fetched), after plan_block knows which chunks the C7 cache
+        // serves. A member whose block was already fetched was charged by
+        // whoever fetched it.
     }
 
     // Diagnostic counters for queue-contention investigation.
@@ -2645,6 +2663,14 @@ class ParquetIOPipeline {
         plan.clen.assign(members.size() * ncols, 0);
         plan.extents.clear();
         plan.groups.clear();
+        for (const DrakenChunkEntry* p : blk.cc_pins)
+            if (p != nullptr) draken_cc_unpin(p);
+        blk.cc_pins.assign(members.size() * ncols, nullptr);
+        // C7: a chunk already in the cache needs no bytes — pin it and buy nothing
+        // for it. Same key as the decoder's (the path up to any '?', the chunk's
+        // first byte).
+        const bool cc_on = draken_cc_enabled() != 0;
+        const size_t cc_key_len = std::min(blk.path.find('?'), blk.path.size());
         for (size_t m = 0; m < members.size(); ++m) {
             WorkItem& item = *members[m];
             compute_page_prune(item);
@@ -2656,6 +2682,17 @@ class ParquetIOPipeline {
                 plan.cstart[slot] = base_offsets[i];
                 plan.clen[slot]   = item.column_stats[i].total_compressed_size;
                 if (pp.active && pp.all_pruned) continue;   // nothing to buy for this member
+                if (cc_on && item.column_stats[i].codec != 0) {
+                    blk.cc_pins[slot] = draken_cc_lookup_hit(blk.path.data(), cc_key_len,
+                                                             base_offsets[i]);
+                    if (blk.cc_pins[slot] != nullptr) {          // served from the cache
+                        cc_get_skipped_chunks_.fetch_add(1, std::memory_order_relaxed);
+                        cc_get_skipped_bytes_.fetch_add(
+                            static_cast<uint64_t>(std::max<int64_t>(plan.clen[slot], 0)),
+                            std::memory_order_relaxed);
+                        continue;
+                    }
+                }
                 const bool sparse = pp.active && i < pp.extents.size() && !pp.extents[i].empty();
                 if (!sparse) {
                     plan.extents.push_back(RemotePlan::Extent{
@@ -2697,6 +2734,19 @@ class ParquetIOPipeline {
             if (!merged)
                 plan.groups.push_back(RemotePlan::Group{st, e, len, {x}});
         }
+        blk.planned = true;
+    }
+
+    // Compressed bytes of member `m`'s chunks that plan_block pinned from the C7
+    // cache: estimated into est_compressed_bytes, but never fetched.
+    static int64_t cached_compressed_bytes(const FetchBlock& blk, size_t m) {
+        int64_t n = 0;
+        for (size_t i = 0; i < blk.ncols; ++i) {
+            const size_t slot = m * blk.ncols + i;
+            if (slot < blk.cc_pins.size() && blk.cc_pins[slot] != nullptr)
+                n += std::max<int64_t>(blk.plan.clen[slot], 0);
+        }
+        return n;
     }
 
 #ifdef RUGO_ENABLE_HTTP
@@ -2875,14 +2925,21 @@ class ParquetIOPipeline {
     // ranges in one batch. `charge_members`: the members whose compressed bytes
     // this fetch buys and must charge on the prefetch ledger (the fetch stage
     // charges every member after an admission wait; the coupled lead charges
-    // only its followers — its own share was charged when it was claimed).
+    // itself and its followers). A charge is the member's estimate less its
+    // chunks served from the C7 cache, which are never fetched.
     void fetch_block(FetchBlock& blk, const std::vector<WorkItem*>& members,
                      const std::vector<WorkItem*>& charge_members) {
 #ifdef RUGO_ENABLE_HTTP
         try {
-            plan_block(blk, members);
-            for (WorkItem* it : charge_members) {
-                it->charged_compressed = it->est_compressed_bytes;
+            if (!blk.planned) plan_block(blk, members);
+            // The prefetch ledger holds what this fetch BUYS: a member's estimate
+            // less its chunks served from the cache.
+            for (size_t m = 0; m < members.size(); ++m) {
+                WorkItem* it = members[m];
+                if (std::find(charge_members.begin(), charge_members.end(), it) == charge_members.end())
+                    continue;
+                it->charged_compressed =
+                    std::max<int64_t>(it->est_compressed_bytes - cached_compressed_bytes(blk, m), 0);
                 ledger_charge(held_prefetch_, it->charged_compressed);
             }
             if (!blk.plan.groups.empty())
@@ -2944,8 +3001,24 @@ class ParquetIOPipeline {
             // until every member's decode has consumed them. Waits only while an
             // EARLIER fetch's bytes are still pending a decode (see the ledger
             // comment).
+            std::vector<WorkItem*> ptrs;
+            ptrs.reserve(members.size());
+            for (WorkItem& it : members) ptrs.push_back(&it);
+            // Plan first (pins the C7 cache hits), so the admission wait is sized
+            // by the bytes this fetch will buy, not by chunks it will not fetch.
             int64_t block_bytes = 0;
-            for (const WorkItem& it : members) block_bytes += it.est_compressed_bytes;
+            try {
+                plan_block(*blk, ptrs);
+                for (size_t m = 0; m < ptrs.size(); ++m)
+                    block_bytes += std::max<int64_t>(
+                        ptrs[m]->est_compressed_bytes - cached_compressed_bytes(*blk, m), 0);
+            } catch (...) {
+                blk->buffers.clear();
+                blk->error = std::current_exception();
+                blk->fetched = true;
+                publish_items(std::move(members));
+                return;
+            }
             if (memory_budget_bytes_ > 0) {
                 std::unique_lock<std::mutex> lk(queue_mutex_);
                 auto admissible = [this, block_bytes]() {
@@ -2966,9 +3039,6 @@ class ParquetIOPipeline {
                         std::memory_order_relaxed);
                 }
             }
-            std::vector<WorkItem*> ptrs;
-            ptrs.reserve(members.size());
-            for (WorkItem& it : members) ptrs.push_back(&it);
             // The budget-off case charges nothing (ledger_charge is a no-op on
             // a zero charge only; guard on the budget itself).
             fetch_block(*blk, ptrs, memory_budget_bytes_ > 0 ? ptrs : std::vector<WorkItem*>{});
@@ -2991,7 +3061,7 @@ class ParquetIOPipeline {
             std::vector<WorkItem*> members;
             members.reserve(1 + blk.followers.size());
             members.push_back(&lead);
-            std::vector<WorkItem*> charge;
+            std::vector<WorkItem*> charge{&lead};
             for (WorkItem& f : blk.followers) { members.push_back(&f); charge.push_back(&f); }
             fetch_block(blk, members, memory_budget_bytes_ > 0 ? charge : std::vector<WorkItem*>{});
             followers = std::move(blk.followers);
@@ -3567,9 +3637,14 @@ class ParquetIOPipeline {
                 // query string, which changes per query: the object is the URL up
                 // to the '?', so that is the key.
                 const size_t cc_key_len = std::min(item.path.find('?'), item.path.size());
+                const DrakenChunkEntry* cc_pinned = nullptr;
+                if (remote && item.block) {
+                    const size_t slot = item.member * item.block->ncols + i;
+                    if (slot < item.block->cc_pins.size()) cc_pinned = item.block->cc_pins[slot];
+                }
                 const ChunkCacheRequest cc_req{item.path.data(), cc_key_len,
                                                base_offset, chunk_cache_admit_,
-                                               !path_is_local(item.path)};
+                                               !path_is_local(item.path), cc_pinned};
 
                 // prefer_dict: keep the dictionary (compressed/Dict shape) for
                 // plain int32/int64 dict columns when not masking. Masked (pass-2)
@@ -3679,15 +3754,17 @@ class ParquetIOPipeline {
                     // in the file tail (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md
                     // [D-6]: the remote bloom decode-skip was dropped with it;
                     // bloom pruning is a plan-time, local-footer concern).
-                    if (i >= col_ptr.size() || col_ptr[i] == nullptr) {
+                    if (cc_pinned == nullptr && (i >= col_ptr.size() || col_ptr[i] == nullptr)) {
                         result.success = false;
                         result.error = "coalesced range fetch did not cover column " +
                                        std::to_string(i);
                         return false;
                     }
-                    const uint8_t* raw_data = col_ptr[i];
-                    const size_t   raw_size = col_len[i];
-                    result.bytes_fetched += col_fetched[i];   // what was actually transferred
+                    // A pinned cache hit was never fetched: no bytes, decoded from the image.
+                    const uint8_t* raw_data = cc_pinned != nullptr ? nullptr : col_ptr[i];
+                    const size_t   raw_size = cc_pinned != nullptr ? 0 : col_len[i];
+                    if (cc_pinned == nullptr)
+                        result.bytes_fetched += col_fetched[i];   // what was actually transferred
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
                         raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
@@ -3696,6 +3773,25 @@ class ParquetIOPipeline {
                 } else {
                     // Local file, reached either because the mmap failed OR because
                     // H15 chose a pread for a small chunk (see small_chunk_pread).
+                    // A C7 hit needs no bytes: probe before the read, decode the image.
+                    struct PinGuard {
+                        const DrakenChunkEntry* p;
+                        ~PinGuard() { if (p != nullptr) draken_cc_unpin(p); }
+                    } local_pin{(adjusted.codec != 0 && draken_cc_enabled())
+                                    ? draken_cc_lookup_hit(cc_req.path, cc_req.path_len, base_offset)
+                                    : nullptr};
+                    if (local_pin.p != nullptr) {
+                        cc_pread_skipped_chunks_.fetch_add(1, std::memory_order_relaxed);
+                        cc_pread_skipped_bytes_.fetch_add(static_cast<uint64_t>(chunk_size),
+                                                          std::memory_order_relaxed);
+                        ChunkCacheRequest pinned_req = cc_req;
+                        pinned_req.pinned = local_pin.p;
+                        auto t_dec = std::chrono::steady_clock::now();
+                        DecodeColumnFromChunk(scratch,
+                            nullptr, 0, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &pinned_req);
+                        total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - t_dec).count();
+                    } else {
                     auto [raw_bytes, read_ns] =
                         read_local_range(fd_lease.get(), item.path, base_offset, chunk_size);
                     result.bytes_fetched += chunk_size;
@@ -3705,6 +3801,7 @@ class ParquetIOPipeline {
                         raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
+                    }
                 }
 
                 if (!decoded.success) {
@@ -4770,6 +4867,10 @@ class ParquetIOPipeline {
     uint64_t page_index_fetches() const {
         return page_index_fetches_.load(std::memory_order_relaxed);
     }
+    uint64_t cc_get_skipped_chunks() const { return cc_get_skipped_chunks_.load(std::memory_order_relaxed); }
+    uint64_t cc_get_skipped_bytes() const { return cc_get_skipped_bytes_.load(std::memory_order_relaxed); }
+    uint64_t cc_pread_skipped_chunks() const { return cc_pread_skipped_chunks_.load(std::memory_order_relaxed); }
+    uint64_t cc_pread_skipped_bytes() const { return cc_pread_skipped_bytes_.load(std::memory_order_relaxed); }
     uint64_t page_index_bytes_fetched() const {
         return page_index_bytes_fetched_.load(std::memory_order_relaxed);
     }

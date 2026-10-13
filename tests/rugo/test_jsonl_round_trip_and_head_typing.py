@@ -22,7 +22,7 @@ from rugo import jsonl
 from rugo import parquet
 
 SPACE_MISSIONS = os.path.join(
-    os.path.dirname(__file__), "..", "..", "testdata", "flat", "space_missions", "space_missions.parquet"
+    os.path.dirname(__file__), "..", "..", "testdata", "missions", "space_missions.parquet"
 )
 UTC = datetime.timezone.utc
 
