@@ -519,3 +519,56 @@ capacity; DuckDB's `LOAD_FACTOR` value and `ht_entry_t` bit split (the H16 note 
 it as 16-bit salt + 48-bit pointer); ClickHouse's `chooseAggregationMethod` full
 mapping (header truncated); whether Pivot's merge tables are sized from the HLL or
 from counts. None of these change the proposal.
+
+---
+
+## 9. As built — R1 + R3 (2026-10-12, uncommitted)
+
+Rulings (architect, 2026-10-12 night, from the leave-one-out runs):
+
+| Part | Ruling | Evidence |
+|---|---|---|
+| R1 segmented storage, doubling geometry | **kept** | base of everything below |
+| Fixed-size segments | **removed** | no faster than doubling; +19–22% peak RSS |
+| R2 batched new-group append / columnar raw scatter | **removed** | neutral or slower in three separate ablations (removing it: 0.914 vs 0.915, 0.901 vs 0.936) |
+| R3 flush clears tables in place, queues data only | kept (final run re-measures) | earned ~1.4–2.8% |
+| Flat-pointer pass C (`pass_c_spec<LanesOf>`, `GBFlatLanes`) | **kept** | apply CPU −5% on Q08/Q09; mixed elsewhere |
+
+What R1 is now (`src/cpp/engine/gb_block_store.hpp`):
+
+- `GBBlockPool`: power-of-two classes, per-thread caches traded in half-batches with
+  the shared lists, a lock-free empty check on refill. Retains ≤ 1 GiB (unmeasured
+  cap). One global mutex was the top frame on Q32 (+28%); the empty-list refill was
+  the second.
+- `GBSegArray` / `GBSegVec<T>`: doubling segments, first segment 2^11 rows unhinted,
+  a hint from 64 rows up; tail-cursor append, first-segment fast path. No `data()`;
+  `run_ptr` / `span` / `copy_out` for contiguous reads.
+- `GBArena`: string bytes in chunks doubling 4 KiB → 1 MiB, never moved; a long string
+  skips (leaves unallocated) chunks too small for it. A fixed 1 MiB first chunk made
+  Q18 request 55 GB from the system per query (peak RSS 2.1×).
+
+Sink changes (`native_group_sinks.hpp`):
+
+- Every merge builds a fresh table hinted to the known total; radix buckets are
+  pre-counted and hinted. Merged columns are one segment, so emit and top-k read them
+  in place.
+- `GBPartition` = `GBPartData` (queued at flush) + tables (index, parvi, medius) kept
+  by the worker and cleared in place (`CarcharIndex::clear()` added).
+- A flush window's columns take the last window's size (+¼) as their first segment —
+  **shrink only** (capped at the 2^11 default). Without it, low-cardinality flush-heavy
+  queries (Q08/Q09) paid a 2,048-row segment per lane per window (2.1× RSS, +10%);
+  letting it grow overshot after a morsel jumped a window (Q32 RSS 12.1 → 16.7 GB).
+- Long-string key stores past 4 GB per partition now fail loud (were a silent u32 wrap).
+
+Remaining compile-time switches (temporary, removed once ruled): `OPTERYX_GB_FLUSH_RECONSTRUCT`
+(R3-off), `OPTERYX_GB_NO_SEG_HINT` (window-hint-off); `OPTERYX_GB_STRESS` is the test-only
+stress build (flush 8, merge leaf 2, raw switch 0.0) and stays.
+
+Tests: `make gb-block-store-test` (in `make q`, ASan/UBSan, includes cross-thread pool
+use); the stress build passes `make q` + `make slt` (its only GROUP BY test failures are
+the top-k *engagement* asserts, which a 2-entry merge leaf cannot satisfy — the value
+comparisons all pass).
+
+Measurement notes: arms must differ in `_operators` only (sharing BASE's
+`pool_reader`/`thread_pool`) — tree-built copies shifted the controls by 4%. Three-round
+runs drift ±4% arm-to-arm on the controls; sub-5% calls need ≥ 5 rounds.

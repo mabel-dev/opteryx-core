@@ -50,6 +50,9 @@ class _FakeDataset:
 
 
 class _FakeCatalog:
+    # Stands in for the native store: its catalog records ARE its datasets.
+    serves_catalog_records = True
+
     loads = []
     sources = []
     complete = True

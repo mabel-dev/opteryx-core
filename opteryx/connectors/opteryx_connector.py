@@ -1599,6 +1599,15 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 execution_context=execution_context,
             )
 
+        # A record prefetched by relation resolution comes from the workspace's
+        # opteryx catalog entry. The METASTORE says whether that record can be
+        # read as the relation (`Metastore.serves_catalog_records`): for the
+        # native store it is the dataset; for an external one (Iceberg) it is a
+        # listing with no snapshot and no files, and reading it as the relation
+        # bound an empty one. Not served -> the table loads from this metastore.
+        if not catalog.serves_catalog_records:
+            kwargs.pop("prefetched_table", None)
+
         # Merge stored kwargs with provided kwargs (provided takes precedence)
         merged_kwargs = {**self.kwargs, **kwargs}
         # The table gets a way to reach OTHER workspaces' catalogs, for the one

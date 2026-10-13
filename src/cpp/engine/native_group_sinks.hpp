@@ -56,6 +56,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -95,13 +96,13 @@
 // pre-redesign behaviour of ONE part, compile-time so the arm costs nothing when off.
 // TEMPORARY — each is deleted, with its losing side, once its arm is ruled.
 //   OPTERYX_GB_FLUSH_RECONSTRUCT=1  R3-off: a flush builds fresh tables per window.
-//   OPTERYX_GB_ROW_APPEND=1         R2-off: new groups' keys appended row by row inside
-//                                   the probe loop (and raw mode likewise).
+//   OPTERYX_GB_NO_SEG_HINT=1        window-hint-off: a flush window's columns take the
+//                                   default first segment, not the last window's size.
 #ifndef OPTERYX_GB_FLUSH_RECONSTRUCT
 #define OPTERYX_GB_FLUSH_RECONSTRUCT 0
 #endif
-#ifndef OPTERYX_GB_ROW_APPEND
-#define OPTERYX_GB_ROW_APPEND 0
+#ifndef OPTERYX_GB_NO_SEG_HINT
+#define OPTERYX_GB_NO_SEG_HINT 0
 #endif
 // STRESS BUILD (test-only, never a release build): OPTERYX_GB_STRESS=1 shrinks the
 // flush window, the merge leaf and the raw-mode switch so the ordinary test suites
@@ -272,79 +273,6 @@ struct GroupKeyColumn {
             put_fixed(static_cast<const uint8_t*>(v.data) + static_cast<size_t>(phys) * elem_size);
         }
         note_null(out_row, false);
-    }
-
-    // Batched append_row (R2, docs/GROUPBY_REDESIGN_2026_10_12.md): rows[0..n) of `v`,
-    // appended in that order. The storage kind and width are dispatched once per call,
-    // not once per row, and the values are written straight into the store's segment
-    // runs. Null tracking is a separate pass, taken only when the input has a validity
-    // mask or the store already holds a NULL.
-    bool append_rows(const DrakenVector& v, const uint32_t* rows, size_t n, ErrCtx& err) {
-        if (n == 0) return true;
-        const uint8_t* vv = v.validity;
-        const uint32_t* sel = v.selection;
-        auto ok_at = [vv](uint32_t r) -> bool {
-            return vv == nullptr || ((vv[r >> 3] >> (r & 7)) & 1u);
-        };
-        const size_t base = row_count();
-        raw.resize_uninit(base + n);
-        size_t k = 0;
-        // fill(dst, row): write one appended row's slot; every row in order.
-        auto each_row = [&](auto&& fill) {
-            raw.for_each_run(base, n, [&](uint8_t* p, size_t cnt) {
-                for (size_t j = 0; j < cnt; ++j, ++k) fill(p + j * elem_size, rows[k]);
-            });
-        };
-        bool good = true;
-        if (gb_key_is_bool(type)) {
-            each_row([&](uint8_t* d, uint32_t r) {
-                *d = ok_at(r) ? gb_read_bool_bit(v, sel[r]) : 0;
-            });
-        } else if (gb_key_is_string(type)) {
-            const auto* sa = static_cast<const DrakenStringArena*>(v.data);
-            each_row([&](uint8_t* d, uint32_t r) {
-                DrakenStringSlot out;
-                if (!ok_at(r)) {
-                    std::memset(&out, 0, sizeof(out));
-                } else {
-                    const DrakenStringSlot* slot = &sa->slots[sel[r]];
-                    if (str_is_inline(slot)) {
-                        out = *slot;
-                    } else if (!put_long(slot, str_data(slot, sa->arena), out, err)) {
-                        std::memset(&out, 0, sizeof(out));
-                        good = false;
-                    }
-                }
-                std::memcpy(d, &out, sizeof(out));
-            });
-        } else {
-            const uint8_t* src = static_cast<const uint8_t*>(v.data);
-            auto typed = [&](auto tag) {
-                using T = decltype(tag);
-                const T* s = reinterpret_cast<const T*>(src);
-                each_row([&](uint8_t* d, uint32_t r) {
-                    T val{};
-                    if (ok_at(r)) std::memcpy(&val, s + sel[r], sizeof(T));
-                    std::memcpy(d, &val, sizeof(T));
-                });
-            };
-            struct W16 { uint64_t a, b; };
-            switch (elem_size) {
-                case 1:  typed(uint8_t{});  break;
-                case 2:  typed(uint16_t{}); break;
-                case 4:  typed(uint32_t{}); break;
-                case 8:  typed(uint64_t{}); break;
-                case 16: typed(W16{});      break;
-                default:
-                    each_row([&](uint8_t* d, uint32_t r) {
-                        if (ok_at(r)) std::memcpy(d, src + static_cast<size_t>(sel[r]) * elem_size, elem_size);
-                        else std::memset(d, 0, elem_size);
-                    });
-            }
-        }
-        if (vv != nullptr || !validity.empty())
-            for (size_t i = 0; i < n; ++i) note_null(base + i, !ok_at(rows[i]));
-        return good;
     }
 
     // Append row `r` of another GroupKeyColumn (same type) to this one, rebasing
@@ -660,6 +588,57 @@ inline int64_t agg2_read_raw_at(DrakenType vtype, const void* vdata,
         case DRAKEN_UINT16: return static_cast<int64_t>(static_cast<const uint16_t*>(vdata)[phys]);
         case DRAKEN_UINT32: return static_cast<int64_t>(static_cast<const uint32_t*>(vdata)[phys]);
         default:            return static_cast<const int64_t*>(vdata)[phys];
+    }
+}
+
+// ---- typed operand readers (static dispatch for the update loops) -------------------
+// One reader per physical operand type, each returning exactly what agg2_read_raw_at
+// returns for that type: the widened int64 container, or a float's bit pattern as a
+// double. The update loops dispatch ONCE per spec per morsel (gb_with_raw_reader) and
+// are instantiated per reader, so the per-row type switch is gone by construction rather
+// than left to the optimizer's loop unswitching (MEASURED 2026-10-12: with the switch in
+// the loop, H2O g9's CORR apply ran 2.5x and g1's SUM 1.9x the pre-redesign build).
+template <class T>
+struct GBRawInt {
+    static inline int64_t at(const void* d, uint32_t p) noexcept {
+        return static_cast<int64_t>(static_cast<const T*>(d)[p]);
+    }
+};
+struct GBRawF32 {
+    static inline int64_t at(const void* d, uint32_t p) noexcept {
+        const double x = static_cast<double>(static_cast<const float*>(d)[p]);
+        int64_t b;
+        std::memcpy(&b, &x, sizeof(b));
+        return b;
+    }
+};
+struct GBRawF64 {
+    static inline int64_t at(const void* d, uint32_t p) noexcept {
+        int64_t b;
+        std::memcpy(&b, static_cast<const double*>(d) + p, sizeof(b));
+        return b;
+    }
+};
+struct GBRawBool {
+    static inline int64_t at(const void* d, uint32_t p) noexcept {
+        return (static_cast<const uint8_t*>(d)[p >> 3] >> (p & 7)) & 1u;
+    }
+};
+// Call f(Reader{}) for the operand's physical type — the same cases as agg2_read_raw_at.
+template <class F>
+inline bool gb_with_raw_reader(DrakenType t, bool is_float, F&& f) {
+    if (is_float) return t == DRAKEN_FLOAT32 ? f(GBRawF32{}) : f(GBRawF64{});
+    switch (t) {
+        case DRAKEN_INT8:   return f(GBRawInt<int8_t>{});
+        case DRAKEN_INT16:  return f(GBRawInt<int16_t>{});
+        case DRAKEN_INT32:
+        case DRAKEN_DATE32:
+        case DRAKEN_TIME32: return f(GBRawInt<int32_t>{});
+        case DRAKEN_BOOL:   return f(GBRawBool{});
+        case DRAKEN_UINT8:  return f(GBRawInt<uint8_t>{});
+        case DRAKEN_UINT16: return f(GBRawInt<uint16_t>{});
+        case DRAKEN_UINT32: return f(GBRawInt<uint32_t>{});
+        default:            return f(GBRawInt<int64_t>{});
     }
 }
 
@@ -2913,14 +2892,60 @@ inline bool gb_kind_row_resolvable(GBKind k) {
     }
 }
 
-struct GBRowLane {
-    GBLanes* L;
+// Row i's lane set and group. LT is GBLanes (segmented) or GBFlatLanes (plain
+// pointers); the update loops spell the lanes identically over both.
+template <class LT>
+struct GBRowRef {
+    LT* L;
     uint32_t e;
 };
+using GBRowLane = GBRowRef<GBLanes>;
 
-template <class Resolve>
-inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const DrakenVector& v,
-                              uint32_t rows, Resolve&& at, ErrCtx& err) {
+// A spec's lanes in one partition as plain pointers. Valid only when every fixed-width
+// lane the spec uses is ONE segment over the partition's groups (gb_flat_lanes says
+// so) — with flush windows sized from their predecessor that is the normal case. Same
+// member names as GBLanes, so a loop written against `L.valid[e]` compiles over either.
+// Why: under -fno-strict-aliasing the segmented accessor reloads its segment table
+// after every lane store; a pointer loaded once per morsel does not (MEASURED,
+// ClickBench 2026-10-12: pass C +9..34% on Q08/Q09/Q28/Q35 through the accessor).
+struct GBFlatLanes {
+    int64_t*  valid = nullptr;
+    int64_t*  i64   = nullptr;
+    double*   f64   = nullptr;
+    double*   f64sq = nullptr;
+    double*   f64y  = nullptr;
+    double*   f64yy = nullptr;
+    double*   f64xy = nullptr;
+    uint64_t* mkey  = nullptr;
+    __int128* i128  = nullptr;
+    std::string* sval = nullptr;
+    GBArrayAggState* aa = nullptr;
+    opteryx::roaring32::Roaring32* cidr = nullptr;
+    opteryx::ungrouped::MedianState* median = nullptr;
+    HllppSketch* hll = nullptr;
+    TDigestPtr* td = nullptr;
+};
+
+// Point f at L's lanes over its n groups. False when a fixed-width lane spans more
+// than one segment (the caller then keeps the segmented lanes).
+inline bool gb_flat_lanes(GBLanes& L, size_t n, GBFlatLanes& f) {
+    bool ok = true;
+    auto take = [&ok, n](auto& lane, auto*& out) {
+        if (lane.empty()) { out = nullptr; return; }
+        out = lane.run_ptr(0, n);
+        ok = ok && out != nullptr;
+    };
+    take(L.valid, f.valid); take(L.i64, f.i64); take(L.f64, f.f64); take(L.f64sq, f.f64sq);
+    take(L.f64y, f.f64y); take(L.f64yy, f.f64yy); take(L.f64xy, f.f64xy);
+    take(L.mkey, f.mkey); take(L.i128, f.i128);
+    f.sval = L.sval.data(); f.aa = L.aa.data(); f.cidr = L.cidr.data();
+    f.median = L.median.data(); f.hll = L.hll.data(); f.td = L.td.data();
+    return ok;
+}
+
+template <class RD, class Resolve>
+inline bool gb_apply_row_kind_rd(GBKind kind, bool want_max, bool is_f, const DrakenVector& v,
+                                 uint32_t rows, Resolve&& at, ErrCtx& err) {
     const DrakenType   vtype  = v.type;
     const void*        vdata  = v.data;
     const uint32_t*    vsel   = v.selection;
@@ -2933,15 +2958,15 @@ inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const Drake
         case GBKind::Valid:
             for (uint32_t i = 0; i < rows; ++i) {
                 if (!row_ok(i)) continue;
-                const GBRowLane r = at(i);
+                const auto r = at(i);
                 r.L->valid[r.e] += 1;
             }
             return true;
         case GBKind::SumI:
             for (uint32_t i = 0; i < rows; ++i) {
                 if (!row_ok(i)) continue;
-                const GBRowLane r = at(i);
-                int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, false);
+                const auto r = at(i);
+                int64_t raw = RD::at(vdata, vsel[i]);
                 if (!agg2_sum_i64_add(r.L->i64[r.e], raw, is_u64)) {
                     err.code = 1;
                     err.msg = "SUM overflow: exact integer sum exceeds INT64 "
@@ -2954,9 +2979,8 @@ inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const Drake
         case GBKind::AvgI:
             for (uint32_t i = 0; i < rows; ++i) {
                 if (!row_ok(i)) continue;
-                const GBRowLane r = at(i);
-                r.L->i128[r.e] += agg2_raw_as_i128(
-                    agg2_read_raw_at(vtype, vdata, vsel, i, false), is_u64);
+                const auto r = at(i);
+                r.L->i128[r.e] += agg2_raw_as_i128(RD::at(vdata, vsel[i]), is_u64);
                 r.L->valid[r.e] += 1;
             }
             return true;
@@ -2964,8 +2988,8 @@ inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const Drake
         case GBKind::AvgF:
             for (uint32_t i = 0; i < rows; ++i) {
                 if (!row_ok(i)) continue;
-                const GBRowLane r = at(i);
-                int64_t bits = agg2_read_raw_at(vtype, vdata, vsel, i, true);
+                const auto r = at(i);
+                int64_t bits = RD::at(vdata, vsel[i]);
                 double d;
                 std::memcpy(&d, &bits, sizeof(d));
                 r.L->f64[r.e] += d;
@@ -2975,8 +2999,8 @@ inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const Drake
         case GBKind::MinMaxNum:
             for (uint32_t i = 0; i < rows; ++i) {
                 if (!row_ok(i)) continue;
-                const GBRowLane r = at(i);
-                GBLanes& L = *r.L;
+                const auto r = at(i);
+                auto& L = *r.L;
                 const uint32_t e = r.e;
                 uint64_t kk = sort_num_key(v, i);
                 if (L.valid[e] == 0 || (want_max ? kk > L.mkey[e] : kk < L.mkey[e])) {
@@ -2992,6 +3016,19 @@ inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const Drake
                       "eligibility gate and dispatch disagree, fail loud";
             return false;
     }
+}
+
+// gb_apply_row_kind_rd with the operand's reader resolved once (gb_with_raw_reader).
+// MIN/MAX read through the sort-key normaliser, not the reader, so one instantiation
+// serves every operand type there.
+template <class Resolve>
+inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const DrakenVector& v,
+                              uint32_t rows, Resolve&& at, ErrCtx& err) {
+    if (kind == GBKind::MinMaxNum)
+        return gb_apply_row_kind_rd<GBRawInt<int64_t>>(kind, want_max, is_f, v, rows, at, err);
+    return gb_with_raw_reader(v.type, is_f, [&](auto rd) {
+        return gb_apply_row_kind_rd<decltype(rd)>(kind, want_max, is_f, v, rows, at, err);
+    });
 }
 
 // ---- DIRECT-ARRAY GROUP BY (PoC 2026-10-09, after Rayforce's "DA" path) ------------
@@ -3225,7 +3262,7 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
         if (total_arena > 0) {
             uint8_t* w = out_arena;
             col.arena.for_each_run(win_lo, win_hi, [&w](const uint8_t* p, size_t bytes) {
-                std::memcpy(w, p, bytes);
+                if (p != nullptr) std::memcpy(w, p, bytes);   // a skipped chunk holds nothing
                 w += bytes;
             });
         }
@@ -3307,6 +3344,30 @@ inline uint64_t gb_prof_now() {
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// CORR's pass C loop with both operands' readers fixed (see gb_with_raw_reader). A free
+// function with explicit parameters, so nothing in the row loop is a lambda capture.
+template <class RX, class RY, class LanesOf>
+inline void gb_corr_rows(LanesOf lanes_of, uint32_t rows, const uint64_t* mkh,
+                         const uint32_t* mke, const void* dx, const uint32_t* sx,
+                         const uint8_t* vx, bool fx, bool ux, const void* dy,
+                         const uint32_t* sy, const uint8_t* vy, bool fy, bool uy) {
+    for (uint32_t i = 0; i < rows; ++i) {
+        // Pairwise: skip unless BOTH operands are non-NULL.
+        if (vx != nullptr && ((vx[i >> 3] >> (i & 7)) & 1u) == 0) continue;
+        if (vy != nullptr && ((vy[i >> 3] >> (i & 7)) & 1u) == 0) continue;
+        auto& L = lanes_of(gb_part(mkh[i]));
+        const uint32_t e = mke[i];
+        const double x = agg2_raw_as_double(RX::at(dx, sx[i]), fx, ux);
+        const double y = agg2_raw_as_double(RY::at(dy, sy[i]), fy, uy);
+        L.f64[e]   += x;
+        L.f64sq[e] += x * x;
+        L.f64y[e]  += y;
+        L.f64yy[e] += y * y;
+        L.f64xy[e] += x * y;
+        L.valid[e] += 1;
+    }
+}
+
 // Per-partition group DATA: per-group key VALUES for emit (GroupKeyColumn per key
 // col), the aggregate lanes indexed by dense group id, the COUNT(DISTINCT) pair stores,
 // and hashes[] — each group's key hash, so the merge can re-insert it. This is what a
@@ -3359,6 +3420,18 @@ struct GBPartition : GBPartData {
     opteryx::medius::MediusMap<128> mid;   // FOOTPRINT TEST: 2KB/partition instead of 8KB
     bool use_mid = true;
     bool use_parvi = false;           // armed by GroupBySink when the NDV estimate is low
+    // First-segment rows for this partition's next flush window: the size its last
+    // window reached, plus a quarter (0 = no window flushed yet → default geometry).
+    // Same idea as cd_hint for the distinct-pair sets.
+    size_t seg_hint = 0;
+
+    // Size the lane sets for nspecs specs, taking seg_hint while they are still empty.
+    void ensure_lanes(size_t nspecs) {
+        if (lanes.size() == nspecs) return;
+        lanes.resize(nspecs);
+        if (seg_hint != 0)
+            for (GBLanes& L : lanes) L.hint(seg_hint);
+    }
 
     // One-shot: move the parvi entries into the CarcharIndex. Group ids are
     // assigned from hashes.size() (dense, monotone), so the carchar continues
@@ -3478,11 +3551,6 @@ struct GroupByLocal : LocalSinkState {
     std::vector<uint8_t>  dict_part;  // per code: partition index
     std::vector<uint32_t> dict_gid;   // per code: group id within that partition
     std::vector<uint64_t> cd_vhash;   // per row: value hash for a CountDistinct spec
-    // R2 batched append: the rows that made a new group this morsel, their partition,
-    // and the same rows ordered by partition (stable — group ids follow row order).
-    std::vector<uint32_t> new_rows;
-    std::vector<uint8_t>  new_part;
-    std::vector<uint32_t> new_order;
     // exchange: this worker's index, per-owner batches under construction, and
     // per-morsel scratch (distinct-value counts + representatives on the dict path)
     int widx = -1;
@@ -4014,11 +4082,16 @@ struct GroupBySink : Sink {
             const GBKind kind = l.kinds[s];
             if (kind == GBKind::Rows) continue;
             GBLanes* L = &l.da.lanes[s];
-            if (!gb_apply_row_kind(kind, specs[s].fn == AggFn::Max, l.meta[s].is_float,
-                                   in->columns[static_cast<size_t>(specs[s].col_idx)].view,
-                                   rows, [L, gid](uint32_t i) { return GBRowLane{L, gid[i]}; },
-                                   err))
-                return false;
+            const DrakenVector& dv = in->columns[static_cast<size_t>(specs[s].col_idx)].view;
+            const bool want_max = specs[s].fn == AggFn::Max;
+            GBFlatLanes fl;
+            const bool ok = gb_flat_lanes(*L, l.da_slots, fl)
+                ? gb_apply_row_kind(kind, want_max, l.meta[s].is_float, dv, rows,
+                                    [f = &fl, gid](uint32_t i) { return GBRowRef<GBFlatLanes>{f, gid[i]}; },
+                                    err)
+                : gb_apply_row_kind(kind, want_max, l.meta[s].is_float, dv, rows,
+                                    [L, gid](uint32_t i) { return GBRowLane{L, gid[i]}; }, err);
+            if (!ok) return false;
         }
         GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _daC_t0);
         groupby_tel::da_morsels.fetch_add(1, std::memory_order_relaxed);
@@ -4085,7 +4158,7 @@ struct GroupBySink : Sink {
                 GBPartition& P = l.parts[p];
                 const size_t nn = P.size();
                 if (l.has_rows) P.grows.resize(nn);
-                if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
+                P.ensure_lanes(nspecs);
                 if (P.cd.size() != nspecs) init_cd(l, p, nspecs);
                 for (size_t s = 0; s < nspecs; ++s)
                     gb_lanes_resize(P.lanes[s], l.kinds[s], nn);
@@ -4145,6 +4218,7 @@ struct GroupBySink : Sink {
             hint.assign(P.cd.size(), 0);
             for (size_t s = 0; s < hint.size(); ++s)
                 hint[s] = static_cast<uint32_t>(P.cd[s].size());
+            const size_t window_groups = P.size();
             out.emplace_back(p, std::move(static_cast<GBPartData&>(P)));
             static_cast<GBPartData&>(P) = GBPartData();
 #if OPTERYX_GB_FLUSH_RECONSTRUCT
@@ -4155,6 +4229,18 @@ struct GroupBySink : Sink {
             P.use_parvi = low_card && !l.raw;        // re-arm the gate
             P.use_mid = !l.mid_disabled && !l.raw;   // ...but never re-arm a lost cause
             type_keycols(P, l.key_meta);
+            // The next window is sized like this one (lanes take it in ensure_lanes).
+#if !OPTERYX_GB_NO_SEG_HINT
+            // Shrink only: a window that overshot (a flush is checked once per morsel,
+            // and a morsel can add far more than one window's worth) must not size the
+            // next one up — MEASURED, Q32 peak RSS 12.1 -> 16.7 GB when it did. Big
+            // windows keep the default doubling geometry.
+            P.seg_hint = std::min(window_groups + window_groups / 4,
+                                  size_t(1) << kGBSegFirstLog2);
+            P.hint_rows(P.seg_hint);
+#else
+            (void)window_groups;
+#endif
         }
         // Raw mode covers EVERY partition, not only the ones just flushed: a raw
         // partition never probes, so no front map may stay armed on it.
@@ -4190,41 +4276,236 @@ struct GroupBySink : Sink {
         l.rows_since_flush = 0;
     }
 
-    // R2's batch step: append l.new_rows (with their partitions in l.new_part) as new
-    // groups — stable by partition, so each partition's new groups take consecutive ids
-    // in row order, exactly the ids pass B handed out. Raw mode's ids are assigned here
-    // (mk_ent), since it never probed.
-    bool append_new_groups(GroupByLocal& l, const MorselPtr& in, ErrCtx& err) {
-        const size_t nn = l.new_rows.size();
-        if (nn == 0) return true;
-        std::array<uint32_t, kGBParts + 1> off{};
-        for (size_t k = 0; k < nn; ++k) off[l.new_part[k] + 1] += 1;
-        for (size_t p = 0; p < kGBParts; ++p) off[p + 1] += off[p];
-        l.new_order.resize(nn);
-        {
-            std::array<uint32_t, kGBParts> pos;
-            for (size_t p = 0; p < kGBParts; ++p) pos[p] = off[p];
-            for (size_t k = 0; k < nn; ++k) l.new_order[pos[l.new_part[k]]++] = l.new_rows[k];
-        }
-        for (size_t p = 0; p < kGBParts; ++p) {
-            const uint32_t lo = off[p], hi = off[p + 1];
-            if (lo == hi) continue;
-            GBPartition& P = l.parts[p];
-            const uint32_t* rp = l.new_order.data() + lo;
-            const size_t n = hi - lo;
-            const size_t base = P.size();
-            P.hashes.resize_uninit(base + n);
-            {
-                size_t k = 0;
-                P.hashes.for_each_run(base, n, [&](uint64_t* d, size_t cnt) {
-                    for (size_t j = 0; j < cnt; ++j, ++k) d[j] = l.mk_hash[rp[k]];
-                });
-            }
-            for (size_t j = 0; j < store_col_idx.size(); ++j)
-                if (!P.keycols[j].append_rows(in->columns[store_col_idx[j]].view, rp, n, err))
+    // Pass C (hash path) for one spec over one morsel: the per-kind update loops.
+    // lanes_of(p) is partition p's lane set for this spec — GBFlatLanes (plain pointers)
+    // when every partition's lanes are one segment, else GBLanes (segmented). The loops
+    // are written once and instantiated for both; a member function with explicit
+    // parameters, not a capturing lambda, so nothing in a row loop is reloaded through a
+    // capture (BYREFCAP: -fno-strict-aliasing).
+    template <class RD, class LanesOf>
+    bool pass_c_spec(GroupByLocal& l, const MorselPtr& in, size_t s, GBKind kind,
+                     uint32_t rows, LanesOf lanes_of, ErrCtx& err) {
+        using LT = std::remove_reference_t<decltype(lanes_of(size_t{0}))>;
+        const DrakenVector& v = in->columns[static_cast<size_t>(specs[s].col_idx)].view;
+        const bool         want_max = specs[s].fn == AggFn::Max;
+        const DrakenType   vtype  = v.type;
+        const void*        vdata  = v.data;
+        const uint32_t*    vsel   = v.selection;
+        const uint8_t*     vvalid = v.validity;   // nullptr ⟹ all rows valid
+        const bool         is_f   = l.meta[s].is_float;
+        const bool         is_u64 = vtype == DRAKEN_UINT64;
+        const uint64_t*    mkh    = l.mk_hash.data();
+        const uint32_t*    mke    = l.mk_ent.data();
+        auto row_ok = [vvalid](uint32_t i) -> bool {
+            return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
+        };
+        switch (kind) {
+            case GBKind::Valid:
+            case GBKind::SumI:
+            case GBKind::AvgI:
+            case GBKind::SumF:
+            case GBKind::AvgF: {
+                if (!gb_apply_row_kind_rd<RD>(kind, want_max, is_f, v, rows,
+                                       [lanes_of, mkh, mke](uint32_t i) {
+                                           return GBRowRef<LT>{&lanes_of(gb_part(mkh[i])), mke[i]};
+                                       },
+                                       err))
                     return false;
-            if (l.raw)
-                for (size_t k = 0; k < n; ++k) l.mk_ent[rp[k]] = static_cast<uint32_t>(base + k);
+                break;
+            }
+            case GBKind::Stddev:
+            case GBKind::StddevSamp:
+            case GBKind::VarPop:
+            case GBKind::VarSamp:
+                // Same Σx/Σx²/count accumulation for all four — only
+                // emit_lane_column's finalize formula differs.
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    uint32_t e = l.mk_ent[i];
+                    double d = agg2_raw_as_double(
+                        RD::at(vdata, vsel[i]), is_f, is_u64);
+                    L.f64[e] += d;
+                    L.f64sq[e] += d * d;
+                    L.valid[e] += 1;
+                }
+                break;
+            case GBKind::Corr: {
+                const DrakenVector& v2 =
+                    in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
+                const DrakenType vtype2 = v2.type;
+                const void*      vdata2 = v2.data;
+                const uint32_t*  vsel2  = v2.selection;
+                const uint8_t*   vvalid2 = v2.validity;
+                const bool       is_f2  = l.meta[s].is_float2;
+                const bool       is_u2  = vtype2 == DRAKEN_UINT64;
+                gb_with_raw_reader(vtype2, is_f2, [&](auto ry) {
+                    gb_corr_rows<RD, decltype(ry)>(lanes_of, rows, mkh, mke,
+                                                    vdata, vsel, vvalid, is_f, is_u64,
+                                                    vdata2, vsel2, vvalid2, is_f2, is_u2);
+                    return true;
+                });
+                break;
+            }
+            case GBKind::Median:
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    uint32_t e = l.mk_ent[i];
+                    double d = agg2_raw_as_double(
+                        RD::at(vdata, vsel[i]), is_f, is_u64);
+                    if (!L.median[e].append(d)) {
+                        err.code = 1;
+                        err.msg = kMedianCapExceededMsg;
+                        return false;
+                    }
+                }
+                break;
+            case GBKind::SumD128:
+            case GBKind::AvgD128:
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    uint32_t e = l.mk_ent[i];
+                    L.i128[e] += agg2_read_i128(v, i);
+                    L.valid[e] += 1;
+                }
+                break;
+            case GBKind::MinMaxNum: {
+                if (!gb_apply_row_kind_rd<RD>(kind, want_max, is_f, v, rows,
+                                       [lanes_of, mkh, mke](uint32_t i) {
+                                           return GBRowRef<LT>{&lanes_of(gb_part(mkh[i])), mke[i]};
+                                       },
+                                       err))
+                    return false;
+                break;
+            }
+            case GBKind::MinMaxD128:
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    uint32_t e = l.mk_ent[i];
+                    __int128 r = agg2_read_i128(v, i);
+                    if (L.valid[e] == 0
+                            || (want_max ? r > L.i128[e] : r < L.i128[e]))
+                        L.i128[e] = r;
+                    L.valid[e] += 1;
+                }
+                break;
+            case GBKind::ApproxCountDistinct: {
+                // Same draken row hash CountDistinct uses (compute_row_hashes),
+                // fed into a HyperLogLog++ sketch instead of an exact dedup set.
+                // NULLs excluded (sort_row_valid skip), matching CountDistinct.
+                std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
+                    return false;
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    L.hll[l.mk_ent[i]].add_hash(hll_avalanche(l.cd_vhash[i]));
+                }
+                break;
+            }
+            case GBKind::ApproxPercentile:
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    uint32_t e = l.mk_ent[i];
+                    double d = agg2_raw_as_double(
+                        RD::at(vdata, vsel[i]), is_f, is_u64);
+                    td_add(L.td[e].h, d, 1);
+                }
+                break;
+            case GBKind::CountDistinct: {
+                // Draken hashes the operand value per row; dedup (group,
+                // value_hash) per group by 64-bit hash identity. COUNT(DISTINCT
+                // col) ignores NULLs (sort_row_valid skip), matching SQL.
+                std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
+                    return false;
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    const size_t pi = gb_part(mkh[i]);
+                    uint32_t e = mke[i];
+                    if (l.parts[pi].cd[s].insert(e, l.cd_vhash[i]))
+                        lanes_of(pi).valid[e] += 1;
+                }
+                break;
+            }
+            case GBKind::MinMaxStr: {
+                const DrakenStringArena* sa = string_arena_of(v);
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!row_ok(i)) continue;
+                    auto& L = lanes_of(gb_part(mkh[i]));
+                    uint32_t e = l.mk_ent[i];
+                    const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
+                    const char* p =
+                        reinterpret_cast<const char*>(str_data(slot, sa->arena));
+                    uint32_t len = str_length(slot);
+                    std::string_view sv(p, len);
+                    std::string& cur = L.sval[e];
+                    if (L.valid[e] == 0
+                            || (want_max ? sv > std::string_view(cur)
+                                         : sv < std::string_view(cur)))
+                        cur.assign(p, len);
+                    L.valid[e] += 1;
+                }
+                break;
+            }
+            case GBKind::ArrayAgg: {
+                // NO sort_row_valid() skip — NULLs are elements of the list.
+                // DISTINCT/ORDER BY/LIMIT are NOT applied here: this worker
+                // holds an arbitrary row subset, so they must wait for the
+                // merged list at finalize.
+                const AAStore st = aa_store_of(l.meta[s].type);
+                const DrakenStringArena* sa =
+                    (st == AAStore::Str) ? string_arena_of(v) : nullptr;
+                for (uint32_t i = 0; i < rows; ++i) {
+                    GBArrayAggState& A =
+                        lanes_of(gb_part(mkh[i])).aa[mke[i]];
+                    bool nul = !sort_row_valid(v, i);
+                    if (st == AAStore::Str) {
+                        const char* p = nullptr;
+                        uint32_t len = 0;
+                        if (!nul) {
+                            const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
+                            p = reinterpret_cast<const char*>(
+                                str_data(slot, sa->arena));
+                            len = str_length(slot);
+                        }
+                        A.push(st, nul, 0, 0, p, len);
+                    } else if (st == AAStore::I128) {
+                        A.push(st, nul, 0, nul ? 0 : agg2_read_i128(v, i),
+                               nullptr, 0);
+                    } else {
+                        A.push(st, nul, nul ? 0 : RD::at(vdata, vsel[i]), 0,
+                               nullptr, 0);
+                    }
+                }
+                break;
+            }
+            case GBKind::CidrAgg: {
+                // NULLs ARE skipped here, unlike ARRAY_AGG one case up. A NULL
+                // is not an address, so it is not a member of the set; a list
+                // keeps NULL because it has a slot to keep it in, a set does
+                // not. The operand is validated UINT32+IPV4, so the raw read
+                // is never a float and the value IS the address (octet A in
+                // bits 31..24 — see draken/core/ipv4.h).
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!sort_row_valid(v, i)) continue;
+                    opteryx::roaring32::Roaring32& R =
+                        lanes_of(gb_part(mkh[i])).cidr[mke[i]];
+                    // Return ignored deliberately: a refusal latches
+                    // R.overflowed, which emit_cidr_lane_column raises on.
+                    // Checking per row would branch the hot loop to reach the
+                    // same outcome one morsel earlier.
+                    (void)R.add(static_cast<uint32_t>(
+                        RD::at(vdata, vsel[i])));
+                }
+                break;
+            }
+            case GBKind::Rows:
+                break;
         }
         return true;
     }
@@ -4508,7 +4789,7 @@ struct GroupBySink : Sink {
                 if (P.hashes.empty()) continue;
                 size_t nn = P.size();
                 if (l.has_rows) P.grows.resize(nn);
-                if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
+                P.ensure_lanes(nspecs);
                 if (P.cd.size() != nspecs) init_cd(l, p, nspecs);
                 for (size_t s = 0; s < nspecs; ++s)
                     gb_lanes_resize(P.lanes[s], l.kinds[s], nn);
@@ -4550,15 +4831,27 @@ struct GroupBySink : Sink {
                     for (size_t p = 0; p < kGBParts; ++p)
                         lp[p] = (l.parts[p].lanes.size() == nspecs) ? &l.parts[p].lanes[s]
                                                                     : nullptr;
-                    if (!gb_apply_row_kind(
-                            kind, specs[s].fn == AggFn::Max, l.meta[s].is_float,
-                            in->columns[static_cast<size_t>(specs[s].col_idx)].view, rows,
-                            [&lp, codes, dpart, dgid](uint32_t i) {
-                                const uint32_t c = codes[i];
-                                return GBRowLane{lp[dpart[c]], dgid[c]};
-                            },
-                            err))
-                        return SinkResult::CONTINUE;
+                    // Plain pointers when every partition's lanes are one segment.
+                    GBFlatLanes fl[kGBParts];
+                    bool flat = true;
+                    for (size_t p = 0; p < kGBParts && flat; ++p)
+                        if (lp[p] != nullptr)
+                            flat = gb_flat_lanes(*lp[p], l.parts[p].size(), fl[p]);
+                    const DrakenVector& cv =
+                        in->columns[static_cast<size_t>(specs[s].col_idx)].view;
+                    const bool want_max = specs[s].fn == AggFn::Max;
+                    const bool ok = flat
+                        ? gb_apply_row_kind(kind, want_max, l.meta[s].is_float, cv, rows,
+                              [fp = &fl[0], codes, dpart, dgid](uint32_t i) {
+                                  const uint32_t c = codes[i];
+                                  return GBRowRef<GBFlatLanes>{fp + dpart[c], dgid[c]};
+                              }, err)
+                        : gb_apply_row_kind(kind, want_max, l.meta[s].is_float, cv, rows,
+                              [lpp = &lp[0], codes, dpart, dgid](uint32_t i) {
+                                  const uint32_t c = codes[i];
+                                  return GBRowLane{lpp[dpart[c]], dgid[c]};
+                              }, err);
+                    if (!ok) return SinkResult::CONTINUE;
                 }
                 GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
                 groupby_tel::dict_codepass.fetch_add(1, std::memory_order_relaxed);
@@ -4621,7 +4914,6 @@ struct GroupBySink : Sink {
         // Net negative across a mixed workload: the cache-resident regression is
         // large and reproducible, the high-cardinality gain marginal. The ban now
         // holds on BOTH architectures. Restructure the passes instead.
-#if OPTERYX_GB_ROW_APPEND
         if (l.raw) {
             // ADAPTIVE RAW MODE: every row is a new group of its partition — no probe.
             // The finalize (radix) merge groups them; see kGBRawSwitchRatio.
@@ -4658,45 +4950,13 @@ struct GroupBySink : Sink {
 
         // Grow lanes ONCE per morsel to each partition's new entry count
         // (resize zero-fills new groups — the correct initial state).
-#else
-        // R2: pass B finds groups, and a second step appends every new group of the
-        // morsel as a batch — hashes and key values one partition at a time, one typed
-        // loop per key column (append_rows) — instead of a per-row key copy, with its
-        // type switch, inside the probe loop. Raw mode has no probe: every row is a new
-        // group, so the batch step is the whole of pass B — a columnar scatter.
-        l.new_rows.clear();
-        l.new_part.clear();
-        if (l.raw) {
-            l.new_rows.resize(rows);
-            l.new_part.resize(rows);
-            for (uint32_t i = 0; i < rows; ++i) {
-                l.new_rows[i] = i;
-                l.new_part[i] = static_cast<uint8_t>(gb_part(l.mk_hash[i]));
-            }
-        } else {
-            std::array<int64_t, kGBParts> next;
-            for (size_t p = 0; p < kGBParts; ++p) next[p] = static_cast<int64_t>(l.parts[p].size());
-            for (uint32_t i = 0; i < rows; ++i) {
-                const uint64_t h = l.mk_hash[i];
-                const size_t pi = gb_part(h);
-                int64_t gid;
-                if (l.parts[pi].find_or_insert_group(h, next[pi], gid)) {
-                    ++next[pi];
-                    l.new_rows.push_back(i);
-                    l.new_part.push_back(static_cast<uint8_t>(pi));
-                }
-                l.mk_ent[i] = static_cast<uint32_t>(gid);
-            }
-        }
-        if (!append_new_groups(l, in, err)) return SinkResult::CONTINUE;
-#endif
 
         for (size_t p = 0; p < kGBParts; ++p) {
             GBPartition& P = l.parts[p];
             if (P.hashes.empty()) continue;
             size_t n = P.size();
             if (l.has_rows) P.grows.resize(n);
-            if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
+            P.ensure_lanes(nspecs);
             if (P.cd.size() != nspecs) init_cd(l, p, nspecs);
             for (size_t s = 0; s < nspecs; ++s)
                 gb_lanes_resize(P.lanes[s], l.kinds[s], n);
@@ -4707,8 +4967,20 @@ struct GroupBySink : Sink {
         // Pass C: columnar updates — kind dispatched ONCE per spec, tight row loops.
         GROUPBY_TEL_START(_gbC_t0);
         if (l.has_rows) {
-            for (uint32_t i = 0; i < rows; ++i)
-                l.parts[gb_part(l.mk_hash[i])].grows[l.mk_ent[i]] += 1;
+            int64_t* gp[kGBParts];
+            bool gflat = true;
+            for (size_t p = 0; p < kGBParts && gflat; ++p) {
+                const GBPartition& P = l.parts[p];
+                gp[p] = P.grows.empty() ? nullptr : P.grows.run_ptr(0, P.size());
+                gflat = P.grows.empty() || gp[p] != nullptr;
+            }
+            const uint64_t* mkh = l.mk_hash.data();
+            const uint32_t* mke = l.mk_ent.data();
+            if (gflat) {
+                for (uint32_t i = 0; i < rows; ++i) gp[gb_part(mkh[i])][mke[i]] += 1;
+            } else {
+                for (uint32_t i = 0; i < rows; ++i) l.parts[gb_part(mkh[i])].grows[mke[i]] += 1;
+            }
         }
         for (size_t s = 0; s < nspecs; ++s) {
             GBKind kind = l.kinds[s];
@@ -4732,7 +5004,6 @@ struct GroupBySink : Sink {
             }
             const DrakenVector& v =
                 in->columns[static_cast<size_t>(specs[s].col_idx)].view;
-            bool want_max = specs[s].fn == AggFn::Max;
 
             // ---- hoisted out of the row loops (all invariant for this spec) ----
             // lp[p] collapses the per-row `l.parts[p].lanes[s]` chain — array
@@ -4748,7 +5019,6 @@ struct GroupBySink : Sink {
             const uint32_t*    vsel   = v.selection;
             const uint8_t*     vvalid = v.validity;   // nullptr ⟹ all rows valid
             const bool         is_f   = l.meta[s].is_float;
-            const bool         is_u64 = vtype == DRAKEN_UINT64;
             // Row-valid test on hoisted locals — same predicate as sort_row_valid.
             auto row_ok = [vvalid](uint32_t i) -> bool {
                 return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
@@ -4778,231 +5048,22 @@ struct GroupBySink : Sink {
                 continue;
             }
 
-            switch (kind) {
-                case GBKind::Valid:
-                case GBKind::SumI:
-                case GBKind::AvgI:
-                case GBKind::SumF:
-                case GBKind::AvgF: {
-                    const uint64_t* mkh = l.mk_hash.data();
-                    const uint32_t* mke = l.mk_ent.data();
-                    if (!gb_apply_row_kind(kind, want_max, is_f, v, rows,
-                                           [&lp, mkh, mke](uint32_t i) {
-                                               return GBRowLane{lp[gb_part(mkh[i])], mke[i]};
-                                           },
-                                           err))
-                        return SinkResult::CONTINUE;
-                    break;
-                }
-                case GBKind::Stddev:
-                case GBKind::StddevSamp:
-                case GBKind::VarPop:
-                case GBKind::VarSamp:
-                    // Same Σx/Σx²/count accumulation for all four — only
-                    // emit_lane_column's finalize formula differs.
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        double d = agg2_raw_as_double(
-                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
-                        L.f64[e] += d;
-                        L.f64sq[e] += d * d;
-                        L.valid[e] += 1;
-                    }
-                    break;
-                case GBKind::Corr: {
-                    const DrakenVector& v2 =
-                        in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
-                    const DrakenType vtype2 = v2.type;
-                    const void*      vdata2 = v2.data;
-                    const uint32_t*  vsel2  = v2.selection;
-                    const uint8_t*   vvalid2 = v2.validity;
-                    const bool       is_f2  = l.meta[s].is_float2;
-                    const bool       is_u2  = vtype2 == DRAKEN_UINT64;
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        // Pairwise: skip unless BOTH operands are non-NULL.
-                        if (!row_ok(i)) continue;
-                        if (vvalid2 != nullptr
-                                && ((vvalid2[i >> 3] >> (i & 7)) & 1u) == 0) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        double x = agg2_raw_as_double(
-                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
-                        double y = agg2_raw_as_double(
-                            agg2_read_raw_at(vtype2, vdata2, vsel2, i, is_f2), is_f2, is_u2);
-                        L.f64[e]   += x;
-                        L.f64sq[e] += x * x;
-                        L.f64y[e]  += y;
-                        L.f64yy[e] += y * y;
-                        L.f64xy[e] += x * y;
-                        L.valid[e] += 1;
-                    }
-                    break;
-                }
-                case GBKind::Median:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        double d = agg2_raw_as_double(
-                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
-                        if (!L.median[e].append(d)) {
-                            err.code = 1;
-                            err.msg = kMedianCapExceededMsg;
-                            return SinkResult::CONTINUE;
-                        }
-                    }
-                    break;
-                case GBKind::SumD128:
-                case GBKind::AvgD128:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        L.i128[e] += agg2_read_i128(v, i);
-                        L.valid[e] += 1;
-                    }
-                    break;
-                case GBKind::MinMaxNum: {
-                    const uint64_t* mkh = l.mk_hash.data();
-                    const uint32_t* mke = l.mk_ent.data();
-                    if (!gb_apply_row_kind(kind, want_max, is_f, v, rows,
-                                           [&lp, mkh, mke](uint32_t i) {
-                                               return GBRowLane{lp[gb_part(mkh[i])], mke[i]};
-                                           },
-                                           err))
-                        return SinkResult::CONTINUE;
-                    break;
-                }
-                case GBKind::MinMaxD128:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        __int128 r = agg2_read_i128(v, i);
-                        if (L.valid[e] == 0
-                                || (want_max ? r > L.i128[e] : r < L.i128[e]))
-                            L.i128[e] = r;
-                        L.valid[e] += 1;
-                    }
-                    break;
-                case GBKind::ApproxCountDistinct: {
-                    // Same draken row hash CountDistinct uses (compute_row_hashes),
-                    // fed into a HyperLogLog++ sketch instead of an exact dedup set.
-                    // NULLs excluded (sort_row_valid skip), matching CountDistinct.
-                    std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
-                    if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
-                        return SinkResult::CONTINUE;
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        L.hll[l.mk_ent[i]].add_hash(hll_avalanche(l.cd_vhash[i]));
-                    }
-                    break;
-                }
-                case GBKind::ApproxPercentile:
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        double d = agg2_raw_as_double(
-                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
-                        td_add(L.td[e].h, d, 1);
-                    }
-                    break;
-                case GBKind::CountDistinct: {
-                    // Draken hashes the operand value per row; dedup (group,
-                    // value_hash) per group by 64-bit hash identity. COUNT(DISTINCT
-                    // col) ignores NULLs (sort_row_valid skip), matching SQL.
-                    std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
-                    if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
-                        return SinkResult::CONTINUE;
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBPartition& P = l.parts[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        if (P.cd[s].insert(e, l.cd_vhash[i]))
-                            P.lanes[s].valid[e] += 1;
-                    }
-                    break;
-                }
-                case GBKind::MinMaxStr: {
-                    const DrakenStringArena* sa = string_arena_of(v);
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
-                        uint32_t e = l.mk_ent[i];
-                        const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
-                        const char* p =
-                            reinterpret_cast<const char*>(str_data(slot, sa->arena));
-                        uint32_t len = str_length(slot);
-                        std::string_view sv(p, len);
-                        std::string& cur = L.sval[e];
-                        if (L.valid[e] == 0
-                                || (want_max ? sv > std::string_view(cur)
-                                             : sv < std::string_view(cur)))
-                            cur.assign(p, len);
-                        L.valid[e] += 1;
-                    }
-                    break;
-                }
-                case GBKind::ArrayAgg: {
-                    // NO sort_row_valid() skip — NULLs are elements of the list.
-                    // DISTINCT/ORDER BY/LIMIT are NOT applied here: this worker
-                    // holds an arbitrary row subset, so they must wait for the
-                    // merged list at finalize.
-                    const AAStore st = aa_store_of(l.meta[s].type);
-                    const bool is_f = l.meta[s].is_float;
-                    const DrakenStringArena* sa =
-                        (st == AAStore::Str) ? string_arena_of(v) : nullptr;
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        GBArrayAggState& A =
-                            l.parts[gb_part(l.mk_hash[i])].lanes[s].aa[l.mk_ent[i]];
-                        bool nul = !sort_row_valid(v, i);
-                        if (st == AAStore::Str) {
-                            const char* p = nullptr;
-                            uint32_t len = 0;
-                            if (!nul) {
-                                const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
-                                p = reinterpret_cast<const char*>(
-                                    str_data(slot, sa->arena));
-                                len = str_length(slot);
-                            }
-                            A.push(st, nul, 0, 0, p, len);
-                        } else if (st == AAStore::I128) {
-                            A.push(st, nul, 0, nul ? 0 : agg2_read_i128(v, i),
-                                   nullptr, 0);
-                        } else {
-                            A.push(st, nul, nul ? 0 : agg2_read_raw_at(vtype, vdata, vsel, i, is_f), 0,
-                                   nullptr, 0);
-                        }
-                    }
-                    break;
-                }
-                case GBKind::CidrAgg: {
-                    // NULLs ARE skipped here, unlike ARRAY_AGG one case up. A NULL
-                    // is not an address, so it is not a member of the set; a list
-                    // keeps NULL because it has a slot to keep it in, a set does
-                    // not. The operand is validated UINT32+IPV4, so the raw read
-                    // is never a float and the value IS the address (octet A in
-                    // bits 31..24 — see draken/core/ipv4.h).
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        opteryx::roaring32::Roaring32& R =
-                            l.parts[gb_part(l.mk_hash[i])].lanes[s].cidr[l.mk_ent[i]];
-                        // Return ignored deliberately: a refusal latches
-                        // R.overflowed, which emit_cidr_lane_column raises on.
-                        // Checking per row would branch the hot loop to reach the
-                        // same outcome one morsel earlier.
-                        (void)R.add(static_cast<uint32_t>(
-                            agg2_read_raw_at(vtype, vdata, vsel, i, false)));
-                    }
-                    break;
-                }
-                case GBKind::Rows:
-                    break;
-            }
+            // Plain pointers when every partition's lanes are one segment (the normal
+            // case once windows are sized from their predecessor), else segmented.
+            GBFlatLanes fl[kGBParts];
+            bool flat = true;
+            for (size_t p = 0; p < kGBParts && flat; ++p)
+                if (lp[p] != nullptr) flat = gb_flat_lanes(*lp[p], l.parts[p].size(), fl[p]);
+            // ...and the operand's reader resolved once (gb_with_raw_reader).
+            const bool ok = gb_with_raw_reader(v.type, is_f, [&](auto rd) {
+                using RD = decltype(rd);
+                return flat
+                    ? pass_c_spec<RD>(l, in, s, kind, rows,
+                                      [fp = &fl[0]](size_t p) -> GBFlatLanes& { return fp[p]; }, err)
+                    : pass_c_spec<RD>(l, in, s, kind, rows,
+                                      [lpp = &lp[0]](size_t p) -> GBLanes& { return *lpp[p]; }, err);
+            });
+            if (!ok) return SinkResult::CONTINUE;
         }
         l.entries_total = 0;
         for (size_t p = 0; p < kGBParts; ++p) {

@@ -343,18 +343,15 @@ chunk-cache-test: ## Build and run the chunk cache policy tests (S3-FIFO admissi
 	@/tmp/opteryx-tests/chunk_cache_test
 	$(call print_green,"✓ chunk cache policy tests passed")
 
-gb-block-store-test: ## Build and run the GROUP BY block store tests (pool, segmented arrays, arena) for both segment geometries, under ASan
+gb-block-store-test: ## Build and run the GROUP BY block store tests (pool, segmented arrays, arena) under ASan
 	$(call print_blue,"Building and running GROUP BY block store tests...")
 	@mkdir -p /tmp/opteryx-tests
-	@for fx in 0 1; do \
-	  clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
-	    -DOPTERYX_GB_SEG_FIXED=$$fx \
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
 	    -I$(CURDIR)/draken -I$(CURDIR)/draken/core -I$(CURDIR)/src/cpp/engine \
 	    $(CURDIR)/src/cpp/engine/test_gb_block_store.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
-	    -o /tmp/opteryx-tests/test_gb_block_store_$$fx && \
-	  /tmp/opteryx-tests/test_gb_block_store_$$fx || exit 1; \
-	done
+	    -o /tmp/opteryx-tests/test_gb_block_store
+	@/tmp/opteryx-tests/test_gb_block_store
 	$(call print_green,"✓ GROUP BY block store tests passed")
 
 page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse + page-predicate tests

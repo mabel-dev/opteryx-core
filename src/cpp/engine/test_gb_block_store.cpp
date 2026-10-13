@@ -1,7 +1,6 @@
 // src/cpp/engine/test_gb_block_store.cpp — GBBlockPool / GBSegArray / GBSegVec / GBArena
-// (gb_block_store.hpp). Built TWICE by `make gb-block-store-test`: once per geometry
-// (-DOPTERYX_GB_SEG_FIXED=0 and =1), because the two share every caller and must
-// agree on every answer. Fails by exit code with the failing check printed.
+// (gb_block_store.hpp), under ASan/UBSan via `make gb-block-store-test` (part of
+// `make q`). Fails by exit code with the failing check printed.
 
 #include <cstdint>
 #include <cstdio>
@@ -57,21 +56,30 @@ static void test_resize_zeroes_recycled_blocks() {
     CHECK(ok);
 }
 
-// A hinted column is one segment in the doubling geometry; the fixed geometry ignores
-// the hint. Either way span() returns the right values.
+// A hinted column is one segment; span() returns the right values either way.
 static void test_hint_and_span() {
     GBSegVec<double> v;
     v.hint(50000);
     for (size_t i = 0; i < 50000; ++i) v.push_back(static_cast<double>(i) + 0.5);
-#if OPTERYX_GB_SEG_FIXED
-    CHECK(v.run_ptr(0, 50000) == nullptr);
-#else
     CHECK(v.run_ptr(0, 50000) != nullptr);
-#endif
     std::vector<double> scratch;
     const double* p = v.span(1234, 40000, scratch);
     bool ok = true;
     for (size_t i = 0; i < 40000; ++i) ok &= p[i] == static_cast<double>(1234 + i) + 0.5;
+    CHECK(ok);
+}
+
+// A small hint gives a small first segment (the flush-window hint): 64 rows, not the
+// unhinted default.
+static void test_small_hint() {
+    GBSegVec<int64_t> v;
+    v.hint(10);
+    for (int i = 0; i < 64; ++i) v.push_back(i);
+    CHECK(v.run_ptr(0, 64) != nullptr);
+    v.push_back(64);
+    CHECK(v.run_ptr(0, 65) == nullptr);   // row 64 opens the second segment
+    bool ok = true;
+    for (int i = 0; i < 65; ++i) ok &= v[static_cast<size_t>(i)] == i;
     CHECK(ok);
 }
 
@@ -161,8 +169,8 @@ static void test_arena() {
     for (size_t i = 0; i < vals.size(); ++i) {
         ok &= std::memcmp(ar.resolve(offs[i]), vals[i].data(), vals[i].size()) == 0;
         if (!vals[i].empty() && vals[i].size() <= GBArena::kChunk)
-            no_straddle &= (offs[i] >> GBArena::kChunkLog2)
-                           == ((offs[i] + vals[i].size() - 1) >> GBArena::kChunkLog2);
+            no_straddle &= GBArena::chunk_of(offs[i])
+                           == GBArena::chunk_of(offs[i] + vals[i].size() - 1);
     }
     CHECK(ok);
     CHECK(no_straddle);
@@ -177,7 +185,7 @@ static void test_arena() {
     std::vector<uint8_t> win(hi - lo);
     size_t pos = 0;
     ar.for_each_run(lo, hi, [&](const uint8_t* p, size_t n) {
-        std::memcpy(win.data() + pos, p, n);
+        if (p != nullptr) std::memcpy(win.data() + pos, p, n);
         pos += n;
     });
     CHECK(pos == hi - lo);
@@ -187,6 +195,33 @@ static void test_arena() {
         wok &= std::memcmp(win.data() + (offs[i] - lo), vals[i].data(), vals[i].size()) == 0;
     }
     CHECK(wok);
+    // Chunk arithmetic: every offset maps back into the chunk that starts at or before it.
+    bool geo = true;
+    for (size_t k = 0; k < GBArena::kGrowChunks + 4; ++k) {
+        const uint64_t st = GBArena::chunk_start(k), sz = GBArena::chunk_size(k);
+        geo &= GBArena::chunk_of(st) == k && GBArena::chunk_of(st + sz - 1) == k;
+        geo &= GBArena::chunk_start(k + 1) == st + sz;
+    }
+    CHECK(geo);
+    // A small arena starts small: one short string takes the 4 KiB first chunk only.
+    {
+        GBArena small;
+        const uint8_t tiny[40] = {1};
+        CHECK(small.put(tiny, sizeof(tiny)) == 0);
+        CHECK(small.used() == sizeof(tiny) && GBArena::chunk_size(0) == 4096);
+    }
+    // A first string longer than the early chunks skips them, and stays readable.
+    {
+        GBArena skip;
+        std::string big(100000, 'x');
+        const uint64_t off = skip.put(reinterpret_cast<const uint8_t*>(big.data()), big.size());
+        CHECK(std::memcmp(skip.resolve(off), big.data(), big.size()) == 0);
+        size_t nulls = 0, total = 0;
+        skip.for_each_run(0, off + big.size(), [&](const uint8_t* p, size_t n) {
+            nulls += p == nullptr ? n : 0; total += n;
+        });
+        CHECK(total == off + big.size() && nulls == off);
+    }
     GBArena moved(std::move(ar));
     CHECK(ar.empty() && !moved.empty());
     CHECK(std::memcmp(moved.resolve(offs[0]), vals[0].data(), vals[0].size()) == 0);
@@ -231,17 +266,16 @@ int main() {
     test_push_and_index();
     test_resize_zeroes_recycled_blocks();
     test_hint_and_span();
+    test_small_hint();
     test_runs_cover_range();
     test_runtime_stride();
     test_move_and_recycle();
     test_arena();
     test_threads();
     if (failures != 0) {
-        std::fprintf(stderr, "gb_block_store (%s geometry): %d check(s) failed\n",
-                     OPTERYX_GB_SEG_FIXED ? "fixed" : "doubling", failures);
+        std::fprintf(stderr, "gb_block_store: %d check(s) failed\n", failures);
         return 1;
     }
-    std::printf("gb_block_store (%s geometry): all checks passed\n",
-                OPTERYX_GB_SEG_FIXED ? "fixed" : "doubling");
+    std::printf("gb_block_store: all checks passed\n");
     return 0;
 }

@@ -124,6 +124,9 @@ class _FakeCatalog:
     """One class serves every workspace - the connector instantiates it per
     workspace name, which is how a cross-workspace source gets looked up."""
 
+    # Stands in for the native store: its catalog records ARE its datasets.
+    serves_catalog_records = True
+
     loads = []
     history = []
     # (workspace, relative id) -> the snapshot ids that still exist there.

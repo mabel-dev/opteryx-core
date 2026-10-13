@@ -16,19 +16,16 @@
 //   * only the rows a column gains are initialised (zeroed by `resize`, left for the
 //     caller by `resize_uninit`/`append`).
 //
-// GEOMETRY is a compile-time choice, because which one wins is a measurement
-// (architect, 2026-10-12: "the data has the answer"):
-//   doubling (default): segment 0 holds 2^b rows; segment k >= 1 holds 2^(b+k-1) rows
-//       and starts at row 2^(b+k-1). Growth never copies, slack is no worse than a
-//       doubling std::vector, and a column has at most ~40 segments, held inline. A
-//       caller that knows a column's final size up front (a merge) passes it to
-//       `hint` before the first append, and the column is then ONE segment.
-//   fixed (-DOPTERYX_GB_SEG_FIXED=1): every segment holds 2^kGBSegFixedLog2 rows and
-//       `hint` is ignored.
+// GEOMETRY: segment 0 holds 2^b rows; segment k >= 1 holds 2^(b+k-1) rows and starts at
+// row 2^(b+k-1). Growth never copies, slack is no worse than a doubling std::vector, and
+// a column has at most ~35 segments, held inline. A caller that knows a column's final
+// size up front (a merge) passes it to `hint` before the first append, and the column
+// is then ONE segment. (Fixed-size segments were the doc's first proposal; MEASURED
+// 2026-10-12 no faster and +19-22% peak RSS — ruled out by the architect.)
 // Every column of one partition is given the same hint, so a row range that is
 // contiguous in one column is contiguous in all of them; where a range is NOT
-// contiguous (fixed geometry, or an unhinted partition), readers copy it out
-// (`copy_out`) — correctness never depends on the geometry.
+// contiguous (an unhinted partition that grew), readers copy it out (`copy_out`) —
+// correctness never depends on the geometry.
 
 #include <algorithm>
 #include <array>
@@ -45,9 +42,6 @@
 
 #include "core/alloc.h"   // draken_malloc / draken_free — charged to the memory account
 
-#ifndef OPTERYX_GB_SEG_FIXED
-#define OPTERYX_GB_SEG_FIXED 0
-#endif
 
 namespace opteryx::engine {
 
@@ -58,8 +52,11 @@ namespace opteryx::engine {
 // segments per window put the merge's combine loops on the segment arithmetic.
 // Slack equals a doubling std::vector's. A per-arch sweep candidate.
 constexpr int kGBSegFirstLog2 = 11;
-// Rows (log2) per segment in the fixed geometry — the redesign doc's 4,096.
-constexpr int kGBSegFixedLog2 = 12;
+// Smallest first segment a HINT may ask for (64 rows). A flush window's partition is
+// hinted from the size its predecessor reached, and a low-cardinality partition holds
+// tens of groups: 2,048 empty rows per lane per partition per window cost a fresh page
+// per lane per window (MEASURED, ClickBench Q09 2026-10-12: 2.1x peak RSS, +10% time).
+constexpr int kGBSegMinLog2 = 6;
 // Largest first segment a hint may ask for (2^40 rows: never reached in practice;
 // the bound only keeps the shift arithmetic in range).
 constexpr int kGBSegMaxLog2 = 40;
@@ -265,15 +262,11 @@ class GBSegArray {
     // First-segment size from the column's known final row count. Only effective
     // before the first segment exists, and only in the doubling geometry.
     void hint(size_t rows) noexcept {
-#if !OPTERYX_GB_SEG_FIXED
         if (nseg() != 0 || rows == 0) return;
         int b = static_cast<int>(std::bit_width(rows - 1));
-        if (b < kGBSegFirstLog2) b = kGBSegFirstLog2;
+        if (b < kGBSegMinLog2) b = kGBSegMinLog2;
         if (b > kGBSegMaxLog2) b = kGBSegMaxLog2;
         b_ = static_cast<uint8_t>(b);
-#else
-        (void)rows;
-#endif
     }
 
     size_t size() const noexcept { return size_; }
@@ -362,45 +355,25 @@ class GBSegArray {
     }
 
   private:
-#if OPTERYX_GB_SEG_FIXED
-    static constexpr uint8_t kDefaultLog2 = kGBSegFixedLog2;
-#else
     static constexpr uint8_t kDefaultLog2 = kGBSegFirstLog2;
-#endif
 
     // Segment k and the row within it holding element i.
     inline void locate(size_t i, size_t& k, size_t& off) const noexcept {
-#if OPTERYX_GB_SEG_FIXED
-        k = i >> b_;
-        off = i & ((size_t(1) << b_) - 1);
-#else
         const size_t q = i >> b_;
         k = static_cast<size_t>(std::bit_width(q));
         off = i - (((size_t(1) << k) >> 1) << b_);
-#endif
     }
     size_t seg_rows(size_t k) const noexcept {
-#if OPTERYX_GB_SEG_FIXED
-        (void)k;
-        return size_t(1) << b_;
-#else
         return (size_t(1) << b_) << (k == 0 ? 0 : k - 1);
-#endif
     }
     size_t seg_bytes(size_t k) const noexcept { return seg_rows(k) * stride(); }
 
-#if OPTERYX_GB_SEG_FIXED
-    uint8_t* seg_ptr(size_t k) const noexcept { return segs_[k]; }
-    size_t nseg() const noexcept { return segs_.size(); }
-    void push_seg(uint8_t* p) { segs_.push_back(p); }
-#else
     // A column never exceeds 2^kGBSegMaxLog2 rows and its first segment is at least
-    // 2^kGBSegFirstLog2, so this many segments always suffice (grow_to checks).
-    static constexpr size_t kMaxSegs = kGBSegMaxLog2 - kGBSegFirstLog2 + 2;
+    // 2^kGBSegMinLog2, so this many segments always suffice (grow_to checks).
+    static constexpr size_t kMaxSegs = kGBSegMaxLog2 - kGBSegMinLog2 + 2;
     uint8_t* seg_ptr(size_t k) const noexcept { return segs_[k]; }
     size_t nseg() const noexcept { return nseg_; }
     void push_seg(uint8_t* p) { segs_[nseg_++] = p; }
-#endif
 
     // Point the tail cursor at row size_ (the next append) and count the room left in
     // its segment; 0 when the column is full.
@@ -421,11 +394,11 @@ class GBSegArray {
         if (stride() == 0) throw std::logic_error("GBSegArray: stride not set before growth");
         while (cap_ < need) {
             const size_t k = nseg();
-#if !OPTERYX_GB_SEG_FIXED
             if (k == kMaxSegs)
                 throw std::length_error("GBSegArray: column exceeds 2^kGBSegMaxLog2 rows");
-#endif
-            auto* p = static_cast<uint8_t*>(GBBlockPool::instance().acquire(seg_bytes(k)));
+            if (k == 0) color_ = next_color(seg_bytes(0));
+            auto* p = static_cast<uint8_t*>(GBBlockPool::instance().acquire(seg_bytes(k) + color_))
+                      + color_;
             push_seg(p);
             cap_ += seg_rows(k);
         }
@@ -433,28 +406,34 @@ class GBSegArray {
 
     void release_all() noexcept {
         const size_t n = nseg();
-        for (size_t k = 0; k < n; ++k) GBBlockPool::instance().release(seg_ptr(k), seg_bytes(k));
-#if OPTERYX_GB_SEG_FIXED
-        segs_.clear();
-#else
+        for (size_t k = 0; k < n; ++k)
+            GBBlockPool::instance().release(seg_ptr(k) - color_, seg_bytes(k) + color_);
         nseg_ = 0;
-#endif
+    }
+
+    // CACHE COLOURING. Pool blocks are power-of-two sized, and the large ones come back
+    // page-aligned, so the hot first rows of every lane of every partition would start
+    // at the same offset and contend for the same cache sets. Each array's segments
+    // start `color_` bytes into their block instead: a rotating multiple of one cache
+    // line, at most a quarter of the first segment (so the block grows by at most a
+    // quarter, usually staying in its class).
+    static size_t next_color(size_t first_seg_bytes) noexcept {
+        static thread_local uint32_t ctr = 0;
+        const size_t cap = first_seg_bytes / 4;
+        const size_t lines = cap / 64 < 64 ? cap / 64 : 64;
+        return lines == 0 ? 0 : static_cast<size_t>(ctr++ % lines) * 64;
     }
 
     void take(GBSegArray& o) noexcept {
-#if OPTERYX_GB_SEG_FIXED
-        segs_ = std::move(o.segs_);
-        o.segs_.clear();
-#else
         nseg_ = o.nseg_;
         for (size_t k = 0; k < nseg_; ++k) segs_[k] = o.segs_[k];
         o.nseg_ = 0;
-#endif
         size_ = o.size_;
         cap_ = o.cap_;
         b_ = o.b_;
         tail_ = o.tail_;
         tail_left_ = o.tail_left_;
+        color_ = o.color_;
         if constexpr (kStride == 0) stride_ = o.stride_;
         o.size_ = 0;
         o.cap_ = 0;
@@ -463,18 +442,15 @@ class GBSegArray {
         o.tail_left_ = 0;
     }
 
-#if OPTERYX_GB_SEG_FIXED
-    std::vector<uint8_t*> segs_;
-#else
     uint8_t* segs_[kMaxSegs] = {};
     size_t nseg_ = 0;
-#endif
     size_t size_ = 0;
     size_t cap_ = 0;
     uint8_t* tail_ = nullptr;   // slot of row size_ (the next append), when tail_left_ > 0
     size_t tail_left_ = 0;      // rows left in tail_'s segment
     size_t stride_ = kStride;   // only read when kStride == 0
     uint8_t b_ = kDefaultLog2;
+    uint32_t color_ = 0;        // bytes each segment starts into its pool block
 };
 
 // Typed view of a segmented array: the per-group lanes (hashes, grows, sums, …).
@@ -527,35 +503,47 @@ class GBSegVec {
 };
 
 // ---- chunked string arena ----------------------------------------------------------
-// The key store's long-string bytes. A linear address space of kChunk-byte chunks that
-// never move: a string is placed whole in one chunk (a chunk tail too small for it is
-// skipped), and a string longer than a chunk gets a run of consecutive chunk indices
-// backed by one block. Offsets are therefore stable for the life of the arena, which
-// is what the 16-byte string slot's arena_offset needs, and a range of offsets can be
-// copied out chunk by chunk with relative positions preserved.
+// The key store's long-string bytes: one linear address space whose chunks never move,
+// so the 16-byte string slot's 32-bit arena_offset stays valid for the arena's life and
+// a range of offsets can be copied out chunk by chunk with relative positions kept.
+//
+// Chunks DOUBLE from 4 KiB to 1 MiB, then stay at 1 MiB. A sink-side partition holds
+// one flush window — tens of KB of strings — and a fixed 1 MiB first chunk per key
+// column per partition per window was MEASURED as the dominant allocation (ClickBench
+// Q18, 2026-10-12: 55 GB requested from the system per query, peak RSS 2.1x the
+// pre-redesign build).
+//
+// A string is placed whole in one chunk. One too long for the next chunk skips it —
+// the skipped chunks stay unallocated (null) and hold nothing, so for_each_run hands
+// them out as nullptr — and a string longer than 1 MiB gets a run of consecutive
+// 1 MiB chunk indices backed by one block.
 class GBArena {
   public:
-    static constexpr int kChunkLog2 = 20;              // 1 MiB
+    static constexpr int kFirstLog2 = 12;                    // 4 KiB first chunk
+    static constexpr int kChunkLog2 = 20;                    // 1 MiB steady-state chunk
     static constexpr size_t kChunk = size_t(1) << kChunkLog2;
+    static constexpr size_t kGrowChunks = kChunkLog2 - kFirstLog2 + 1;   // 4 KiB .. 1 MiB
+    // Bytes of address space the doubling chunks cover: 4 KiB * (2^kGrowChunks - 1).
+    static constexpr uint64_t kGrowBytes = ((uint64_t(1) << kGrowChunks) - 1) << kFirstLog2;
 
     GBArena() = default;
     ~GBArena() { release_all(); }
     GBArena(const GBArena&) = delete;
     GBArena& operator=(const GBArena&) = delete;
     GBArena(GBArena&& o) noexcept
-        : chunks_(std::move(o.chunks_)), owner_span_(std::move(o.owner_span_)), used_(o.used_) {
+        : chunks_(std::move(o.chunks_)), owner_bytes_(std::move(o.owner_bytes_)), used_(o.used_) {
         o.chunks_.clear();
-        o.owner_span_.clear();
+        o.owner_bytes_.clear();
         o.used_ = 0;
     }
     GBArena& operator=(GBArena&& o) noexcept {
         if (this != &o) {
             release_all();
             chunks_ = std::move(o.chunks_);
-            owner_span_ = std::move(o.owner_span_);
+            owner_bytes_ = std::move(o.owner_bytes_);
             used_ = o.used_;
             o.chunks_.clear();
-            o.owner_span_.clear();
+            o.owner_bytes_.clear();
             o.used_ = 0;
         }
         return *this;
@@ -565,30 +553,44 @@ class GBArena {
     // One past the highest offset handed out.
     uint64_t used() const noexcept { return used_; }
 
+    // Chunk k's first offset and size.
+    static uint64_t chunk_start(size_t k) noexcept {
+        if (k < kGrowChunks) return ((uint64_t(1) << k) - 1) << kFirstLog2;
+        return kGrowBytes + (uint64_t(k - kGrowChunks) << kChunkLog2);
+    }
+    static uint64_t chunk_size(size_t k) noexcept {
+        return k < kGrowChunks ? uint64_t(1) << (kFirstLog2 + k) : uint64_t(kChunk);
+    }
+    // The chunk holding offset `off`.
+    static size_t chunk_of(uint64_t off) noexcept {
+        if (off < kGrowBytes)
+            return static_cast<size_t>(std::bit_width((off >> kFirstLog2) + 1)) - 1;
+        return kGrowChunks + static_cast<size_t>((off - kGrowBytes) >> kChunkLog2);
+    }
+
     // Copy len bytes in; returns their offset. Throws std::bad_alloc on failure.
     uint64_t put(const uint8_t* p, size_t len) {
         if (len == 0) return used_;
-        const size_t in_chunk = static_cast<size_t>(used_ & (kChunk - 1));
-        if (len > kChunk) {
-            // Oversize: a fresh run of chunk indices, one block behind them.
-            uint64_t base = round_up(used_);
-            const size_t span = (len + kChunk - 1) >> kChunkLog2;
-            auto* blk = static_cast<uint8_t*>(GBBlockPool::instance().acquire(span * kChunk));
-            pad_to(base);
+        const bool fits = !chunks_.empty()
+            && used_ + len <= chunk_start(chunks_.size() - 1) + chunk_size(chunks_.size() - 1);
+        if (!fits) {
+            // Skip (unallocated) chunks too small for this string; past the doubling
+            // chunks every chunk is 1 MiB and a longer string spans several.
+            size_t k = chunks_.size();
+            while (k < kGrowChunks && chunk_size(k) < len) {
+                chunks_.push_back(nullptr);
+                owner_bytes_.push_back(0);
+                ++k;
+            }
+            const size_t span = len <= chunk_size(k)
+                ? 1 : static_cast<size_t>((len + kChunk - 1) >> kChunkLog2);
+            const size_t bytes = span == 1 ? static_cast<size_t>(chunk_size(k)) : span * kChunk;
+            auto* blk = static_cast<uint8_t*>(GBBlockPool::instance().acquire(bytes));
             for (size_t j = 0; j < span; ++j) {
                 chunks_.push_back(blk + j * kChunk);
-                owner_span_.push_back(j == 0 ? static_cast<uint32_t>(span) : 0u);
+                owner_bytes_.push_back(j == 0 ? bytes : 0);
             }
-            std::memcpy(blk, p, len);
-            used_ = base + len;
-            return base;
-        }
-        if (chunks_.empty() || in_chunk == 0 || in_chunk + len > kChunk) {
-            const uint64_t base = chunks_.empty() ? 0 : round_up(used_);
-            pad_to(base);
-            chunks_.push_back(static_cast<uint8_t*>(GBBlockPool::instance().acquire(kChunk)));
-            owner_span_.push_back(1u);
-            used_ = base;
+            used_ = chunk_start(k);
         }
         const uint64_t off = used_;
         std::memcpy(resolve_mut(off), p, len);
@@ -596,18 +598,18 @@ class GBArena {
         return off;
     }
 
-    inline const uint8_t* resolve(uint64_t off) const noexcept {
-        return chunks_[static_cast<size_t>(off >> kChunkLog2)] + (off & (kChunk - 1));
-    }
+    inline const uint8_t* resolve(uint64_t off) const noexcept { return resolve_mut(off); }
 
-    // f(p, bytes) over [lo, hi) in address order, one call per chunk touched. Bytes in
-    // a chunk tail that no string occupies are passed through unread-by-anyone.
+    // f(p, bytes) over [lo, hi) in address order, one call per chunk touched. p is
+    // nullptr for a skipped chunk (no string lives there, so nothing points into it).
     template <class F>
     void for_each_run(uint64_t lo, uint64_t hi, F&& f) const {
         while (lo < hi) {
-            const uint64_t chunk_end = (lo | (kChunk - 1)) + 1;
-            const uint64_t end = chunk_end < hi ? chunk_end : hi;
-            f(resolve(lo), static_cast<size_t>(end - lo));
+            const size_t k = chunk_of(lo);
+            const uint64_t end_k = chunk_start(k) + chunk_size(k);
+            const uint64_t end = end_k < hi ? end_k : hi;
+            f(chunks_[k] == nullptr ? nullptr : chunks_[k] + (lo - chunk_start(k)),
+              static_cast<size_t>(end - lo));
             lo = end;
         }
     }
@@ -618,29 +620,20 @@ class GBArena {
     }
 
   private:
-    static uint64_t round_up(uint64_t off) { return (off + kChunk - 1) & ~uint64_t(kChunk - 1); }
-
     uint8_t* resolve_mut(uint64_t off) const noexcept {
-        return chunks_[static_cast<size_t>(off >> kChunkLog2)] + (off & (kChunk - 1));
-    }
-
-    // Chunk indices below `base` that do not exist yet cannot occur: the address space
-    // only ever advances to the next chunk boundary after the last allocated chunk.
-    void pad_to(uint64_t base) const {
-        if ((base >> kChunkLog2) != chunks_.size())
-            throw std::logic_error("GBArena: chunk address space out of step");
+        const size_t k = chunk_of(off);
+        return chunks_[k] + (off - chunk_start(k));
     }
 
     void release_all() noexcept {
         for (size_t j = 0; j < chunks_.size(); ++j)
-            if (owner_span_[j] != 0)
-                GBBlockPool::instance().release(chunks_[j], owner_span_[j] * kChunk);
+            if (owner_bytes_[j] != 0) GBBlockPool::instance().release(chunks_[j], owner_bytes_[j]);
         chunks_.clear();
-        owner_span_.clear();
+        owner_bytes_.clear();
     }
 
-    std::vector<uint8_t*> chunks_;
-    std::vector<uint32_t> owner_span_;   // span length on the chunk that owns a block, else 0
+    std::vector<uint8_t*> chunks_;      // nullptr = a chunk skipped by a long string
+    std::vector<size_t> owner_bytes_;   // block size on the chunk that owns a block, else 0
     uint64_t used_ = 0;
 };
 

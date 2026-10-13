@@ -104,6 +104,10 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
         # Shared state, visible to every instance the connector creates.
         store = datasets
 
+        # Stands in for the native OpteryxCatalog, whose catalog records ARE its
+        # datasets - see opteryx_catalog's `Metastore.serves_catalog_records`.
+        serves_catalog_records = True
+
         # Borrowed from the real catalog: none of these touch the metastore.
         write_parquet_manifest = OpteryxCatalog.write_parquet_manifest
         open_pending_data_file_writer = OpteryxCatalog.open_pending_data_file_writer

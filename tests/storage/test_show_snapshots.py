@@ -167,6 +167,9 @@ class _FakeDataset:
 class _FakeCatalog:
     """`coll1.src` has a three-commit history; `coll1.empty` has none."""
 
+    # Stands in for the native store: its catalog records ARE its datasets.
+    serves_catalog_records = True
+
     loads = []
     history = _HISTORY
     # One tag, on the MIDDLE snapshot: a tag on the current snapshot would pass
