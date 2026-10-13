@@ -80,8 +80,12 @@ class _AvroReader:
         )
         from draken.morsels.morsel import Morsel
 
-        for vectors in result["batches"]:
-            yield Morsel.from_vectors(result["column_names"], vectors)
+        for vectors, rows in zip(result["batches"], result["batch_rows"]):
+            morsel = Morsel.from_vectors(result["column_names"], vectors)
+            # With no columns (a record with no fields) the vectors carry no length;
+            # the row count must come from the batch itself.
+            morsel._zero_col_num_rows = rows
+            yield morsel
 
 
 def read_avro(

@@ -566,6 +566,38 @@ def test_refuses_decimal_wider_than_38():
     _refuses(_container(schema, _zz(1) + b"\x01", 1), r"wider than 38")
 
 
+# Kafka Connect's precision placeholder, exactly as Confluent's AvroData writes it for a
+# Connect Decimal with no connect.decimal.precision (testdata/avro/kafka_connect/).
+CONNECT_DEC64 = (b'{"type":"record","name":"r","fields":[{"name":"c","type":{"type":"bytes","scale":2,'
+                 b'"precision":64,"connect.version":1,"connect.parameters":{"scale":"2"},'
+                 b'"connect.name":"org.apache.kafka.connect.data.Decimal","logicalType":"decimal"}}]}')
+
+
+def _dec_bytes(unscaled):
+    raw = unscaled.to_bytes((unscaled.bit_length() + 8) // 8, "big", signed=True)
+    return _zz(len(raw)) + raw
+
+
+def test_connect_decimal_precision_placeholder_reads_as_38():
+    values = [12345, -1, 10**38 - 1]
+    res, rows = _rugo_rows(_container(CONNECT_DEC64, b"".join(_dec_bytes(v) for v in values), len(values)))
+    assert rows["c"] == [decimal.Decimal(v).scaleb(-2) for v in values]
+
+
+def test_connect_decimal_placeholder_value_wider_than_38_fails():
+    _refuses(_container(CONNECT_DEC64, _dec_bytes(10**38), 1), r"exceeds its declared precision 38")
+
+
+def test_precision_64_without_connect_parameters_still_refused():
+    schema = CONNECT_DEC64.replace(b'"connect.parameters":{"scale":"2"},', b"")
+    _refuses(_container(schema, _dec_bytes(1), 1), r"precision 64 is wider than 38")
+
+
+def test_precision_64_with_declared_connect_precision_still_refused():
+    schema = CONNECT_DEC64.replace(b'{"scale":"2"}', b'{"scale":"2","connect.decimal.precision":"64"}')
+    _refuses(_container(schema, _dec_bytes(1), 1), r"precision 64 is wider than 38")
+
+
 def test_refuses_missing_column():
     data = _write(NESTED, _nested_records(10))
     _refuses(data, r"'inner.nope' is not in the file's schema", ["inner.nope"])

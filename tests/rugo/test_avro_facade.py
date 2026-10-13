@@ -67,3 +67,13 @@ def test_reader_schema_as_dict_or_text():
     b = _columns(avro.read_avro(AVRO, reader_schema=json.dumps(schema)))
     assert a == b
     assert set(a["Source"]) == {"sample"} and len(a["Source"]) == 4630
+
+
+def test_record_with_no_fields_keeps_its_row_count():
+    # fastavro's tests/avro-files/no-fields.avro: one record of an empty record type.
+    # No column carries a length, so the morsel's row count must come from the batch.
+    path = str(REPO_ROOT / "testdata" / "avro" / "fastavro" / "no-fields.avro")
+    with avro.read_avro(path) as reader:
+        morsels = list(reader)
+    assert [m.num_rows for m in morsels] == [1]
+    assert [m.column_names for m in morsels] == [[]]

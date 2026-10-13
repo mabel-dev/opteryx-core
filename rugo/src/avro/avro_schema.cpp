@@ -119,7 +119,15 @@ struct SchemaParser {
             yyjson_val* p = yyjson_obj_get(obj, "precision");
             yyjson_val* sc = yyjson_obj_get(obj, "scale");
             if (!yyjson_is_int(p)) fail(path, "decimal has no integer 'precision'");
-            const int64_t prec = yyjson_get_sint(p);
+            int64_t prec = yyjson_get_sint(p);
+            // Kafka Connect's Decimal carries no precision; Confluent's AvroData writes 64
+            // as "unknown" (CONNECT_AVRO_DECIMAL_PRECISION_DEFAULT) when the source gave no
+            // connect.decimal.precision. Read that placeholder as DECIMAL(38, scale); every
+            // value is still checked against 38 digits and fails loudly if wider.
+            if (prec == 64 && n.kind == Kind::Bytes) {
+                yyjson_val* cp = yyjson_obj_get(obj, "connect.parameters");
+                if (yyjson_is_obj(cp) && yyjson_obj_get(cp, "connect.decimal.precision") == nullptr) prec = 38;
+            }
             int64_t scale = 0;
             if (sc != nullptr) {
                 if (!yyjson_is_int(sc)) fail(path, "decimal 'scale' is not an integer");

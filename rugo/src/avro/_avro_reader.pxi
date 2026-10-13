@@ -76,6 +76,8 @@ def read_avro(data, columns=None, reader_schema=None, size_t max_threads=0):
         'column_names': list[str]
         'batches': list of batches, each a list of Draken Vectors (one per column);
           whole blocks are packed into a batch up to 65536 rows
+        'batch_rows': list[int] — each batch's row count (the only carrier of it
+          when no column is read, e.g. a record with no fields)
         'num_rows': int
         'schema': the file's writer schema (JSON text)
         'metadata': dict[str, bytes] — the file header's metadata map
@@ -97,16 +99,19 @@ def read_avro(data, columns=None, reader_schema=None, size_t max_threads=0):
         read_avro_buffer(ptr, n, cols, all_columns, rschema, max_threads, res)
 
     batches = []
+    batch_rows = []
     num_rows = 0
     for bi in range(res.batches.size()):
         vectors = []
         for ci in range(res.batches[bi].columns.size()):
             vectors.append(_rugo_steal(wrap_avro_column(res.batches[bi].columns[ci])))
         batches.append(vectors)
+        batch_rows.append(res.batches[bi].rows)
         num_rows += res.batches[bi].rows
     return {
         "column_names": [name.decode("utf-8") for name in res.column_names],
         "batches": batches,
+        "batch_rows": batch_rows,
         "num_rows": num_rows,
         "schema": res.schema_json.decode("utf-8"),
         "metadata": _avro_metadata(res),

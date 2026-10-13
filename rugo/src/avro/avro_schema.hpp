@@ -9,7 +9,9 @@
 //   recursive named types, unions other than two branches with one `null`,
 //   `timestamp-nanos`, `local-timestamp-*`, `duration`, decimal precision > 38,
 //   an invalid decimal (missing/zero precision, scale > precision, a fixed too
-//   narrow for its precision). The spec says an invalid logical type is IGNORED;
+//   narrow for its precision). Exception: Kafka Connect's precision-64 placeholder
+//   (bytes, `connect.parameters` without `connect.decimal.precision`) reads as
+//   DECIMAL(38, scale). The spec says an invalid logical type is IGNORED;
 //   we refuse it instead (fail fast, docs §18).
 // Aliases are not consulted (D5 refuses alias-based resolution).
 
