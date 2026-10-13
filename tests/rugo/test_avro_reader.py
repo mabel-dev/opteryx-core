@@ -566,6 +566,36 @@ def test_refuses_decimal_wider_than_38():
     _refuses(_container(schema, _zz(1) + b"\x01", 1), r"wider than 38")
 
 
+# A top-level schema that is not a record is valid Avro (Kafka topics with bare string
+# or long values sink to exactly this); it reads as one column, `value`.
+@pytest.mark.parametrize("schema,records", [
+    ("long", [1, -2, 2**40]),
+    ("string", ["a", "", "Zürich"]),
+    (["null", "double"], [1.5, None, -0.25]),
+    ({"type": "array", "items": "int"}, [[1, 2], [], [3]]),
+    ({"type": "enum", "name": "E", "symbols": ["A", "B"]}, ["B", "A", "B"]),
+])
+def test_non_record_schema_reads_as_value(schema, records):
+    data = _write(schema, records)
+    res, rows = _rugo_rows(data)
+    assert res["column_names"] == ["value"]
+    assert rows["value"] == _fastavro_rows(data) == _apache_rows(data) == records
+
+
+def test_non_record_map_schema_reads_as_json_value():
+    data = _write({"type": "map", "values": "long"}, [{"a": 1}, {}])
+    _, rows = _rugo_rows(data)
+    assert [json.loads(v) for v in rows["value"]] == _fastavro_rows(data)
+
+
+def test_non_record_file_resolves_onto_a_record_reader_schema_with_value():
+    data = _write("int", [1, 2, 3])
+    reader = json.dumps(_record([{"name": "value", "type": "long"}]))
+    res = read_avro(data, None, reader)
+    assert res["column_names"] == ["value"]
+    assert [v for b in res["batches"] for v in b[0].to_pylist()] == [1, 2, 3]
+
+
 # Kafka Connect's precision placeholder, exactly as Confluent's AvroData writes it for a
 # Connect Decimal with no connect.decimal.precision (testdata/avro/kafka_connect/).
 CONNECT_DEC64 = (b'{"type":"record","name":"r","fields":[{"name":"c","type":{"type":"bytes","scale":2,'

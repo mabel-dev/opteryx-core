@@ -235,9 +235,7 @@ public:
     Compiler(Program& p, const char* schema_name) : p_(p), schema_name_(schema_name) {}
 
     void compile_root(const Node* w, const Node* r, Req& req) {
-        if (w->kind != Kind::Record) fail("the file's schema is a " + std::string(kind_name(w->kind)) +
-                                          ", not a record; only record schemas are supported");
-        if (r->kind != Kind::Record) fail("the reader schema is not a record");
+        // Schema::parse guarantees record roots (non-record schemas are wrapped as `value`).
         compile_record(w, r, req);
     }
 
@@ -1646,7 +1644,6 @@ AvroFile::AvroFile(const uint8_t* data, size_t size, const std::vector<std::stri
     m.names = columns;
     if (all_columns) {
         if (!columns.empty()) fail("pass either columns or all_columns, not both");
-        if (r->kind != Kind::Record) fail("the schema is not a record");
         for (const Field& f : r->fields) m.names.push_back(f.name);
     }
     m.count_only = m.names.empty();

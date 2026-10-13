@@ -262,6 +262,11 @@ def test_empty_file_has_a_schema_and_no_rows(tmp_path):
 
 # ── a glob: the first file's schema, every file resolved onto it ──
 
+def test_non_record_file_is_one_value_column(tmp_path):
+    path = _write(str(tmp_path / "bare.avro"), "string", ["a", "b", "b"])
+    assert _rows(f"SELECT value, COUNT(*) FROM READ_AVRO('{path}') GROUP BY value") == [("a", 1), ("b", 2)]
+
+
 def test_glob_resolves_evolved_files_onto_the_first(tmp_path):
     first = _record([
         {"name": "id", "type": "long"},

@@ -47,8 +47,11 @@ class AvroMetadata:
 
     @property
     def columns(self) -> list:
-        """Top-level field names of the writer schema."""
-        return [f["name"] for f in self.schema["fields"]]
+        """Top-level field names of the writer schema. A non-record schema (a file of
+        bare values) reads as one column, `value`."""
+        if type(self.schema) is dict and self.schema["type"] in ("record", "error"):
+            return [f["name"] for f in self.schema["fields"]]
+        return ["value"]
 
     def __repr__(self):
         return f"AvroMetadata(codec={self.codec!r}, columns={self.columns})"
@@ -116,6 +119,8 @@ def read_avro(
     positions per row) · date DATE · time-* TIME (us) · timestamp-* TIMESTAMP (us, UTC)
     · decimal DECIMAL / DECIMAL128 · array of a plain scalar ARRAY · a whole record,
     map, or array of nested values NVARCHAR JSON text (the parquet nested-JSON rules).
+    A file whose schema is not a record (bare strings, longs, ...) reads as one
+    column, `value`.
 
     Codecs: null, deflate, snappy, zstandard. Refused, by name: bzip2 and xz, unions
     other than [null, T], recursive types, uuid, decimal precision > 38,

@@ -95,7 +95,7 @@ Designed so B is an extension (new output sink + edge), not a rewrite.
 | `time-millis` / `time-micros` | int / long | TIME (micros) |
 | `timestamp-millis` / `timestamp-micros` | long | TIMESTAMP (micros) |
 | `uuid` | string, or fixed(16) (Iceberg) | BLOB 16 bytes |
-| `decimal(p,s)` | bytes or fixed(n) | DECIMAL; p ≤ 18 → int64, p ≤ 38 → int128; p > 38 refused |
+| `decimal(p,s)` | bytes or fixed(n) | DECIMAL; p ≤ 18 → int64, p ≤ 38 → int128; p > 38 refused, except Kafka Connect's p = 64 placeholder (§27) |
 | `timestamp-nanos`, `local-timestamp-*`, `duration` | — | refused until ruled (D8) |
 | unknown `logicalType` | — | ignored, underlying type used (spec-mandated) |
 
@@ -808,3 +808,31 @@ Telemetry: the scan's operation row carries `avro_two_pass_batches` /
 no calls - the scan did that work. A predicate failure is reported exactly as the Filter
 would have (`set_span_error`: a data error stays a DataError). Fuzz: the `avro` target
 runs split + both passes + `blocks_with`; corpus and 5,000 mutants clean under ASan/UBSan.
+
+## 27. Kafka Connect decimal precision placeholder (RULED 2026-10-13)
+
+Kafka Connect's `Decimal` carries a scale but no precision. Confluent's `AvroData`
+writes `"precision": 64` (`CONNECT_AVRO_DECIMAL_PRECISION_DEFAULT`) when the source
+supplied no `connect.decimal.precision` parameter — "unknown", not a claim about the
+data. Seen in real S3-sink output (`testdata/avro/kafka_connect/confluent/connect_types`).
+
+Ruling (option 2 of three): a **bytes** decimal with precision 64 whose
+`connect.parameters` object has no `connect.decimal.precision` reads as
+`DECIMAL(38, scale)`. Every value still goes through `checked_decimal` against 38
+digits, so a genuinely wider value fails loudly; nothing is truncated. Any other
+precision > 38 (including 64 without `connect.parameters`, or with an explicit
+`connect.decimal.precision` of 64) is still refused. Tests:
+`tests/rugo/test_avro_reader.py::test_connect_decimal_*`, `test_precision_64_*`.
+
+## 28. Non-record top-level schemas read as `value` (RULED 2026-10-13)
+
+A top-level schema need not be a record: a file of bare strings, longs, arrays or a
+`[null, T]` union is valid Avro (Java avro-tools writes them; a Kafka topic with
+primitive values sinks to one). `Schema::parse` wraps any non-record root as a record
+with one field, `value`. A one-field record's binary encoding is exactly its field's,
+so decoding is unchanged; reader-schema resolution, column selection, the engine binder
+and `READ_AVRO` all see an ordinary one-column record. A record reader schema with a
+`value` field resolves a bare file onto it. The `error` type is a record and is not
+wrapped. A top-level `null` schema becomes a `value` column of type null, which is
+refused as any null-typed column is. Tests: `test_non_record_*` in
+`tests/rugo/test_avro_reader.py` and `tests/unit/connectors/test_read_avro.py`.

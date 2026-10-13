@@ -70,7 +70,8 @@ struct Node {
 class Schema {
 public:
     // Parse `json` (an Avro schema). Throws std::runtime_error naming the schema
-    // path on anything malformed or refused.
+    // path on anything malformed or refused. The root is always a record: a
+    // non-record top-level schema is wrapped as a record with one field, `value`.
     static Schema parse(const char* json, size_t len);
 
     const Node* root() const { return root_; }

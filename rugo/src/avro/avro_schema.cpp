@@ -305,6 +305,18 @@ Schema Schema::parse(const char* json, size_t len) {
     Schema s;
     SchemaParser p{s, {}};
     s.root_ = p.parse(yyjson_doc_get_root(doc.get()), "", "");
+    // A top-level schema that is not a record (a file of bare strings, longs, ...) is
+    // valid Avro. It reads as a record with one field, `value`: a one-field record's
+    // binary encoding is exactly its field's, so the data is decoded unchanged.
+    if (s.root_->kind != Kind::Record) {
+        Node& wrapper = s.nodes_.emplace_back();
+        wrapper.kind = Kind::Record;
+        Field f;
+        f.name = "value";
+        f.type = s.root_;
+        wrapper.fields.push_back(std::move(f));
+        s.root_ = &wrapper;
+    }
     return s;
 }
 
