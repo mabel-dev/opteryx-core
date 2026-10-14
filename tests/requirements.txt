@@ -46,4 +46,4 @@ pyiceberg[sql-sqlite]
 
 setuptools_rust
 
-pydantic==2.13.5
+pydantic==2.14.0
