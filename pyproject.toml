@@ -116,7 +116,7 @@ testing = [
     "jellyfish",
 ]
 performance = [
-    'orjson==3.11.*',  # Faster JSON serialization (not available on free-threaded Python)
+    'orjson>=3.11,<3.14',  # Faster JSON serialization (not available on free-threaded Python)
 ]
 
 
