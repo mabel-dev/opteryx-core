@@ -376,6 +376,7 @@ inline std::string type_display_name_parts(DrakenType physical, LogicalKind kind
         case DRAKEN_VARBINARY: return "VARBINARY";
         case DRAKEN_VARIANT:   return "VARIANT";
         case DRAKEN_NULL:      return "NULL";
+        case DRAKEN_UUID:      return "UUID";
         default:               return "";   // caller decides: unnamed is an error
     }
 }

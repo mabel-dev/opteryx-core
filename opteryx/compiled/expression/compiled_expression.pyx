@@ -33,6 +33,7 @@ from opteryx.exceptions import NotSupportedError
 
 import datetime as _datetime
 import decimal as _decimal
+import uuid as _uuid
 import struct as _struct
 
 from draken.vectors.vector cimport Vector
@@ -41,7 +42,7 @@ from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINA
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_DECIMAL128, DRAKEN_DECIMAL, DRAKEN_TIME32, DRAKEN_TIME64
-from draken.core.buffers cimport DRAKEN_BOOL
+from draken.core.buffers cimport DRAKEN_BOOL, DRAKEN_UUID
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
@@ -122,6 +123,8 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
             return Vector(_draken_native.vector_float64_from_constant(None, 1))
         if physical_type == <int>DRAKEN_DATE32:
             return Vector(_draken_native.vector_date32_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_UUID:
+            return Vector(_draken_native.vector_uuid_from_constant(None, 1))
         # DECIMAL/DECIMAL128/TIMESTAMP64/TIME32/TIME64/ARRAY are the PARAMETERIZED
         # and STRUCTURED physical types (§14): their tag alone is not a full type,
         # so a NULL literal for one of them used to fall through to untyped
@@ -200,6 +203,10 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
         # Numeric and genuinely untyped (physical_type == -1) NULLs keep
         # DRAKEN_NULL — their kernels short-circuit on the DRAKEN_NULL tag.
         return Vector(_draken_native.vector_null_from_length(1))
+    if physical_type == <int>DRAKEN_UUID:
+        # A UUID literal's value is a uuid.UUID (the binder retypes string literals
+        # compared with a UUID column; CAST literals parse to one).
+        return Vector(_draken_native.vector_uuid_from_constant(value, 1))
     if isinstance(value, bool):
         # Bools are handled upstream by BC_LOAD_LIT_BOOL; reaching here is a bug.
         raise InvalidInternalStateError(
@@ -786,6 +793,12 @@ def _build_in_list_blob(values, left_type, int negate):
         scale = int(left_type.logical.scale)
         raws = [_decimal_unscaled(v, scale, lo, hi) for v in vals]
         return _pack_membership_blob([r for r in raws if r is not None], 4 if wide else 0, negate)
+    if phys == "UUID" and all(isinstance(v, _uuid.UUID) for v in vals):
+        # Each literal (retyped to uuid.UUID by the binder) is packed as its 16
+        # stored bytes through the kind-4 (16-byte raw) arm: int.from_bytes
+        # little-endian then to_bytes little-endian round-trips the exact bytes.
+        raws = [int.from_bytes(v.bytes, "little", signed=True) for v in vals]
+        return _pack_membership_blob(raws, 4, negate)
     return None
 
 

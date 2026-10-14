@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import uuid
 from typing import Dict, Optional, Type
 
 from draken.draken_native import DrakenType
@@ -60,7 +61,7 @@ __all__ = [
     "FLOAT32", "FLOAT64",
     "BOOLEAN", "DATE", "INTERVAL",
     "VARCHAR", "NVARCHAR", "VARBINARY", "VARIANT",
-    "IPV4",
+    "IPV4", "UUID",
     "NULL",
     # constructors
     "DECIMAL", "TIMESTAMP", "TIME", "VECTOR",
@@ -95,6 +96,7 @@ _NAME_OF: dict = {
     DrakenType.VARBINARY: "VARBINARY",
     DrakenType.VARIANT: "VARIANT",
     DrakenType.NULL: "NULL",
+    DrakenType.UUID: "UUID",
 }
 
 
@@ -119,6 +121,8 @@ NVARCHAR = ColumnType(DrakenType.NVARCHAR)
 VARBINARY = ColumnType(DrakenType.VARBINARY)
 VARIANT = ColumnType(DrakenType.VARIANT)
 NULL = ColumnType(DrakenType.NULL)
+# UUID — 16 bytes in RFC 9562 network order (docs/UUID_TYPE_DESIGN.md).
+UUID = ColumnType(DrakenType.UUID)
 
 # IPv4 — UINT32 physical refined by LogicalKind.IPV4. Unparameterized (the
 # prefix length is never carried on the value; it is always an operand of the
@@ -523,6 +527,7 @@ _TYPE_TO_PYTHON: Dict[LogicalCategory, Type] = {
     LogicalCategory.ARRAY: list,
     LogicalCategory.VECTOR: list,
     LogicalCategory.VARIANT: str,
+    LogicalCategory.UUID: uuid.UUID,
 }
 
 PYTHON_TO_SQL_MAP: Dict[Type, LogicalCategory] = {
@@ -543,6 +548,7 @@ PYTHON_TO_SQL_MAP: Dict[Type, LogicalCategory] = {
     tuple: LogicalCategory.ARRAY,
     dict: LogicalCategory.NVARCHAR,
     set: LogicalCategory.ARRAY,
+    uuid.UUID: LogicalCategory.UUID,
 }
 SQL_TO_PYTHON_MAP: Dict[LogicalCategory, Type] = dict(_TYPE_TO_PYTHON)
 
@@ -743,6 +749,7 @@ def find_compatible_type(types: list) -> Optional["ColumnType"]:
         LogicalCategory.VARBINARY: VARBINARY,
         LogicalCategory.VARIANT: VARIANT,
         LogicalCategory.NULL: NULL,
+        LogicalCategory.UUID: UUID,
     }
     ct = _LC_TO_CT.get(result_lc)
     if ct is not None:
@@ -784,6 +791,7 @@ _CATEGORY_TO_CANONICAL = {
     LogicalCategory.INTERVAL: INTERVAL,
     LogicalCategory.VARIANT: VARIANT,
     LogicalCategory.NULL: NULL,
+    LogicalCategory.UUID: UUID,
 }
 
 

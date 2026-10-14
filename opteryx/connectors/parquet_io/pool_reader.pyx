@@ -3631,9 +3631,10 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     ``expected_kinds[i]`` pairs with ``column_names[i]`` and is one of "int"
     (every integer width and signedness, plus parquet TIME), "float32",
     "float64", "varchar", "bool", "date", "timestamp", "decimal64",
-    "decimal128", or "array" (R6 — a parquet LIST column, decoded natively from
-    its TAG_ARRAY pool blob). Everything else — MAP, STRUCT/json, int96,
-    fixed_len_byte_array — has no `expected_kinds` spelling at all and so refuses
+    "decimal128", "array" (R6 — a parquet LIST column, decoded natively from
+    its TAG_ARRAY pool blob), or "uuid" (FIXED_LEN_BYTE_ARRAY(16) annotated UUID).
+    Everything else — MAP, STRUCT/json, int96, other fixed_len_byte_array — has no
+    `expected_kinds` spelling at all and so refuses
     at the first loop below; those scans stay on the trampoline Source.
 
     Encoding is deliberately NOT checked: for single-pass (mask-free) decode,
@@ -3689,6 +3690,8 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     cdef string s_binary = b"binary"
     cdef string s_json = b"json"
     cdef string s_boolean = b"boolean"
+    cdef string s_flba = b"fixed_len_byte_array"
+    cdef string s_uuid = b"uuid"
     # WP-11 footer tokens: rugo's metadata.cpp emits "date32[day]", "timestamp[unit]",
     # "time[unit]" (optionally ",UTC"), "decimal(p,s)". We prefix-match the temporal /
     # decimal families and check the physical width to pin down 32- vs 64-bit forms.
@@ -3722,7 +3725,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
         wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
         kind, _, declared_type = expected_kinds[k].partition(":")
         if kind not in ("int", "float32", "float64", "varchar", "bool",
-                        "decimal64", "decimal128", "date", "timestamp", "array"):
+                        "decimal64", "decimal128", "date", "timestamp", "array", "uuid"):
             return f"column '{name}' has kind '{kind}', which the native scan has no decoder for"
         if declared_type and kind not in ("int", "decimal64", "decimal128"):
             return f"column '{name}' has kind '{expected_kinds[k]}', which cannot carry a declared type"
@@ -3914,6 +3917,11 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                         # WP-11: parquet BOOLEAN → DK_BOOL dense (1 byte/row). No
                         # logical annotation.
                         if csp.physical_type != s_boolean:
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
+                    elif kind == "uuid":
+                        # UUID: FIXED_LEN_BYTE_ARRAY(16) annotated UUID → DK_UUID /
+                        # DK_UUID_DICT (the raw 16 bytes). Nothing else is a UUID.
+                        if csp.physical_type != s_flba or csp.logical_type != s_uuid:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "date":
                         # WP-11: parquet DATE (int32 days) — footer "date32[day]".

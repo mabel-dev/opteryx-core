@@ -375,6 +375,10 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // draken_cast_uint_to_string instead (both are physically UINT32).
     {"draken_cast_ipv4_to_string", (kernel_fn_t)&draken_cast_ipv4_to_string},
     {"draken_cast_ipv4_to_blob", (kernel_fn_t)&draken_cast_ipv4_to_blob},
+    {"draken_cast_string_to_uuid", (kernel_fn_t)&draken_cast_string_to_uuid},
+    {"draken_cast_blob_to_uuid", (kernel_fn_t)&draken_cast_blob_to_uuid},
+    {"draken_cast_uuid_to_string", (kernel_fn_t)&draken_cast_uuid_to_string},
+    {"draken_cast_uuid_to_blob", (kernel_fn_t)&draken_cast_uuid_to_blob},
     {"draken_ipv4_in_cidr", (kernel_fn_t)&draken_ipv4_in_cidr},
     {"draken_ip_trunc", (kernel_fn_t)&draken_ip_trunc},
     {"draken_cast_string_to_float64", (kernel_fn_t)&draken_cast_string_to_float64},

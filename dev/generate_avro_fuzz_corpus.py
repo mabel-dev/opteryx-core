@@ -54,7 +54,7 @@ def records(n):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for codec in ["null", "deflate", "snappy", "zstandard"]:
+    for codec in ["null", "deflate", "snappy", "zstandard", "bzip2"]:
         buf = io.BytesIO()
         fastavro.writer(buf, SCHEMA, records(6), codec=codec, sync_interval=200)
         (OUT / f"mixed_{codec}.avro").write_bytes(buf.getvalue())

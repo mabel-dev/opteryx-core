@@ -15,6 +15,7 @@
 #include "ops/vec_result.h"
 #include "ops/int64_compare.h"
 #include "ops/int128_compare.h"  // i128_compare_vector (DECIMAL128)
+#include "ops/uuid_ops.h"         // uuid_compare_vector (UUID)
 #include "ops/float_ops.h"
 #include "ops/fixed_int_ops.h"   // i8/i16/i32 + u8/u16/u32 compare_vector
 #include "ops/uint64_compare.h"  // u64_compare_vector (UINT64)
@@ -169,6 +170,11 @@ extern "C" DrakenVector* draken_compare_dv(
                 // year ratio predicate (a division of two DECIMAL128 aggregates
                 // compared to another) hit exactly this.
                 vr = draken::ops::i128_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_UUID:
+                // memcmp order of the 16 bytes (uuid_ops.h); literals arrive as UUID
+                // constant vectors, parsed at bind time.
+                vr = draken::ops::uuid_compare_vector(*left, *right, op_code);
                 break;
             case DRAKEN_INT8:
                 vr = draken::ops::i8_compare_vector(*left, *right, op_code);

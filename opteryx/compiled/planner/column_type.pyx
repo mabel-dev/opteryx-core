@@ -78,6 +78,7 @@ _CATEGORY_OF = {
     DrakenType.ARRAY: LogicalCategory.ARRAY,
     DrakenType.VECTOR_FP16: LogicalCategory.VECTOR,
     DrakenType.NULL: LogicalCategory.NULL,
+    DrakenType.UUID: LogicalCategory.UUID,
 }
 
 # The canonical spelling of a TimestampUnit, both directions. It matches the SQL

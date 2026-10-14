@@ -52,6 +52,14 @@ inline int64_t ReadBESignExt(const uint8_t* p, int width) {
 // Big-endian two's-complement signed integer of `width` bytes (9..16) into
 // __int128. The first byte is sign-extended. Used to widen FIXED_LEN_BYTE_ARRAY
 // DECIMAL values with precision > 18 into the int128-backed DECIMAL128 tier.
+// UUID (FLBA(16) + UUID logical type): the 16 bytes verbatim — network order is the
+// storage order (docs/UUID_TYPE_DESIGN.md), so there is nothing to convert.
+inline __int128 ReadRaw16(const uint8_t* p) {
+  __int128 v;
+  std::memcpy(&v, p, 16);
+  return v;
+}
+
 inline __int128 ReadBESignExt128(const uint8_t* p, int width) {
   __int128 v = static_cast<__int128>(static_cast<int8_t>(p[0]));
   for (int i = 1; i < width; ++i) {
@@ -1047,17 +1055,21 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     int flba_byte_width = 0;
     bool flba_int128 = false;
     if (target_col->physical_type == "fixed_len_byte_array") {
+      const bool flba_uuid =
+          target_col->logical_type == "uuid" && target_col->type_length == 16;
       if (target_col->type_length <= 0 || target_col->type_length > 16 ||
-          target_col->logical_type.rfind("decimal", 0) != 0) {
-        // Non-DECIMAL FIXED_LEN_BYTE_ARRAY (UUID, fixed-width hashes) and
-        // out-of-range widths have no decode path. Reason-carrying so callers
-        // fail loud instead of reading this as an absent column.
+          (!flba_uuid && target_col->logical_type.rfind("decimal", 0) != 0)) {
+        // Other FIXED_LEN_BYTE_ARRAY (fixed-width hashes, ...) and out-of-range
+        // widths have no decode path. Reason-carrying so callers fail loud
+        // instead of reading this as an absent column.
         result.error_message =
             "fixed_len_byte_array column is only decodable as DECIMAL with "
-            "width 1..16 (got width " + std::to_string(target_col->type_length) +
+            "width 1..16 or UUID with width 16 (got width " +
+            std::to_string(target_col->type_length) +
             ", logical type '" + target_col->logical_type + "')";
         return;
       }
+      result.is_uuid = flba_uuid;
       flba_byte_width = target_col->type_length;
       if (flba_byte_width > 8) {
         flba_int128 = true;
@@ -1231,7 +1243,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           result.dict_int128_values.reserve(safe_count);
           for (int32_t i = 0; i < safe_count; i++) {
             result.dict_int128_values.push_back(
-                ReadBESignExt128(dict_data_ptr, flba_byte_width));
+                result.is_uuid ? ReadRaw16(dict_data_ptr)
+                               : ReadBESignExt128(dict_data_ptr, flba_byte_width));
             dict_data_ptr += flba_byte_width;
           }
         } else if (zc_byte_array) {
@@ -3216,8 +3229,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             result.int128_values.resize_uninit(old_sz + safe_count);
             __int128* dst = result.int128_values.data() + old_sz;
             for (int32_t i = 0; i < safe_count; i++) {
-              dst[i] = ReadBESignExt128(data_ptr + i * flba_byte_width,
-                                        flba_byte_width);
+              dst[i] = result.is_uuid
+                           ? ReadRaw16(data_ptr + i * flba_byte_width)
+                           : ReadBESignExt128(data_ptr + i * flba_byte_width,
+                                              flba_byte_width);
             }
             data_ptr += safe_count * flba_byte_width;
           }

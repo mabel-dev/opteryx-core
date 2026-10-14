@@ -53,6 +53,8 @@ enum Code : uint8_t {
     R_TIME_MS,       // int millis -> int64 micros
     R_TS_MS,         // long millis -> int64 micros (checked)
     R_DEC_BYTES64, R_DEC_BYTES128, R_DEC_FIXED64, R_DEC_FIXED128,
+    R_UUID_STR,      // string uuid -> 16 bytes (strict 8-4-4-4-12; anything else fails)
+    R_UUID_FIXED,    // fixed(16) uuid -> its 16 bytes
     // reader-schema promotions (docs §19.3)
     R_INT_AS_I64, R_INT_AS_F32, R_INT_AS_F64, R_LONG_AS_F32, R_LONG_AS_F64, R_FLOAT_AS_F64,
     R_ENUM_MAP,      // writer enum index -> reader index through enum_maps[sub ..]
@@ -72,6 +74,7 @@ enum Code : uint8_t {
     J_LIT,           // append literal `arg`
     J_BOOL, J_INT, J_LONG, J_FLOAT, J_DOUBLE, J_STR, J_B64, J_FIXED_B64, J_ENUM,
     J_DATE, J_TIME_MS, J_TIME_US, J_TS_MS, J_TS_US, J_DEC_BYTES, J_DEC_FIXED,
+    J_UUID_STR, J_UUID_FIXED,  // a uuid as lowercase 8-4-4-4-12 text, quoted
     J_ARRAY, J_MAP,  // items/values are the `sub` ops that follow
     J_OPT,           // null branch -> `null`, else the `sub` ops that follow
     // a record whose fields the reader schema orders differently from the file:
@@ -535,8 +538,13 @@ private:
             case Kind::Bytes:
             case Kind::Fixed:
             case Kind::String: {
-                if (t->logical == Logical::Uuid)
-                    fail("column '" + name + "' is a uuid, which is not supported (as for parquet)");
+                if (t->logical == Logical::Uuid) {
+                    // DRAKEN_UUID: 16 bytes, network order (docs/UUID_TYPE_DESIGN.md).
+                    // The schema parser admits uuid only on string or fixed(16).
+                    set_spec(col, OutKind::Raw, DRAKEN_UUID, 16);
+                    push(Op{t->kind == Kind::Fixed ? R_UUID_FIXED : R_UUID_STR, 0, col, 16, 0});
+                    return;
+                }
                 if (t->logical == Logical::Decimal) {
                     const bool wide = t->precision > 18;
                     set_spec(col, wide ? OutKind::Decimal128 : OutKind::Decimal64,
@@ -613,8 +621,10 @@ private:
             case Kind::String:
             case Kind::Bytes:
             case Kind::Fixed:
-                if (t->logical == Logical::Uuid)
-                    fail("column '" + col + "' holds a uuid, which is not supported (as for parquet)");
+                if (t->logical == Logical::Uuid) {
+                    push(Op{t->kind == Kind::Fixed ? J_UUID_FIXED : J_UUID_STR, 0, 0, 16, 0});
+                    return;
+                }
                 if (t->logical == Logical::Decimal) {
                     push(Op{t->kind == Kind::Fixed ? J_DEC_FIXED : J_DEC_BYTES, 0, t->precision, t->fixed_size, t->scale});
                     return;
@@ -727,7 +737,14 @@ private:
                 return o;
             }
             case Kind::String:
-                if (t->logical == Logical::Uuid) fail("column '" + col + "' holds a uuid, which is not supported");
+                if (t->logical == Logical::Uuid) {
+                    uint8_t u[16];
+                    const std::string txt = d.text();
+                    if (!draken::ops::uuid_parse(txt.data(), txt.size(), u))
+                        fail("column '" + col + "': the default of '" + f.name + "' is not a uuid");
+                    rugo_text::fmt_uuid_quoted(o, u);
+                    return o;
+                }
                 return quoted(d.text());
             case Kind::Bytes:
             case Kind::Fixed: {
@@ -738,7 +755,10 @@ private:
                     rugo_text::fmt_decimal(o, checked_decimal(reinterpret_cast<const uint8_t*>(b.data()), b.size(), t->precision), t->scale);
                     return o;
                 }
-                if (t->logical == Logical::Uuid) fail("column '" + col + "' holds a uuid, which is not supported");
+                if (t->logical == Logical::Uuid) {
+                    rugo_text::fmt_uuid_quoted(o, reinterpret_cast<const uint8_t*>(b.data()));
+                    return o;
+                }
                 o.push_back('"');
                 const size_t at = o.size();
                 o.resize(at + b64_encoded_size(b.size()));
@@ -810,7 +830,23 @@ private:
         auto text = [&](DrakenType dt, const std::string& v) {
             cs.kind = OutKind::ConstString; cs.type = dt; cs.const_value = v;
         };
-        if (t->logical == Logical::Uuid) fail("column '" + name + "' is a uuid, which is not supported (as for parquet)");
+        if (t->logical == Logical::Uuid) {
+            uint8_t u[16] = {0};
+            if (!null) {
+                const DefaultValue d(f.default_json, name);
+                if (t->kind == Kind::Fixed) {
+                    const std::string b = d.bytes();
+                    if (b.size() != 16) fail("column '" + name + "': its default is not 16 bytes");
+                    std::memcpy(u, b.data(), 16);
+                } else {
+                    const std::string txt = d.text();
+                    if (!draken::ops::uuid_parse(txt.data(), txt.size(), u))
+                        fail("column '" + name + "': its default is not a uuid");
+                }
+            }
+            fixed(DRAKEN_UUID, u, 16);
+            return;
+        }
         // TIME / TIMESTAMP (microseconds) and DECIMAL constants carry their logical type
         // on the column. The engine attaches it natively; the Python edge has no
         // producer that does, and refuses them (docs §19.4).
@@ -1245,6 +1281,21 @@ private:
                     c.p += op->arg;
                     break;
                 }
+                case R_UUID_STR: {
+                    const uint64_t n = read_length(c);
+                    need(c, n);
+                    if (!draken::ops::uuid_parse(reinterpret_cast<const char*>(c.p), n,
+                                                 sinks_[op->col].data.data() + static_cast<size_t>(r) * 16u))
+                        fail("a uuid value is not 8-4-4-4-12 hex digits: '" +
+                             std::string(reinterpret_cast<const char*>(c.p), n < 48 ? n : 48) + "'");
+                    c.p += n;
+                    break;
+                }
+                case R_UUID_FIXED:
+                    need(c, 16);
+                    std::memcpy(sinks_[op->col].data.data() + static_cast<size_t>(r) * 16u, c.p, 16);
+                    c.p += 16;
+                    break;
                 case R_ARRAY: {
                     Sink& child = sinks_[op->arg];
                     const Op* item = op + 1;
@@ -1379,6 +1430,22 @@ private:
                     c.p += n;
                     break;
                 }
+                case J_UUID_STR: {
+                    const uint64_t n = read_length(c);
+                    need(c, n);
+                    uint8_t u[16];
+                    if (!draken::ops::uuid_parse(reinterpret_cast<const char*>(c.p), n, u))
+                        fail("a uuid value is not 8-4-4-4-12 hex digits: '" +
+                             std::string(reinterpret_cast<const char*>(c.p), n < 48 ? n : 48) + "'");
+                    rugo_text::fmt_uuid_quoted(*out_, u);
+                    c.p += n;
+                    break;
+                }
+                case J_UUID_FIXED:
+                    need(c, 16);
+                    rugo_text::fmt_uuid_quoted(*out_, c.p);
+                    c.p += 16;
+                    break;
                 case J_DEC_FIXED:
                     need(c, op->arg);
                     rugo_text::fmt_decimal(*out_, checked_decimal(c.p, op->arg, op->col), static_cast<int>(op->sub));

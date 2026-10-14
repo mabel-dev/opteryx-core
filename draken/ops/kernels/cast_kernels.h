@@ -79,6 +79,15 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_ipv4_to_string(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_ipv4_to_blob(void* ctx, const DrakenVector* vector);
 
+/** UUID casts (docs/UUID_TYPE_DESIGN.md). VARCHAR/NVARCHAR -> UUID parses the strict
+ *  36-char form; VARBINARY -> UUID takes exactly 16 raw bytes; UUID -> VARCHAR renders
+ *  lowercase 8-4-4-4-12; UUID -> VARBINARY is the raw 16 bytes. Invalid input raises
+ *  (TRY_CAST nulls it). */
+VecResult draken_cast_string_to_uuid(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_blob_to_uuid(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uuid_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uuid_to_blob(void* ctx, const DrakenVector* vector);
+
 // String-family retag: VARCHAR/NVARCHAR/VARBINARY -> VARCHAR or -> VARBINARY.
 // All three share the exact DrakenStringArena byte layout (buffers.h), so this
 // is a byte-identical copy that only changes the type tag — no validation, no

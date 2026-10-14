@@ -45,6 +45,7 @@
 #include "ops/string_gather.h"      // str_take, str_materialize, str_dictionary_encode
 #include "ops/string_predicates.h"  // str_in_list
 #include "ops/interval_ops.h"       // D.12 — DRAKEN_INTERVAL kernels
+#include "ops/uuid_ops.h"           // DRAKEN_UUID kernels (docs/UUID_TYPE_DESIGN.md)
 #include "ops/int_bitwise.h"        // E.2 — AND/OR/XOR/NOT/SHL/SHR across int8/16/32/64
 #include "ops/decimal_arith.h"     // E.32 — scale-aware DECIMAL arithmetic kernels
 #include "ops/uint64_arithmetic.h" // E33 — u64_add, u64_sub, … (genuine unsigned semantics)
@@ -257,9 +258,9 @@ static inline void hash_decimal128(const DrakenVector& v, uint64_t* out, uint32_
 }
 
 // ---------------------------------------------------------------------------
-// OpsTable: flat array[108] of TypeOps, indexed by DrakenType enum value.
+// OpsTable: flat array[109] of TypeOps, indexed by DrakenType enum value.
 // The D.11 tail runs NULL=101, VECTOR_FP16=102, DECIMAL128=103, UINT8=104,
-// UINT16=105, UINT32=106, UINT64=107, so 108 entries cover all tags. Index 100 is
+// UINT16=105, UINT32=106, UINT64=107, UUID=108, so 109 entries cover all tags. Index 100 is
 // a permanently-burned hole (the retired DRAKEN_NON_NATIVE; see core/buffers.h) and
 // stays zero-filled like any unregistered type. NULL / VECTOR_FP16 are handled at the nanobind boundary and keep zero
 // (null) slots here; DECIMAL128 fills only the gather slots (its arithmetic/hash/
@@ -269,7 +270,7 @@ static inline void hash_decimal128(const DrakenVector& v, uint64_t* out, uint32_
 // Unfilled entries are zero-initialized (null function pointers).
 // ---------------------------------------------------------------------------
 struct OpsTable {
-    static constexpr unsigned kSize = 108u;
+    static constexpr unsigned kSize = 109u;
     TypeOps entries[kSize];
 
     OpsTable() noexcept {
@@ -485,6 +486,19 @@ struct OpsTable {
         // and group-by/join keying. Cross-tier consistent with the int64 hash.
         entries[DRAKEN_DECIMAL128].hash        = hash_decimal128;
         // .ordinalize deliberately left unregistered -- see ops/ordinalize.h.
+
+        // UUID: 16 opaque bytes. Gathers reuse the 16-byte i128_* copies (they never
+        // interpret the bytes); hash folds the bytes; compare_vector orders as
+        // memcmp. compare_scalar/between/in_list carry an int64 scalar and cannot
+        // hold a UUID, so they stay null (fail loud) — literals are materialized as
+        // UUID vectors and compared vector×vector. No ordinalize (no min/max pruning
+        // yet, ruling U14). No arithmetic.
+        entries[DRAKEN_UUID].take              = draken::ops::i128_take;
+        entries[DRAKEN_UUID].slice             = draken::ops::i128_slice;
+        entries[DRAKEN_UUID].materialize       = draken::ops::i128_materialize;
+        entries[DRAKEN_UUID].dictionary_encode = draken::ops::i128_dictionary_encode;
+        entries[DRAKEN_UUID].hash              = draken::ops::uuid_hash;
+        entries[DRAKEN_UUID].compare_vector    = draken::ops::uuid_compare_vector;
 
         // E33 — UINT8/16/32/64. Gather ops (take/slice/materialize/dictionary_encode),
         // hash (GROUP BY/JOIN keys), arithmetic/compare/reductions/between/

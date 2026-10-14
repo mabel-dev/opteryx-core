@@ -194,6 +194,10 @@ static void ej_ipv4(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   fmt_ipv4_quoted(o, ((const uint32_t *)c.dv->data)[c.dv->selection[i]]);
 }
+static void ej_uuid(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
+  fmt_uuid_quoted(o, (const uint8_t *)c.dv->data + (size_t)c.dv->selection[i] * 16);
+}
 static void ej_null(std::string &o, Col &c, size_t i) { (void)c; (void)i; o.append("null"); }
 
 // ---- CSV cell emitters (null -> empty field) ----
@@ -267,6 +271,12 @@ static void ec_date(std::string &o, Col &c, size_t i) {
 // it touches 16 even though an address is at most 15) rather than the shared
 // scratch string, so the quote-awareness costs one pass over those bytes and no
 // allocation.
+// UUID: 36 hex/hyphen chars never need CSV quoting, so append directly.
+static void ec_uuid(std::string &o, Col &c, size_t i) {
+  if (!row_valid(c.dv->validity, i)) return;
+  fmt_uuid(o, (const uint8_t *)c.dv->data + (size_t)c.dv->selection[i] * 16);
+}
+
 static void ec_ipv4(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   char buf[draken::ipv4::FORMAT_SCRATCH_BYTES];
@@ -392,8 +402,15 @@ static void resolve_col(Col &c, const DrakenVector *dv,
     c.emit = csv ? (for_excel ? ec_array_x : ec_array) : ej_array; return;
   case DRAKEN_VECTOR_FP16:
     c.emit = csv ? (for_excel ? ec_fp16_x : ec_fp16) : ej_fp16; return;
-  default:
+  case DRAKEN_UUID:
+    c.emit = csv ? ec_uuid : ej_uuid; return;
+  case DRAKEN_NULL:
     c.emit = csv ? ec_null : ej_null; return;
+  // A type with no arm here used to be written as empty/null for every row — a
+  // silent wrong answer. Unwritable types now fail loud.
+  default:
+    throw std::invalid_argument("text writer: no CSV/JSONL rendering for DrakenType " +
+                                std::to_string((int)dv->type));
   }
   // cast path
   vr_to_dv(vr, c.sv);
@@ -431,6 +448,7 @@ static inline size_t est_cell_bytes(const Col &c) {
   case DRAKEN_TIMESTAMP64: return 34;
   case DRAKEN_TIME32: case DRAKEN_TIME64: return 17;
   case DRAKEN_DECIMAL: case DRAKEN_DECIMAL128: return 22;
+  case DRAKEN_UUID: return 38;
   case DRAKEN_VECTOR_FP16: return 1 + (size_t)c.desc.column.dim * 12;
   case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR: case DRAKEN_VARBINARY: case DRAKEN_VARIANT: {
     const DrakenStringArena *sa = (const DrakenStringArena *)dv->data;

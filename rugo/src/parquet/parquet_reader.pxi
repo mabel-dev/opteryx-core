@@ -918,6 +918,7 @@ cdef extern from "parquet/column_materialize.hpp" namespace "rugo::_parquet":
         pass
 
     MaterializedColumn materialize_decimal(parquet_reader.DecodedColumn& col, int32_t num_rows) except +
+    MaterializedColumn materialize_uuid(parquet_reader.DecodedColumn& col, int32_t num_rows) except +
     MaterializedColumn materialize_int(parquet_reader.DecodedColumn& col, int32_t num_rows, bint from_int32) except +
     MaterializedColumn materialize_float(parquet_reader.DecodedColumn& col, int32_t num_rows, bint from_float32) except +
     MaterializedColumn materialize_string(parquet_reader.DecodedColumn& col, int32_t num_rows, bint is_text) except +
@@ -933,6 +934,12 @@ cdef extern from "parquet/_parquet_column_wrap.hpp" namespace "rugo::_parquet":
 cdef inline object rugo_decimal_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
     cdef MaterializedColumn mc = materialize_decimal(col, num_rows)
     return _rugo_steal(wrap_parquet_column(mc))
+
+
+cdef Vector _make_uuid_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
+    """DRAKEN_UUID from a decoded FLBA(16) + UUID column (raw 16 bytes per value)."""
+    cdef MaterializedColumn mc = materialize_uuid(col, num_rows)
+    return Vector(_rugo_steal(wrap_parquet_column(mc)))
 
 
 cdef Vector _make_decimal_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
@@ -1598,6 +1605,9 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
             if cp[0].string_dict_lens.size() > 0:
                 _TEL["parquet_dict_materialize_fallbacks"] += 1
             _TEL["cython_str_s"] += _time.perf_counter() - _t0
+        elif cp[0].is_uuid:
+            vec = _make_uuid_vector(cp[0], num_rows)
+            _TEL["cython_other_s"] += _time.perf_counter() - _t0
         elif cp[0].is_decimal:
             # DECIMAL (any tier): real DECIMAL/DECIMAL128 vector, not a bare
             # int — and never drop the int128 tier.
@@ -2105,6 +2115,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     # DECIMAL (scalar): int64/int32-tier (width<=8) and int128-tier (width 9..16)
     # both flagged is_decimal — materialize a real DECIMAL vector rather than a
     # bare int (or, for int128, dropping the column).
+    if result.is_uuid:
+        return _make_uuid_vector(result, num_rows)
     if result.is_decimal:
         return _make_decimal_vector(result, num_rows)
 

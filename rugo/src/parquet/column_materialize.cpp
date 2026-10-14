@@ -456,6 +456,24 @@ void str_resolve(const DecodedColumn& col, int32_t num_rows,
 
 }  // namespace
 
+// UUID (FLBA(16) + UUID logical type): the int128 lane holds the RAW 16 bytes, so
+// the same positional scatter as DECIMAL128 builds a DRAKEN_UUID column — no
+// precision, no descriptor.
+MaterializedColumn materialize_uuid(const DecodedColumn& col, int32_t num_rows) {
+    if (!col.is_uuid || col.type != "int128")
+        throw std::invalid_argument("materialize_uuid: column is not a decoded UUID");
+    const uint32_t length = (uint32_t)(num_rows > 0 ? num_rows : 0);
+    DrakenPtr<uint8_t> validity = alloc_validity(length);
+    bool has_nulls = false;
+    DrakenPtr<__int128> data = draken_alloc<__int128>(length > 0u ? length : 1u);
+    const bool has_codes = !col.dict_codes_array.empty() || !col.dict_indices.empty();
+    const bool has_dict = !col.dict_int128_values.empty() && has_codes;
+    scatter_unscaled<__int128, __int128, __int128>(
+        col, num_rows, col.dict_int128_values, col.int128_values,
+        has_dict, /*is_rle=*/false, data.get(), validity.get(), &has_nulls);
+    return finish(DRAKEN_UUID, length, data, validity, has_nulls);
+}
+
 MaterializedColumn materialize_decimal(const DecodedColumn& col, int32_t num_rows) {
     const uint8_t precision = col.decimal_precision;
     const uint8_t scale     = col.decimal_scale;

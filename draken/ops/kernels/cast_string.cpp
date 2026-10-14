@@ -1,5 +1,6 @@
 #include "ops/kernels/cast_kernels.h"
 #include "core/ipv4.h"
+#include "ops/uuid_ops.h"   // uuid_parse / uuid_format — the one UUID text form
 #include "core/iso_datetime.h"
 #include "core/decimal_text.h"
 #include "ops/kernels/error_handling.h"
@@ -844,3 +845,126 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
 }
 
 }  // extern "C"
+
+
+// ── UUID casts (docs/UUID_TYPE_DESIGN.md, rulings U5/U6) ───────────────────────
+//
+// Text <-> UUID route through draken/ops/uuid_ops.h's uuid_parse / uuid_format so
+// parse strictness and render form cannot drift apart. VARBINARY <-> UUID are the
+// RAW 16 bytes (network order), not text. All are compression-aware: each PHYSICAL
+// slot is converted once and the selection kept; dead dictionary slots are skipped.
+
+// CAST(<VARCHAR/NVARCHAR> AS UUID): strict 36-char 8-4-4-4-12 hex, either case.
+VecResult draken_cast_string_to_uuid(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
+            return draken_error_sentinel_fmt("cast string->uuid: expected VARCHAR/NVARCHAR, got %d", v->type);
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        uint8_t* out = static_cast<uint8_t*>(draken_malloc((k > 0u ? k : 1u) * 16u));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad;
+        if (is_safe) bad.assign(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+        for (uint32_t j = 0u; j < k; ++j) {
+            uint8_t* dst = out + static_cast<size_t>(j) * 16u;
+            if (live_map != nullptr && !live_map[j]) { std::memset(dst, 0, 16); continue; }
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
+            const uint32_t len = str_length(slot);
+            if (!draken::ops::uuid_parse(reinterpret_cast<const char*>(s), len, dst)) {
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to UUID: got '%.*s', expected 8-4-4-4-12 hex digits. Use TRY_CAST to return NULL instead.",
+                        (int)(len < 48u ? len : 48u), (const char*)s);
+                }
+                std::memset(dst, 0, 16); bad[j] = 1u; any_bad = true;
+            }
+        }
+        VecResult r;
+        r.data = out; r.type = DRAKEN_UUID; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
+        return r;
+    });
+}
+
+// CAST(<VARBINARY> AS UUID): the value must be exactly 16 bytes.
+VecResult draken_cast_blob_to_uuid(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt("cast blob->uuid: expected VARBINARY, got %d", v->type);
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        uint8_t* out = static_cast<uint8_t*>(draken_malloc((k > 0u ? k : 1u) * 16u));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        std::vector<uint8_t> live;
+        const uint8_t* live_map = kernel_live_slots(v, live);
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad;
+        if (is_safe) bad.assign(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+        for (uint32_t j = 0u; j < k; ++j) {
+            uint8_t* dst = out + static_cast<size_t>(j) * 16u;
+            if (live_map != nullptr && !live_map[j]) { std::memset(dst, 0, 16); continue; }
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint32_t len = str_length(slot);
+            if (len != 16u) {
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to UUID: got %u bytes, expected exactly 16. Use TRY_CAST to return NULL instead.", len);
+                }
+                std::memset(dst, 0, 16); bad[j] = 1u; any_bad = true;
+                continue;
+            }
+            std::memcpy(dst, str_data(slot, sa ? sa->arena : nullptr), 16);
+        }
+        VecResult r;
+        r.data = out; r.type = DRAKEN_UUID; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
+        return r;
+    });
+}
+
+// UUID -> string-family core: `text` renders the canonical 36-char form (VARCHAR);
+// otherwise the raw 16 bytes (VARBINARY). Cannot fail.
+static VecResult uuid_to_string_core(const DrakenVector* v, bool text) {
+    if (!v) return draken_error_sentinel("Input vector is null");
+    if (v->type != DRAKEN_UUID)
+        return draken_error_sentinel_fmt("cast uuid->string: expected UUID, got %d", v->type);
+    const uint32_t k = v->data_length;
+    const uint8_t* src = static_cast<const uint8_t*>(v->data);
+    const uint32_t len = text ? 36u : 16u;   // both > STR_INLINE_MAX: always in the arena
+    const size_t total_extern = static_cast<size_t>(k) * len;
+    DrakenStringSlot* slots;
+    uint8_t* arena;
+    uint8_t* vunused;
+    uint8_t* block = vecresult_string_block_alloc(k, total_extern, 0, &slots, &arena, &vunused);
+    if (!block) return draken_error_sentinel("Allocation failed");
+    (void)vunused;
+    for (uint32_t j = 0u; j < k; ++j) {
+        const uint32_t off = j * len;
+        if (text) draken::ops::uuid_format(src + static_cast<size_t>(j) * 16u, reinterpret_cast<char*>(arena + off));
+        else std::memcpy(arena + off, src + static_cast<size_t>(j) * 16u, 16);
+        draken_build_string_slot(&slots[j], arena + off, len, off);
+    }
+    VecResult r = vecresult_from_string_block(block, k, total_extern, 0, text ? DRAKEN_VARCHAR : DRAKEN_VARBINARY);
+    kernel_preserve_shape(r, v);
+    return r;
+}
+
+VecResult draken_cast_uuid_to_string(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return uuid_to_string_core(v, true); });
+}
+
+VecResult draken_cast_uuid_to_blob(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({ return uuid_to_string_core(v, false); });
+}

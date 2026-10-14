@@ -63,7 +63,7 @@ cdef extern from "interop/value_format.hpp" namespace "rugo_text" nogil:
         vector[ArrayLevel] levels
 
     void render_json_column(string& out, const DrakenVector* dv,
-                            const ColumnDesc& desc, size_t nrows)
+                            const ColumnDesc& desc, size_t nrows) except +
 
 
 def type_display_name(physical, kind=None, unit=None, precision=0, scale=0,

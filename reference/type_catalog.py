@@ -63,6 +63,25 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             "An address does not carry a prefix length (unlike a PostgreSQL `inet`). The prefix is always an operand of the operation that needs it — `ip <<= '10.0.0.0/8'`.",
         ],
     },
+    "uuid": {
+        "description": "A universally unique identifier (RFC 9562). Stored as its 16 bytes in network order, so ordering, grouping, joining and comparison work on the bytes and byte order is the same as the order of the canonical text.",
+        "example": "CAST('550e8400-e29b-41d4-a716-446655440000' AS UUID)",
+        "notes": "Rendered as lowercase 8-4-4-4-12 text. A string literal compared with a UUID column is parsed as a UUID when the query is planned, so `id = '550e8400-...'` compares 16 bytes; a string column compared with a UUID column needs an explicit CAST.",
+        "cast_to": [
+            {"type": "varchar", "example": "CAST(id AS VARCHAR)", "note": "Lowercase 8-4-4-4-12 text."},
+            {"type": "varbinary", "example": "CAST(id AS VARBINARY)", "note": "The raw 16 bytes, not the text."},
+            {"type": "from VARCHAR", "example": "CAST('550e8400-e29b-41d4-a716-446655440000' AS UUID)", "note": "Strict: exactly 8-4-4-4-12 hex digits, either case."},
+            {"type": "from VARBINARY", "example": "CAST(raw AS UUID)", "note": "Exactly 16 bytes."},
+        ],
+        "comparable_with": ["uuid"],
+        "limitations": [
+            "UUID text is parsed strictly: braces, `urn:uuid:` prefixes and unhyphenated hex are rejected rather than guessed.",
+            "No arithmetic, and no string functions without an explicit CAST to VARCHAR.",
+            "MIN, MAX and ANY_VALUE work over UUID; SUM and AVG do not. MIN/MAX as window functions (with an OVER clause) are not supported yet.",
+            "Read from Parquet (FIXED_LEN_BYTE_ARRAY(16) annotated UUID), Avro (`uuid` on string or fixed(16)) and PostgreSQL `uuid` columns. CSV and JSONL produce UUID only through a declared schema; a uuid-shaped string is otherwise VARCHAR.",
+            "Filters on a PostgreSQL UUID column are evaluated by Opteryx, not pushed to the server.",
+        ],
+    },
     "null": {
         "description": "The absence of a value. NULL is not a type you declare — it appears when a column has no value or an expression produces no result.",
         "example": "NULL",
@@ -385,6 +404,7 @@ _FAMILY: dict[LogicalCategory, str] = {
     LogicalCategory.ARRAY: "nested",
     LogicalCategory.VARIANT: "nested",
     LogicalCategory.NULL: "null",
+    LogicalCategory.UUID: "identifier",
 }
 
 

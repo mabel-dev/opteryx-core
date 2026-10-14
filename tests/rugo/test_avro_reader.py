@@ -13,6 +13,7 @@ PyArrow has no Avro reader, so it is not an oracle here.
 """
 
 import base64
+import bz2
 import datetime
 import decimal
 import io
@@ -35,7 +36,7 @@ from avro.io import DatumReader  # noqa: E402
 from rugo.rugo_native import read_avro, read_avro_metadata  # noqa: E402
 
 UTC = datetime.timezone.utc
-CODECS = ["null", "deflate", "snappy", "zstandard"]
+CODECS = ["null", "deflate", "snappy", "zstandard", "bzip2"]
 
 
 def _write(schema, records, codec="null", sync_interval=16000):
@@ -507,6 +508,47 @@ def test_deflate_refuses_more_than_the_zlib_trailer():
             _refuses(data, r"trailing bytes after the compressed block")
 
 
+def _bzip2_container(body, count=10):
+    schema = b'{"type":"record","name":"r","fields":[{"name":"c","type":"long"}]}'
+    meta = (_zz(2) + _zz(11) + b"avro.schema" + _zz(len(schema)) + schema
+            + _zz(10) + b"avro.codec" + _zz(5) + b"bzip2" + _zz(0))
+    sync = b"Q" * 16
+    return b"Obj\x01" + meta + sync + _zz(count) + _zz(len(body)) + body + sync
+
+
+_BZIP2_RAW = b"".join(_zz(i) for i in range(10))
+
+
+def test_bzip2_hand_built_block():
+    assert _rugo_rows(_bzip2_container(bz2.compress(_BZIP2_RAW)))[1]["c"] == list(range(10))
+
+
+def test_bzip2_block_needing_output_growth():
+    # 200k zero longs compress to a few dozen bytes: far past the 4x first guess.
+    raw = _zz(0) * 200_000
+    assert _rugo_rows(_bzip2_container(bz2.compress(raw), 200_000))[1]["c"] == [0] * 200_000
+
+
+def test_bzip2_refuses_trailing_bytes():
+    # One Avro block is one bzip2 stream; anything after its end is corrupt.
+    _refuses(_bzip2_container(bz2.compress(_BZIP2_RAW) + b"\x00"), r"bzip2: trailing bytes after the compressed block")
+
+
+def test_bzip2_refuses_truncated_block():
+    body = bz2.compress(_BZIP2_RAW)
+    _refuses(_bzip2_container(body[:-6]), r"bzip2: the compressed block is truncated")
+
+
+def test_bzip2_refuses_corrupt_block():
+    body = bytearray(bz2.compress(_BZIP2_RAW * 50, 9))
+    body[len(body) // 2] ^= 0xFF
+    _refuses(_bzip2_container(bytes(body), 500), r"bzip2: the compressed block is corrupt")
+
+
+def test_bzip2_refuses_bad_magic():
+    _refuses(_bzip2_container(b"XYZh9" + bz2.compress(_BZIP2_RAW)[5:]), r"bzip2: the block is not a bzip2 stream \(bad magic\)")
+
+
 def test_deflate_block_needing_output_growth():
     # A block that inflates far beyond 4x its compressed size: the first output buffer
     # is too small, so the decoder must grow it and inflate the block again.
@@ -549,10 +591,37 @@ def test_refuses_recursive_type():
     _refuses(data, r"recursive type 'Node'")
 
 
-def test_refuses_uuid():
+# uuid reads as DRAKEN_UUID (docs/UUID_TYPE_DESIGN.md): 16 bytes in network order,
+# uuid.UUID at the Python edge, from either physical form.
+_UUIDS = ["6b8c5d4e-0000-4000-8000-000000000000", None, "FFFFFFFF-0000-0000-0000-000000000001"]
+
+
+def test_uuid_string_and_fixed_read_as_uuid():
+    import uuid as _uuid
+
+    want = [None if u is None else _uuid.UUID(u) for u in _UUIDS]
+    data = _write(_record([
+        {"name": "s", "type": ["null", {"type": "string", "logicalType": "uuid"}]},
+        {"name": "f", "type": ["null", {"type": "fixed", "name": "U16", "size": 16, "logicalType": "uuid"}]},
+    ]), [{"s": u, "f": None if u is None else _uuid.UUID(u).bytes} for u in _UUIDS])
+    res, rows = _rugo_rows(data)
+    assert rows["s"] == want
+    assert rows["f"] == want
+    assert [b[0].to_pylist() for b in res["batches"]][0] == want
+
+
+def test_uuid_inside_a_record_renders_lowercase_text():
+    data = _write(_record([{"name": "r", "type": {"type": "record", "name": "Inner", "fields": [
+        {"name": "id", "type": {"type": "string", "logicalType": "uuid"}}]}}]),
+        [{"r": {"id": _UUIDS[2]}}])
+    _, rows = _rugo_rows(data)
+    assert json.loads(rows["r"][0]) == {"id": _UUIDS[2].lower()}
+
+
+def test_uuid_string_that_is_not_a_uuid_fails():
     data = _write(_record([{"name": "u", "type": {"type": "string", "logicalType": "uuid"}}]),
-                  [{"u": "6b8c5d4e-0000-4000-8000-000000000000"}])
-    _refuses(data, r"uuid, which is not supported")
+                  [{"u": "not-a-uuid"}])
+    _refuses(data, r"uuid value is not 8-4-4-4-12")
 
 
 @pytest.mark.parametrize("lt", ["timestamp-nanos", "local-timestamp-micros"])
@@ -643,11 +712,12 @@ def test_refuses_path_through_array():
     _refuses(data, r"is a array", ["tags.x"])
 
 
-def test_refuses_bzip2_codec():
+def test_refuses_xz_codec():
     schema = b'{"type":"record","name":"r","fields":[{"name":"c","type":"long"}]}'
     meta = (_zz(2) + _zz(11) + b"avro.schema" + _zz(len(schema)) + schema
-            + _zz(10) + b"avro.codec" + _zz(5) + b"bzip2" + _zz(0))
-    _refuses(b"Obj\x01" + meta + b"S" * 16, r"codec 'bzip2' is not supported")
+            + _zz(10) + b"avro.codec" + _zz(2) + b"xz" + _zz(0))
+    _refuses(b"Obj\x01" + meta + b"S" * 16,
+             r"codec 'xz' is not supported \(null, deflate, snappy, zstandard and bzip2 are\)")
 
 
 def test_refuses_undecodable_header_bytes_with_runtime_error():

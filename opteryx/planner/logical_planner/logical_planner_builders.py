@@ -10,6 +10,7 @@ a function and a reference to it in the dictionary.
 """
 
 import datetime
+import uuid
 import decimal
 from typing import List, Optional
 
@@ -1122,6 +1123,7 @@ _CAST_TARGET_NAMES = (
     "UINT32",
     "UINT64",
     "IPV4",
+    "UUID",
 )
 
 # The THREE implied aliases the dialect ACCEPTS in CREATE and CAST, mapped to the
@@ -1232,6 +1234,9 @@ def _normalize_cast_type(data_type: str, *, refused_as: str) -> str:
     # any future alias. Matched exactly so it cannot be shadowed.
     if upper_type == "IPV4":
         return "IPV4"
+    # UUID — exact match for the same reason (sqlparser emits it as a unit DataType).
+    if upper_type == "UUID":
+        return "UUID"
 
     # Map of type spellings to normalized types, matched EXACTLY.
     #
@@ -1834,6 +1839,24 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         # failures and returns the value unchanged (fine for its other callers,
         # which reconcile already-compatible literal branches) — but CAST on a
         # literal must fail loud on bad input, matching the runtime CAST path.
+        # VARBINARY -> UUID is the RAW 16 bytes (ruling U6), never text: a binary
+        # literal's bytes are not UTF-8 and must not go through .text().
+        if (
+            _sql_type_lc == LogicalCategory.UUID
+            and type(literal_node.value) is bytes
+            and isinstance(literal_node.type, ColumnType)
+            and literal_node.type.category == LogicalCategory.VARBINARY
+        ):
+            if len(literal_node.value) != 16:
+                raise ValueError(
+                    f"got {len(literal_node.value)} bytes, expected exactly 16"
+                )
+            return Literal(
+                type=sql_type,
+                value=uuid.UUID(bytes=literal_node.value),
+                alias=alias,
+                arena=literal_node.arena,
+            )
         # A string literal's value is parsed from its text.
         source_value = (
             literal_node.text() if type(literal_node.value) is bytes else literal_node.value
@@ -1871,7 +1894,13 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         if kind in {"TryCast", "SafeCast"}:
             return Literal(type=_CT_NULL, alias=alias, arena=literal_node.arena)
         # For regular CAST, raise an error
-        shown = literal_node.text() if type(literal_node.value) is bytes else literal_node.value
+        # errors="replace": a VARBINARY literal's bytes need not be UTF-8, and the
+        # message must not itself fail while reporting the cast failure.
+        shown = (
+            literal_node.value.decode("utf-8", errors="replace")
+            if type(literal_node.value) is bytes
+            else literal_node.value
+        )
         raise SqlError(f"Error casting value '{shown}' to type '{base_type}': {e}")
 
 

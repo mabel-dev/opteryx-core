@@ -131,6 +131,7 @@ _TYPE_BY_PHYSICAL: Dict[int, ColumnType] = {
         _lt.VARCHAR,
         _lt.VARBINARY,
         _lt.VARIANT,
+        _lt.UUID,
     )
 }
 

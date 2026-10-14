@@ -44,7 +44,9 @@ static bool CheckColumnCompatibility(const ColumnStats &col) {
   // Non-DECIMAL FLBA (UUID, fixed-width hashes, etc.) is a clean bail.
   if (col.physical_type == "fixed_len_byte_array") {
     if (col.type_length <= 0 || col.type_length > 16) return false;
-    if (col.logical_type.rfind("decimal", 0) != 0) return false;
+    // UUID: FIXED_LEN_BYTE_ARRAY(16), decoded as its raw 16 bytes (DRAKEN_UUID).
+    const bool is_uuid = col.logical_type == "uuid" && col.type_length == 16;
+    if (!is_uuid && col.logical_type.rfind("decimal", 0) != 0) return false;
   }
 
   // Encodings we can actually decode, using Parquet spec IDs:

@@ -12,11 +12,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "core/buffers.h"
 #include "core/ipv4.h"
+#include "core/uuid_text.h"
 #include "core/string_slot.h"
 #include "logical_type.h"  // LogicalKind — the kind vocabulary is draken's, never copied
 #include "ryu.h"  // third_party/ulfjack/ryu is on every consuming extension's include path
@@ -83,6 +85,21 @@ struct ColumnDesc {
 inline void fmt_ipv4(std::string &out, uint32_t v) {
   char buf[draken::ipv4::FORMAT_SCRATCH_BYTES];
   out.append(buf, draken::ipv4::format(v, buf));
+}
+
+// UUID: canonical lowercase 8-4-4-4-12 (draken/core/uuid_text.h), bare and quoted.
+inline void fmt_uuid(std::string &out, const uint8_t *p) {
+  char buf[36];
+  draken::ops::uuid_format(p, buf);
+  out.append(buf, 36);
+}
+
+inline void fmt_uuid_quoted(std::string &out, const uint8_t *p) {
+  char buf[38];
+  buf[0] = '"';
+  draken::ops::uuid_format(p, buf + 1);
+  buf[37] = '"';
+  out.append(buf, 38);
 }
 
 // JSON form: quotes baked into the same stack buffer, one append per cell.
@@ -607,7 +624,15 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
     json_string(out, (const char *)str_data(slot, sa->arena), str_length(slot));
     break;
   }
-  default: out.append("null");
+  case DRAKEN_UUID:
+    fmt_uuid_quoted(out, (const uint8_t *)dv->data + (size_t)p * 16);
+    break;
+  case DRAKEN_NULL: out.append("null"); break;
+  // A type with no arm here used to render as `null` — a silent wrong answer for
+  // a valid value. Unrenderable types now fail loud instead.
+  default:
+    throw std::invalid_argument("render_json_scalar: no JSON rendering for DrakenType " +
+                                std::to_string((int)dv->type));
   }
 }
 

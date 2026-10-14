@@ -1,11 +1,13 @@
 #include "avro_container.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
 
 #include "avro_varint.hpp"
+#include "bzlib.h"
 #include "compression/stream_decompress.hpp"  // crc32_update
 #include "libdeflate.h"
 #include "snappy.h"
@@ -93,7 +95,8 @@ Header read_header(const uint8_t* data, size_t size) {
     else if (codec == "deflate") h.codec = BlockCodec::Deflate;
     else if (codec == "snappy") h.codec = BlockCodec::Snappy;
     else if (codec == "zstandard") h.codec = BlockCodec::Zstandard;
-    else corrupt("codec '" + printable(codec) + "' is not supported (null, deflate, snappy and zstandard are)");
+    else if (codec == "bzip2") h.codec = BlockCodec::Bzip2;
+    else corrupt("codec '" + printable(codec) + "' is not supported (null, deflate, snappy, zstandard and bzip2 are)");
     need(c, 16);
     std::memcpy(h.sync, c.p, 16);
     c.p += 16;
@@ -188,6 +191,58 @@ void unsnappy(const uint8_t* src, size_t n, draken::AppendBuffer<uint8_t>& out) 
         corrupt("snappy: CRC32 mismatch (the block is corrupt)");
 }
 
+// libbzip2 (third_party/bzip2, built with BZ_NO_STDIO by _bzip2_lib.c) reports an
+// internal consistency failure by calling bz_internal_error() and then carrying on, so
+// the code is recorded here and checked after every BZ2_bzDecompress call. Per thread:
+// each worker decodes its own blocks.
+thread_local int bz_internal_code = 0;
+
+// One Avro bzip2 block is one complete bzip2 stream. Like deflate the uncompressed size
+// is not recorded, so `out` starts at the larger of 4x the input and the capacity
+// earlier blocks grew it to, and doubles while the decompressor fills it.
+void unbzip2(const uint8_t* src, size_t n, draken::AppendBuffer<uint8_t>& out) {
+    bz_stream s;
+    std::memset(&s, 0, sizeof(s));
+    const int init = BZ2_bzDecompressInit(&s, 0, 0);
+    if (init == BZ_MEM_ERROR) throw std::bad_alloc();
+    if (init != BZ_OK) corrupt("bzip2: the decompressor could not be initialised (code " + std::to_string(init) + ")");
+    struct End {
+        bz_stream* s;
+        ~End() { BZ2_bzDecompressEnd(s); }
+    } end{&s};
+    if (n > UINT_MAX) corrupt("bzip2: the compressed block is larger than 4 GiB");
+    out.clear();
+    out.reserve(std::max<size_t>(out.capacity(), n * 4 > 4096 ? n * 4 : 4096));
+    s.next_in = const_cast<char*>(reinterpret_cast<const char*>(src));
+    s.avail_in = static_cast<unsigned int>(n);
+    bz_internal_code = 0;
+    for (;;) {
+        const size_t room = std::min<size_t>(out.capacity() - out.size(), UINT_MAX);
+        s.next_out = reinterpret_cast<char*>(out.data() + out.size());
+        s.avail_out = static_cast<unsigned int>(room);
+        const unsigned int in_before = s.avail_in;
+        const int r = BZ2_bzDecompress(&s);
+        const size_t produced = room - s.avail_out;
+        out.resize_uninit(out.size() + produced);
+        if (bz_internal_code != 0)
+            corrupt("bzip2: internal error " + std::to_string(bz_internal_code) + " in libbzip2");
+        if (r == BZ_STREAM_END) {
+            if (s.avail_in != 0) corrupt("bzip2: trailing bytes after the compressed block");
+            return;
+        }
+        if (r == BZ_DATA_ERROR_MAGIC) corrupt("bzip2: the block is not a bzip2 stream (bad magic)");
+        if (r == BZ_DATA_ERROR) corrupt("bzip2: the compressed block is corrupt");
+        if (r == BZ_MEM_ERROR) throw std::bad_alloc();
+        if (r != BZ_OK) corrupt("bzip2: decompression failed (code " + std::to_string(r) + ")");
+        if (s.avail_out == 0) {
+            out.reserve(out.capacity() * 2);
+            continue;
+        }
+        if (s.avail_in == 0) corrupt("bzip2: the compressed block is truncated");
+        if (s.avail_in == in_before && produced == 0) corrupt("bzip2: the decompressor made no progress");
+    }
+}
+
 }  // namespace
 
 BlockDecoder::BlockDecoder() = default;
@@ -208,8 +263,12 @@ std::pair<const uint8_t*, size_t> BlockDecoder::payload(const Block& b, BlockCod
             break;
         case BlockCodec::Snappy:    unsnappy(b.bytes, b.size, scratch_); break;
         case BlockCodec::Zstandard: unzstd(b.bytes, b.size, scratch_); break;
+        case BlockCodec::Bzip2:     unbzip2(b.bytes, b.size, scratch_); break;
     }
     return {scratch_.data(), scratch_.size()};
 }
 
 }  // namespace rugo::avro
+
+// libbzip2's BZ_NO_STDIO hook (see unbzip2): record, never exit.
+extern "C" void bz_internal_error(int errcode) { rugo::avro::bz_internal_code = errcode; }

@@ -37,6 +37,7 @@ struct MaterializedColumn {
 
 // DECIMAL (p<=18, int64) or DECIMAL128 (p>18, int128) from a decoded DECIMAL column.
 MaterializedColumn materialize_decimal(const DecodedColumn& col, int32_t num_rows);
+MaterializedColumn materialize_uuid(const DecodedColumn& col, int32_t num_rows);
 
 // Integer column at its DECLARED width and signedness (IntType annotation; an
 // unannotated column takes its width from the physical type).

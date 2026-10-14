@@ -363,6 +363,11 @@ static std::string ParseLogicalType(TInput &in) {
       result = "bson";
       break;
     }
+    case 14: { // UUID (UUIDType - empty struct): FIXED_LEN_BYTE_ARRAY(16)
+      SkipStruct(in);
+      result = "uuid";
+      break;
+    }
     case 15: {        // FLOAT16 (Float16Type - empty struct)
       SkipStruct(in); // it’s defined as an empty struct
       result = "float16";

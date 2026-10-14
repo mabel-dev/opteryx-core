@@ -777,6 +777,42 @@ void register_vector_casts(nb::module_ &m) {
         "CAST(v AS VARBINARY) for an IPV4 source: same bytes as the VARCHAR twin, "
         "tagged VARBINARY. Null rows propagate.");
 
+    // UUID (docs/UUID_TYPE_DESIGN.md): Python-evaluator counterparts to the
+    // registered draken_cast_*uuid* C-ABI kernels — the SAME kernels, so the two
+    // paths cannot disagree on parse strictness or render form.
+    m.def("vector_cast_string_to_uuid",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_string_to_uuid(nullptr, dv), true);
+        },
+        nb::arg("v"),
+        "CAST(v AS UUID) for VARCHAR/NVARCHAR: strict 8-4-4-4-12 hex. Invalid raises ValueError.");
+    m.def("vector_cast_blob_to_uuid",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_blob_to_uuid(nullptr, dv), true);
+        },
+        nb::arg("v"),
+        "CAST(v AS UUID) for VARBINARY: exactly 16 raw bytes. Any other length raises ValueError.");
+    m.def("vector_cast_uuid_to_string",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_uuid_to_string(nullptr, dv));
+        },
+        nb::arg("v"),
+        "CAST(v AS VARCHAR) for a UUID source: lowercase 8-4-4-4-12. Null rows propagate.");
+    m.def("vector_cast_uuid_to_blob",
+        [](nb::object v) -> nb::object {
+            const DrakenVector* dv = draken_vector_unwrap(v.ptr());
+            if (!dv) throw nb::python_error();
+            return wrap_cast_result(draken_cast_uuid_to_blob(nullptr, dv));
+        },
+        nb::arg("v"),
+        "CAST(v AS VARBINARY) for a UUID source: the raw 16 bytes. Null rows propagate.");
+
     m.def("vector_cast_uint_to_string",
         [](nb::object v) -> nb::object {
             const DrakenVector* dv = draken_vector_unwrap(v.ptr());

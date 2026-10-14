@@ -30,7 +30,7 @@ make job-aistor                         313818.7ms  (12-OCT) [46.49x]
 make tpch-sf01-aistor                   2467.0ms    (12-OCT) [21.74x]
 make tpcds-sf01-aistor                  74.6s       (12-OCT) [1 fails (Q51)]
 make clickbench-aistor-canon-split-10   36406ms     (12-OCT) [19.28x] [10M rows]
-make clickbench-aistor-rugo-split-10    18921ms     (12-OCT) [10.02x] [10M rows]
+make clickbench-aistor-rugo-split-10    8761ms      (14-OCT) [4.64x] [10M rows]
 make h2o-small-aistor                   17653.5ms   (12-OCT) [6.25x]
 
 **** clickbench (125.6 seconds) <- Opteryx 0.26.8

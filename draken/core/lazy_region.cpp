@@ -53,7 +53,7 @@ inline size_t fixed_width(DrakenType t) noexcept {
         case DRAKEN_DATE32: case DRAKEN_TIME32: return 4;
         case DRAKEN_INT64: case DRAKEN_UINT64: case DRAKEN_FLOAT64: case DRAKEN_DECIMAL:
         case DRAKEN_TIMESTAMP64: case DRAKEN_TIME64: return 8;
-        case DRAKEN_DECIMAL128: case DRAKEN_INTERVAL: return 16;
+        case DRAKEN_DECIMAL128: case DRAKEN_INTERVAL: case DRAKEN_UUID: return 16;
         default: return 0;
     }
 }

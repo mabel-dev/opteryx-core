@@ -901,6 +901,9 @@ def draken_rugo_extensions(parquet_created_by):
                     "third_party/libdeflate/lib/utils.c",
                     "third_party/libdeflate/lib/arm/cpu_features.c",
                     "third_party/libdeflate/lib/x86/cpu_features.c",
+                    # libbzip2 1.0.8 (third_party/bzip2, unmodified) as one TU with
+                    # BZ_NO_STDIO set: Avro's `bzip2` codec (BZIP2_VERSION.txt).
+                    "rugo/src/avro/_bzip2_lib.c",
                 ]
                 + get_parquet_vendor_sources()
                 + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
@@ -922,6 +925,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/csv/core",
                     "third_party/yyjson/src",       # avro schema parsing (symbols from draken_native)
                     "third_party/libdeflate",       # libdeflate.h: avro deflate + parquet GZIP codecs
+                    "third_party/bzip2",            # bzlib.h: avro bzip2 codec
                     "third_party/snappy",
                     "third_party/zstd",
                     "third_party/zstd/common",

@@ -394,6 +394,14 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
         if s in _CAST_UNSIGNED_INT:
             return ("draken_cast_uint_to_uint32", 0)
         return None
+    # UUID (docs/UUID_TYPE_DESIGN.md U6): text parses strictly, VARBINARY is the raw
+    # 16 bytes. No numeric source.
+    if t == "UUID":
+        if s in ("VARCHAR", "NVARCHAR"):
+            return ("draken_cast_string_to_uuid", 0)
+        if s == "VARBINARY":
+            return ("draken_cast_blob_to_uuid", 0)
+        return None
     if t == "BOOLEAN":
         if s == "INT64":
             return ("draken_cast_int64_to_bool", 0)
@@ -495,6 +503,8 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
         # wrong-answer bug rather than an error.
         if s == "UINT32" and source_is_ipv4:
             return ("draken_cast_ipv4_to_blob" if t == "BLOB" else "draken_cast_ipv4_to_string", 0)
+        if s == "UUID":
+            return ("draken_cast_uuid_to_blob" if t == "BLOB" else "draken_cast_uuid_to_string", 0)
         if s == "INT64":
             return ("draken_cast_int64_to_blob" if t == "BLOB" else "draken_cast_int64_to_string", 0)
         if s in _CAST_NARROW_INT:
@@ -625,6 +635,10 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         vector_cast_string_to_ipv4,
         vector_cast_ipv4_to_string,
         vector_cast_ipv4_to_blob,
+        vector_cast_string_to_uuid,
+        vector_cast_blob_to_uuid,
+        vector_cast_uuid_to_string,
+        vector_cast_uuid_to_blob,
         vector_cast_uint_to_string,
         vector_cast_uint_to_blob,
         vector_cast_string_to_nvarchar,
@@ -739,6 +753,16 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         if s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT:
             return _int_to_ipv4_native_only, False, False
         raise NotImplementedError(f"CAST {source_physical} → IPV4 is not supported")
+
+    # ---- UUID target (docs/UUID_TYPE_DESIGN.md U6) ----
+    if t == "UUID":
+        if s == "UUID":
+            return (lambda arr: arr), False, False
+        if s in ("VARCHAR", "NVARCHAR"):
+            return vector_cast_string_to_uuid, True, True
+        if s == "VARBINARY":
+            return vector_cast_blob_to_uuid, True, True
+        raise NotImplementedError(f"CAST {source_physical} → UUID is not supported")
 
     # ---- TIME target (string parse; only TIME64/microseconds is reachable
     # from SQL — TIME() always resolves to TIME64, see logical_type.TIME()) ----
@@ -889,6 +913,9 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         if s == "UINT32" and source_is_ipv4:
             return (vector_cast_ipv4_to_blob if t == "BLOB"
                     else vector_cast_ipv4_to_string), True, True
+        if s == "UUID":
+            return (vector_cast_uuid_to_blob if t == "BLOB"
+                    else vector_cast_uuid_to_string), True, True
         if s in _CAST_UNSIGNED_INT:
             return (vector_cast_uint_to_blob if t == "BLOB"
                     else vector_cast_uint_to_string), True, True

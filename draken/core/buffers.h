@@ -87,6 +87,11 @@ typedef enum {
     DRAKEN_UINT16         = 105,
     DRAKEN_UINT32         = 106,
     DRAKEN_UINT64         = 107,
+
+    // UUID (docs/UUID_TYPE_DESIGN.md): 16 opaque bytes in RFC 9562 network order — the
+    // order the value is written in text — so memcmp order == canonical-text order.
+    // Not numeric: no arithmetic. Appended at the tail; skene persists this number.
+    DRAKEN_UUID           = 108,
 } DrakenType;
 
 typedef struct {
@@ -318,7 +323,8 @@ static inline size_t draken_type_fixed_itemsize(DrakenType t) {
         case DRAKEN_TIME64:
         case DRAKEN_DECIMAL:     return 8u;
         case DRAKEN_DECIMAL128:
-        case DRAKEN_INTERVAL:    return 16u;
+        case DRAKEN_INTERVAL:
+        case DRAKEN_UUID:        return 16u;
         default:                 return 0u;
     }
 }
@@ -472,3 +478,4 @@ DRAKEN_STATIC_ASSERT(DRAKEN_VARCHAR == 60, "DrakenType tag renumbered: DRAKEN_VA
 DRAKEN_STATIC_ASSERT(DRAKEN_DECIMAL128 == 103, "DrakenType tag renumbered: DRAKEN_DECIMAL128");
 DRAKEN_STATIC_ASSERT(DRAKEN_UINT8  == 104, "DrakenType tag renumbered: DRAKEN_UINT8");
 DRAKEN_STATIC_ASSERT(DRAKEN_UINT64 == 107, "DrakenType tag renumbered: DRAKEN_UINT64");
+DRAKEN_STATIC_ASSERT(DRAKEN_UUID   == 108, "DrakenType tag renumbered: DRAKEN_UUID");

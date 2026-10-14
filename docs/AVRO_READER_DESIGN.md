@@ -73,7 +73,8 @@ Designed so B is an extension (new output sink + edge), not a rewrite.
 | `deflate` | raw RFC 1951 (no zlib header) — libdeflate (miniz `tinfl` until §21) |
 | `snappy` | snappy raw block, then a 4-byte **big-endian CRC32 of the uncompressed bytes**; verify, mismatch = error |
 | `zstandard` | `ZSTD_decompressDCtx`, one frame per block |
-| `bzip2`, `xz`, anything else | **refused**, error names the codec |
+| `bzip2` | libbzip2 1.0.8, one complete bzip2 stream per block (§29) |
+| `xz`, anything else | **refused**, error names the codec |
 
 ### 3.3 Encoding primitives
 - `int`/`long`: zigzag varint; reject > 5 / > 10 bytes and out-of-range `int`.
@@ -316,7 +317,7 @@ PyIceberg-written table) is taken **before** the first line of code.
 | D3 | **Open** — costs requested, DrakenVectors preferred (§15). |
 | D4 | Accepted "for starters" — Python in `opteryx-iceberg` for metadata.json / list walk / deletes; bound decoding native only if profiled. |
 | D5 | Aliases **refused**. Non-null defaults — **open**, user asks whether Draken can carry them (§16). |
-| D6 | Accepted — bzip2/xz refused. |
+| D6 | Accepted — bzip2/xz refused. **Revised 2026-10-14 (§29): bzip2 reads; xz stays refused.** |
 | D7 | Accepted — no UTF-8 validation in A. |
 | D8 | Accepted — refused in A. |
 | D9 | Accepted "as a starter" — `rugo/src/avro/`, in `rugo_native`. |
@@ -836,3 +837,36 @@ and `READ_AVRO` all see an ordinary one-column record. A record reader schema wi
 wrapped. A top-level `null` schema becomes a `value` column of type null, which is
 refused as any null-typed column is. Tests: `test_non_record_*` in
 `tests/rugo/test_avro_reader.py` and `tests/unit/connectors/test_read_avro.py`.
+
+## 29. bzip2 codec (RULED 2026-10-14)
+
+D6 refused bzip2. Real Kafka Connect output reversed that: the Confluent S3/GCS sinks
+offer `avro.codec=bzip2` (testdata/avro/kafka_connect/confluent/codec_bzip2). The user
+ruled to read it with **libbzip2 1.0.8**, the upstream reference implementation, vendored
+unmodified in `third_party/bzip2` (BSD-style licence, sha256 recorded in
+BZIP2_VERSION.txt). Alternatives considered: libbz2-rs (Rust — the standalone rugo wheel
+has no Rust toolchain), lbzip2 (GPL), 7-Zip's decoder (LGPL C++), Intel IPP (proprietary,
+x86 only). None is more than tens of percent faster: inverse BWT is memory-latency bound.
+
+- **One stream per block.** Each Avro block is decoded as one complete bzip2 stream;
+  bytes after its end-of-stream are refused ("trailing bytes"), as is a stream that ends
+  early ("truncated"). Output sizing follows deflate: no recorded size, start at 4x the
+  input (or the capacity earlier blocks reached) and double.
+- **BZ_NO_STDIO.** Without it, libbzip2's internal consistency checks print and call
+  `exit(3)` — fatal to the host process. `rugo/src/avro/_bzip2_lib.c` compiles the seven
+  library sources as one translation unit with BZ_NO_STDIO defined, so every build that
+  carries the reader (rugo_native, opteryx operators, the native fuzz harness) gets the
+  same configuration. The required `bz_internal_error()` hook records the code in a
+  thread-local, which the reader checks after every BZ2_bzDecompress call and raises.
+- **xz stays refused** — no observed writer in our target set emits it.
+- **Allocator reuse: measured, ruled out (2026-10-14).** BZ2_bzDecompressInit/End per
+  block allocates and frees the decoder's tables (~3.6 MB at level 9) every block, so a
+  per-worker recycling allocator looked like the obvious win. Profiled before building:
+  1M-row events dataset (dev/generate_avro_bench.py, bzip2, 108.5 MB, 11,865 blocks),
+  single thread 3.64 s median (all cores 0.28 s), Apple M-series. Of 7,530 active
+  samples, Init/End were 4 and every malloc/zero/VM frame together 14 — a 0.19% ceiling.
+  The time is the algorithm: BZ2_decompress (Huffman + inverse BWT) 86%, the RLE
+  output stage in BZ2_bzDecompress 9%, Huffman table builds 4%. Not built. (Measured on
+  macOS's allocator only; glibc's mmap threshold adapts upward after the first free, so
+  the same is expected on Linux, but that is not measured.)
+

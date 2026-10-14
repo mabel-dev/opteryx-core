@@ -1,9 +1,10 @@
 #pragma once
 // draken/ops/int128_gather.h — take / slice / materialize / dictionary_encode for
-// int128-backed vectors (DRAKEN_DECIMAL128, the "correct-but-scalar" decimal tier).
+// 16-byte vectors: DRAKEN_DECIMAL128 (the "correct-but-scalar" decimal tier) and
+// DRAKEN_UUID. The bytes are only moved, never interpreted.
 //
 // A byte-for-byte mirror of int64_gather.h with two differences: the element type
-// is __int128 (16-byte storage) and the result tag is DRAKEN_DECIMAL128. The slice
+// is __int128 (16-byte storage) and the result keeps the input's tag (v.type). The slice
 // / take / materialize / dictionary_encode nanobind wrappers restore the original type and
 // logical descriptor (precision/scale) after dispatch, so these kernels only have
 // to move the right number of bytes.
@@ -78,7 +79,7 @@ static inline VecResult i128_take(
     r.owns_selection = false;
     r.data_length    = n;
     r.length         = n;
-    r.type           = DRAKEN_DECIMAL128;
+    r.type           = v.type;
     r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
     return r;
 }
@@ -104,7 +105,7 @@ static inline VecResult i128_slice(const DrakenVector& v, uint32_t start, uint32
     // flattening it. One rule for every fixed-width family (ops/slice_shape.h);
     // the width arithmetic there makes this unreachable for types <= 4 bytes.
     VecResult kept;
-    if (slice_keep_dict<__int128>(v, start, n, out_null, DRAKEN_DECIMAL128, kept)) return kept;
+    if (slice_keep_dict<__int128>(v, start, n, out_null, v.type, kept)) return kept;
 
 
     __int128* dst = static_cast<__int128*>(
@@ -128,7 +129,7 @@ static inline VecResult i128_slice(const DrakenVector& v, uint32_t start, uint32
     r.owns_selection = false;
     r.data_length    = n;
     r.length         = n;
-    r.type           = DRAKEN_DECIMAL128;
+    r.type           = v.type;
     r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
     return r;
 }
@@ -168,7 +169,7 @@ static inline VecResult i128_materialize(const DrakenVector& v) {
     r.owns_selection = false;
     r.data_length    = n;
     r.length         = n;
-    r.type           = DRAKEN_DECIMAL128;
+    r.type           = v.type;
     r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
     return r;
 }
@@ -192,7 +193,7 @@ static inline VecResult i128_dictionary_encode(const DrakenVector& v) {
         r.owns_selection = false;
         r.data_length    = 0;
         r.length         = 0;
-        r.type           = DRAKEN_DECIMAL128;
+        r.type           = v.type;
         r.flags          = 0;
         return r;
     }
@@ -233,7 +234,7 @@ static inline VecResult i128_dictionary_encode(const DrakenVector& v) {
         r.owns_selection = false;
         r.data_length    = 1;
         r.length         = n;
-        r.type           = DRAKEN_DECIMAL128;
+        r.type           = v.type;
         r.flags          = 0;
         return r;
     }
@@ -273,7 +274,7 @@ static inline VecResult i128_dictionary_encode(const DrakenVector& v) {
     r.owns_selection = true;
     r.data_length    = dict_size;
     r.length         = n;
-    r.type           = DRAKEN_DECIMAL128;
+    r.type           = v.type;
     r.flags          = 0;
     return r;
 }

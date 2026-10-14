@@ -216,3 +216,17 @@ if __name__ == "__main__":  # pragma: no cover
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_a_uuid_column_is_uuid_typed(monkeypatch):
+    """docs/UUID_TYPE_DESIGN.md U10: oid 2950 is UUID (it was VARCHAR). The type
+    follows the OID, so a catalog record written when uuid read as VARCHAR still
+    plans as UUID — matching what the wire decoder now produces."""
+    monkeypatch.setattr(
+        "opteryx.connectors.postgres_connector._pg_helpers", _no_wire
+    )
+    columns = _columns() + [
+        {"id": 4, "name": "ref", "type": "VARCHAR", "nullable": True, "remote-type": 2950},
+    ]
+    schema = _table(_Record(columns)).get_dataset_schema()
+    assert schema.columns[3].column_type.physical == DrakenType.UUID

@@ -248,6 +248,9 @@ _NC_UNSIGNED_WIDTH = {
 _NC_UNSIGNED_INT = frozenset(_NC_UNSIGNED_WIDTH)
 _NC_FIXED = _NC_SIGNED_INT | _NC_FLOAT | _NC_UNSIGNED_INT | frozenset((
     DrakenType.DATE32, DrakenType.TIME32, DrakenType.TIME64, DrakenType.TIMESTAMP64,
+    # UUID blends only with UUID (_nc_promote_fixed's a == b arm); the kernel
+    # memcpys its 16 bytes like any same-type fixed-width row.
+    DrakenType.UUID,
 ))
 
 # DECIMAL/DECIMAL128 blend with each other and with signed INTEGER/FLOAT —

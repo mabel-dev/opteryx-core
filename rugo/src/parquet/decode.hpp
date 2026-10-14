@@ -100,6 +100,10 @@ struct DecodedColumnMeta {
   // decimal from a plain int, and precision/scale live nowhere else on the
   // decoded column.
   bool is_decimal = false;
+  // UUID logical type on FIXED_LEN_BYTE_ARRAY(16): `type` is "int128" (the 16-byte
+  // lane) but the values are the RAW bytes in network order, not a sign-extended
+  // big-endian integer — the materializer builds DRAKEN_UUID from them.
+  bool is_uuid = false;
   uint8_t decimal_precision = 0;
   uint8_t decimal_scale = 0;
   // Draken logical descriptor KIND for kinds parquet has no logical type to

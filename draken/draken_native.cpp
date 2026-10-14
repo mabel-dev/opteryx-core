@@ -1885,6 +1885,11 @@ static int draken_vector_compare_at(const DrakenVector& v,
             const int64_t tb = s[b].months * INTERVAL_MONTH_US + s[b].us;
             return (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
         }
+        case DRAKEN_UUID: {
+            const uint8_t* d = static_cast<const uint8_t*>(v.data);
+            const int c = std::memcmp(d + static_cast<size_t>(a) * 16u, d + static_cast<size_t>(b) * 16u, 16);
+            return (c < 0) ? -1 : (c > 0) ? 1 : 0;
+        }
         default:
             // ARRAY / VECTOR_FP16 / NULL — no natural sort order.
             throw std::invalid_argument(
@@ -4217,6 +4222,98 @@ static nb::object interval_slot_to_py(const DrakenIntervalSlot& s) {
     return nb::steal<nb::object>(tup);
 }
 
+// ── UUID (docs/UUID_TYPE_DESIGN.md) ─────────────────────────────────────────────
+// Python edge: uuid.UUID out; uuid.UUID, canonical text (strict, ruling U5) or 16
+// bytes in. Storage is the 16 RFC 9562 bytes in network order.
+
+static nb::object uuid_class() {
+    static nb::object cls = nb::module_::import_("uuid").attr("UUID");
+    return cls;
+}
+
+static void py_to_uuid_bytes(nb::handle obj, uint8_t* out) {
+    if (PyUnicode_Check(obj.ptr())) {
+        Py_ssize_t len = 0;
+        const char* p = PyUnicode_AsUTF8AndSize(obj.ptr(), &len);
+        if (!p) throw nb::python_error();
+        if (!draken::ops::uuid_parse(p, static_cast<size_t>(len), out))
+            throw std::invalid_argument("uuid: '" + std::string(p, static_cast<size_t>(len)) +
+                                        "' is not a UUID (expected 8-4-4-4-12 hex digits)");
+        return;
+    }
+    if (PyBytes_Check(obj.ptr())) {
+        if (PyBytes_GET_SIZE(obj.ptr()) != 16)
+            throw std::invalid_argument("uuid: bytes must be exactly 16 long, got " +
+                                        std::to_string(PyBytes_GET_SIZE(obj.ptr())));
+        std::memcpy(out, PyBytes_AS_STRING(obj.ptr()), 16);
+        return;
+    }
+    const int is_uuid = PyObject_IsInstance(obj.ptr(), uuid_class().ptr());
+    if (is_uuid < 0) throw nb::python_error();
+    if (!is_uuid) throw std::invalid_argument("uuid: expected uuid.UUID, str or 16 bytes");
+    nb::bytes raw = nb::borrow<nb::bytes>(obj.attr("bytes"));
+    std::memcpy(out, raw.c_str(), 16);
+}
+
+static nb::object uuid_to_py(nb::handle cls, const uint8_t* p) {
+    return cls(nb::arg("bytes") = nb::bytes(reinterpret_cast<const char*>(p), 16));
+}
+
+static uint8_t* uuid_null_validity(nb::list seq, uint32_t length, OwnedBuffer<uint8_t>& validity_buf) {
+    const uint32_t padded = ((((length + 7u) >> 3) + 7u) & ~7u);
+    const size_t   vbytes = padded > 0u ? padded : 8u;
+    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+    if (!validity) throw std::bad_alloc();
+    validity_buf.reset(validity);
+    std::memset(validity, 0xFF, vbytes);
+    for (uint32_t i = 0; i < length; ++i)
+        if (seq[static_cast<Py_ssize_t>(i)].is_none())
+            validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+    return validity;
+}
+
+static VectorOwner make_uuid_from_sequence(nb::list seq) {
+    const uint32_t length = static_cast<uint32_t>(seq.size());
+    uint8_t* data = static_cast<uint8_t*>(draken_malloc((length > 0u ? length : 1u) * 16u));
+    if (!data) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(data);
+    bool has_nulls = false;
+    for (uint32_t i = 0; i < length; ++i) {
+        nb::object obj = seq[static_cast<Py_ssize_t>(i)];
+        if (obj.is_none()) {
+            std::memset(data + static_cast<size_t>(i) * 16u, 0, 16);
+            has_nulls = true;
+        } else {
+            py_to_uuid_bytes(obj, data + static_cast<size_t>(i) * 16u);
+        }
+    }
+    OwnedBuffer<uint8_t> validity_buf;
+    uint8_t* validity = has_nulls ? uuid_null_validity(seq, length, validity_buf) : nullptr;
+    DrakenVector v = draken_vector_from_dense(data, length, DRAKEN_UUID, validity);
+    return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+}
+
+static VectorOwner make_uuid_constant(nb::object value_obj, uint32_t length) {
+    const bool is_null = value_obj.is_none();
+    uint8_t* data = static_cast<uint8_t*>(draken_malloc(16));
+    if (!data) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(data);
+    if (is_null) std::memset(data, 0, 16);
+    else py_to_uuid_bytes(value_obj, data);
+    OwnedBuffer<uint8_t> validity_buf;
+    uint8_t* validity = nullptr;
+    if (is_null) {
+        const uint32_t padded = ((((length + 7u) >> 3) + 7u) & ~7u);
+        const size_t   vbytes = padded > 0u ? padded : 8u;
+        validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) throw std::bad_alloc();
+        std::memset(validity, 0x00, vbytes);
+        validity_buf.reset(validity);
+    }
+    DrakenVector v = draken_vector_from_constant(data, length, DRAKEN_UUID, validity);
+    return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+}
+
 static VectorOwner make_interval_from_sequence(nb::list seq) {
     const uint32_t length = static_cast<uint32_t>(seq.size());
 
@@ -6056,6 +6153,7 @@ NB_MODULE(draken_native, m) {
         .value("NULL",         DRAKEN_NULL)
         .value("VECTOR_FP16",  DRAKEN_VECTOR_FP16)
         .value("DECIMAL128",   DRAKEN_DECIMAL128)
+        .value("UUID",         DRAKEN_UUID)
         .value("UINT8",        DRAKEN_UINT8)
         .value("UINT16",       DRAKEN_UINT16)
         .value("UINT32",       DRAKEN_UINT32)
@@ -6378,6 +6476,10 @@ NB_MODULE(draken_native, m) {
                     static_cast<const DrakenIntervalSlot*>(v.vec.data);
                 return interval_slot_to_py(data[v.vec.selection[idx]]);
             }
+            if (v.vec.type == DRAKEN_UUID) {
+                const uint8_t* data = static_cast<const uint8_t*>(v.vec.data);
+                return uuid_to_py(uuid_class(), data + static_cast<size_t>(v.vec.selection[idx]) * 16u);
+            }
             if (v.vec.type == DRAKEN_BOOL)     return nb::cast(row_bool(v.vec, idx));
             if (v.vec.type == DRAKEN_VARCHAR)   return row_string(v.vec, idx);
             if (v.vec.type == DRAKEN_NVARCHAR)  return row_string(v.vec, idx);
@@ -6431,6 +6533,16 @@ NB_MODULE(draken_native, m) {
                     } else {
                         out.append(interval_slot_to_py(data[v.vec.selection[i]]));
                     }
+                }
+                return out;
+            }
+            // UUID — each row is a uuid.UUID (ruling U9).
+            if (v.vec.type == DRAKEN_UUID) {
+                const uint8_t* data = static_cast<const uint8_t*>(v.vec.data);
+                nb::object cls = uuid_class();
+                for (uint32_t i = 0; i < v.vec.length; ++i) {
+                    if (!row_is_valid(v.vec, i)) out.append(nb::none());
+                    else out.append(uuid_to_py(cls, data + static_cast<size_t>(v.vec.selection[i]) * 16u));
                 }
                 return out;
             }
@@ -9210,6 +9322,19 @@ NB_MODULE(draken_native, m) {
         "Build a constant INTERVAL Vector from a single (months, us) tuple or None.\n"
         "None produces a length-row all-null vector.\n"
         "Raises OverflowError if normalization overflows int64.");
+
+    m.def("vector_uuid_from_sequence",
+        [](nb::list seq) { return make_uuid_from_sequence(seq); },
+        nb::arg("sequence"),
+        "Build a dense UUID Vector from a Python list[uuid.UUID | str | bytes | None].\n"
+        "str must be the canonical 36-char 8-4-4-4-12 hex form (either case); bytes\n"
+        "must be exactly 16 long (RFC 9562 network order). None elements become nulls.");
+
+    m.def("vector_uuid_from_constant",
+        [](nb::object value, uint32_t length) { return make_uuid_constant(value, length); },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant UUID Vector from one uuid.UUID / str / 16 bytes, or None\n"
+        "(a length-row all-null vector).");
 
     m.def("vector_interval_from_dict",
         [](nb::list values, nb::list codes, nb::object nulls) {

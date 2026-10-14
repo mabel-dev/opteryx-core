@@ -262,6 +262,18 @@ def test_empty_file_has_a_schema_and_no_rows(tmp_path):
 
 # ── a glob: the first file's schema, every file resolved onto it ──
 
+def test_uuid_columns_are_uuid_typed(tmp_path):
+    import uuid
+
+    ids = [uuid.UUID("6b8c5d4e-0000-4000-8000-000000000001"), uuid.UUID("ffffffff-0000-4000-8000-000000000002")]
+    path = _write(str(tmp_path / "ids.avro"), _record([
+        {"name": "s", "type": {"type": "string", "logicalType": "uuid"}},
+        {"name": "f", "type": {"type": "fixed", "name": "U16", "size": 16, "logicalType": "uuid"}},
+    ]), [{"s": str(u), "f": u.bytes} for u in ids])
+    assert _rows(f"SELECT s, f FROM READ_AVRO('{path}')") == sorted([(u, u) for u in ids], key=repr)
+    assert _rows(f"SELECT COUNT(*) FROM READ_AVRO('{path}') WHERE s = f AND s > '{ids[0]}'") == [(1,)]
+
+
 def test_non_record_file_is_one_value_column(tmp_path):
     path = _write(str(tmp_path / "bare.avro"), "string", ["a", "b", "b"])
     assert _rows(f"SELECT value, COUNT(*) FROM READ_AVRO('{path}') GROUP BY value") == [("a", 1), ("b", 2)]

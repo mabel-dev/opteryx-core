@@ -42,7 +42,7 @@ class AvroMetadata:
 
     def __init__(self, schema: dict, codec: str, metadata: dict):
         self.schema = schema        # the file's writer schema, parsed
-        self.codec = codec          # null / deflate / snappy / zstandard
+        self.codec = codec          # null / deflate / snappy / zstandard / bzip2
         self.metadata = metadata    # the header's metadata map, {str: bytes}
 
     @property
@@ -117,13 +117,14 @@ def read_avro(
     Types: boolean BOOL · int INT32 · long INT64 · float FLOAT32 · double FLOAT64 ·
     string VARCHAR · bytes / fixed VARBINARY · enum VARCHAR (one entry per symbol,
     positions per row) · date DATE · time-* TIME (us) · timestamp-* TIMESTAMP (us, UTC)
-    · decimal DECIMAL / DECIMAL128 · array of a plain scalar ARRAY · a whole record,
+    · decimal DECIMAL / DECIMAL128 · uuid (string or fixed(16)) UUID
+    · array of a plain scalar ARRAY · a whole record,
     map, or array of nested values NVARCHAR JSON text (the parquet nested-JSON rules).
     A file whose schema is not a record (bare strings, longs, ...) reads as one
     column, `value`.
 
-    Codecs: null, deflate, snappy, zstandard. Refused, by name: bzip2 and xz, unions
-    other than [null, T], recursive types, uuid, decimal precision > 38,
+    Codecs: null, deflate, snappy, zstandard, bzip2. Refused, by name: xz, unions
+    other than [null, T], recursive types, decimal precision > 38,
     timestamp-nanos, local-timestamp-*, duration.
     """
     return _AvroReader(source, columns, reader_schema, max_threads)

@@ -1154,6 +1154,9 @@ extensions = [
         "third_party/libdeflate/lib/utils.c",
         "third_party/libdeflate/lib/arm/cpu_features.c",
         "third_party/libdeflate/lib/x86/cpu_features.c",
+        # Avro's bzip2 block codec: libbzip2 1.0.8 (third_party/bzip2) as one TU with
+        # BZ_NO_STDIO set. Own copy, like snappy and libdeflate above.
+        "rugo/src/avro/_bzip2_lib.c",
         ]
         # skene's kZstd section codec, both halves. Same argument as lz4.c above,
         # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
@@ -1183,6 +1186,7 @@ extensions = [
             "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip)
             "third_party/snappy",        # Avro's snappy block codec
             "third_party/libdeflate",    # Avro's deflate block codec (libdeflate.h)
+            "third_party/bzip2",         # Avro's bzip2 block codec (bzlib.h)
             # The vector index builder (src/cpp/engine/vector_index_build.hpp) runs
             # draken/ops/ann, which converts fp16 via <fp16/fp16.h>.
             "third_party/usearch/fp16/include",

@@ -1,0 +1,9 @@
+bzip2-version: 1.0.8 (13 July 2019)
+source: https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz (upstream reference implementation)
+sha256: ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269 (verified at vendoring, 2026-10-14)
+license: BSD-style (LICENSE)
+vendored: the library sources only, unmodified — bzlib.h, bzlib_private.h, bzlib.c, compress.c, decompress.c, blocksort.c, huffman.c, crctable.c, randtable.c — plus LICENSE, README, CHANGES. Not vendored: the bzip2/bzip2recover programs, docs, test samples, build files.
+compiled: all seven .c files as ONE translation unit, rugo/src/avro/_bzip2_lib.c, which defines BZ_NO_STDIO first. compress.c/blocksort.c are only there because bzlib.c references the compressor; rugo calls the decompressor only.
+BZ_NO_STDIO: required. Without it an internal consistency failure prints and calls exit(3), killing the host process. With it libbzip2 calls bz_internal_error(), which rugo defines (rugo/src/avro/avro_container.cpp) to record the code so the Avro reader raises instead.
+purpose: Avro's `bzip2` block codec (rugo/src/avro/avro_container.cpp) — Kafka Connect's S3/GCS sinks offer it (avro.codec=bzip2).
+include-path: third_party/bzip2

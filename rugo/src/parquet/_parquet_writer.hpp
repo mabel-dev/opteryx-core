@@ -155,6 +155,7 @@ enum LogicalKindPq {
   LK_DECIMAL,
   LK_TIME,
   LK_INTERVAL,
+  LK_UUID,      // FLBA(16), the 16 bytes verbatim (network order), UUIDType annotation
 };
 
 // Parquet TimeUnit union member ids (1=MILLIS, 2=MICROS, 3=NANOS).
@@ -482,7 +483,7 @@ inline void encode_values(const ColumnInput &col, size_t num_rows,
     for (size_t i = 0; i < num_rows; i++)
       if (is_valid(col.validity, i)) {
         const uint8_t *p = col.dec_raw + (size_t)i * col.dec_width;
-        if (col.logical == LK_INTERVAL)
+        if (col.logical == LK_INTERVAL || col.logical == LK_UUID)
           out.insert(out.end(), p, p + col.dec_width);
         else
           put_be_from_le(out, p, col.dec_width);
@@ -616,6 +617,24 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
   case PT_FLBA: { // DECIMAL: numeric min/max of the unscaled value, BE-encoded
     if (col.logical == LK_INTERVAL)
       break; // parquet INTERVAL has UNKNOWN sort order — emit null_count only
+    if (col.logical == LK_UUID) {
+      // UUID sorts as UNSIGNED bytes (parquet's FLBA type-defined order), which is
+      // also the type's own order; the stats ARE the stored bytes.
+      const uint8_t *lo = nullptr, *hi = nullptr;
+      for (size_t i = 0; i < num_rows; i++) {
+        if (!is_valid(col.validity, i))
+          continue;
+        const uint8_t *p = col.dec_raw + i * col.dec_width;
+        if (lo == nullptr || std::memcmp(p, lo, col.dec_width) < 0) lo = p;
+        if (hi == nullptr || std::memcmp(p, hi, col.dec_width) > 0) hi = p;
+      }
+      if (lo != nullptr) {
+        st.has_minmax = true;
+        st.min_bytes.assign(lo, lo + col.dec_width);
+        st.max_bytes.assign(hi, hi + col.dec_width);
+      }
+      break;
+    }
     bool any = false;
     __int128 lo = 0, hi = 0;
     size_t lo_i = 0, hi_i = 0;
@@ -812,8 +831,13 @@ inline bool hash_column_rows(const ColumnInput &col, size_t num_rows,
       break;
     }
     case PT_FLBA: {
-      // Hash the big-endian fixed-width bytes (as written to the page).
+      // Hash the fixed-width bytes as written to the page: big-endian for
+      // DECIMAL, verbatim for UUID.
       const uint8_t *le = col.dec_raw + (size_t)i * col.dec_width;
+      if (col.logical == LK_UUID) {
+        row_hashes[i] = bloom_hash(le, col.dec_width);
+        break;
+      }
       for (int k = 0; k < col.dec_width; k++)
         buf[k] = le[col.dec_width - 1 - k];
       row_hashes[i] = bloom_hash(buf, col.dec_width);
@@ -2077,6 +2101,15 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
     } else if (c.logical == LK_INTERVAL) {
       // FLBA(12); only ConvertedType INTERVAL (no LogicalType union member).
       w.writeI32Field(6, CONV_INTERVAL);
+    } else if (c.logical == LK_UUID) {
+      // FLBA(16); LogicalType UUID (union member 14, empty UUIDType). There is
+      // no ConvertedType for UUID.
+      w.writeFieldHeader(CT_STRUCT, 10);
+      w.structBegin();                             // LogicalType union
+      w.writeFieldHeader(CT_STRUCT, 14);           // UUID member
+      w.structBegin();                             // UUIDType {}
+      w.structEnd();
+      w.structEnd();
     } else if (c.logical == LK_TIME) {
       if (c.ts_unit == TU_MILLIS)
         w.writeI32Field(6, CONV_TIME_MILLIS);

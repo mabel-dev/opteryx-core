@@ -207,6 +207,9 @@ inline ColumnInput shape_from_schema_element(const SchemaElement &e) {
     ci.ts_unit = ts_unit_from_logical(lt);
   } else if (lt == "interval") {
     ci.logical = LK_INTERVAL;
+  } else if (lt == "uuid") {
+    ci.logical = LK_UUID;
+    ci.dec_width = e.type_length;  // 16
   } else if (lt.rfind("int", 0) == 0 || lt.rfind("uint", 0) == 0) {
     // INTEGER(bitWidth, isSigned) - how every width narrower than the physical
     // type, and unsignedness at any width, is carried.
@@ -378,10 +381,10 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
     if (w == 0)
       throw std::runtime_error("parquet patch: donor FIXED_LEN_BYTE_ARRAY has no width");
     need(w);
-    // INTERVAL is stored verbatim; DECIMAL is stored big-endian on disk and
-    // dec_raw wants it native-endian, so it is reversed back here.
+    // INTERVAL and UUID are stored verbatim; DECIMAL is stored big-endian on
+    // disk and dec_raw wants it native-endian, so it is reversed back here.
     cc.v_bytes.assign(val, val + w);
-    if (cc.shape.logical != LK_INTERVAL)
+    if (cc.shape.logical != LK_INTERVAL && cc.shape.logical != LK_UUID)
       std::reverse(cc.v_bytes.begin(), cc.v_bytes.end());
     break;
   }

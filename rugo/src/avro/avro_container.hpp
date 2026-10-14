@@ -19,7 +19,7 @@ struct libdeflate_decompressor;  // third_party/libdeflate (C, global namespace)
 
 namespace rugo::avro {
 
-enum class BlockCodec : uint8_t { Null, Deflate, Snappy, Zstandard };
+enum class BlockCodec : uint8_t { Null, Deflate, Snappy, Zstandard, Bzip2 };
 
 struct Header {
     std::string schema_json;

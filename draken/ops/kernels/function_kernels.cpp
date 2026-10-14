@@ -2302,12 +2302,15 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
             bool hit = std::binary_search(items, items + c->count, val);
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
-    } else if (c->kind == 4) {   // int128 raw (DECIMAL128), sorted ascending
-        if (v->type != DRAKEN_DECIMAL128) {
+    } else if (c->kind == 4) {   // 16-byte raw (DECIMAL128 / UUID), sorted ascending
+        // UUID rides this arm too: membership is byte EQUALITY, and two 16-byte
+        // values are byte-equal exactly when their int128 readings are equal. The
+        // sort order is only the binary search's own (the blob is packed in it).
+        if (v->type != DRAKEN_DECIMAL128 && v->type != DRAKEN_UUID) {
             draken_free(out);
             if (validity != nullptr) draken_free(validity);
             return draken_error_sentinel(
-                "draken_in_list: DECIMAL128 operand required for kind-4 set");
+                "draken_in_list: DECIMAL128 or UUID operand required for kind-4 set");
         }
         // The payload follows an 8-byte header, so it is NOT 16-byte aligned and
         // an __int128 load straight from it would be misaligned. Copy the (small,

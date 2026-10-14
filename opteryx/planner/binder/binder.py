@@ -112,6 +112,9 @@ _CASE_BLEND_FAMILIES = (
     frozenset((LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY)),
     frozenset((LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)),
     frozenset((LogicalCategory.DATE, LogicalCategory.TIME, LogicalCategory.TIMESTAMP)),
+    # UUID blends only with UUID: 16 fixed bytes (draken_type_fixed_itemsize), so
+    # draken_if_then_else carries it like any fixed-width scalar.
+    frozenset((LogicalCategory.UUID,)),
 )
 
 # Categories draken_if_then_else can blend AT ALL, independent of what it is
@@ -1551,6 +1554,63 @@ def inner_binder(
                 "NotInList",
             ):
                 from opteryx.types.logical_type import LogicalCategory as _OT
+
+                def _literal_text(v):
+                    return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+
+                # UUID against a string LITERAL (docs/UUID_TYPE_DESIGN.md, ruling U7):
+                # the literal is parsed strictly NOW and becomes a UUID literal —
+                # value, type and schema column together, so payload and type tag
+                # never disagree. A non-UUID string fails here, at bind. Only a
+                # literal: a VARCHAR column against a UUID stays a type mismatch.
+                def _retype_uuid_literal(literal_node, other_node):
+                    if other_node is None or other_node.schema_column is None:
+                        return
+                    if other_node.schema_column.category != _OT.UUID:
+                        return
+                    if literal_node.schema_column is None or literal_node.schema_column.category not in (
+                        _OT.VARCHAR, _OT.NVARCHAR, _OT.ARRAY
+                    ):
+                        return
+                    from opteryx.types.logical_type import ARRAY as _ARRAY
+                    from opteryx.types.logical_type import UUID as _UUID
+                    from opteryx.types.scalars.value_parsing import _parse_uuid
+                    from opteryx.types.scalars.value_parsing import is_uuid_text
+
+                    value = literal_node.value
+                    items = value if isinstance(value, (list, tuple)) else (value,)
+                    if not all(isinstance(v, (str, bytes)) or v is None for v in items):
+                        return
+                    for v in items:
+                        if v is not None and not is_uuid_text(v):
+                            raise IncompatibleTypesError(
+                                message=(
+                                    f"{_literal_text(v)!r} is compared with a UUID column but "
+                                    "is not a UUID - a UUID literal is 8-4-4-4-12 hex digits, "
+                                    "for example '550e8400-e29b-41d4-a716-446655440000'"
+                                )
+                            )
+                    if isinstance(value, (list, tuple)):
+                        new_value = type(value)(None if v is None else _parse_uuid(v) for v in value)
+                        new_type = _ARRAY(_UUID)
+                    else:
+                        new_value = _parse_uuid(value)
+                        new_type = _UUID
+                    _old_sc = literal_node.schema_column
+                    literal_node.value = new_value
+                    literal_node.type = new_type
+                    literal_node.schema_column = context.plan_context.columns.constant(
+                        _old_sc.name,
+                        column_type=new_type,
+                        aliases=list(_old_sc.aliases) if _old_sc.aliases else [],
+                        value=new_value,
+                        nullable=False,
+                    )
+
+                if node.right is not None and node.right.node_type == NodeType.LITERAL:
+                    _retype_uuid_literal(node.right, node.left)
+                elif node.left is not None and node.left.node_type == NodeType.LITERAL:
+                    _retype_uuid_literal(node.left, node.right)
 
                 _COERCE = {
                     _OT.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,

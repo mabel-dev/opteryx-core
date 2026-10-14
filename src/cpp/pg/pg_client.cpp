@@ -68,8 +68,9 @@ DrakenType pg_oid_to_draken(uint32_t oid) {
         case 1700: return DRAKEN_DECIMAL128; // numeric; the plan narrows to DECIMAL when p <= 18
         case 17:   return DRAKEN_VARBINARY;  // bytea
         case 114: case 3802: return DRAKEN_VARIANT;   // json, jsonb
-        case 18: case 19: case 25: case 1042: case 1043: case 2950:
-                   return DRAKEN_VARCHAR;    // "char", name, text, bpchar, varchar, uuid
+        case 2950: return DRAKEN_UUID;       // uuid: 16 bytes, network order — the wire form
+        case 18: case 19: case 25: case 1042: case 1043:
+                   return DRAKEN_VARCHAR;    // "char", name, text, bpchar, varchar
         default:   return DRAKEN_NULL;
     }
 }

@@ -62,6 +62,7 @@
 #include "core/vergesort.h"      // vergesort_generic — stage 1
 #include "logical_type.h"        // LogicalType + draken_type_itemsize
 #include "morsels/cxx_morsel.h"  // CxxMorsel, CxxColumn, ErrCtx
+#include "ops/uuid_ops.h"        // uuid_key — UUID sort order
 
 using MorselPtr = std::shared_ptr<CxxMorsel>;
 
@@ -108,6 +109,7 @@ inline bool sort_key_type_supported(DrakenType t) {
         case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
         case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR: case DRAKEN_VARBINARY:
         case DRAKEN_DECIMAL128:   // int128 lane in SortKeyColumn
+        case DRAKEN_UUID:         // int128 lane, memcmp order (uuid_key, sign-flipped)
         case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:  // E33
             return true;
         default:
@@ -172,6 +174,7 @@ struct SortKeyColumn {
     bool nulls_first = true;
     bool is_str = false;
     bool is_i128 = false;
+    bool is_uuid = false;                   // is_i128 lane holding a UUID order key
     std::vector<uint8_t> valid;
     std::vector<uint64_t> num;              // fixed-width path
     std::vector<__int128> num128;           // DECIMAL128 path (raw ordering == value
@@ -208,7 +211,8 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
                     return false;
                 }
                 col.is_str = sort_type_is_string(v.type);
-                col.is_i128 = (v.type == DRAKEN_DECIMAL128);
+                col.is_i128 = (v.type == DRAKEN_DECIMAL128 || v.type == DRAKEN_UUID);
+                col.is_uuid = (v.type == DRAKEN_UUID);
                 if (col.is_str) { col.sptr.reserve(n); col.slen.reserve(n); }
                 else if (col.is_i128) { col.num128.reserve(n); }
                 else { col.num.reserve(n); }
@@ -231,9 +235,14 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
                 } else if (col.is_i128) {
                     __int128 kv = 0;
                     if (ok) {
-                        std::memcpy(&kv, static_cast<const uint8_t*>(v.data)
-                                            + static_cast<size_t>(v.selection[r]) * 16u,
-                                    16u);
+                        const uint8_t* p = static_cast<const uint8_t*>(v.data)
+                                           + static_cast<size_t>(v.selection[r]) * 16u;
+                        if (col.is_uuid) {
+                            // memcmp order as a signed key (the lane compares signed).
+                            kv = draken::ops::uuid_order_key(p);
+                        } else {
+                            std::memcpy(&kv, p, 16u);
+                        }
                     }
                     col.num128.push_back(kv);
                 } else {

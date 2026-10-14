@@ -24,7 +24,7 @@ cdef extern from "_text_render.hpp" namespace "rugo_text":
     # Returns the rendered bytes as one buffer per worker (parallel render).
     vector[string] jsonl_write(const DrakenVector** dvs,
                                const ColumnDesc* descs,
-                               const string* prefixes, size_t ncols, size_t nrows) nogil
+                               const string* prefixes, size_t ncols, size_t nrows) except + nogil
 
 
 def write_jsonl(Morsel morsel not None):

@@ -225,7 +225,8 @@ inline double comparison_cost(DrakenType t) {
         case DRAKEN_VARBINARY: return 0.058;
         case DRAKEN_ARRAY: return 10.00;
         case DRAKEN_NULL: return 10.00;
-        case DRAKEN_VARIANT: case DRAKEN_VECTOR_FP16: return 10.0;   // categories with no measured cost
+        case DRAKEN_VARIANT: case DRAKEN_VECTOR_FP16: case DRAKEN_UUID:
+            return 10.0;   // categories with no measured cost
         default: throw SelectivityRefused("predicate_cost: no dispatch category for the column's physical type");
     }
 }

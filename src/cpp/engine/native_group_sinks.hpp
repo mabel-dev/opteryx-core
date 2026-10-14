@@ -552,9 +552,13 @@ inline bool corr_capture_meta(const AggSpec2& sp, const CxxMorsel& in,
 }
 
 inline __int128 agg2_read_i128(const DrakenVector& v, uint32_t row) {
+    const uint8_t* p = static_cast<const uint8_t*>(v.data)
+                       + static_cast<size_t>(v.selection[row]) * 16u;
+    // UUID rides the DECIMAL128 MIN/MAX lanes as its order key (memcmp order under
+    // the lanes' signed compare); emit_i128_lane_column turns it back into bytes.
+    if (v.type == DRAKEN_UUID) return draken::ops::uuid_order_key(p);
     __int128 out;
-    std::memcpy(&out, static_cast<const uint8_t*>(v.data)
-                          + static_cast<size_t>(v.selection[row]) * 16u, 16u);
+    std::memcpy(&out, p, 16u);
     return out;
 }
 
@@ -705,9 +709,11 @@ inline bool agg2_sum_i64_add(int64_t& lane, int64_t raw, bool is_u64) noexcept {
 inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is_float,
                         bool needs_minmax = true) {
     // caller has already established the row is valid (non-NULL operand)
-    if (v.type == DRAKEN_DECIMAL128) {
+    if (v.type == DRAKEN_DECIMAL128 || v.type == DRAKEN_UUID) {
         __int128 raw = agg2_read_i128(v, row);
-        c.isum += raw;
+        // A UUID has no sum (MIN/MAX/ANY_VALUE only — the capture guard), and its
+        // order keys would overflow the int128 accumulator.
+        if (v.type == DRAKEN_DECIMAL128) c.isum += raw;
         if (needs_minmax) {
             if (c.valid == 0 || raw < c.min128) c.min128 = raw;
             if (c.valid == 0 || raw > c.max128) c.max128 = raw;
@@ -1355,7 +1361,7 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
         case AggFn::Max:
         case AggFn::AnyValue:   // always the min-direction lane — see AggFn::AnyValue
             if (m.is_string) return GBKind::MinMaxStr;
-            if (m.type == DRAKEN_DECIMAL128) return GBKind::MinMaxD128;
+            if (m.type == DRAKEN_DECIMAL128 || m.type == DRAKEN_UUID) return GBKind::MinMaxD128;
             return GBKind::MinMaxNum;
         case AggFn::Stddev:
             return GBKind::Stddev;
@@ -1381,8 +1387,11 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
 // carrying the operand's own descriptor (the raw unscaled domain is closed
 // under addition; int128 overflow at any real scale is astronomically out of
 // range). NULL where valid[i] == 0 (valid == nullptr → all valid).
+// `out_type` DRAKEN_DECIMAL128 copies the lanes as-is; DRAKEN_UUID turns each order
+// key (agg2_read_i128) back into its 16 bytes.
 inline CxxColumn emit_i128_lane_column(const __int128* vals, const int64_t* valid,
-                                       uint32_t n, const LogicalType* logical) {
+                                       uint32_t n, const LogicalType* logical,
+                                       DrakenType out_type) {
     size_t alloc_n = (n == 0 ? 1 : n);
     auto* data = static_cast<uint8_t*>(draken_malloc(alloc_n * 16u));
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
@@ -1397,11 +1406,14 @@ inline CxxColumn emit_i128_lane_column(const __int128* vals, const int64_t* vali
             std::memset(data + static_cast<size_t>(i) * 16u, 0, 16u);
             continue;
         }
-        std::memcpy(data + static_cast<size_t>(i) * 16u, &vals[i], 16u);
+        if (out_type == DRAKEN_UUID)
+            draken::ops::uuid_from_order_key(vals[i], data + static_cast<size_t>(i) * 16u);
+        else
+            std::memcpy(data + static_cast<size_t>(i) * 16u, &vals[i], 16u);
     }
     DrakenVector v;
     v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
-    v.validity = vbits; v.type = DRAKEN_DECIMAL128;
+    v.validity = vbits; v.type = out_type;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
@@ -1585,7 +1597,7 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
             std::vector<int64_t> v64(total);
             for (uint32_t i = 0; i < total; ++i) v64[i] = cvalid[i];
             child_col = emit_i128_lane_column(ci128.data(), v64.data(), total,
-                                              meta.logical);
+                                              meta.logical, DRAKEN_DECIMAL128);
             break;
         }
         case AAStore::Str: {
@@ -1728,7 +1740,8 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
                                      valid_ok(), n, DRAKEN_FLOAT64, nullptr, err);
         case GBKind::SumD128:
         case GBKind::MinMaxD128:
-            return emit_i128_lane_column(L.i128, L.valid, n, meta.logical);
+            return emit_i128_lane_column(L.i128, L.valid, n, meta.logical,
+                                         meta.type == DRAKEN_UUID ? DRAKEN_UUID : DRAKEN_DECIMAL128);
         case GBKind::AvgI:
         case GBKind::AvgF:
         case GBKind::AvgD128: {
@@ -2325,9 +2338,13 @@ struct UngroupedAggSink : Sink {
             // COUNT only reads validity — any column type is countable.
             // COUNT(DISTINCT) reads serialized value bytes (key_append fails
             // loud on unsupported types at run time).
+            // UUID: MIN/MAX/ANY_VALUE only, on the DECIMAL128 extreme lanes.
+            const bool uuid_minmax = t == DRAKEN_UUID
+                && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
+                    || specs[s].fn == AggFn::AnyValue);
             if (specs[s].fn != AggFn::Count && specs[s].fn != AggFn::CountDistinct
                     && specs[s].fn != AggFn::ApproxCountDistinct
-                    && !str_minmax
+                    && !str_minmax && !uuid_minmax
                     && !agg2_operand_supported(t)) {
                 err.code = 1;
                 err.msg = "unsupported aggregate operand type — fail "
@@ -3936,6 +3953,9 @@ struct GroupBySink : Sink {
                     && specs[s].fn != AggFn::CountDistinct
                     && specs[s].fn != AggFn::ApproxCountDistinct
                     && !str_minmax
+                    && !(t == DRAKEN_UUID
+                         && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
+                             || specs[s].fn == AggFn::AnyValue))
                     && !agg2_operand_supported(t)) {
                 // COUNT reads only validity; COUNT(DISTINCT) reads serialized value
                 // bytes (key_append fails loud on unsupported types at run time).

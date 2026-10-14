@@ -27,6 +27,7 @@ import decimal
 import json
 import math
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -43,20 +44,17 @@ from rugo.rugo_native import read_avro  # noqa: E402
 AVRO_ROOT = REPO_ROOT / "testdata" / "avro"
 CORPORA = ("apache/data", "fastavro", "kafka_connect")
 
-_BZIP2 = "Avro container: codec 'bzip2' is not supported (null, deflate, snappy and zstandard are)"
-
 # Files rugo refuses, with the message it must refuse them with. Refusals are
 # decisions (docs/AVRO_READER_DESIGN.md), not failures to tolerate: if one starts
 # reading, it moves out of here and gets compared.
 REFUSED = {
     "apache/data/test.avro12": "Avro container: not an Avro object container file (bad magic)",
-    "fastavro/java-generated-uuid.avro": "Avro: column 'id' is a uuid, which is not supported (as for parquet)",
     "fastavro/recursive.avro": "Avro schema at 'next': recursive type 'LongList' is not supported",
     "fastavro/testDataFileMeta.avro": "Avro: column 'value' has type null, which is not supported",
 }
-REFUSED_PREFIXES = {
-    "kafka_connect/confluent/codec_bzip2/": _BZIP2,
-}
+# Whole folders refused with one message; none at present (bzip2 reads since
+# docs/AVRO_READER_DESIGN.md §29).
+REFUSED_PREFIXES = {}
 
 # Files an oracle cannot read, and why. Each such file is still compared against the
 # other oracle; a file neither oracle reads would fail test_every_read_file_has_an_oracle.
@@ -139,6 +137,10 @@ def _same(got, want):
         return json.loads(got, parse_float=decimal.Decimal) == _json_ready(want)
     if type(want) is float and type(got) is float and math.isnan(want):
         return math.isnan(got)
+    # Apache's `avro` ignores logicalType uuid and hands back the text; rugo (and
+    # fastavro) give uuid.UUID. Same value, so compare in the oracle's form.
+    if type(got) is uuid.UUID and type(want) is str:
+        return got == uuid.UUID(want)
     return got == want
 
 

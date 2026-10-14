@@ -1,7 +1,7 @@
-# UUID column type — design (DRAFT, awaiting rulings)
+# UUID column type — design (RULED 2026-10-14)
 
-2026-10-13. Ruled so far: **UUID is a first-class type** (option 3 of three — rejected:
-uuid → VARCHAR text, uuid → VARBINARY). Everything below the rulings line is proposal.
+2026-10-13: **UUID is a first-class type** (option 3 of three — rejected: uuid → VARCHAR
+text, uuid → VARBINARY). 2026-10-14: every proposal in §3 (U1–U15) RULED as written.
 
 ## 1. Why
 
@@ -41,7 +41,7 @@ mostly numeric paths UUID does not need. Estimate: **35–50 real edit sites**.
 
 ## 3. Decisions needed
 
-| # | Question | Proposal |
+| # | Question | Ruling (2026-10-14) |
 |---|---|---|
 | U1 | Physical tag or LogicalKind refinement (as IPV4 refines UINT32)? | **New physical tag `DRAKEN_UUID = 108`** at the enum tail. No 16-byte opaque tag exists to refine: DECIMAL128 is a signed int128 (wrong order, numeric kernels), INTERVAL has (months, µs) semantics. |
 | U2 | In-memory byte order | **RFC 9562 network order (the 16 bytes as written in text)**. `memcmp` order = canonical-text order = Postgres order. The sort lane loads two big-endian u64s (byte-swap on little-endian hosts). Equality/hash don't care about order. |
@@ -70,3 +70,76 @@ mostly numeric paths UUID does not need. Estimate: **35–50 real edit sites**.
 
 `make dt + st + rt` as well as `make q` + `make slt` after phase 1 (native enum change,
 per the DTSTRT rule), and a full `make compile` (ABI change).
+
+## 5. Phase 1 — BUILT (2026-10-14)
+
+`DRAKEN_UUID = 108`; `LogicalCategory.UUID`; canonical `UUID` ColumnType; strict text
+form in `draken/core/uuid_text.h` (the one parser/formatter); kernels in
+`draken/ops/uuid_ops.h` (hash, memcmp-order compare); 16-byte gathers in
+`int128_gather.h` now keep the input tag (they hard-coded DECIMAL128). Casts
+VARCHAR/NVARCHAR/VARBINARY ↔ UUID (`cast_string.cpp`, both the C-native and evaluator
+paths, and literal folding). A string literal compared with a UUID column is retyped
+to a UUID literal in the binder (value, type and schema column together); `IN` lists
+pack through the 16-byte membership arm. ORDER BY (int128 lane, sign-flipped memcmp
+key), GROUP BY / DISTINCT / joins (hash), COALESCE/IFNULL/IIF and CASE blend UUID with
+UUID. CSV/JSONL and nested JSON render lowercase text. Python edge returns `uuid.UUID`.
+
+Built alongside, per §2's hazards: `render_json_scalar` and the CSV/JSONL writer now
+FAIL LOUD on a type they cannot render (they wrote `null`/empty before); `jsonl_write`
+and `render_json_column` gained `except +` so that failure reaches Python instead of
+terminating the process. A third hand-copied width table
+(`evaluation.pyx _dv_result_elem_size`) now calls `draken_type_fixed_itemsize`.
+
+**Not built in phase 1:** MIN/MAX over UUID (the aggregate sinks have no
+non-numeric extreme path — VARCHAR has none either; refused at plan time with a
+clear error). Tests: `tests/sql/test_uuid_type.py` (28).
+
+## 6. Phase 2 — readers BUILT (2026-10-14)
+
+- **Avro** (`rugo/src/avro`): `uuid` on `string` (strict text parse; a malformed value
+  fails naming it) and on `fixed(16)` (raw bytes) → DRAKEN_UUID; nested records render
+  it as lowercase text; reader-schema defaults supported. `READ_AVRO` types it UUID.
+- **Parquet** (`rugo/src/parquet`): `ParseLogicalType` now parses the UUID logical type
+  (id 14 — it fell to "skipping unknown logical type" before). FIXED_LEN_BYTE_ARRAY(16)
+  + UUID decodes through the existing 16-byte lane with `ReadRaw16` (bytes verbatim,
+  no sign extension) and `DecodedColumn.is_uuid`; `materialize_uuid` for standalone
+  rugo; `DK_UUID` / `DK_UUID_DICT` for the engine's native scan (footer gate kind
+  `"uuid"`); a UUID inside a STRUCT/MAP renders as quoted text (it was base64 while
+  the annotation was ignored). Other FLBA (hashes, ...) are still refused.
+- **Postgres**: oid 2950 → DRAKEN_UUID (was VARCHAR); the binary wire form is the
+  storage form (16 bytes). The type follows the OID, so existing catalog records plan
+  as UUID. UUID filters are not pushed to the server (not in PUSHABLE_TYPES).
+- **Planner**: `selectivity.hpp comparison_cost` has a UUID arm (it threw for an
+  unknown type, refusing the query).
+
+Tests: `tests/unit/connectors/parquet_io/test_flba_uuid.py` (DuckDB oracle, plain +
+dict + nested), Avro reader/corpus/READ_AVRO tests, Postgres catalog-schema test. The
+live Postgres wire decode is not exercised by any offline test.
+
+## 7. MIN / MAX / ANY_VALUE — BUILT (2026-10-14)
+
+UUID rides the DECIMAL128 extreme lanes (`GBKind::MinMaxD128`, `AggCell.min128/max128`)
+as `uuid_order_key` — the memcmp-ordered key with its top bit flipped, so the lanes'
+signed compare gives byte order — read in `agg2_read_i128`; `emit_i128_lane_column`
+(now told the output type) turns each key back into the 16 bytes via
+`uuid_from_order_key`. Grouped and ungrouped. Admitted at plan time
+(`compiler.py _uuid_minmax`) and at sink capture for MIN/MAX/ANY_VALUE only — not via
+`agg2_operand_supported`, which would also have admitted it to ARRAY_AGG's raw store.
+SUM/AVG refused. Windowed MIN/MAX (`OVER`) over UUID is NOT built: the framed-window
+sink (`native_window_frame.hpp`) has its own domains and the compiler gate refuses it.
+Tests: `tests/sql/test_uuid_type.py`, `test_flba_uuid.py::test_min_max_match_duckdb`.
+
+## 8. Phase 3 — Parquet writer BUILT (2026-10-14)
+
+`LK_UUID` (`_parquet_writer.hpp`, appended to `LogicalKindPq`): a DRAKEN_UUID column is
+written FIXED_LEN_BYTE_ARRAY(16), the 16 bytes verbatim, schema LogicalType union
+member 14 (empty UUIDType; parquet has no ConvertedType for UUID). Statistics are the
+unsigned byte-order min/max — parquet's FLBA type-defined order and the type's own —
+stored as the bytes themselves (DECIMAL's signed big-endian path is skipped). The
+bloom filter hashes the bytes as written. `patch_columns` maps footer `uuid` back to
+LK_UUID and copies donor values verbatim, so rename/add/drop keep the annotation.
+No PageIndex for UUID (FLBA is excluded from `page_index_bound_kind`, as DECIMAL is).
+rugo's and the engine's own bloom probes still decline FLBA (no pruning on UUID
+equality from blooms yet). ARRAY<UUID> is not written. Tests:
+`tests/rugo/test_parquet_uuid_write.py` (DuckDB oracle: schema, stats, values,
+bloom lookup, patch rename/add).

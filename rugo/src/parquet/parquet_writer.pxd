@@ -25,6 +25,7 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         LK_DECIMAL
         LK_TIME
         LK_INTERVAL
+        LK_UUID
 
     cdef enum:
         CODEC_UNCOMPRESSED

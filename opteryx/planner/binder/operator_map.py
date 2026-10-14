@@ -32,7 +32,7 @@ def _category_name(category) -> str:
 
 # Phase 3: OPERATOR_MAP is now authored directly on LogicalCategory (LC) keys.
 # Integer widths collapse to LC.INTEGER, floats to LC.FLOAT, JSONB/STRUCT to
-# LC.NVARCHAR — the map carries 317 entries. The count is asserted by
+# LC.NVARCHAR — the map carries 325 entries. The count is asserted by
 # test_operator_map_entry_count_is_accurate (tests/planner/test_operator_map.py)
 # rather than maintained by hand: it had drifted through at least three changes
 # (330 was stale before the ILIKE VARBINARY rows were added, and stale again by 13
@@ -200,6 +200,14 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.INTEGER     , LC.INTEGER     , 'ShiftRight'              ): OMT(_I, None, 100.0),
     (LC.INTERVAL    , LC.DATE        , 'Minus'                   ): OMT(_T, None, 100.0),
     (LC.INTERVAL    , LC.DATE        , 'Plus'                    ): OMT(_T, None, 100.0),
+    (LC.UUID        , LC.ARRAY       , 'InList'                  ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.ARRAY       , 'NotInList'               ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.UUID        , 'Eq'                      ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.UUID        , 'Gt'                      ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.UUID        , 'GtEq'                    ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.UUID        , 'Lt'                      ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.UUID        , 'LtEq'                    ): OMT(_B, None, 100.0),
+    (LC.UUID        , LC.UUID        , 'NotEq'                   ): OMT(_B, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'Eq'                      ): OMT(_B, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'Gt'                      ): OMT(_B, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'GtEq'                    ): OMT(_B, None, 100.0),

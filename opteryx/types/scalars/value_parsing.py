@@ -8,6 +8,7 @@ return the coerced value. Used by CAST, literal coercion, and array-element cast
 import datetime
 import decimal
 import re
+import uuid
 from typing import Any, Callable
 
 from opteryx.types.logical_type import LogicalCategory
@@ -77,6 +78,10 @@ def _parse_blob(value):
         return value.encode("utf-8")
     if isinstance(value, (bytearray, memoryview)):
         return bytes(value)
+    # A UUID's VARBINARY form is its 16 raw bytes, not its text — the same bytes
+    # draken_cast_uuid_to_blob produces on a column (ruling U6).
+    if isinstance(value, uuid.UUID):
+        return value.bytes
     # Everything else is the VARCHAR rendering, encoded — the same bytes the
     # runtime cast produces (CAST(id AS BLOB) on a column gives b'1', b'2', and
     # CAST(gravity AS BLOB) gives b'3.7'). This used to be bytes(value), whose
@@ -185,6 +190,32 @@ def _parse_interval(value):
     raise ValueError(f"Cannot parse {value} as interval")
 
 
+def is_uuid_text(value) -> bool:
+    """True when `value` (str or UTF-8 bytes) is exactly the canonical 36-char
+    8-4-4-4-12 hex form, either case (docs/UUID_TYPE_DESIGN.md U5). Python's
+    uuid.UUID() alone also takes braces, urn:uuid: and bare hex — those are not."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return (
+        isinstance(value, str)
+        and len(value) == 36
+        and value[8] == value[13] == value[18] == value[23] == "-"
+        and all(c in _HEX_DIGITS for i, c in enumerate(value) if i not in (8, 13, 18, 23))
+    )
+
+
+def _parse_uuid(value):
+    """Strict UUID parse: a uuid.UUID passes through; text must pass is_uuid_text."""
+    if isinstance(value, uuid.UUID):
+        return value
+    if not is_uuid_text(value):
+        raise ValueError(f"Cannot parse {value!r} as UUID: expected 8-4-4-4-12 hex digits")
+    return uuid.UUID(value.decode("utf-8") if isinstance(value, bytes) else value)
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
 _PARSERS: dict = {
     LogicalCategory.BOOLEAN: _parse_boolean,
     LogicalCategory.INTEGER: _parse_integer,
@@ -198,6 +229,7 @@ _PARSERS: dict = {
     LogicalCategory.TIME: _parse_time,
     LogicalCategory.TIMESTAMP: _parse_timestamp,
     LogicalCategory.INTERVAL: _parse_interval,
+    LogicalCategory.UUID: _parse_uuid,
 }
 
 

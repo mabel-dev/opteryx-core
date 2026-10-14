@@ -232,7 +232,11 @@ enum DirectKind {
     // precision > 18 - used to fall to DK_POOL, which the native Source cannot consume
     // ("unsupported column encoding") and which the pool serializer read from the
     // EMPTY int128_values.
-    DK_DECIMAL128_DICT = 25
+    DK_DECIMAL128_DICT = 25,
+    // UUID (FLBA(16) + UUID logical type): the same 16-byte buffers as DECIMAL128
+    // (int128_values / dict_int128_values hold the RAW bytes), typed DRAKEN_UUID
+    // with no descriptor. Built by build_direct_fixed / build_direct_int128_dict.
+    DK_UUID = 26, DK_UUID_DICT = 27
 };
 
 struct ColumnOut {
@@ -694,11 +698,11 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
         !d.dict_float32_values.empty() &&
         (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
         return DK_FLOAT32_DICT;
-    // Dictionary-encoded int128 (DECIMAL128): the dictionary payload + a per-row code
-    // source, and NOT a mixed/plain chunk (int128_values empty).
+    // Dictionary-encoded int128 (DECIMAL128 or UUID): the dictionary payload + a
+    // per-row code source, and NOT a mixed/plain chunk (int128_values empty).
     if (d.int128_values.empty() && !d.dict_int128_values.empty() && d.rle_run_lengths.empty() &&
         (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
-        return DK_DECIMAL128_DICT;
+        return d.is_uuid ? DK_UUID_DICT : DK_DECIMAL128_DICT;
     if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
     // RLE skip-dense NUMERIC → §11 Dict-shaped direct, rebuilt from the run table
     // by build_direct_rle_dict. Previously this fell to DK_POOL below, and the
@@ -740,7 +744,7 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     if (!d.int128_values.empty() && _fixed_eligible(d.int128_values.size(), n, nullable))
-        return DK_DECIMAL128;
+        return d.is_uuid ? DK_UUID : DK_DECIMAL128;
     if (t == "int64"   && _fixed_eligible(d.int64_values.size(),   n, nullable)) {
         if (d.is_unsigned) return DK_UINT64;  // physical int64, declared UINT64: exact width
         return DK_INT64;
@@ -1622,7 +1626,7 @@ static inline bool build_direct_fixed(DecodedColumn& d, DirectKind dk,
         csrc = reinterpret_cast<const uint8_t*>(d.float64_values.data());
         elem = 8; compact_count = d.float64_values.size();
         take = [](DecodedColumn& c) -> void* { return c.float64_values.release(); };
-    } else {  // DK_DECIMAL128
+    } else {  // DK_DECIMAL128 / DK_UUID: the 16-byte lane
         csrc = reinterpret_cast<const uint8_t*>(d.int128_values.data());
         elem = 16; compact_count = d.int128_values.size();
         take = [](DecodedColumn& c) -> void* { return c.int128_values.release(); };
@@ -3475,6 +3479,7 @@ class ParquetIOPipeline {
                                                   // models no TIME coercion) — direct-eligible
                                                   // exactly like date/timestamp.
                     lt.rfind("uint", 0) == 0 ||  // E33: uint8/16/32/64 direct kinds
+                    lt == "uuid" ||              // DK_UUID / DK_UUID_DICT: raw 16 bytes
                     (lt.rfind("decimal", 0) == 0 &&
                      (!decoded.int128_values.empty() || !decoded.dict_int128_values.empty()));
                 DirectKind dk = pool_sink_.draken_alloc ? direct_kind_for(decoded) : DK_POOL;
@@ -3534,7 +3539,7 @@ class ParquetIOPipeline {
                         ok = build_direct_narrow_dict(decoded, 4, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_UINT64_DICT)
                         ok = build_direct_narrow_dict(decoded, 8, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
-                    else if (dk == DK_DECIMAL128_DICT)
+                    else if (dk == DK_DECIMAL128_DICT || dk == DK_UUID_DICT)
                         ok = build_direct_int128_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else
                         ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout,

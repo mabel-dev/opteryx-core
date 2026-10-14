@@ -321,6 +321,7 @@ struct NativeScanColumnBuilder {
             case rugo::DK_INT64: case rugo::DK_FLOAT32: case rugo::DK_FLOAT64:
             case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
             case rugo::DK_DECIMAL128: case rugo::DK_DECIMAL128_DICT: case rugo::DK_BOOL:
+            case rugo::DK_UUID: case rugo::DK_UUID_DICT:
             // A1 (E33): exact-width integer direct kinds — dense
             // (DK_UINT8/16/32/64, DK_INT8/16/32) and dict-shaped (DK_*_DICT).
             // Signed narrow ints no longer widen to DK_INT64, so the signed
@@ -343,6 +344,7 @@ struct NativeScanColumnBuilder {
             case rugo::DK_INT64:      case rugo::DK_INT64_DICT:   return DRAKEN_INT64;
             case rugo::DK_FLOAT32:    case rugo::DK_FLOAT32_DICT: return DRAKEN_FLOAT32;
             case rugo::DK_DECIMAL128: case rugo::DK_DECIMAL128_DICT: return DRAKEN_DECIMAL128;
+            case rugo::DK_UUID:       case rugo::DK_UUID_DICT:    return DRAKEN_UUID;
             case rugo::DK_BOOL:                                   return DRAKEN_BOOL;
             // A1 (E33): preserve the exact declared width and signedness (dense + dict
             // share the tag), byte-identical to the trampoline's _wrap_direct /
@@ -367,7 +369,7 @@ struct NativeScanColumnBuilder {
             case rugo::DK_UINT32_DICT: case rugo::DK_UINT64_DICT:
             case rugo::DK_INT8_DICT:   case rugo::DK_INT16_DICT:
             case rugo::DK_INT32_DICT:
-            case rugo::DK_DECIMAL128_DICT:
+            case rugo::DK_DECIMAL128_DICT: case rugo::DK_UUID_DICT:
                 return true;
             default:
                 return false;

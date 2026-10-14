@@ -585,7 +585,7 @@ with avro.read_avro("launches.avro", columns=["Company", "Rocket.Name"]) as read
 
 Types: `boolean` BOOL · `int` INT32 · `long` INT64 · `float`/`double` FLOAT32/FLOAT64 · `string` VARCHAR · `bytes`/`fixed` VARBINARY · `enum` VARCHAR (one entry per symbol, a position per row) · `date` DATE · `time-*` TIME (µs) · `timestamp-*` TIMESTAMP (µs, UTC) · `decimal` DECIMAL / DECIMAL128 · an array of a plain scalar ARRAY · a whole record, map, or array of nested values NVARCHAR JSON text.
 
-Codecs: `null`, `deflate`, `snappy`, `zstandard`.
+Codecs: `null`, `deflate`, `snappy`, `zstandard`, `bzip2`.
 
 ### Performance
 
@@ -602,7 +602,7 @@ The deflate row uses libdeflate (after 0.5.0; 0.72 s with miniz in 0.5.0). rugo 
 
 ### Limitations
 
-Refused, with an error naming what was refused: the `bzip2` and `xz` codecs, unions other than `["null", T]`, recursive types, `uuid`, decimal precision above 38, `timestamp-nanos`, `local-timestamp-*`, `duration`, and alias-based schema resolution. A file is decoded on one thread. At the Python edge a reader-schema field the file lacks cannot be a constant TIME/TIMESTAMP/DECIMAL column (the Opteryx engine builds those natively).
+Refused, with an error naming what was refused: the `xz` codec, unions other than `["null", T]`, recursive types, `uuid`, decimal precision above 38, `timestamp-nanos`, `local-timestamp-*`, `duration`, and alias-based schema resolution. A file is decoded on one thread. At the Python edge a reader-schema field the file lacks cannot be a constant TIME/TIMESTAMP/DECIMAL column (the Opteryx engine builds those natively).
 
 ---
 

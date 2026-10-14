@@ -22,7 +22,7 @@ from enum import Enum
 class LogicalCategory(Enum):
     """The Opteryx SQL type vocabulary AND the operator-dispatch key (Decision B).
 
-    Pure projection enum — reachable only via `ColumnType.category`. 15 canonical
+    Pure projection enum — reachable only via `ColumnType.category`. 16 canonical
     members; no aliases, no behaviours. Integer/float widths collapse to INTEGER/FLOAT
     (the actual physical width lives on `ColumnType.physical`).
 
@@ -45,3 +45,4 @@ class LogicalCategory(Enum):
     VARIANT = "VARIANT"
     ARRAY = "ARRAY"
     VECTOR = "VECTOR"
+    UUID = "UUID"

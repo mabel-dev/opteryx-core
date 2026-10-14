@@ -940,6 +940,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -957,6 +958,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -989,6 +991,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -1001,6 +1004,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -1008,7 +1012,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 24,
+        "signature_count": 25,
         "signatures": [
             {
                 "left_type": "boolean",
@@ -1137,6 +1141,13 @@
                 "cost_estimate": 100.0
             },
             {
+                "left_type": "uuid",
+                "right_type": "uuid",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
                 "left_type": "varbinary",
                 "right_type": "nvarchar",
                 "result_type": "boolean",
@@ -1214,6 +1225,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -1230,6 +1242,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -1259,6 +1272,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -1270,6 +1284,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -1277,7 +1292,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 23,
+        "signature_count": 24,
         "signatures": [
             {
                 "left_type": "date",
@@ -1394,6 +1409,13 @@
             {
                 "left_type": "timestamp",
                 "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
+                "right_type": "uuid",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
@@ -1476,6 +1498,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -1492,6 +1515,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -1521,6 +1545,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -1532,6 +1557,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -1539,7 +1565,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 23,
+        "signature_count": 24,
         "signatures": [
             {
                 "left_type": "date",
@@ -1656,6 +1682,13 @@
             {
                 "left_type": "timestamp",
                 "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
+                "right_type": "uuid",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
@@ -2026,6 +2059,7 @@
                     "integer",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -2066,6 +2100,7 @@
             "integer",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -2076,7 +2111,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 9,
+        "signature_count": 10,
         "signatures": [
             {
                 "left_type": "boolean",
@@ -2122,6 +2157,13 @@
             },
             {
                 "left_type": "timestamp",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
                 "right_type": "array",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,
@@ -2474,6 +2516,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -2490,6 +2533,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -2518,6 +2562,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -2529,6 +2574,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -2536,7 +2582,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 23,
+        "signature_count": 24,
         "signatures": [
             {
                 "left_type": "date",
@@ -2653,6 +2699,13 @@
             {
                 "left_type": "timestamp",
                 "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
+                "right_type": "uuid",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
@@ -2735,6 +2788,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -2751,6 +2805,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -2779,6 +2834,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -2790,6 +2846,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -2797,7 +2854,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 23,
+        "signature_count": 24,
         "signatures": [
             {
                 "left_type": "date",
@@ -2914,6 +2971,13 @@
             {
                 "left_type": "timestamp",
                 "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
+                "right_type": "uuid",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
@@ -3641,6 +3705,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -3658,6 +3723,7 @@
                     "interval",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -3692,6 +3758,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -3704,6 +3771,7 @@
             "interval",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -3711,7 +3779,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 24,
+        "signature_count": 25,
         "signatures": [
             {
                 "left_type": "boolean",
@@ -3835,6 +3903,13 @@
             {
                 "left_type": "timestamp",
                 "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
+                "right_type": "uuid",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
@@ -4058,6 +4133,7 @@
                     "integer",
                     "nvarchar",
                     "timestamp",
+                    "uuid",
                     "varbinary",
                     "varchar"
                 ]
@@ -4093,6 +4169,7 @@
             "integer",
             "nvarchar",
             "timestamp",
+            "uuid",
             "varbinary",
             "varchar"
         ],
@@ -4103,7 +4180,7 @@
             "boolean"
         ],
         "has_dynamic_result": false,
-        "signature_count": 9,
+        "signature_count": 10,
         "signatures": [
             {
                 "left_type": "boolean",
@@ -4149,6 +4226,13 @@
             },
             {
                 "left_type": "timestamp",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "uuid",
                 "right_type": "array",
                 "result_type": "boolean",
                 "result_type_is_dynamic": false,

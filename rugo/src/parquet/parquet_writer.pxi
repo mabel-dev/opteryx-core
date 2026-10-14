@@ -50,6 +50,7 @@ from draken.core.buffers cimport (
     DRAKEN_INTERVAL,
     DRAKEN_DECIMAL,
     DRAKEN_DECIMAL128,
+    DRAKEN_UUID,
     DRAKEN_ARRAY,
     DRAKEN_NULL,
     DRAKEN_VECTOR_FP16,
@@ -83,6 +84,7 @@ from parquet_writer cimport (
     LK_DECIMAL,
     LK_TIME,
     LK_INTERVAL,
+    LK_UUID,
     TU_MILLIS,
     TU_MICROS,
     TU_NANOS,
@@ -233,7 +235,8 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
 
     Supported column types: INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL,
     VARCHAR, NVARCHAR, VARBINARY, DATE32, TIMESTAMP64, TIME32/64, INTERVAL,
-    DECIMAL, DECIMAL128, ARRAY, and all-null (NULL) columns. Any other physical
+    DECIMAL, DECIMAL128, UUID (FLBA(16) + UUID annotation), ARRAY, and all-null
+    (NULL) columns. Any other physical
     type raises ValueError (fail loud).
 
     Integer widths are preserved. Parquet stores integers only as INT32 or
@@ -805,6 +808,21 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             ci.dec_precision = <int>prec_obj
             ci.dec_raw = dec_store.back().data()
 
+        elif t == DRAKEN_UUID:
+            # FLBA(16) annotated UUID: the 16 bytes verbatim (network order is the
+            # storage order on both sides — docs/UUID_TYPE_DESIGN.md).
+            tmpdec = vector[uint8_t]()
+            tmpdec.resize(<size_t>nrows * 16)
+            srcb = <const uint8_t*>dv.data
+            with nogil:
+                for j in range(nrows):
+                    memcpy(tmpdec.data() + <size_t>j * 16, srcb + <size_t>sel[j] * 16, 16)
+            dec_store.push_back(tmpdec)
+            ci.type = PT_FLBA
+            ci.logical = LK_UUID
+            ci.dec_width = 16
+            ci.dec_raw = dec_store.back().data()
+
         elif t == DRAKEN_NULL:
             # Typeless all-null column: emit INT32 with an all-null validity
             # mask (no values written). The INT32 buffer is never read.
@@ -1221,7 +1239,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 "write_parquet: unsupported column type %d for column %r "
                 "(supports INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL, VARCHAR/NVARCHAR/"
                 "VARBINARY/VARIANT, DATE32, TIME32/64, TIMESTAMP64, INTERVAL, "
-                "DECIMAL/DECIMAL128, ARRAY of those, NULL, VECTOR_FP16)"
+                "DECIMAL/DECIMAL128, UUID, ARRAY of those, NULL, VECTOR_FP16)"
                 % (<int>t, names[i])
             )
 
@@ -1240,7 +1258,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         # Bloom filter: equality-friendly types only (skip FLOAT/BOOL/INTERVAL).
         if t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
                  DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_TIME32, DRAKEN_TIME64,
-                 DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_VARCHAR,
+                 DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_UUID, DRAKEN_VARCHAR,
                  DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_VARIANT):
             if bloom_all:
                 ci.bloom = True

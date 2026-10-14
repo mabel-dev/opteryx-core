@@ -1,11 +1,12 @@
 """Generate the Avro reader comparison dataset (dev tooling; never imported).
 
 Writes the SAME rows (seeded, deterministic) once per codec, so the readers can be
-compared on decode alone (null), and with decompression (deflate, zstandard):
+compared on decode alone (null), and with decompression (deflate, zstandard, bzip2):
 
     testdata/avro_bench/events_<rows>_null.avro
     testdata/avro_bench/events_<rows>_deflate.avro
     testdata/avro_bench/events_<rows>_zstandard.avro
+    testdata/avro_bench/events_<rows>_bzip2.avro
 
 fastavro is the writer (rugo has no Avro writer). The output is git-ignored
 (testdata/avro_bench/**) — regenerate it rather than commit it:
@@ -36,7 +37,7 @@ import time
 import fastavro
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "testdata", "avro_bench")
-CODECS = ("null", "deflate", "zstandard")
+CODECS = ("null", "deflate", "zstandard", "bzip2")
 SEED = 20261010
 
 COUNTRIES = ["AU", "BR", "CA", "CN", "DE", "ES", "FR", "GB", "IN", "IT",
@@ -117,10 +118,11 @@ def records(n):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--rows", type=int, default=1_000_000)
+    ap.add_argument("--codecs", nargs="+", default=list(CODECS), choices=list(CODECS))
     args = ap.parse_args()
     os.makedirs(OUT_DIR, exist_ok=True)
     parsed = fastavro.parse_schema(SCHEMA)
-    for codec in CODECS:
+    for codec in args.codecs:
         path = os.path.join(OUT_DIR, f"events_{args.rows}_{codec}.avro")
         t0 = time.perf_counter()
         with open(path, "wb") as f:

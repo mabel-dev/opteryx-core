@@ -141,7 +141,7 @@ AVRO_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/avro $(DRAKEN_INC) -I$(ZSTD_D
              -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
              -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/yyjson/src \
              -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu \
-             -I$(ROOT)/third_party/libdeflate
+             -I$(ROOT)/third_party/libdeflate -I$(ROOT)/third_party/bzip2
 AVRO_SRCS := $(ROOT)/rugo/src/avro/avro_schema.cpp \
              $(ROOT)/rugo/src/avro/avro_container.cpp \
              $(ROOT)/rugo/src/avro/avro_reader.cpp \
@@ -157,6 +157,7 @@ AVRO_CSRCS := $(ROOT)/third_party/yyjson/src/yyjson.c \
               $(ROOT)/third_party/libdeflate/lib/utils.c \
               $(ROOT)/third_party/libdeflate/lib/arm/cpu_features.c \
               $(ROOT)/third_party/libdeflate/lib/x86/cpu_features.c \
+              $(ROOT)/rugo/src/avro/_bzip2_lib.c \
               $(wildcard $(ROOT)/third_party/mabel/base64/*.c) \
               $(ROOT)/third_party/ulfjack/ryu/d2s.c \
               $(ROOT)/third_party/ulfjack/ryu/f2s.c \

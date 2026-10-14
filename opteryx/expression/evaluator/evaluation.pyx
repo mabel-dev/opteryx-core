@@ -602,7 +602,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
 )
 from libc.stdint cimport uint8_t, int8_t, int16_t, int32_t, int64_t, uintptr_t, uint32_t
 
-from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, DRAKEN_ARRAY, DRAKEN_VECTOR_FP16, draken_vector_from_dense
+from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, DRAKEN_ARRAY, DRAKEN_VECTOR_FP16, draken_vector_from_dense, draken_type_fixed_itemsize
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_VARIANT
@@ -3094,20 +3094,10 @@ cdef class Pass1PredResolver:
 
 
 cdef size_t _dv_result_elem_size(DrakenType t) noexcept nogil:
-    """Byte width of one fixed-width value; 0 for bit-packed BOOL / unsupported."""
-    if t == DRAKEN_INT8 or t == DRAKEN_UINT8:
-        return 1
-    if t == DRAKEN_INT16 or t == DRAKEN_UINT16:
-        return 2
-    if (t == DRAKEN_INT32 or t == DRAKEN_UINT32 or t == DRAKEN_FLOAT32
-            or t == DRAKEN_DATE32 or t == DRAKEN_TIME32):
-        return 4
-    if (t == DRAKEN_INT64 or t == DRAKEN_UINT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
-            or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64):
-        return 8
-    if t == DRAKEN_DECIMAL128 or t == DRAKEN_INTERVAL:
-        return 16   # INTERVAL = {int64 months, int64 us}, a plain 16-byte value
-    return 0
+    """Byte width of one fixed-width value; 0 for bit-packed BOOL / unsupported.
+    The ONE width table (buffers.h draken_type_fixed_itemsize) — a hand copy here
+    drifted the moment a 16-byte type (UUID) was added."""
+    return draken_type_fixed_itemsize(t)
 
 
 cdef int _dv_copy_result_string(

@@ -2035,6 +2035,7 @@ class _Compiler:
         DrakenType.DATE32, DrakenType.TIMESTAMP64, DrakenType.TIME32, DrakenType.TIME64,
         DrakenType.BOOL,
         DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
+        DrakenType.UUID,
     )
     # WindowTopKSink's ORDER BY key: sort_num_key()'s fixed-width numeric path
     # (native_group_sinks.hpp) — _KEY_COLUMN_TYPES minus the string family and
@@ -2045,7 +2046,7 @@ class _Compiler:
     _TOPK_FAST_KEY_TYPES = tuple(
         t for t in _KEY_COLUMN_TYPES
         if t not in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
-                     DrakenType.DECIMAL128)
+                     DrakenType.DECIMAL128, DrakenType.UUID)
     )
     # Kind code from the window-function registry (opteryx/operators/window/helpers.py)
     _RANK_ROW_NUMBER = WINDOW_FUNCTIONS["ROW_NUMBER"]
@@ -2300,7 +2301,10 @@ class _Compiler:
                 # stays rejected.
                 _string_minmax = func in ("MIN", "MAX", "ANY_VALUE") and pt in (
                     DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY)
-                if not _string_minmax:
+                # UUID: MIN/MAX/ANY_VALUE ride the DECIMAL128 extreme lanes as an
+                # order key (native_group_sinks.hpp agg2_read_i128); no SUM/AVG.
+                _uuid_minmax = func in ("MIN", "MAX", "ANY_VALUE") and pt == DrakenType.UUID
+                if not _string_minmax and not _uuid_minmax:
                     _unsupported(
                         f"{md_syntax(func)} over a column of type {md_code(_type_name(psc, pt))}"
                     )
@@ -3454,6 +3458,14 @@ class _Compiler:
                 # are identical).
                 kinds.append("varchar")
                 string_types.append(DrakenType.VARCHAR.value if pt == DrakenType.VARIANT else pt.value)
+                widen_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
+            elif pt == DrakenType.UUID:
+                # FLBA(16) + UUID → DK_UUID / DK_UUID_DICT, self-describing (no
+                # descriptor); the footer gate admits only a uuid-annotated FLBA(16).
+                kinds.append("uuid")
+                string_types.append(0)
                 widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)

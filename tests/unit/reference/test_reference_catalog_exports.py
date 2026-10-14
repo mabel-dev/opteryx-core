@@ -133,7 +133,7 @@ def test_operator_catalog_includes_binder_matrix_metadata():
     assert eq_operator["category"] == "comparison"
     assert eq_operator["description"] == "Equality comparison."
     assert eq_operator["documentation"] == "Returns true when both operands compare equal."
-    assert eq_operator["signature_count"] == 24
+    assert eq_operator["signature_count"] == 25
     assert eq_operator["result_types"] == ["boolean"]
     assert {
         "left_type": "integer",

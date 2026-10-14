@@ -125,17 +125,12 @@ public:
                     throw PgError("column '" + name_ + "': unsupported jsonb binary version");
                 append_string(p + 1, (uint32_t)(len - 1));
                 break;
-            case 2950: {
+            case 2950:
+                // DRAKEN_UUID (docs/UUID_TYPE_DESIGN.md U10): the binary wire form IS
+                // the storage form — 16 bytes, network order.
                 if (len != 16) bad_length("uuid");
-                static const char* hexd = "0123456789abcdef";
-                char buf[36]; int k = 0;
-                for (int i = 0; i < 16; i++) {
-                    if (i == 4 || i == 6 || i == 8 || i == 10) buf[k++] = '-';
-                    buf[k++] = hexd[p[i] >> 4]; buf[k++] = hexd[p[i] & 15];
-                }
-                append_string((const uint8_t*)buf, 36);
+                std::memcpy(fixed_ + (size_t)rows_ * width_, p, 16);
                 break;
-            }
             default:
                 // Remaining string-family OIDs (text, varchar, bpchar, name, "char",
                 // bytea, json): raw bytes.

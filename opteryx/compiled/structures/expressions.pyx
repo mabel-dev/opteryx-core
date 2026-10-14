@@ -256,6 +256,10 @@ cdef bint _value_matches(object value, object column_type):
         return kind is Decimal
     if category is _LC.VARCHAR or category is _LC.NVARCHAR or category is _LC.VARBINARY:
         return kind is bytes
+    if category is _LC.UUID:
+        from uuid import UUID
+
+        return kind is UUID
     if category is _LC.INTERVAL:
         # DrakenIntervalSlot: (months, microseconds)
         return kind is tuple and len(value) == 2 and type(value[0]) is int and type(value[1]) is int

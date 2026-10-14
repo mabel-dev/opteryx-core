@@ -19,7 +19,7 @@ using rugo_text::U_US;
 namespace {
 
 enum class NK : uint8_t { Scalar, Struct, List, Map, Repeated };
-enum class SK : uint8_t { Bool, Int, UInt, F32, F64, String, Binary, Date, Timestamp, Time, Decimal };
+enum class SK : uint8_t { Bool, Int, UInt, F32, F64, String, Binary, Date, Timestamp, Time, Decimal, Uuid };
 
 struct Node {
     NK kind = NK::Scalar;
@@ -107,6 +107,8 @@ struct Builder {
         if (pt == "float64") { n.sk = SK::F64; return; }
         if (pt == "byte_array" || pt == "fixed_len_byte_array") {
             if (lt == "varchar" || lt == "enum" || lt == "json") { n.sk = SK::String; return; }
+            // UUID: FLBA(16), rendered as its lowercase 8-4-4-4-12 text, quoted.
+            if (lt == "uuid") { n.sk = SK::Uuid; return; }
             if (lt.empty() || lt == "binary" || lt == "bson" ||
                 lt.rfind("fixed_len_byte_array", 0) == 0) {
                 n.sk = SK::Binary;
@@ -416,6 +418,13 @@ struct Assembler {
             const uint8_t* p; uint32_t len;
             str_value(l, p, len);
             rugo_text::json_string(o, reinterpret_cast<const char*>(p), len);
+            return;
+        }
+        case SK::Uuid: {
+            // The leaf decodes through the 16-byte lane holding the RAW bytes
+            // (decode_column.cpp ReadRaw16), so the int128's memory IS the uuid.
+            const __int128 v = decimal_value(l);
+            rugo_text::fmt_uuid_quoted(o, reinterpret_cast<const uint8_t*>(&v));
             return;
         }
         case SK::Binary: {
