@@ -31,11 +31,19 @@ def is_cython_generated(path: str) -> bool:
         return MARKER in handle.readline()
 
 
+# Top-level directories never touched: scratch/ holds experiment state that a clean
+# must not destroy (only at the root — a nested dir of the same name is not exempt).
+SKIP_TOP_DIRS = {"scratch"}
+
+
 def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     removed = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in SKIP_DIRS and not (dirpath == root and d in SKIP_TOP_DIRS)
+        ]
         for name in filenames:
             if not name.endswith(SUFFIXES):
                 continue

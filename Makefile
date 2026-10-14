@@ -1155,13 +1155,16 @@ check-symbols: ## Verify no undefined symbols in compiled extensions (run after 
 
 # === CLEANUP ===
 
-clean: ## Clean build artifacts
+# scratch/ is never touched: it holds experiment state (A/B baseline .so snapshots
+# among it) that a clean must not destroy. -prune is ignored under -delete (which
+# implies -depth), so the sweeps remove with -exec instead.
+clean: ## Clean build artifacts (scratch/ untouched)
 	$(call print_blue,"Cleaning build artifacts...")
-	@find . -name '*.so' -delete
+	@find . -path ./scratch -prune -o -name '*.so' -type f -exec rm -f {} +
 	@$(PYTHON) dev/clean_cython_generated.py
-	@find . -name '*.pyc' -delete
-	@find . -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-	@find . -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
+	@find . -path ./scratch -prune -o -name '*.pyc' -type f -exec rm -f {} +
+	@find . -path ./scratch -prune -o -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+	@find . -path ./scratch -prune -o -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
 	@rm -rf $(BUILD_DIR) $(DIST_DIR) target/ .coverage htmlcov/ .pytest_cache/ .mypy_cache/
 	$(call print_green,"Cleanup complete!")
 

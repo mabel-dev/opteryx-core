@@ -459,10 +459,12 @@ CURLcode Curl_ossl_certchain(struct Curl_easy *data, SSL *ssl)
     push_certinfo("Version", i);
 
     num = X509_get_serialNumber(x);
-    if(num->type == V_ASN1_NEG_INTEGER)
+    /* opteryx: ASN1_STRING is opaque from OpenSSL 4 - use the accessors
+       (OpenSSL >= 1.1.0) rather than the struct fields */
+    if(ASN1_STRING_type(num) == V_ASN1_NEG_INTEGER)
       BIO_puts(mem, "-");
-    for(j = 0; j < num->length; j++)
-      BIO_printf(mem, "%02x", num->data[j]);
+    for(j = 0; j < ASN1_STRING_length(num); j++)
+      BIO_printf(mem, "%02x", ASN1_STRING_get0_data(num)[j]);
     push_certinfo("Serial Number", i);
 
 #if defined(HAVE_X509_GET0_SIGNATURE) && defined(HAVE_X509_GET0_EXTENSIONS)
@@ -642,8 +644,9 @@ CURLcode Curl_ossl_certchain(struct Curl_easy *data, SSL *ssl)
     }
 
     if(psig) {
-      for(j = 0; j < psig->length; j++)
-        BIO_printf(mem, "%02x:", psig->data[j]);
+      /* opteryx: ASN1_STRING is opaque from OpenSSL 4 (see above) */
+      for(j = 0; j < ASN1_STRING_length(psig); j++)
+        BIO_printf(mem, "%02x:", ASN1_STRING_get0_data(psig)[j]);
       push_certinfo("Signature", i);
     }
 
