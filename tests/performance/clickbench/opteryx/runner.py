@@ -39,8 +39,8 @@ class Dataset(enum.Enum):
     AISTOR_CANON_SINGLE = "aistor.clickbench.hits_canon_single"
     AISTOR_RUGO_SPLIT = "aistor.clickbench.hits_rugo_typed_split"
     # Quick remote variants: files hits_0..hits_9 of each split (10M rows, the
-    # same rows in both), for iteration in minutes rather than hours. Compare
-    # against duckdb/results.local.hits10.json, not the full-dataset baseline.
+    # same rows in both), for iteration in minutes rather than hours. Compared
+    # against DuckDB reading the same table on AIStor (SAME_FILES_BASELINES).
     AISTOR_CANON_SPLIT_10 = "aistor.clickbench.hits_canon_split_10"
     AISTOR_RUGO_SPLIT_10 = "aistor.clickbench.hits_rugo_typed_split_10"
 
@@ -130,8 +130,14 @@ OWN_BASELINES = {
 # the ratio compares engines, not formats. No such file means no ratio column -
 # never the parquet baseline. (`make clickbench-duckdb-avro` writes the DuckDB
 # equivalent; at ~50s a query it is not the default.)
+#
+# The AIStor 10-file variants compare to DuckDB's iceberg_scan over the same
+# Iceberg table on AIStor (`make clickbench-duckdb-aistor-*-split-10`), not to
+# DuckDB on local parquet - that ratio measured the network, not the engine.
 SAME_FILES_BASELINES = {
     "avro": ("ClickHouse", "../clickhouse/results.local.avro.json"),
+    "aistor-canon-split-10": ("DuckDB", "../duckdb/results.aistor.hits_canon_split_10.json"),
+    "aistor-rugo-split-10": ("DuckDB", "../duckdb/results.aistor.hits_rugo_typed_split_10.json"),
 }
 
 # fmt:off

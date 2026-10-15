@@ -822,6 +822,14 @@ clickbench-duckdb-avro: ## DuckDB (avro extension) over the clickbench-avro shar
 	@test -f scratch/hits_avro.deflate-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --avro-dir scratch/hits_avro
 
+clickbench-duckdb-aistor-canon-split-10: ## DuckDB (iceberg_scan) over AIStor clickbench.hits_canon_split_10 - the same table as clickbench-aistor-canon-split-10 (regenerates duckdb/results.aistor.hits_canon_split_10.json)
+	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --aistor-table hits_canon_split_10
+
+clickbench-duckdb-aistor-rugo-split-10: ## DuckDB (iceberg_scan) over AIStor clickbench.hits_rugo_typed_split_10 - the same table as clickbench-aistor-rugo-split-10 (regenerates duckdb/results.aistor.hits_rugo_typed_split_10.json)
+	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --aistor-table hits_rugo_typed_split_10
+
+.PHONY: clickbench-duckdb-aistor-canon-split-10 clickbench-duckdb-aistor-rugo-split-10
+
 CLICKHOUSE ?= scratch/clickhouse/clickhouse
 clickbench-clickhouse-avro: ## ClickHouse local over the clickbench-avro shards, 1 try per query (writes clickhouse/results.local.avro.json; needs a clickhouse binary at CLICKHOUSE and scratch/hits_avro built by make clickbench-avro)
 	@test -f scratch/hits_avro.deflate-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
@@ -1050,14 +1058,12 @@ tpcds-sf01-aistor: ## Quick: TPC-DS SF0.1 smoke suite on AIStor (coverage, not p
 clickbench-aistor-canon-split-10: ## Quick: ClickBench on upstream's files hits_0..9 (10M rows) on AIStor
 	$(call print_blue,Running ClickBench on AIStor (canon split, 10 files)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split-10 \
-		--duckdb-baseline tests/performance/clickbench/duckdb/results.local.hits10.json
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split-10
 
 clickbench-aistor-rugo-split-10: ## Quick: ClickBench on the rugo split's files hits_0..9 (10M rows) on AIStor
 	$(call print_blue,Running ClickBench on AIStor (rugo split, 10 files)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split-10 \
-		--duckdb-baseline tests/performance/clickbench/duckdb/results.local.hits10.json
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split-10
 
 h2o-small-aistor: ## Quick: H2O db-benchmark (groupby + join, small = 1e7 rows) on AIStor
 	$(call print_blue,Running H2O small on AIStor...)

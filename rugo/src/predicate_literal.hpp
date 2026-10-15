@@ -15,8 +15,15 @@
 //   string  (VARCHAR/NVARCHAR/VARBINARY)   STRING (Python str / bytes)
 //   numeric (INT*/UINT*/FLOAT*)            INT or FLOAT (never bool)
 //   BOOL                                   BOOL
+//   UUID (declared)                        STRING that is a UUID (strict 8-4-4-4-12)
 //   anything else (DATE, TIMESTAMP, DECIMAL, IPV4, ARRAY, VARIANT, ...) — NOT COVERED: the
 //     reader's existing comparison applies, unchanged.
+//
+// UUID is compared on its 16 BYTES, not left to "the existing comparison": that
+// is on the field's raw text, and UUID text is case-insensitive, so `= 'ffff...'`
+// against a stored 'FFFF...' would answer "no rows". The literal is parsed once
+// (uuid_literal_bytes; a non-UUID string raises) and each field with the same
+// strict parser; byte order is the type's order, so all six comparisons hold.
 //
 // The literal's kind is its PYTHON type, decided once at the Cython edge — not
 // sniffed from its text, which is what let the string '1' compare as a number.
@@ -35,6 +42,8 @@
 //           is a NULL, not an unknown column: it matches no comparison.
 
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 #include <string>
 
 #include "buffers.h"            // DrakenType
@@ -82,6 +91,7 @@ inline bool literal_contract_covers(DrakenType t, uint8_t logical_kind) noexcept
 // True when a literal of `kind` may be compared with the column. Types outside
 // the contract accept every kind (their comparison is unchanged).
 inline bool literal_fits_type(DrakenType t, uint8_t logical_kind, uint8_t kind) noexcept {
+    if (t == DRAKEN_UUID) return kind == LITERAL_STRING;
     if (!literal_contract_covers(t, logical_kind)) return true;
     if (declared_is_string(t)) return kind == LITERAL_STRING;
     if (type_is_numeric(t))    return kind == LITERAL_INT || kind == LITERAL_FLOAT;
@@ -100,6 +110,29 @@ inline std::string literal_mismatch_message(const std::string& column,
            literal_kind_name(kind) + " value " +
            (kind == LITERAL_STRING ? "'" + literal + "'" : literal) +
            "; a predicate literal must be of the column's type — it is not coerced";
+}
+
+// UUID predicates: the literal's 16 bytes, parsed once with the reader's strict
+// parser (draken/core/uuid_text.h). Throws naming the column for a non-UUID literal.
+inline void uuid_literal_bytes(const std::string& column, const std::string& literal,
+                               uint8_t* out) {
+    if (!draken::ops::uuid_parse(literal.data(), literal.size(), out))
+        throw std::invalid_argument("predicate on column '" + column + "' (UUID): '" + literal +
+                                    "' is not a UUID (expected 8-4-4-4-12 hex digits)");
+}
+
+// op: 0=EQ 1=NE 2=LT 3=LE 4=GT 5=GE, on 16 bytes in network order (== UUID order).
+inline bool apply_op_uuid(uint8_t op, const uint8_t* field, const uint8_t* literal) noexcept {
+    const int c = std::memcmp(field, literal, 16);
+    switch (op) {
+        case 0: return c == 0;
+        case 1: return c != 0;
+        case 2: return c < 0;
+        case 3: return c <= 0;
+        case 4: return c > 0;
+        case 5: return c >= 0;
+    }
+    return false;
 }
 
 }  // namespace rugo

@@ -143,3 +143,26 @@ rugo's and the engine's own bloom probes still decline FLBA (no pruning on UUID
 equality from blooms yet). ARRAY<UUID> is not written. Tests:
 `tests/rugo/test_parquet_uuid_write.py` (DuckDB oracle: schema, stats, values,
 bloom lookup, patch rename/add).
+
+## 9. CSV / JSONL declared UUID + Postgres verification (2026-10-14)
+
+- `explicit_schema={"col": "UUID"}` (rugo `declared_type.cpp` / `declared_parse.hpp`):
+  strict text → DRAKEN_UUID in both readers; a mismatch raises (ValueError for JSONL,
+  RuntimeError for CSV, as for every declared type). Undeclared UUID text stays
+  VARCHAR (ruling U12 — no inference).
+- **Pushed reader predicates on a declared UUID column compare the 16 parsed bytes**
+  (`predicate_literal.hpp` `uuid_literal_bytes` / `apply_op_uuid`; CSV `PRED_UUID`;
+  JSONL `Predicate::is_uuid`, set in `prepare_predicate` from `explicit_schema`). Found
+  while testing: types outside the literal contract (DATE, TIMESTAMP, DECIMAL, IPV4,
+  ...) keep "the existing comparison" on the field's RAW TEXT, which for UUID answered
+  `= 'ffff...'` with no rows against a stored 'FFFF...'. Now case never matters and all
+  six comparisons follow byte (= UUID) order; a non-UUID literal raises. The JSONL
+  raw-text PREFILTER (`choose_prefilter_plan`) skips declared UUID columns for the same
+  reason. The other out-of-contract declared types still use the raw-text compare —
+  unexamined.
+- Postgres verified against a throwaway local Postgres 17 (Colima): 2,000 rows with
+  nulls — values, full sort order, grouped MIN/MAX + null counts, `=` (either case),
+  IN, CAST — all equal Postgres's own answers, via NativePostgresScanSource. The
+  existing live suite (system relations only, read-only) passes 34/34. There is no
+  automated UUID Postgres test: the live suite has no uuid relation and the repo has
+  no Python Postgres client to build one.

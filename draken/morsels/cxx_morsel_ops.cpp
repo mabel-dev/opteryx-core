@@ -30,6 +30,7 @@
 #include "core/string_slot.h"
 #include "core/vector_alloc.h"
 #include "core/vector_owner_ops.h"
+#include "core/validity_word.h"
 #include "logical_type.h"
 #include "morsels/cxx_morsel_c.h"
 #include "morsels/cxx_morsel_ops.h"
@@ -413,6 +414,50 @@ VectorOwner vector_slice_impl(const VectorOwner& v, uint32_t start, uint32_t len
     return result;
 }
 
+// Surviving bits (valid AND true) of 64-row word `w` of an IDENTITY mask.
+// Full words only (w < n >> 6): no tail mask, one 8-byte load per bitmap.
+template <bool HasValidity>
+static inline uint64_t mask_full_word(const uint8_t* d, const uint8_t* v, uint32_t w) {
+    uint64_t b = draken_validity_full_bits(d, w);
+    if constexpr (HasValidity) b &= draken_validity_full_bits(v, w);
+    return b;
+}
+
+template <bool HasValidity>
+static void mask_indices_identity(const uint8_t* d, const uint8_t* v, uint32_t n,
+                                  std::vector<int32_t>& out_vec) {
+    const uint32_t nfull = n >> 6;
+    const uint32_t nw    = draken_validity_word_count(n);
+    // The partial tail word (if any): both bitmaps loaded tail-masked, so garbage
+    // bits past the row count never survive.
+    uint64_t tail = 0;
+    if (nw > nfull) {
+        tail = draken_validity_bits(d, nfull, n);
+        if constexpr (HasValidity) tail &= draken_validity_bits(v, nfull, n);
+    }
+    // Pass 1: exact survivor count, so the output is sized once.
+    size_t total = static_cast<size_t>(__builtin_popcountll(tail));
+    for (uint32_t w = 0; w < nfull; ++w)
+        total += static_cast<size_t>(__builtin_popcountll(mask_full_word<HasValidity>(d, v, w)));
+    out_vec.resize(total);
+    int32_t* out = out_vec.data();
+    // Pass 2: all-true words are a run; otherwise one ctz per survivor. Zero
+    // words cost one load and one compare — no per-row branch anywhere.
+    for (uint32_t w = 0; w < nw; ++w) {
+        uint64_t b = w < nfull ? mask_full_word<HasValidity>(d, v, w) : tail;
+        const int32_t base = static_cast<int32_t>(w << 6);
+        if (b == ~uint64_t{0}) {
+            for (int32_t k = 0; k < 64; ++k) out[k] = base + k;
+            out += 64;
+            continue;
+        }
+        while (b != 0) {
+            *out++ = base + __builtin_ctzll(b);
+            b &= b - 1;
+        }
+    }
+}
+
 // Derive the surviving-row indices (valid AND true) from a DRAKEN_BOOL mask.
 // Shared by the single-column vector_mask_impl and the whole-morsel cxx_mask so
 // the index list is built ONCE per mask, not re-scanned per column.
@@ -421,6 +466,15 @@ std::vector<int32_t> mask_indices(const DrakenVector& m) {
         throw std::invalid_argument("mask: expected a DRAKEN_BOOL mask vector");
     const uint32_t mn = m.length;
     std::vector<int32_t> idx_vec;
+    // IDENTITY fast path (§11, ratified 2026-08-06): selection[i] == i, so data
+    // bit i IS row i and the mask is walked 64 rows per word. Same answer as the
+    // uniform loop below, which every other shape takes.
+    if (m.flags & DRAKEN_SEL_IDENTITY) {
+        const uint8_t* d = static_cast<const uint8_t*>(m.data);
+        if (m.validity == nullptr) mask_indices_identity<false>(d, nullptr, mn, idx_vec);
+        else                       mask_indices_identity<true>(d, m.validity, mn, idx_vec);
+        return idx_vec;
+    }
     idx_vec.reserve(mn);
     for (uint32_t i = 0; i < mn; ++i)
         if (row_is_valid(m, i) && row_bool(m, i))

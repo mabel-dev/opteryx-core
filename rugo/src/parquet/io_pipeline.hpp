@@ -2672,7 +2672,8 @@ class ParquetIOPipeline {
         blk.cc_pins.assign(members.size() * ncols, nullptr);
         // C7: a chunk already in the cache needs no bytes — pin it and buy nothing
         // for it. Same key as the decoder's (the path up to any '?', the chunk's
-        // first byte).
+        // first byte). Every codec: a block is remote, and a remote UNCOMPRESSED
+        // chunk is cached too — its GET is the cost a hit saves.
         const bool cc_on = draken_cc_enabled() != 0;
         const size_t cc_key_len = std::min(blk.path.find('?'), blk.path.size());
         for (size_t m = 0; m < members.size(); ++m) {
@@ -2686,7 +2687,7 @@ class ParquetIOPipeline {
                 plan.cstart[slot] = base_offsets[i];
                 plan.clen[slot]   = item.column_stats[i].total_compressed_size;
                 if (pp.active && pp.all_pruned) continue;   // nothing to buy for this member
-                if (cc_on && item.column_stats[i].codec != 0) {
+                if (cc_on) {
                     blk.cc_pins[slot] = draken_cc_lookup_hit(blk.path.data(), cc_key_len,
                                                              base_offsets[i]);
                     if (blk.cc_pins[slot] != nullptr) {          // served from the cache
@@ -3647,9 +3648,13 @@ class ParquetIOPipeline {
                     const size_t slot = item.member * item.block->ncols + i;
                     if (slot < item.block->cc_pins.size()) cc_pinned = item.block->cc_pins[slot];
                 }
+                // Whole = not split into page-pruned runs: the same test plan_block
+                // uses to decide what to fetch.
+                const bool cc_whole =
+                    !(pp.active && i < pp.extents.size() && !pp.extents[i].empty());
                 const ChunkCacheRequest cc_req{item.path.data(), cc_key_len,
                                                base_offset, chunk_cache_admit_,
-                                               !path_is_local(item.path), cc_pinned};
+                                               !path_is_local(item.path), cc_whole, cc_pinned};
 
                 // prefer_dict: keep the dictionary (compressed/Dict shape) for
                 // plain int32/int64 dict columns when not masking. Masked (pass-2)

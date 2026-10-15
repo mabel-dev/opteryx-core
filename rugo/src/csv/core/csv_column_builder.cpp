@@ -57,6 +57,7 @@ enum PredMode : uint8_t {
     PRED_OTHER   = 3,   // type outside the contract (DATE, DECIMAL, IPV4, ...):
                         // the reader's original compare — numeric when both the
                         // literal and the field parse as numbers, else byte-wise
+    PRED_UUID    = 4,   // declared UUID: 16 parsed bytes, never the raw text (case)
 };
 
 // One pushed predicate, with its literal pre-parsed ONCE (never per row).
@@ -69,6 +70,7 @@ struct PredEval {
     int64_t     i64;
     double      f64;
     std::string str;
+    uint8_t     uuid[16];  // PRED_UUID: the literal's bytes
 };
 
 template <typename T>
@@ -122,6 +124,13 @@ static bool eval_predicate(const PredEval& p, const uint8_t* fptr, uint32_t flen
             return eval_string(p, fptr, flen);
         case PRED_NUMERIC:
             return eval_numeric(p, fptr, flen);
+        case PRED_UUID: {
+            // The same strict parser the declared column is built with; a field that
+            // is not a UUID matches nothing here and fails the column build.
+            uint8_t fv[16];
+            if (!draken::ops::uuid_parse(reinterpret_cast<const char*>(fptr), flen, fv)) return false;
+            return rugo::apply_op_uuid(p.op, fv, p.uuid);
+        }
         case PRED_BOOL: {
             bool fv;
             // The same strict parser the declared BOOL column is built with.
@@ -274,7 +283,8 @@ static std::vector<DrakenType> sniff_csv_column_types(
     };
 
     auto end_row = [&]() {
-        // skip remaining requested columns (missing = null, doesn't affect type)
+        // skip remaining requested columns (a ragged row is refused later, by
+        // stream_build_range; the sniff only reads the fields that are there)
         while (req_idx < np && proj_ordinals[req_idx] <= current_col) ++req_idx;
         current_col = 0;
         req_idx     = 0;
@@ -414,11 +424,28 @@ struct FieldPend {
     bool           is_null;
 };
 
+// A row whose field count differs from the header's is refused, never NULL-padded
+// or truncated. Cold path: the 1-based physical line is found by counting '\n'
+// from the start of the file (a quoted field's embedded newlines count, so this is
+// the line an editor shows the row starting on).
+[[noreturn]] static void throw_ragged_row(const uint8_t* file_base, const uint8_t* row,
+                                          uint32_t fields, uint32_t num_cols) {
+    size_t line = 1;
+    for (const uint8_t* p = file_base; p < row; ++p)
+        if (*p == '\n') ++line;
+    throw std::runtime_error(
+        "read_csv: line " + std::to_string(line) + " has " + std::to_string(fields) +
+        (fields == 1 ? " field" : " fields") + " but the header has " +
+        std::to_string(num_cols) + "; every row must have the same number of fields");
+}
+
 // ---------------------------------------------------------------------------
 // stream_build_range — single streaming pass for one thread's byte range.
 // ---------------------------------------------------------------------------
 
 static void stream_build_range(
+    const uint8_t*               file_base,     // start of the file (line numbers)
+    uint32_t                     num_cols,      // header field count
     const uint8_t*               body,
     size_t                       range_start,
     size_t                       range_end,
@@ -455,6 +482,7 @@ static void stream_build_range(
     bool     cr_ended         = false;
     uint32_t current_col      = 0;
     size_t   req_idx          = 0;
+    uint32_t row_start        = 0;   // chunk offset of the current row's first field
 
     // commit_row: write pending field views to output buffers.
     auto commit_row = [&]() {
@@ -563,6 +591,7 @@ static void stream_build_range(
 
     // emit_field: called when a field boundary is found.
     auto emit_field = [&](uint32_t value_end) {
+        if (current_col == 0) row_start = field_start;
         while (req_idx < n_req && req_ords[req_idx] < current_col) ++req_idx;
 
         if (req_idx < n_req && req_ords[req_idx] == current_col) {
@@ -606,16 +635,11 @@ static void stream_build_range(
         state = S::FIELD_START;
     };
 
-    // end_row: handle missing trailing fields then commit or discard.
+    // end_row: refuse a ragged row, then commit or discard. With exactly num_cols
+    // fields every requested ordinal (< num_cols) has been emitted.
     auto end_row = [&]() {
-        // Fill missing trailing requested columns with null
-        while (req_idx < n_req) {
-            const int pi = proj_idx_map[req_idx];
-            // Missing field is NULL: UNKNOWN under every comparison operator.
-            if (!preds_for_req[req_idx].empty()) row_pred_ok = false;
-            if (pi >= 0) pending[pi] = {nullptr, 0, true};
-            ++req_idx;
-        }
+        if (current_col != num_cols)
+            throw_ragged_row(file_base, chunk + row_start, current_col, num_cols);
 
         if (row_pred_ok) commit_row();
 
@@ -1076,6 +1100,11 @@ StreamResult build_columns_streaming(
         p.bool_val = false;
         p.i64      = 0;
         p.f64      = 0.0;
+        if (t == DRAKEN_UUID) {
+            p.mode = PRED_UUID;
+            rugo::uuid_literal_bytes(cp.column, cp.value, p.uuid);
+            continue;
+        }
         if (!rugo::literal_contract_covers(t, lk))  p.mode = PRED_OTHER;
         else if (rugo::declared_is_string(t))       p.mode = PRED_STRING;
         else if (t == DRAKEN_BOOL)                  p.mode = PRED_BOOL;
@@ -1119,6 +1148,7 @@ StreamResult build_columns_streaming(
 
     auto run_thread = [&](size_t t) {
         stream_build_range(
+            buffer, num_cols,
             ranges[t].base, ranges[t].start, ranges[t].end,
             ctx, request_ordinals, proj_idx_map, preds_for_req, preds,
             proj_col_names, thread_bufs[t]);

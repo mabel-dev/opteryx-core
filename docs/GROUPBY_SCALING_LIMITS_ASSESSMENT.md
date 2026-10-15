@@ -162,10 +162,11 @@ Q16 0.87×, Q17 0.90×, Q13 0.95×, Q34 0.95×, Q33 0.99× (raw mode), Q08 contr
   at sink time. They do gain in finalize (Q33 Σ merge −6%), since the merge
   probes. Raw mode is also the heaviest flusher (Q33: 805 flushes), so it carries
   most of B's residue.
-- **Routed prototype (`OPTERYX_GB_ROUTED`):** `owner(p) = p % nworkers` makes
-  64-partition granularity a *build-time* imbalance there. At N=30, owners hold 2
-  or 3 partitions; at N>64, workers own nothing. The tag fix applies unchanged.
-  Not measured: routed covers only `COUNT(*)`.
+- **Routed prototype (`OPTERYX_GB_ROUTED`) — removed 2026-10-15:** while it
+  existed, `owner(p) = p % nworkers` made 64-partition granularity a
+  *build-time* imbalance there (at N=30, owners held 2 or 3 partitions; at
+  N>64, workers owned nothing). Never measured (it covered only `COUNT(*)`);
+  the code has been deleted, so this no longer applies.
 
 ## Reproduction
 

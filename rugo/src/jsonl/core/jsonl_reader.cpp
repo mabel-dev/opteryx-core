@@ -293,6 +293,7 @@ std::vector<PrefilterSegment> prefilter_plan_segments(
 // ---------------------------------------------------------------------------------
 
 #include "predicate_literal.hpp"   // LITERAL_STRING
+#include "declared_type.hpp"       // parse_declared_type (declared UUID never prefilters)
 #include "nested_column.hpp"       // parse_column_spec
 
 namespace rugo::_jsonl {
@@ -524,6 +525,14 @@ bool choose_prefilter_plan(const uint8_t* buffer, size_t length, const ParseCont
         // `=` (one literal) or IN (any of its members). Every literal must be a string: a
         // non-string literal is a type mismatch against a string column, and prefiltering
         // on it would drop every record before evaluate_predicate could raise.
+        // A column DECLARED UUID never prefilters: the prefilter matches the literal's
+        // raw text, and UUID text is case-insensitive — `= 'ffff...'` would drop a
+        // stored "FFFF..." line before evaluate_predicate's byte compare saw it.
+        const auto declared = context.explicit_schema.find(pred.column);
+        rugo::DeclaredType dt;
+        if (declared != context.explicit_schema.end() &&
+            rugo::parse_declared_type(declared->second, &dt) && dt.type == DRAKEN_UUID)
+            continue;
         std::vector<const Predicate*> literals;
         if (pred.op == kOpEq && pred.members.empty()) literals.push_back(&pred);
         else if (pred.op == kOpIn && !pred.members.empty())

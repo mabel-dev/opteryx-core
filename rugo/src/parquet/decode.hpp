@@ -413,6 +413,10 @@ struct ChunkCacheRequest {
   int64_t     chunk_offset;  // absolute file offset of the chunk's first byte
   bool        admit;         // false: use hits, never fill (compaction)
   bool        remote;        // fetched over the network: a refill pays a re-fetch
+  // `data` holds every byte of the chunk. False when page pruning fetched only
+  // the surviving runs: the bytes between them are absent. An UNCOMPRESSED
+  // remote chunk is cached as its fetched bytes, so it fills only when whole.
+  bool        whole;
   // A hit the IO planner already pinned (it skipped the GET, so `data` may hold
   // no bytes for this chunk). Borrowed: the planner owns the pin and releases it.
   const DrakenChunkEntry* pinned = nullptr;

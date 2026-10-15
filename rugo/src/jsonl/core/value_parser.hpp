@@ -28,7 +28,10 @@ inline bool parse_bool_wrapper(const uint8_t* buffer, uint32_t start, uint32_t e
 // string literal needs no parse), and cache the result on the Predicate. Call once
 // per predicate before the per-record evaluation loop — evaluate_predicate() reads
 // the cached fields instead of re-parsing pred.value on every call.
-void prepare_predicate(Predicate& pred);
+// `explicit_schema`: a predicate on a column declared UUID is prepared to compare
+// parsed UUID bytes (Predicate::is_uuid); a non-UUID literal raises.
+void prepare_predicate(Predicate& pred,
+                       const std::map<std::string, std::string>& explicit_schema);
 
 // "JSON string", "JSON number", ... for a FieldSpan::type, for error messages.
 const char* json_value_kind_name(uint8_t value_type);

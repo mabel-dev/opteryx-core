@@ -1,6 +1,7 @@
 #include "value_parser.hpp"
 #include "fast_parsers.hpp"
 #include "predicate_literal.hpp"
+#include "declared_type.hpp"     // parse_declared_type: a predicate on a declared UUID column
 #include "json_canonical.hpp"   // jsoncanon::render_nested (nested `->>` predicates)
 #include <vector>
 #include <cstring>
@@ -110,9 +111,21 @@ bool literal_fits_json_value(uint8_t value_type, uint8_t kind) {
     }
 }
 
-void prepare_predicate(Predicate& pred) {
-    for (auto& m : pred.members) prepare_predicate(m);
+void prepare_predicate(Predicate& pred,
+                       const std::map<std::string, std::string>& explicit_schema) {
+    for (auto& m : pred.members) prepare_predicate(m, explicit_schema);
     if (pred.op >= 6) return;   // IN / NOT IN (members prepared above), IS [NOT] NULL
+    const auto declared = explicit_schema.find(pred.column);
+    rugo::DeclaredType dt;
+    if (declared != explicit_schema.end() && rugo::parse_declared_type(declared->second, &dt) &&
+        dt.type == DRAKEN_UUID) {
+        if (pred.kind != rugo::LITERAL_STRING)
+            throw std::invalid_argument(rugo::literal_mismatch_message(
+                pred.column, declared->second, pred.kind, pred.value));
+        pred.is_uuid = true;
+        rugo::uuid_literal_bytes(pred.column, pred.value, pred.uuid_bytes);
+        return;
+    }
     const uint8_t* v = reinterpret_cast<const uint8_t*>(pred.value.c_str());
     const uint32_t e = pred.value.empty() ? 0 : static_cast<uint32_t>(pred.value.length() - 1);
     // Parse ONLY as the literal's kind. Sniffing the text instead is what made the
@@ -155,6 +168,20 @@ bool evaluate_scalar(
             pred.column, json_value_kind_name(value_span.type), pred.kind, pred.value));
 
     const uint32_t fend = value_span.value_start + value_span.value_width - 1;
+
+    if (pred.is_uuid) {
+        // A declared UUID column: the field's text parsed with the same strict parser
+        // the column is built with, compared as bytes (case-insensitive by construction).
+        uint8_t fv[16];
+        if (!draken::ops::uuid_parse(reinterpret_cast<const char*>(buffer + value_span.value_start),
+                                     value_span.value_width, fv))
+            throw std::invalid_argument(
+                "explicit_schema: column '" + pred.column + "' value '" +
+                std::string(reinterpret_cast<const char*>(buffer + value_span.value_start),
+                            value_span.value_width < 64u ? value_span.value_width : 64u) +
+                "' is not a valid UUID (declared type mismatch)");
+        return rugo::apply_op_uuid(pred.op, fv, pred.uuid_bytes);
+    }
 
     switch (static_cast<ValueType>(value_span.type)) {
         case ValueType::Integer:

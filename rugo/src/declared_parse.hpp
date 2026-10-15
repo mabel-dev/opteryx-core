@@ -53,6 +53,7 @@
 
 #include "declared_type.hpp"
 #include "core/ipv4.h"
+#include "core/uuid_text.h"   // uuid_parse — the one UUID text form
 #include "core/iso_datetime.h"
 #include "core/decimal_text.h"
 #include "ops/float_ops.h"   // fp_canon — ingestion canonicalisation of -0.0 / NaN
@@ -77,7 +78,8 @@ inline size_t declared_elem_size(DrakenType t) noexcept {
         case DRAKEN_FLOAT64:
         case DRAKEN_TIMESTAMP64:
         case DRAKEN_DECIMAL:     return 8;
-        case DRAKEN_DECIMAL128:  return 16;
+        case DRAKEN_DECIMAL128:
+        case DRAKEN_UUID:        return 16;
         default:                 return 0;   // string family / not fixed width
     }
 }
@@ -292,6 +294,10 @@ inline bool declared_parse_into(const DeclaredType& dt, const uint8_t* p, uint32
             }
             return true;
         }
+        case DRAKEN_UUID:
+            // Strict: exactly 8-4-4-4-12 hex, either case (docs/UUID_TYPE_DESIGN.md U5).
+            return draken::ops::uuid_parse(reinterpret_cast<const char*>(p), len,
+                                           static_cast<uint8_t*>(buffer) + static_cast<size_t>(index) * 16u);
         default:
             break;
     }

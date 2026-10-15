@@ -2,7 +2,7 @@
 CSV predicate pushdown under SQL three-valued logic.
 
 A comparison against NULL is UNKNOWN and a filter drops UNKNOWN rows, so a
-NULL field (empty, quoted-empty, or missing trailing field) must satisfy NO
+NULL field (empty or quoted-empty) must satisfy NO
 comparison operator -- `!=` included. This matches rugo.parquet (Draken compare
 kernels + filter_mask) and rugo.jsonl.
 """
@@ -60,16 +60,12 @@ def test_empty_last_field_is_null_for_every_operator(kind, op):
     assert r["columns"][0].to_pylist() == _expected(values, op, literal)
 
 
-@pytest.mark.parametrize("kind", sorted(COLUMNS))
 @pytest.mark.parametrize("op", sorted(OPS))
-def test_missing_trailing_field_is_null_for_every_operator(kind, op):
-    # Short rows: the predicate column is absent entirely (end_row fill path).
-    texts, values, literal = COLUMNS[kind]
-    lines = [f"{i},{t}" if t != "" else f"{i}" for i, t in enumerate(texts)]
-    csv = ("k,v\n" + "".join(line + "\n" for line in lines)).encode()
-    r = read_csv(csv, predicates=[("v", op, literal)])
-    assert r["success"]
-    assert r["columns"][1].to_pylist() == _expected(values, op, literal)
+def test_missing_trailing_field_is_refused(op):
+    # A short row is ragged: refused with its line number, never NULL-padded.
+    csv = b"k,v\n0,1\n1\n2,3\n"
+    with pytest.raises(RuntimeError, match="line 3 has 1 field but the header has 2"):
+        read_csv(csv, predicates=[("v", op, 3)])
 
 
 @pytest.mark.parametrize("op", sorted(OPS))

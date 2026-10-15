@@ -556,3 +556,53 @@ def test_late_mismatch_with_threading_still_raises():
     csv = _late_mismatch_csv(good_rows=5000, bad_value="notanumber")
     with pytest.raises(RuntimeError, match="val"):
         read_csv(csv, infer_sample_size=3, use_threads=True)
+
+
+# ── Ragged rows: a field count that differs from the header fails loud ──────────
+
+
+def test_ragged_short_row_names_its_line():
+    with pytest.raises(RuntimeError, match="line 3 has 2 fields but the header has 3"):
+        read_csv(b"a,b,c\n1,2,3\n4,5\n7,8,9\n")
+
+
+def test_ragged_long_row_names_its_line():
+    with pytest.raises(RuntimeError, match="line 2 has 4 fields but the header has 3"):
+        read_csv(b"a,b,c\n1,2,3,4\n")
+
+
+def test_ragged_row_refused_even_when_not_projected_or_filtered_out():
+    # The check is on the row, not on the requested columns or predicate survivors.
+    csv = b"a,b,c\n1,2,3\n9\n"
+    with pytest.raises(RuntimeError, match="line 3 has 1 field"):
+        read_csv(csv, columns=["a"])
+    with pytest.raises(RuntimeError, match="line 3 has 1 field"):
+        read_csv(csv, predicates=[("a", "==", 1)])
+
+
+def test_ragged_line_counts_quoted_embedded_newlines():
+    # The quoted field spans lines 2-3, so the short row starts on physical line 4.
+    with pytest.raises(RuntimeError, match="line 4 has 1 field"):
+        read_csv(b'a,b\n1,"x\ny"\n2\n')
+
+
+def test_ragged_final_row_without_trailing_newline():
+    with pytest.raises(RuntimeError, match="line 3 has 2 fields but the header has 3"):
+        read_csv(b"a,b,c\n1,2,3\n4,5")
+
+
+def test_ragged_row_on_worker_thread_raises():
+    rows = "".join(f"{i},{i}\n" for i in range(20000))
+    csv = ("a,b\n" + rows + "x\n" + rows).encode()
+    with pytest.raises(RuntimeError, match="line 20002 has 1 field"):
+        read_csv(csv, use_threads=True)
+
+
+def test_blank_line_in_multi_column_file_is_ragged():
+    with pytest.raises(RuntimeError, match="line 3 has 1 field"):
+        read_csv(b"a,b\n1,2\n\n3,4\n")
+
+
+def test_trailing_delimiter_is_an_extra_field():
+    with pytest.raises(RuntimeError, match="line 2 has 3 fields but the header has 2"):
+        read_csv(b"a,b\n1,2,\n")

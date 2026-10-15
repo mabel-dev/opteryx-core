@@ -35,6 +35,12 @@ struct Predicate {
     bool    pred_parsed_float = false;
     bool    pred_bool = false;
     bool    pred_parsed_bool = false;
+
+    // The column is DECLARED UUID (explicit_schema): compare 16 parsed bytes, never
+    // the raw text (UUID text is case-insensitive). Set, with the literal's bytes, by
+    // prepare_predicate when the context declares the column UUID.
+    bool    is_uuid = false;
+    uint8_t uuid_bytes[16] = {};
 };
 
 // One line of the buffer, [start, end): `end` is the position of its newline, or the end

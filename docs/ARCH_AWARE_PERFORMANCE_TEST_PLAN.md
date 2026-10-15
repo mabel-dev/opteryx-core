@@ -155,8 +155,9 @@ code is written.
 - **Gap:** we flush/queue partitions and rehash Carchar on growth; Pivot stops
   probing past 32k entries and scatters rows into radix buffers (no probe),
   aggregating in a cache-resident merge.
-- **Overlap:** our raw mode (`kGBRawSwitchRatio`) and the routed prototype
-  (`OPTERYX_GB_ROUTED`) cover part of this. Phase-1 constant sweeps come first;
+- **Overlap:** our raw mode (`kGBRawSwitchRatio`) covers part of this (the
+  routed `OPTERYX_GB_ROUTED` prototype that also overlapped was removed
+  2026-10-15). Phase-1 constant sweeps come first;
   only build if the profile shows probe cost on high-NDV int keys (Q16/Q17/Q32/Q33
   shapes) after re-tuning.
 - **Arch angle:** scatter-vs-probe crossover depends on L2 size — expect

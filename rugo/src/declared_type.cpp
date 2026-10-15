@@ -154,6 +154,14 @@ bool parse_declared_type(const std::string& name, DeclaredType* out) {
         return true;
     }
 
+    // UUID — strict 36-char 8-4-4-4-12 text (draken/core/uuid_text.h), stored as
+    // its 16 bytes. Only declared: a uuid-shaped string is otherwise VARCHAR.
+    if (u == "UUID") {
+        out->type = DRAKEN_UUID;
+        out->logical_kind = LK_NONE;
+        return true;
+    }
+
     // VARIANT — a JSON object or array held as JSON text (JSONL only; see the
     // header). Same German-string storage as VARCHAR, distinct tag.
     if (u == "VARIANT") {
@@ -196,7 +204,7 @@ bool parse_declared_type(const std::string& name, DeclaredType* out) {
 const char* declared_type_vocabulary() {
     return "INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, FLOAT32, "
            "FLOAT64, BOOL, VARCHAR, DATE, TIMESTAMP[s|ms|us|ns], DECIMAL(p, s), "
-           "IPV4 (aliases: INTEGER/INT/BIGINT, TINYINT, SMALLINT, DOUBLE/FLOAT, "
+           "IPV4, UUID (aliases: INTEGER/INT/BIGINT, TINYINT, SMALLINT, DOUBLE/FLOAT, "
            "REAL, STRING/TEXT, BOOLEAN); JSONL only: VARIANT, "
            "ARRAY<INT64|UINT64|FLOAT64|BOOL|VARCHAR>";
 }

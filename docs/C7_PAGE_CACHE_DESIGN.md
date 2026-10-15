@@ -138,7 +138,9 @@ Option C detail:
   cheap locally, so this matters only if T0 is ever added.
 - DATA_PAGE_V2: only the values region is compressed. The entry holds only the
   decompressed values region; the levels are read from the chunk as today.
-- Uncompressed columns (`codec == 0`): never cached, there is nothing to save.
+- Uncompressed columns (`codec == 0`): never cached LOCALLY, there is nothing to
+  save (the OS page cache holds the bytes). **Remote** uncompressed chunks ARE
+  cached (ruled 2026-10-14, see §29): since the GET skip a hit saves the GET.
 
 ## 5. Eviction and admission
 
@@ -1050,3 +1052,51 @@ five queries; every part KEPT — turning it off measured slower):
 Cost weighting only acts on remote chunks (the modelled re-fetch); on hadro with
 no latency it gave +13% hits but no time (re-fetch free), with GCS-like latency
 it is 1.0% faster.
+
+## 29. Remote UNCOMPRESSED chunks — ruled and built (2026-10-14)
+
+**Why.** §4's "codec 0: never cached, nothing to save" predates the GET skip
+(docs/C7_GET_SKIP_AND_DECODED_CACHE_DESIGN.md, Part A). Since then a remote hit
+saves the GET. Profiled on `aistor-rugo-split-10`: rugo's writer leaves chunks
+UNCOMPRESSED when compression does not pay — 64 of 160 UserID chunks (10.60 MB),
+all 160 WatchID chunks (80.0 MB), 141 of 160 ClientIP chunks (10.52 MB) — so every
+warm run re-fetched exactly those bytes: ~180 ms on the scan-and-aggregate band,
+~1.1 s on Q31/Q32, against ~20 ms of compute.
+
+**Rulings (architect, 2026-10-14).**
+- D1: remote codec-0 chunks go in C7 (they are the decompressed pages by the
+  letter of D-C7-1; an in-RAM cache, not the 2026-07-10 disk cache).
+- D2: remote only. Locally the OS page cache already holds the bytes.
+- D3: fill when the chunk was fetched WHOLE and decoded successfully; a
+  predicated decode need not have walked every page (the bytes are all there).
+- D4: the existing modelled cost (30 ms + compressed bytes at 60 MB/s), no
+  decompression term; no codec-specific rule.
+
+**Built.**
+- `ChunkCacheRequest::whole` (rugo/src/parquet/decode.hpp): false when page
+  pruning fetched only the surviving runs — the same test `plan_block` uses. Not
+  implied by "no jump plan": a nested column can be fetched sparse with no jump.
+- `plan_block` looks up every codec (a fetch block is remote); the decoder's gate
+  is `codec != 0 || remote`; the local small-chunk pread gate is unchanged.
+- `ChunkPageSource` verbatim mode: no fill slots; `commit` copies the fetched
+  chunk as its own image (headers already say compressed == body), indexed at
+  each header's offset. The hit path (`DecodeFromChunkImage`) is unchanged.
+- Tests: tests/unit/connectors/parquet_io/test_chunk_cache_get_skip.py, 14/14
+  (4 of the 5 new fail on the old build; the local not-cached case passes on
+  both). `make q` and `make slt` pass.
+
+**A/B** (Mac, interleaved, 3 rounds × 43 queries, process per query, 5 runs,
+median of per-process best; scratch/c7codec0/ab.py):
+
+| | A (before) | B (codec-0 remote cached) |
+|---|---|---|
+| sum of best, ms | 7347 | **2616** (0.356) |
+| sum of first runs, ms | 34575 | 34437 (cold unchanged) |
+| vs DuckDB iceberg_scan on the same table (sum / geomean) | 3.30x / 2.59x | **1.17x / 1.15x** |
+
+Biggest moves: Q31 1098 → 35 ms, Q32 1183 → 76, Q04 179 → 28, Q10 203 → 24.
+Not moved: Q19–Q21 (pushed predicates; Q19 had zero hits even before — a
+separate path), Q28.
+
+**Cost.** Uncompressed chunks occupy their wire size: WatchID alone would be
+~800 MB on full ClickBench. Admission/eviction (§27) is unchanged.

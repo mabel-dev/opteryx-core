@@ -203,7 +203,7 @@ pass): `kGBArenaChunk` unused (:1904); `OPTERYX_GB_DICT` and
 warns about at :3526); stale comments at :2668–2675 and :3199–3206; `put_long`
 returns a `uint32_t` arena offset with no overflow check (:197); `errs[tid].msg`
 stores a pointer into a mutable string (:5881); `OPTERYX_GB_ROUTED` prototype
-(COUNT(*) only) still in tree — finish or kill; `OPTERYX_GB_MERGE_THREADS` marked
+(COUNT(*) only) — killed, removed from the tree 2026-10-15; `OPTERYX_GB_MERGE_THREADS` marked
 temporary since 2026-08-29.
 
 ---

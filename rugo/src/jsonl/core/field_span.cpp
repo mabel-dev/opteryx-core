@@ -34,7 +34,7 @@ InterpreterResult interpret_range(
     // interpret_jsonl runs once per newline-range (interpret_jsonl_threaded calls it once
     // per thread chunk, typically single-digit count), so this is O(threads), never O(rows).
     std::vector<Predicate> prepared_predicates = context.predicates;
-    for (auto& p : prepared_predicates) prepare_predicate(p);
+    for (auto& p : prepared_predicates) prepare_predicate(p, context.explicit_schema);
 
     // Wanted set: every output column (capture slot = its output index), then each
     // predicate column not already among them (capture slots past the outputs). `specs`

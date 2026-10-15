@@ -530,8 +530,10 @@ int32_t PreScanPages(
 // indexed by each page header's offset in `data`. Only when a header walk proves
 // every compressed page has its slot (partial chunks are not cached — any skipped
 // page, early exit or error leaves a gap and the fill is dropped).
-// Otherwise (no request, uncompressed column, cache off): the scratch path,
-// exactly as before.
+// A REMOTE UNCOMPRESSED chunk fetched whole is already such an image: after a
+// successful decode commit() copies its bytes verbatim (no slots, no rewrite).
+// Otherwise (no request, local uncompressed column, cache off): the scratch
+// path, exactly as before.
 namespace {
 // Modelled cost of re-fetching a remote chunk (ChunkPageSource): a rough form,
 // not a measurement — 30 ms per GET plus 60 MB/s.
@@ -596,6 +598,18 @@ class ChunkPageSource {
     if (req == nullptr || !fill_ok || !req->admit || skips_pages ||
         col->total_uncompressed_size <= 0)
       return;
+    if (col->codec == 0) {
+      // An UNCOMPRESSED chunk reaches here only when remote (the gate in
+      // DecodeColumnFromChunk). It is already an image: commit copies the
+      // fetched bytes as they are. Its whole cost is the re-fetch; there is no
+      // decompression. Bytes absent between page-pruned runs cannot be copied.
+      if (!req->whole || col->total_compressed_size <= 0) return;
+      verbatim_ = true;
+      cost_ns_.store(kRemoteFetchFixedNs +
+                         col->total_compressed_size * 1000000000LL / kRemoteFetchBytesPerSec,
+                     std::memory_order_relaxed);
+      return;
+    }
     cap_ = static_cast<size_t>(col->total_uncompressed_size);
     fill_ = draken_cc_fill_alloc(static_cast<int64_t>(cap_));
     // A remote chunk's refill also pays a re-fetch. Modelled, not measured
@@ -666,6 +680,10 @@ class ChunkPageSource {
   // After a successful decode of the whole chunk `data_[0, size)`: build the
   // uncompressed image from the raw headers + the filled bodies and insert it.
   void commit(size_t size) {
+    if (verbatim_) {
+      commit_verbatim(size);
+      return;
+    }
     if (fill_ == nullptr) return;
     // Fill slots by the chunk offset of their compressed region.
     std::vector<std::pair<int64_t, size_t>> have;   // (region offset, triple index)
@@ -757,9 +775,41 @@ class ChunkPageSource {
   }
 
  private:
+  // The UNCOMPRESSED chunk `data_[0, size)` as its own image: the bytes verbatim,
+  // each page indexed at its header's offset (image offset == chunk offset). The
+  // headers already say compressed size == body, so nothing is rewritten.
+  void commit_verbatim(size_t size) {
+    verbatim_ = false;
+    std::vector<int64_t> img_index;
+    const uint8_t* cursor = data_;
+    const uint8_t* end = data_ + size;
+    while (cursor < end) {
+      TInput in{cursor, end};
+      PageHeader h = ParsePageHeader(in);
+      const uint8_t* body = in.p;
+      if (body > end) return;
+      if (h.page_type != 0 && h.page_type != 2 && h.page_type != 3) return;
+      const size_t csize = static_cast<size_t>(h.compressed_page_size);
+      if (csize > static_cast<size_t>(end - body)) return;
+      img_index.push_back(static_cast<int64_t>(cursor - data_));
+      img_index.push_back(static_cast<int64_t>(cursor - data_));
+      img_index.push_back(static_cast<int64_t>(body + csize - cursor));
+      cursor = body + csize;
+    }
+    if (img_index.empty()) return;
+    uint8_t* image = draken_cc_fill_alloc(static_cast<int64_t>(size));
+    std::memcpy(image, data_, size);
+    // Ownership of the image passes to the cache whether it admits it or not.
+    draken_cc_insert(req_->path, req_->path_len, req_->chunk_offset, image,
+                     static_cast<int64_t>(size), img_index.data(),
+                     static_cast<int32_t>(img_index.size() / 3),
+                     cost_ns_.load(std::memory_order_relaxed));
+  }
+
   const ChunkCacheRequest* req_;
   const uint8_t* data_;
   bool predicated_ = false;
+  bool verbatim_ = false;   // a remote UNCOMPRESSED chunk: commit copies data_ whole
   uint8_t* fill_ = nullptr;
   size_t cap_ = 0;
   size_t used_ = 0;
@@ -874,7 +924,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
   // pages by design, so it still never fills.
   const bool predicated = skip_pred != nullptr || search != nullptr || row_mask != nullptr;
   int fill_ok = 0;
-  if (cache != nullptr && target_col->codec != 0 && draken_cc_enabled()) {
+  // An UNCOMPRESSED chunk is cached only when remote: a hit saves its GET.
+  // Locally the OS page cache already holds those bytes; a copy would only
+  // double them.
+  if (cache != nullptr && (target_col->codec != 0 || cache->remote) && draken_cc_enabled()) {
     // HIT: decode the cached image; `file_data` is never read. An entry the IO
     // planner pinned (cache->pinned) was fetched-around — there may be no bytes.
     const DrakenChunkEntry* hit = cache->pinned;

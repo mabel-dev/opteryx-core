@@ -3503,41 +3503,6 @@ struct GBPartition : GBPartData {
 };
 
 
-// ---- ROUTED PROTOTYPE (2026-08-29, behind OPTERYX_GB_ROUTED=1) --------------------
-// Ownership routing instead of per-worker partial aggregation + merge. Each worker
-// OWNS a fixed set of partitions (owner(p) = p % nworkers); a worker that hashes a
-// row belonging to someone else's partition hands the owner a reference to the
-// morsel plus the row ids, and the owner does the probe. Every key is therefore
-// probed exactly ONCE globally instead of once per worker, and no two tables ever
-// hold the same group — so finalize has nothing to merge.
-//
-// NOTHING IS COPIED. MorselPtr is a shared_ptr and CxxMorsel is immutable here, so
-// a routed batch costs one refcount plus 4 bytes per row (the row id) and 8 (its
-// hash) — never the row data. The morsel dies when the last inbox entry referencing
-// it is consumed, which is refcount-automatic; the only thing under our control is
-// how many are alive at once, and that is the drain policy below.
-// The EXCHANGE unit (v2 — replaces the mask-passing GBRouteEntry, which was
-// measured 2026-08-29 to cost 2.1x sink CPU: the owner gathered key bytes by
-// random row-id out of a FOREIGN core's morsel, one cold cross-core miss per
-// probe). A batch is a self-contained per-morsel PARTIAL AGGREGATE, materialized
-// by the PRODUCER while the morsel is hot in its cache: one tuple per distinct
-// key (dict-shaped morsels — probe-once-per-distinct survives the exchange) or
-// per row (dense morsels, count=1 — pre-aggregation buys nothing at high NDV).
-// The owner consumes dense sequential arrays and never touches the source
-// morsel, so morsel lifetime ends at the scan boundary — nothing to manage.
-struct GBXBatch {
-    std::vector<uint64_t> hashes;             // one per tuple
-    std::vector<int64_t>  counts;             // rows folded into each tuple
-    std::vector<GroupKeyColumn> keycols;      // key VALUES per tuple (emitted keys only)
-};
-// One inbox per worker. A plain mutex + deque: a push is once per morsel per
-// OWNER (not per partition, not per row). If contention shows up,
-// morsel_queue.hpp already has the bounded moodycamel MPSC to graduate to.
-struct GBInbox {
-    std::mutex mtx;
-    std::deque<GBXBatch> q;
-};
-
 struct GroupByLocal : LocalSinkState {
     std::array<GBPartition, kGBParts> parts;
     std::vector<AggColMeta> meta;
@@ -3569,12 +3534,6 @@ struct GroupByLocal : LocalSinkState {
     std::vector<uint8_t>  dict_part;  // per code: partition index
     std::vector<uint32_t> dict_gid;   // per code: group id within that partition
     std::vector<uint64_t> cd_vhash;   // per row: value hash for a CountDistinct spec
-    // exchange: this worker's index, per-owner batches under construction, and
-    // per-morsel scratch (distinct-value counts + representatives on the dict path)
-    int widx = -1;
-    std::vector<GBXBatch> xstage;     // one per owner worker; moved out per morsel
-    std::vector<int64_t>  xcnt;       // dict path: rows per distinct code this morsel
-    std::vector<uint32_t> xrep;       // dict path: representative row per code
     // Every spec is COUNT(*) or a row-kind (gb_kind_row_resolvable) without a
     // DISTINCT operand: the shapes the dict code pass and the direct array cover.
     bool row_kinds_only = false;
@@ -3594,17 +3553,6 @@ struct GroupByGlobal : GlobalSinkState {
     std::mutex mtx;
     // Queued worker partition DATA (deque: queuing never moves what is already queued).
     std::array<std::deque<GBPartData>, kGBParts> pending;
-    // ---- routed prototype ----
-    bool routed = false;
-    int  nworkers = 1;
-    bool route_init = false;
-    std::vector<std::unique_ptr<GBInbox>> inbox;   // one per worker
-    std::atomic<int> widx_next{0};
-    // Workers still able to PUSH. Decremented once as each worker enters combine();
-    // at zero no further push can occur, so one last drain per worker is sufficient.
-    // Out-of-band like morsel_queue.hpp's finish counter, and for the same reason:
-    // an in-band sentinel races across producers.
-    std::atomic<int> routing_live{0};
     std::vector<AggColMeta> meta;
     std::vector<GBKind> kinds;
     std::vector<KeyColMeta> key_meta;
@@ -3740,9 +3688,11 @@ struct GroupBySink : Sink {
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GroupByGlobal>();
     }
-    std::unique_ptr<LocalSinkState> make_local(GlobalSinkState& gs) override {
+    std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
         auto l = std::make_unique<GroupByLocal>();
-        // Read per QUERY (FROZENcfg trap, see the routed flag below).
+        // Read per QUERY, never a process-lifetime static latch: a static froze
+        // whichever value the process's first grouped query saw, silently turning
+        // every arm of an in-process A/B into the first arm (the FROZENcfg trap).
         {
             const char* v = getenv("OPTERYX_GB_DA");
             if (v != nullptr && v[0] == '0' && v[1] == '\0') l->da_mode = -1;
@@ -3753,104 +3703,7 @@ struct GroupBySink : Sink {
             for (auto& P : l->parts) P.use_parvi = true;
             groupby_tel::parvi_sinks.fetch_add(1, std::memory_order_relaxed);
         }
-        // Routed prototype: arm the inboxes here, not in make_global — exec_dop is
-        // written by run_pipeline_impl AFTER make_global returns, and make_local runs
-        // once per worker after that, so this is the first point the width is known.
-        auto& g = static_cast<GroupByGlobal&>(gs);
-        {
-            std::lock_guard<std::mutex> lk(g.mtx);
-            if (!g.route_init) {
-                // Read per QUERY, never a process-lifetime static latch: a static
-                // here froze whichever value the process's first grouped query saw,
-                // which silently turned every arm of an in-process A/B into the
-                // first arm's configuration (the FROZENcfg trap, reproduced 2026-08-29
-                // — three sweeps voided).
-                const char* v = getenv("OPTERYX_GB_ROUTED");
-                const bool routed_on = v != nullptr && v[0] == '1' && v[1] == '\0';
-                g.nworkers = g.exec_dop > 0 ? g.exec_dop : 1;
-                g.routed = routed_on && g.nworkers > 1;
-                if (g.routed) {
-                    g.inbox.resize(static_cast<size_t>(g.nworkers));
-                    for (auto& b : g.inbox) b = std::make_unique<GBInbox>();
-                    g.routing_live.store(g.nworkers, std::memory_order_relaxed);
-                }
-                g.route_init = true;
-            }
-        }
-        if (g.routed) l->widx = g.widx_next.fetch_add(1, std::memory_order_relaxed);
         return l;
-    }
-
-    // owner(p): static partition ownership. Static (not work-stealing) is the whole
-    // point — a partition has ONE writer, so its table needs no lock and its adaptive
-    // parvi/medius front maps stay single-threaded exactly as they are today.
-    static inline int route_owner(size_t p, int nworkers) {
-        return static_cast<int>(p % static_cast<size_t>(nworkers));
-    }
-
-    // Owner-side init when a batch arrives before this worker has seen a morsel
-    // of its own: key/spec metadata was published to the global by the producer
-    // BEFORE it enqueued anything (see sink()), so it is always there to copy.
-    void init_local_from_global(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
-        std::lock_guard<std::mutex> lk(g.mtx);
-        if (!g.init) {
-            err.code = 1;
-            err.msg = "GROUP BY exchange: batch arrived before any producer "
-                      "published key metadata — ordering bug, fail loud";
-            return;
-        }
-        l.meta = g.meta;
-        l.kinds = g.kinds;
-        l.key_meta = g.key_meta;
-        l.has_rows = g.has_rows;
-        for (size_t p = 0; p < kGBParts; ++p) type_keycols(l.parts[p], l.key_meta);
-        l.init = true;
-    }
-
-    // Fold one exchange tuple stream into the partitions this worker owns. Every
-    // array read here is dense and sequential; the only random access is the
-    // probe into the owner's own table — the one intrinsic cost of building it.
-    void fold_batch(GroupByLocal& l, const GBXBatch& b, ErrCtx& err) {
-        const size_t nt = b.hashes.size();
-        const size_t nk = b.keycols.size();
-        for (size_t t = 0; t < nt; ++t) {
-            const uint64_t h = b.hashes[t];
-            GBPartition& P = l.parts[gb_part(h)];
-            int64_t gid;
-            const bool is_new =
-                P.find_or_insert_group(h, static_cast<int64_t>(P.hashes.size()), gid);
-            if (is_new) {
-                P.hashes.push_back(h);
-                P.grows.push_back(0);   // grows tracks size exactly — sampled hot as
-                                        // a per-tuple resize (memset per element)
-                for (size_t j = 0; j < nk; ++j) {
-                    P.keycols[j].append_from(b.keycols[j], t, err);
-                    if (err.code != 0) return;
-                }
-            }
-            P.grows[static_cast<size_t>(gid)] += b.counts[t];
-        }
-    }
-
-    // Consume everything currently in this worker's inbox. Called from sink() on
-    // every morsel (keeps queues shallow) and from combine() as the quiesce drain.
-    void drain_inbox(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
-        GBInbox& box = *g.inbox[static_cast<size_t>(l.widx)];
-        for (;;) {
-            GBXBatch b;
-            {
-                std::lock_guard<std::mutex> lk(box.mtx);
-                if (box.q.empty()) return;
-                b = std::move(box.q.front());
-                box.q.pop_front();
-            }
-            if (!l.init) {
-                init_local_from_global(g, l, err);
-                if (err.code != 0) return;
-            }
-            fold_batch(l, b, err);
-            if (err.code != 0) return;
-        }
     }
 
     // Type a partition's per-group key store from the captured key metadata. Called
@@ -4280,11 +4133,10 @@ struct GroupBySink : Sink {
     // The flush trigger, plus the adaptive raw-mode decision it is the natural point
     // for: a flush is where the tables' size is compared to the rows that built them.
     // Groups only — COUNT(DISTINCT) pairs count toward the flush but say nothing
-    // about how well the KEY probe deduplicates. Never in routed mode (its owners
-    // are the only writers of their tables; there is no merge to hand grouping to).
+    // about how well the KEY probe deduplicates.
     void maybe_flush(GroupByGlobal& g, GroupByLocal& l) {
         if (l.entries_total <= kGBFlushEntries) return;
-        if (!l.raw && !g.routed) {
+        if (!l.raw) {
             size_t groups = 0;
             for (size_t p = 0; p < kGBParts; ++p) groups += l.parts[p].size();
             if (static_cast<double>(groups) >
@@ -4543,153 +4395,7 @@ struct GroupBySink : Sink {
         size_t nspecs = specs.size();
         groupby_tel::calls.fetch_add(1, std::memory_order_relaxed);
         l.rows_since_flush += rows;
-
-        // ---- EXCHANGE (v2, behind OPTERYX_GB_ROUTED=1) -----------------------------
-        // Producer materializes per-OWNER partial-aggregate batches while the morsel
-        // is hot in its cache; owners fold dense batches into tables they alone
-        // write. No merge exists (one contributor per partition ⇒ finalize is pure
-        // emit), and the owner never touches a foreign morsel (the v1 mask-passing
-        // transport did, measured at 2.1x sink CPU from cold cross-core gathers).
         auto& g_ = static_cast<GroupByGlobal&>(gs);
-        if (g_.routed) {
-            bool rows_only = l.has_rows;
-            for (size_t s = 0; s < nspecs && rows_only; ++s)
-                if (l.kinds[s] != GBKind::Rows) rows_only = false;
-            if (!rows_only) {
-                // Fail loud rather than quietly running the merge path — a prototype
-                // that silently covers only some shapes reports a comparison it did
-                // not actually run.
-                err.code = 1;
-                err.msg = "OPTERYX_GB_ROUTED covers only COUNT(*) GROUP BY in this "
-                          "prototype; unset it for other aggregate shapes";
-                return SinkResult::CONTINUE;
-            }
-            // Publish key metadata BEFORE anything can be enqueued: an owner that
-            // receives a batch before its own first morsel inits from the global.
-            if (!g_.init) {
-                std::lock_guard<std::mutex> lk(g_.mtx);
-                if (!g_.init) {
-                    g_.meta = l.meta;
-                    g_.kinds = l.kinds;
-                    g_.key_meta = l.key_meta;
-                    g_.has_rows = l.has_rows;
-                    g_.init = true;
-                }
-            }
-            const int W = g_.nworkers;
-            if (l.xstage.empty()) l.xstage.resize(static_cast<size_t>(W));
-            auto stage_keycols_ready = [&](GBXBatch& b) {
-                if (b.keycols.size() == store_key_pos.size()) return;
-                b.keycols.resize(store_key_pos.size());
-                for (size_t j = 0; j < store_key_pos.size(); ++j) {
-                    const KeyColMeta& m = l.key_meta[store_key_pos[j]];
-                    b.keycols[j].set_type(m.type, gb_key_elem_size(m.type, m.logical),
-                                          m.logical);
-                }
-            };
-            // One tuple into own table or a per-owner batch. `count` rows of group
-            // hash `h`, key values at morsel row `rep`.
-            auto emit_tuple = [&](uint64_t h, int64_t count, uint32_t rep,
-                                  ErrCtx& e) -> bool {
-                const size_t pi = gb_part(h);
-                const int owner = route_owner(pi, W);
-                if (owner == l.widx) {
-                    GBPartition& P = l.parts[pi];
-                    int64_t gid;
-                    const bool is_new = P.find_or_insert_group(
-                        h, static_cast<int64_t>(P.hashes.size()), gid);
-                    if (is_new) {
-                        P.hashes.push_back(h);
-                        P.grows.push_back(0);
-                        for (size_t j = 0; j < store_col_idx.size(); ++j) {
-                            P.keycols[j].append_row(in->columns[store_col_idx[j]].view,
-                                                    rep, e, "GROUP BY key value");
-                            if (e.code != 0) return false;
-                        }
-                    }
-                    P.grows[static_cast<size_t>(gid)] += count;
-                    return true;
-                }
-                GBXBatch& b = l.xstage[static_cast<size_t>(owner)];
-                stage_keycols_ready(b);
-                b.hashes.push_back(h);
-                b.counts.push_back(count);
-                for (size_t j = 0; j < store_col_idx.size(); ++j) {
-                    b.keycols[j].append_row(in->columns[store_col_idx[j]].view, rep, e,
-                                            "GROUP BY key value");
-                    if (e.code != 0) return false;
-                }
-                return true;
-            };
-            // Dict-shaped single keys keep probe-once-per-DISTINCT across the
-            // exchange: counts accumulate per code in one hot pass, then ONE tuple
-            // per distinct value travels. Dense/multi-key morsels ship one tuple per
-            // row with count=1 — at the NDV where morsels stop compressing,
-            // per-morsel pre-aggregation has nothing to fold.
-            static const bool gbx_dict_on = []() {
-                const char* v = getenv("OPTERYX_GB_DICT");
-                return !(v != nullptr && v[0] == '0' && v[1] == '\0');
-            }();
-            ShapedKeyHash skh;
-            bool dict = false;
-            if (gbx_dict_on && key_idx.size() == 1) {
-                GROUPBY_TEL_START(_gbX_t0);
-                if (!compute_row_hashes_shaped(in, key_idx, skh, err))
-                    return SinkResult::CONTINUE;
-                GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbX_t0);
-                dict = skh.compressed();
-                if (!dict) {
-                    l.mk_hash.resize(rows);
-                    for (uint32_t i = 0; i < rows; ++i)
-                        l.mk_hash[i] = skh.hashes[skh.codes[i]];
-                    cxx_morsel_delete(skh.owner);
-                    skh.owner = nullptr;
-                }
-            } else {
-                GROUPBY_TEL_START(_gbX_t0);
-                if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
-                    return SinkResult::CONTINUE;
-                GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbX_t0);
-            }
-            if (dict) {
-                struct HmGuard {
-                    CxxMorsel* m;
-                    ~HmGuard() { if (m != nullptr) cxx_morsel_delete(m); }
-                } _hm_guard{skh.owner};
-                const uint32_t D = skh.data_length;
-                l.xcnt.assign(D, 0);
-                l.xrep.assign(D, UINT32_MAX);
-                for (uint32_t i = 0; i < rows; ++i) {
-                    const uint32_t c = skh.codes[i];
-                    l.xcnt[c] += 1;
-                    if (l.xrep[c] == UINT32_MAX) l.xrep[c] = i;
-                }
-                for (uint32_t d = 0; d < D; ++d) {
-                    if (l.xrep[d] == UINT32_MAX) continue;   // code never used
-                    if (!emit_tuple(skh.hashes[d], l.xcnt[d], l.xrep[d], err))
-                        return SinkResult::CONTINUE;
-                }
-            } else {
-                for (uint32_t i = 0; i < rows; ++i) {
-                    if (!emit_tuple(l.mk_hash[i], 1, i, err))
-                        return SinkResult::CONTINUE;
-                }
-            }
-            // Hand every non-empty staged batch to its owner, then consume our own
-            // inbox — the interleaved drain that keeps queues shallow.
-            for (int o = 0; o < W; ++o) {
-                GBXBatch& b = l.xstage[static_cast<size_t>(o)];
-                if (b.hashes.empty()) continue;
-                GBInbox& box = *g_.inbox[static_cast<size_t>(o)];
-                {
-                    std::lock_guard<std::mutex> lk(box.mtx);
-                    box.q.push_back(std::move(b));
-                }
-                b = GBXBatch();
-            }
-            drain_inbox(g_, l, err);
-            return SinkResult::CONTINUE;
-        }
 
         // DIRECT ARRAY: no hash, no probe — see gb_da_key_pass. A morsel outside this
         // worker's layout spills the slot state into the partitions and is hashed
@@ -5103,25 +4809,6 @@ struct GroupBySink : Sink {
     void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx& err) override {
         auto& l = static_cast<GroupByLocal&>(ls);
         auto& g = static_cast<GroupByGlobal&>(gs);
-        if (g.routed) {
-            // QUIESCE. A worker that has entered combine() can no longer push, so once
-            // the count reaches zero no inbox can gain another entry and a single final
-            // drain is provably sufficient. Early finishers keep draining while others
-            // are still routing — that is productive work, not a spin.
-            g.routing_live.fetch_sub(1, std::memory_order_acq_rel);
-            while (g.routing_live.load(std::memory_order_acquire) > 0) {
-                drain_inbox(g, l, err);
-                if (err.code != 0) return;
-                std::this_thread::yield();
-            }
-            drain_inbox(g, l, err);
-            if (err.code != 0) return;
-            if (!l.init) return;   // never saw a morsel and owned nothing
-            // Each partition now has exactly ONE contributor, so finalize's merge loop
-            // (list.size() == 1) degenerates to a pure emit. Nothing else changes.
-            flush_locals(g, l);
-            return;
-        }
         if (!l.init) return;
         if (l.da_mode == 1) {
             da_spill(g, l, err);
@@ -6036,7 +5723,7 @@ struct GroupBySink : Sink {
     void cd_repartition(GroupByGlobal& g, unsigned nt) {
         const size_t nspecs = specs.size();
         g.cd_repart.assign(nspecs, 0);
-        if (g.routed || g.kinds.size() != nspecs) return;
+        if (g.kinds.size() != nspecs) return;
         std::vector<size_t> rs;
         for (size_t s = 0; s < nspecs; ++s)
             if (g.kinds[s] == GBKind::CountDistinct && !specs[s].distinct_operand)

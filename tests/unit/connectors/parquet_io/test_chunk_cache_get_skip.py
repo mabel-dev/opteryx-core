@@ -16,6 +16,10 @@ counted range GET:
     image at the mapped page offsets and answers like the local read;
   * a local repeat scan is served from the image too, same answer as cache off,
     and a small chunk's pread is skipped on a hit;
+  * a remote UNCOMPRESSED chunk is cached too (its fetched bytes ARE the
+    image) so its repeat issues no GET, but only when fetched whole — a
+    page-pruned fetch holds just the surviving runs and fills nothing — and a
+    local uncompressed chunk is never cached (the OS page cache holds it);
   * the cached chunks are neither charged to the prefetch memory ledger nor
     counted by admission (coupled and fetch-ahead paths), and the skips are
     visible in io_scan_diagnostics.
@@ -62,6 +66,20 @@ def _rugo_file(path):
     )
     with open(path, "wb") as f:
         f.write(rp.write_parquet(m, max_rows_per_row_group=R))
+
+
+def _plain_file(path):
+    # UNCOMPRESSED (codec 0), several pages per chunk so a range prunes pages.
+    m = Morsel.from_vectors(
+        [b"a", b"s", b"f"],
+        [vector_from_sequence(list(range(N)), DrakenType.INT64),
+         vector_from_sequence([None if i % 11 == 0 else f"p{i % 89}" for i in range(N)],
+                              DrakenType.VARCHAR),
+         vector_from_sequence([i * 0.25 for i in range(N)], DrakenType.FLOAT64)],
+    )
+    with open(path, "wb") as f:
+        f.write(rp.write_parquet(m, compression="none", max_rows_per_row_group=R,
+                                 max_page_bytes=2048))
 
 
 def _v2_file(path):
@@ -164,15 +182,17 @@ def cache_on():
 @pytest.fixture(scope="module")
 def served():
     with tempfile.TemporaryDirectory() as tmp:
-        for d in ("rugo", "v2"):
+        for d in ("rugo", "v2", "plain"):
             os.makedirs(os.path.join(tmp, d))
         _rugo_file(os.path.join(tmp, "rugo", "part-0.parquet"))
         _v2_file(os.path.join(tmp, "v2", "part-0.parquet"))
+        _plain_file(os.path.join(tmp, "plain", "part-0.parquet"))
         proc, port = _server(tmp)
         try:
             _register_http_workspace("ccgs_rugo", tmp, port, "rugo")
             _register_http_workspace("ccgs_v2", tmp, port, "v2")
-            yield {"rugo": os.path.join(tmp, "rugo"), "v2": os.path.join(tmp, "v2")}
+            _register_http_workspace("ccgs_plain", tmp, port, "plain")
+            yield {d: os.path.join(tmp, d) for d in ("rugo", "v2", "plain")}
         finally:
             proc.kill()
             proc.wait()
@@ -194,6 +214,9 @@ def _local_cache_off(sql, path):
     ("rugo", "SELECT s, COUNT(*) AS c FROM {rel} GROUP BY s"),
     ("v2", "SELECT * FROM {rel}"),
     ("v2", "SELECT s, g FROM {rel} WHERE g IS NULL OR s IS NULL"),
+    ("plain", "SELECT * FROM {rel}"),
+    ("plain", "SELECT s, COUNT(*) AS c FROM {rel} GROUP BY s"),
+    ("plain", "SELECT a, f FROM {rel} WHERE s IS NULL"),
 ])
 def test_repeat_remote_scan_issues_no_data_gets(cache_on, served, arm, sql):
     expected = _local_cache_off(sql, served[arm])
@@ -264,3 +287,40 @@ def test_local_small_chunk_pread_is_skipped_on_a_hit(cache_on, served):
     assert hot["chunk_cache_pread_skipped_chunks"] > 0
     assert hot["chunk_cache_pread_skipped_bytes"] > 0
     assert hot["bytes_fetched"] == 0
+
+
+def test_uncompressed_page_pruned_fetch_fills_nothing(cache_on, served):
+    """A page-pruned remote fetch of an UNCOMPRESSED chunk holds only the
+    surviving page runs, so it is never cached; once a whole fetch has filled the
+    cache, the same pruned scan is served from the image with no data GET."""
+    rel = "ccgs_plain.plain"
+    sql = "SELECT a, s, f FROM {rel} WHERE a BETWEEN 3100 AND 3350"
+    expected = _local_cache_off(sql, served["plain"])
+    assert len(expected) == 251
+    before = chunk_cache_stats()["inserts"]
+    rows, gets, _ = _run(sql.format(rel=rel))
+    assert rows == expected
+    assert gets > 0
+    pruned = _diags(sql.format(rel=rel))
+    assert pruned["page_index_pages_pruned"] > 0, "the range pruned no pages"
+    assert chunk_cache_stats()["inserts"] == before, "a page-pruned fetch filled the cache"
+    _run(f"SELECT * FROM {rel}")
+    filled = chunk_cache_stats()
+    assert filled["inserts"] > before
+    rows, gets, _ = _run(sql.format(rel=rel))
+    assert rows == expected
+    assert gets == 0
+    assert chunk_cache_stats()["hits"] > filled["hits"]
+
+
+def test_local_uncompressed_is_not_cached(cache_on, served):
+    sql = "SELECT s, COUNT(*) AS c FROM {rel} GROUP BY s"
+    expected = _local_cache_off(sql, served["plain"])
+    flush_chunk_cache()
+    before = chunk_cache_stats()
+    for _ in range(2):
+        rows, _, _ = _run(sql.format(rel=f"'{served['plain']}'"))
+        assert rows == expected
+    after = chunk_cache_stats()
+    assert after["inserts"] == before["inserts"]
+    assert after["hits"] == before["hits"]

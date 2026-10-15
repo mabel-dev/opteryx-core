@@ -15,6 +15,17 @@ Usage:
 (`INSTALL avro` once; it is not built in) and writes results.local.avro.json -
 the like-for-like engine comparison for `make clickbench-avro`.
 
+`--aistor-table` reads an Iceberg table in the AIStor `clickbench` namespace
+(e.g. hits_rugo_typed_split_10) - the SAME table the opteryx
+`--variant aistor-*` runs read - and writes results.aistor.<table>.json, the
+like-for-like engine comparison for those variants. DuckDB's REST catalog
+client cannot SigV4-sign a non-AWS host ("Could not parse AWS service from
+host"), so the catalog lookup alone goes through pyiceberg, once, before any
+timing; DuckDB's iceberg_scan then reads the metadata JSON, manifests and data
+files over S3 itself. Opteryx's per-query times include its catalog lookup;
+these do not. Iceberg types the string columns BINARY, so they are decode()d to
+VARCHAR in the view, as the Avro path does.
+
 The result file is written to the same directory as this script so that
 opteryx/runner.py can reference it as the local baseline.
 """
@@ -133,13 +144,79 @@ def machine_description() -> str:
     return f"{node} ({cpu})"
 
 
-def run_benchmark(parquet_glob: str = None, avro_glob: str = None) -> list:
+AISTOR_REGION = "us-east-1"
+
+
+def resolve_aistor_table(table_name: str) -> tuple[str, int]:
+    """(metadata_location, data_size) of `clickbench.<table_name>` in the AIStor
+    Iceberg REST catalog - the catalog tests/performance/_common.py binds the
+    opteryx `aistor` workspace to, configured identically. A missing AISTOR_*
+    key raises KeyError: no remote configured means no remote run."""
+    from pyiceberg.catalog import load_catalog
+
+    endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
+    # pyiceberg's SigV4 signer takes its credentials from the process environment.
+    os.environ["AWS_ACCESS_KEY_ID"] = os.environ["AISTOR_ACCESS_KEY_ID"]
+    os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["AISTOR_SECRET_ACCESS_KEY"]
+    os.environ["AWS_REGION"] = AISTOR_REGION
+    catalog = load_catalog(
+        "aistor",
+        **{
+            "type": "rest",
+            "uri": f"{endpoint}/_iceberg",
+            "warehouse": "benchmarks",
+            "rest.sigv4-enabled": "true",
+            "rest.signing-name": "s3tables",
+            "rest.signing-region": AISTOR_REGION,
+            "s3.endpoint": endpoint,
+            "s3.access-key-id": os.environ["AISTOR_ACCESS_KEY_ID"],
+            "s3.secret-access-key": os.environ["AISTOR_SECRET_ACCESS_KEY"],
+            "s3.region": AISTOR_REGION,
+        },
+    )
+    table = catalog.load_table(("clickbench", table_name))
+    data_size = sum(task.file.file_size_in_bytes for task in table.scan().plan_files())
+    return table.metadata_location, data_size
+
+
+def run_benchmark(parquet_glob: str = None, avro_glob: str = None, iceberg_metadata: str = None) -> list:
     """
-    Run all queries TRIES times each, over the parquet OR the Avro files.
+    Run all queries TRIES times each, over the parquet, the Avro files, OR the
+    AIStor Iceberg table whose metadata JSON is `iceberg_metadata`.
     Returns a list of [cold, warm1, warm2] timing tuples (seconds, 3 d.p.).
     """
     con = duckdb.connect()
-    if avro_glob is not None:
+    to_date_time = "epoch_ms(CAST(t AS BIGINT) * 1000)"
+    if iceberg_metadata is not None:
+        endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
+        scheme, host = endpoint.split("://", 1)
+        for extension in ("httpfs", "iceberg"):
+            con.execute(f"INSTALL {extension}")
+            con.execute(f"LOAD {extension}")
+        con.execute(f"""
+            CREATE SECRET aistor (
+                TYPE s3,
+                KEY_ID '{os.environ["AISTOR_ACCESS_KEY_ID"]}',
+                SECRET '{os.environ["AISTOR_SECRET_ACCESS_KEY"]}',
+                REGION '{AISTOR_REGION}',
+                ENDPOINT '{host}',
+                URL_STYLE 'path',
+                USE_SSL {str(scheme == "https").lower()}
+            )
+        """)
+        columns = con.execute(f"DESCRIBE SELECT * FROM iceberg_scan('{iceberg_metadata}')").fetchall()
+        column_types = {name: column_type for name, column_type, *_ in columns}
+        replace = [f"decode({name}) AS {name}" for name, column_type in column_types.items() if column_type == "BLOB"]
+        # The canon split carries upstream's integer EventDate/EventTime; the
+        # rugo typed split carries DATE/TIMESTAMP.
+        if column_types["EventDate"] != "DATE":
+            replace.append("make_date(EventDate) AS EventDate")
+        if column_types["EventTime"] == "TIMESTAMP":
+            to_date_time = "t"
+        con.execute(
+            f"CREATE VIEW hits AS SELECT * REPLACE ({', '.join(replace)}) FROM iceberg_scan('{iceberg_metadata}')"
+        )
+    elif avro_glob is not None:
         # The shards keep the source's binary strings as Avro `bytes` (BLOB here);
         # decode() is read_parquet's binary_as_string=True, so the queries see
         # the same VARCHAR columns as the parquet view.
@@ -158,7 +235,7 @@ def run_benchmark(parquet_glob: str = None, avro_glob: str = None) -> list:
             SELECT * REPLACE (make_date(EventDate) AS EventDate)
             FROM read_parquet('{parquet_glob}', binary_as_string=True)
         """)
-    con.execute("CREATE MACRO toDateTime(t) AS epoch_ms(CAST(t AS BIGINT) * 1000)")
+    con.execute(f"CREATE MACRO toDateTime(t) AS {to_date_time}")
 
     results = []
     total = len(QUERIES)
@@ -201,7 +278,52 @@ def main():
         default=None,
         help="Output JSON path (default: same dir as this script / duckdb.local.json)",
     )
+    parser.add_argument(
+        "--aistor-table",
+        default=None,
+        help="Read Iceberg table clickbench.<name> on AIStor (e.g. hits_rugo_typed_split_10) instead of parquet "
+        "(default output: results.aistor.<name>.json)",
+    )
     args = parser.parse_args()
+
+    if args.aistor_table is not None:
+        import dotenv
+
+        # AISTOR_* live in the repo-root .env (make runs from the root).
+        dotenv.load_dotenv(os.path.join(os.getcwd(), ".env"))
+        metadata_location, data_size = resolve_aistor_table(args.aistor_table)
+        output_path = args.output or os.path.join(
+            os.path.dirname(__file__), f"results.aistor.{args.aistor_table}.json"
+        )
+        print("DuckDB ClickBench — AIStor Iceberg benchmark")
+        print(f"  DuckDB version : {duckdb.__version__}")
+        print(f"  Machine        : {machine_description()}")
+        print(f"  Table          : clickbench.{args.aistor_table}  ({data_size / 1e9:.2f} GB)")
+        print(f"  Metadata       : {metadata_location}")
+        print(f"  Tries per query: {TRIES}")
+        print(f"  Output         : {output_path}")
+        print()
+        start = time.monotonic()
+        results = run_benchmark(iceberg_metadata=metadata_location)
+        print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
+        payload = {
+            "system": "DuckDB (Iceberg on AIStor, iceberg_scan)",
+            "date": __import__("datetime").date.today().isoformat(),
+            "machine": machine_description(),
+            "cluster_size": 1,
+            "proprietary": "no",
+            "hardware": "cpu",
+            "tuned": "no",
+            "tags": ["C++", "column-oriented", "embedded", "stateless"],
+            "load_time": 0,
+            "data_size": data_size,
+            "table": f"clickbench.{args.aistor_table}",
+            "result": results,
+        }
+        with open(output_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"Results written to {output_path}")
+        return
 
     if args.avro_dir is not None:
         avro_dir = os.path.realpath(args.avro_dir)
