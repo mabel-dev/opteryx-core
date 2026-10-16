@@ -412,6 +412,98 @@ functions' bodies and stop before `to_chars`.
   `make st` all pass. `make -C skene bench` builds; its include path gained
   `third_party/bshoshany`.
 
+### Full ClickBench rewrite (the opteryx-parquet entry's load step)
+
+- **Setup:** `ClickBench-167/opteryx-parquet/convert.py` with the entry's own
+  arguments (zstd, 64k-row row groups, blocks of 4) on the 100-file, 14 GB `hits`
+  set, on this Mac (18 cores). The budget is `-m 40` GiB, which allowed 9
+  concurrent workers.
+- **Trees:** two clean ones built from the same source snapshot: the pre-change
+  writer, and the current one.
+- **Order:** ABBA, one full rewrite per cell. Each rewrite reads every file
+  through Opteryx, sorts it by the primary key, writes it, and verifies it.
+
+| run | base | new |
+|---|---:|---:|
+| 1 | 91.5 s | 59.4 s |
+| 2 | 87.2 s | 58.8 s |
+
+- **Result:** **89 s → 59 s, 0.66x (1.5x faster).** The output is identical:
+  9,946,412,822 bytes and 99,997,497 rows in both.
+- **Smaller gain than the single-file benchmark:** the rewrite already runs 9
+  files at once, so the writer's internal threads compete for the same cores,
+  and reading, sorting and verifying are unchanged.
+- **For reference:** the published c6a.4xlarge load was 292 s on 0.9.167, with 16
+  cores and 5 concurrent workers under a 20.8 GiB budget. That figure predates
+  these changes and has not been re-measured.
+
+### x86 (i5-8500, 6 cores, gcc 12, `-march=haswell`)
+
+- **Machine:** the x86 repro box (`opteryx-perf`), running Debian 12 and Python 3.14.0.
+- **Trees:** both are in `~/wspeed-20261016/` on the box.
+  - `new` is the main checkout at 18:08 on 2026-10-16.
+  - `base` is the same tree with the pre-change versions of the touched files
+    restored. Those come from the snapshot taken before the first edit; the ryu
+    additions are stripped and `_writer_pool.hpp` is removed.
+  - Both were built with `make compile`.
+- **Data:** `wide.csv` is regenerated with the same seed and byte-identical in
+  size (82,626,106 B). The other shapes are generated the same way as on ARM.
+- **Method:** fresh process per cell, best of 5, arm order alternated, 12 rounds,
+  13 shapes. Output bytes were identical between the arms for every shape.
+
+`make q` on `new` passes on x86 (exit 0, SQL battery 530/530). It first needed the
+box's August testdata brought up to date for this tree only: `flat/`, `tweets`,
+`tpcds_001(_skene)`, `tpch_01`, `avro`, `band_*`, `decimals128`, `gcs_report`,
+`org` and `parquet_tests` were copied from the Mac, along with the sibling
+`opteryx-catalog` checkout. Every failure before that was a
+`DatasetNotFoundError`, an outdated `tweets` dataset (10x the rows), or the
+installed catalog package lacking `maintenance_lease`. None was an engine
+failure.
+
+| shape | BASE ms | NEW ms | NEW/BASE (best of 5) | NEW/BASE (within-process median) | rounds NEW faster |
+|---|---:|---:|---:|---:|---:|
+| pq_wide | 2309.9 | 571.8 | 0.247 | 0.250 | 12/12 |
+| pq_int | 551.1 | 131.5 | 0.238 | 0.243 | 12/12 |
+| pq_float | 391.0 | 136.4 | 0.350 | 0.350 | 12/12 |
+| pq_str | 1338.3 | 338.1 | 0.252 | 0.254 | 12/12 |
+| pq_small | 45.7 | 9.2 | 0.201 | 0.219 | 12/12 |
+| pq_dict | 966.2 | 227.9 | 0.236 | 0.238 | 12/12 |
+| pq_url | 466.4 | 204.8 | 0.438 | 0.443 | 12/12 |
+| csv_wide | 498.6 | 240.5 | 0.482 | 0.560 | 12/12 |
+| csv_float | 323.0 | 109.2 | 0.338 | 0.350 | 12/12 |
+| csv_small | 11.9 | 10.7 | 0.903 | 0.908 | 12/12 |
+| jsonl_wide | 309.5 | 339.0 | **1.116** | 0.986 | 0/12 |
+| jsonl_float | 132.7 | 127.0 | 0.955 | 0.985 | 10/12 |
+| jsonl_small | 13.1 | 11.8 | 0.904 | 0.917 | 12/12 |
+
+- **Parquet: 4–5x faster on x86** (pq_wide 2,310 → 572 ms). On ARM it was about
+  9x. The box has 6 cores to the Mac's 18, and its single-thread base is 3x slower.
+- **CSV: 2–3x faster** (csv_wide 0.48). The parallel render is capped by 6 cores.
+  csv_small is single-threaded, so it isolates the float change: 0.903.
+- **JSONL: float-heavy and single-thread shapes are faster** (0.90–0.96).
+  jsonl_wide is the one shape where the metrics disagree, so it was examined
+  separately:
+  - **Best of 5** puts it at **1.116 (0/12)**.
+  - **Within-process median** puts it at 0.986 (7/12). A single process spreads
+    298–371 ms across its 5 writes of 159 MB, so best of 5 records the luckiest
+    run, not the code.
+  - **3-way A/B** (base / new / new with only the float change reverted, rebuilt
+    on the box): by median, new / no-float = 0.985 and new / base = 0.992.
+  - **`perf stat`, mean of 20 writes, 4 alternating rounds:** base 371–375 ms/iter,
+    new 322–365, no-float 322–360. Both new builds fall into the same two bands
+    (~322 or ~360 ms) regardless of build.
+  - **Hardware counters:** the float change removes 9.5% of instructions
+    (82.6B vs 91.2B) at unchanged cycles (94–102B in both). IPC is 0.82–0.91: on
+    the i5 this shape is bound by memory traffic, not formatting.
+
+  So on x86 the float change is cycle-neutral for jsonl_wide and a win where
+  formatting dominates. No x86 regression is established. The 1.116 is an
+  artefact of using best of 5 on a bandwidth-bound shape.
+- **Profile note:** on Linux, rugo's text writers resolve `fmt_double` to
+  draken_native's copy through ELF symbol interposition. `perf` attributes the
+  float samples to `draken_native`, and the change has to be in both `.so` files
+  to take effect. Both builds were rebuilt.
+
 ## Found in passing (not in scope; reported, not touched)
 
 - `draken.draken_native.vector_float64_from_sequence` turns `-0.0` into `0.0`, so
