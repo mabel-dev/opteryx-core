@@ -6,8 +6,28 @@
 """
 Optimization Rule - Compaction Planning
 
-Type: Physical planning
-Goal: Decide which data files an OPTIMIZE rewrites
+Type: Physical planning (reads manifest statistics; no plan-statistics cost model)
+Goal: Decide which data files an OPTIMIZE rewrites, and whether it sorts them
+
+`OPTIMIZE TABLE x` arrives as an ordinary plan — `SELECT * FROM x [ORDER BY <cluster
+cols>]` under a CompactionCommit sink. This strategy picks the files the pass
+rewrites by narrowing the scan's manifest to them, and removes the Order node when
+the chosen rule is a brute (unsorted) merge.
+
+Order:
+    After:  nothing — it constructs its decision from the manifest rather than from
+            what other strategies produced, so its position is arbitrary (D-11). It
+            sits at position 2, after DecorrelateSubquery.
+    Before: nothing depends on it. The pushdown strategies decline a plan carrying a
+            CompactionCommit sink (`_STRATEGIES_SKIPPED_ON_COMPACTION`, D-10); that
+            is a gate on them, not an ordering rule on this.
+
+Rewrite:
+    OPTIMIZE TABLE x                                       -- desugared to
+    SELECT * FROM x ORDER BY <cluster cols>  -> CompactionCommit
+    ->
+    the same plan over a manifest holding only the chosen files; the ORDER BY is
+    removed when the selected rule does not sort.
 
 `OPTIMIZE TABLE x` arrives here already desugared into an ordinary plan —
 `SELECT * FROM x [ORDER BY <cluster cols>]` under a CompactionCommit sink. This

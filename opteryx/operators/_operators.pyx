@@ -487,6 +487,12 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         uint64_t block_bytes
         double dense_bpr
         double code_bpr
+    cdef cppclass GroupJoinReading "opteryx::engine::Engine::GroupJoinReading":
+        uint64_t streamed_rows
+        uint64_t matched_rows
+        uint64_t emitted_rows
+        uint64_t workers
+        uint64_t build_rows
     cdef cppclass LoopReading "opteryx::engine::Engine::LoopReading":
         string name
         uint32_t iterations
@@ -501,6 +507,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         cppvector[PipelineReading] collect_pipeline_stats()
         cppvector[LoopReading] collect_loop_stats()
         cppvector[Join2BuildReading] collect_join2_build_stats()
+        cppvector[GroupJoinReading] collect_groupjoin_stats()
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
         size_t pipeline_count()
@@ -702,6 +709,14 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                  void* instrs, int count, cppvector[int] col_idx,
                                  cppvector[void*] lit_dv, ExprEvalFn fn)
         void set_semi_anti_build_source(size_t p, size_t ref, bint emit_matched)
+        size_t new_groupjoin_state(size_t ref, cppvector[AggSpec2] specs,
+                                   cppvector[DrakenType] operand_types,
+                                   cppvector[int] lt_kind, cppvector[int] lt_unit,
+                                   cppvector[int] lt_precision, cppvector[int] lt_scale,
+                                   cppvector[int] lt_dimension) except +
+        void set_groupjoin_accum_sink(size_t p, size_t gj, cppvector[size_t] key_idx) except +
+        void set_groupjoin_source(size_t p, size_t gj, bint per_key, bint multiply_d,
+                                  int unmatched) except +
         void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
                                       cppvector[size_t] payload_idx, int mode,
                                       void* instrs, int count, cppvector[int] col_idx,
@@ -3472,6 +3487,51 @@ cdef class NativePlan:
         self._e.set_join2_mark_sink(p, ref, keys, pay,
                                     <void*>bc.instrs, <int>bc.count,
                                     col_idx, lit_dv, _expr_eval_tramp)
+
+    def new_groupjoin_state(self, size_t ref, list specs, list operand_types,
+                            list operand_logical):
+        """GROUPJOIN shared state (docs/GROUPJOIN_DESIGN.md) over join ref ``ref``.
+        ``specs`` use the GROUP BY spec format; ``operand_types``/``operand_logical``
+        are each spec's PLAN-KNOWN operand type (any value for COUNT(*)), fixing every
+        accumulator kind before the first morsel."""
+        cdef cppvector[DrakenType] ts
+        cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef cppvector[cppvector[int]] ec
+        _fill_payload_types(operand_types, operand_logical, None,
+                            ts, lk, lu, lp, lsc, ld, ec)
+        return self._e.new_groupjoin_state(ref, _agg_spec_from_list(specs), ts,
+                                           lk, lu, lp, lsc, ld)
+
+    def set_groupjoin_accum_sink(self, size_t p, size_t gj, list key_idx):
+        """GROUPJOIN stream half: accumulate pipeline ``p``'s rows (keys ``key_idx``)
+        into state ``gj``. Emits nothing."""
+        cdef cppvector[size_t] keys
+        cdef int i
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        self._e.set_groupjoin_accum_sink(p, gj, keys)
+
+    def set_groupjoin_source(self, size_t p, size_t gj, bint per_key, bint multiply_d,
+                             int unmatched):
+        """GROUPJOIN emit half: build payload columns, then one column per aggregate.
+        ``unmatched``: 0 drop, 1 organic LEFT, 2 null-pad."""
+        self._e.set_groupjoin_source(p, gj, per_key, multiply_d, unmatched)
+
+    def collect_groupjoin_stats(self):
+        """One row per groupjoin: streamed / matched / emitted rows, workers that
+        accumulated, and the build's row count. Valid after the run has drained."""
+        cdef cppvector[GroupJoinReading] rows = self._e.collect_groupjoin_stats()
+        cdef GroupJoinReading r
+        out = []
+        for r in rows:
+            out.append({
+                "streamed_rows": int(r.streamed_rows),
+                "matched_rows": int(r.matched_rows),
+                "emitted_rows": int(r.emitted_rows),
+                "workers": int(r.workers),
+                "build_rows": int(r.build_rows),
+            })
+        return out
 
     def set_semi_anti_build_source(self, size_t p, size_t ref, bint emit_matched):
         """RIGHT SEMI / RIGHT ANTI, half two: emit the build rows whose match flag has

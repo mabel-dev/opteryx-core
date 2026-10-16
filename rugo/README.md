@@ -53,7 +53,7 @@ The wheel bundles everything it needs — [Draken](https://draken.dev/), the col
 
 One install, four formats.
 
-Rugo reads and writes Parquet, CSV, and JSONL, and reads Avro. The API is the same shape across all of them: pass a path or bytes, get columnar data back.
+Rugo reads and writes Parquet, CSV, JSONL and Avro. The API is the same shape across all of them: pass a path or bytes, get columnar data back.
 
 ### Installation
 
@@ -95,7 +95,7 @@ with parquet.read_parquet("planets.parquet") as reader:
 
 ## Command-line interface
 
-Installing Rugo puts a `rugo` command on your `PATH` — the same reader and writer, driven from the shell. No Python required at the call site; it's the quickest way to inspect a file, convert between formats, or wire Parquet/CSV/JSONL into a shell pipeline.
+Installing Rugo puts a `rugo` command on your `PATH` — the same reader and writer, driven from the shell. No Python required at the call site; it's the quickest way to inspect a file, convert between formats, or wire Parquet/CSV/JSONL/Avro into a shell pipeline.
 
 ```bash
 rugo info space_missions.parquet          # rows, columns, size, format
@@ -125,7 +125,7 @@ rugo describe --json events.parquet | jq '.columns[] | select(.null_count > 0)'
 | `stats`     | Alias for `describe`                                                        | `rugo stats data.parquet`                  |
 | `inspect`   | Low-level footer / row-group / encoding dump *(Parquet only)*              | `rugo inspect data.parquet`                |
 | `diff`      | Compare two files' schemas: columns added, removed, type-changed           | `rugo diff before.parquet after.parquet`   |
-| `convert`   | Convert between Parquet, CSV, and JSONL (format inferred from extensions)   | `rugo convert data.parquet data.csv`       |
+| `convert`   | Convert between Parquet, CSV, JSONL and Avro (format inferred from extensions) | `rugo convert data.parquet data.csv`       |
 | `merge`     | Concatenate multiple schema-identical files into one                       | `rugo merge part-*.parquet all.parquet`    |
 | `split`     | Split one file into row-count-bounded chunks (`--rows`, `--format`)        | `rugo split --rows 100000 big.parquet`     |
 
@@ -560,7 +560,7 @@ On narrow files PyArrow is faster across the board. On wide files with filtering
 
 ## Avro
 
-`rugo.avro` reads Avro object container files — the format of Kafka Connect sinks and of Iceberg's manifests. Reading only; rugo has no Avro writer. The decoder is native C++: each file's schema is compiled once into a decode program, and values are written straight into Draken columns — no Python object per value.
+`rugo.avro` reads and writes Avro object container files — the format of Kafka Connect sinks and of Iceberg's manifests. The decoder is native C++: each file's schema is compiled once into a decode program, and values are written straight into Draken columns — no Python object per value.
 
 ### Quick start
 
@@ -586,6 +586,31 @@ with avro.read_avro("launches.avro", columns=["Company", "Rocket.Name"]) as read
 Types: `boolean` BOOL · `int` INT32 · `long` INT64 · `float`/`double` FLOAT32/FLOAT64 · `string` VARCHAR · `bytes`/`fixed` VARBINARY · `enum` VARCHAR (one entry per symbol, a position per row) · `date` DATE · `time-*` TIME (µs) · `timestamp-*` TIMESTAMP (µs, UTC) · `decimal` DECIMAL / DECIMAL128 · an array of a plain scalar ARRAY · a whole record, map, or array of nested values NVARCHAR JSON text.
 
 Codecs: `null`, `deflate`, `snappy`, `zstandard`, `bzip2`.
+
+### `write_avro`
+
+```python
+data = avro.write_avro(morsel, codec="deflate")   # -> bytes; codec null / deflate / snappy / zstandard / bzip2
+```
+
+A column with no nulls is written as plain `T`, one with nulls as `["null", T]`; the root
+record is `rugo.record` (`record_name=` to change it). Types: BOOL `boolean` · INT8/16/32,
+UINT8/16 `int` · INT64, UINT32 `long` · FLOAT32 `float` · FLOAT64 `double` ·
+VARCHAR/NVARCHAR/VARIANT `string` · VARBINARY `bytes` · DATE `date` · TIME `time-millis` /
+`time-micros` · TIMESTAMP `timestamp-millis` / `timestamp-micros` (by the column's unit) ·
+DECIMAL `fixed` + `decimal(p, s)` at the smallest width for p · UUID `fixed(16)` + `uuid` ·
+IPV4 `long` with an `"opteryx.type": "IPV4"` attribute, which rugo's reader turns back into
+IPV4 and every other reader ignores · ARRAY `array` of `["null", T]`, nested arrays nested.
+With `dictionary=True` (the default) a VARCHAR / NVARCHAR column whose values are all valid
+Avro names, with at most 4,096 distinct values, is written as an `enum` when that is
+smaller; rugo reads it back dictionary-encoded.
+
+`open_avro_writer(sink)` / `write_avro_stream(morsels, sink)` stream batches to a callable
+(e.g. `f.write`). A stream cannot see later batches, so its fields keep `["null", T]` and
+its strings stay strings; the first batch fixes the schema. Rows are packed into blocks of `block_bytes` (default 1 MiB) encoded bytes. Refused,
+with an error naming the column: UINT64, INTERVAL, VECTOR_FP16 and nanosecond TIME /
+TIMESTAMP (Avro cannot carry them), and a column name that is not a valid Avro name
+(`[A-Za-z_][A-Za-z0-9_]*` — nothing is renamed). Design: `docs/AVRO_WRITER_DESIGN.md`.
 
 ### Performance
 

@@ -7,22 +7,30 @@
 Optimization Rule - Join Elimination
 
 Type: Heuristic
-Goal: Rewrite INNER JOINs to LEFT SEMI JOINs when the right relation contributes
-      no columns to the output
+Goal: Rewrite an INNER JOIN to a LEFT SEMI JOIN when the right relation contributes
+      no columns to the output and its join key is provably unique
 
-When no column from the right-hand relation appears above the JOIN node in the
-plan, the join exists only to test for existence of a matching row.  An INNER
-JOIN in that position is semantically equivalent to a LEFT SEMI JOIN:
+When no column from the right-hand relation appears above the Join node, the join
+exists only to test for the existence of a matching row. With a unique right-side
+key an INNER JOIN in that position is a LEFT SEMI JOIN: the same rows, and the
+engine short-circuits after the first match per probe row.
 
+The uniqueness gate (`_right_is_provably_unique`) is load-bearing: a semi join
+emits at most one row per left row, so where the right key repeats it would DROP
+the extra matches an inner join emits and change every COUNT/SUM above the join.
+Without the proof the join is left exactly as it was.
+
+Order:
+    After:  CrossJoinFilterPushdown and PredicatePushdown (the inner joins it inspects
+            have their final ON keys), ProjectionPushdown (pipeline position: the
+            "no right-side column used above" walk runs over the pruned plan).
+    Before: JoinAlgorithm (a semi join's build side is pinned differently).
+
+Rewrite:
     SELECT title FROM film JOIN language ON film.language_id = language.language_id
-
-becomes:
-
+    ->
     SELECT title FROM film LEFT SEMI JOIN language ON film.language_id = language.language_id
-
-The semi-join returns at most one row per left row regardless of how many right
-rows match, which is the correct deduplication behaviour.  It also allows the
-execution engine to short-circuit after the first match per probe row.
+        -- only when language.language_id is provably unique
 """
 
 from opteryx.compiled.structures.expressions import expressions_with

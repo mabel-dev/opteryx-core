@@ -7,9 +7,30 @@
 Optimization Rule - Limit Pushdown
 
 Type: Heuristic
-Goal: Reduce Rows
+Goal: Apply the LIMIT as close to the scan as it is sound to
 
-We try to push the limit to the other side of PROJECTS
+A LIMIT with no OFFSET walks down through Project nodes and lands on a Scan whose
+connector accepts a pushed limit (the scan then reads at most n rows and the Limit
+node is removed); otherwise it stops directly above the first barrier. A barrier is
+any node whose output is not a row-prefix of its input: Aggregate and
+AggregateAndGroup, Distinct, Filter, FunctionDataset, HeapSort, another Limit,
+Order, Set, Union, Unnest, Window, FramedWindow, and every Join (any join can
+multiply rows, so capping one input never caps the output). A scan that has
+absorbed a predicate takes the LIMIT only when its connector counts the limit
+against rows that SURVIVED the predicate (`supports_filtered_limit_pushdown`).
+
+Order:
+    After:  PredicatePushdown (a Filter absorbed into a scan is no longer a barrier
+            node, so the scan's own `predicates` are checked instead),
+            ProjectionPushdown, RedundantSortElimination.
+    Before: LimitFilesPruning (requires limits-pushed), OperatorFusion (Order is a
+            barrier here, so the LIMIT the fusion reads is still above its sort).
+    Declares: provides limits-pushed.
+
+Rewrite:
+    SELECT a, b FROM t LIMIT 10
+    ->
+    SELECT a, b FROM t        -- the scan itself stops after 10 rows
 """
 
 from typing import Optional

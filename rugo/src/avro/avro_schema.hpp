@@ -61,6 +61,11 @@ struct Node {
     uint32_t    fixed_size = 0;         // fixed
     uint8_t     precision = 0;          // decimal
     uint8_t     scale = 0;              // decimal
+    // The `opteryx.type` attribute of a primitive type object, when present — the
+    // rugo writer's side channel for a Draken type Avro has no type for (today only
+    // "IPV4" on long; docs/AVRO_WRITER_DESIGN.md D9). Unknown attributes are permitted
+    // by the spec and ignored by every other reader.
+    std::string opteryx_type;
 
     // Union only: index of the `null` branch (0 or 1) and the value branch.
     uint8_t null_branch = 0;

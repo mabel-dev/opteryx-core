@@ -4,11 +4,27 @@
 # AS IS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 
 """
-Optimization Strategy: Disjunctive Domain Pushdown
+Optimization Rule - Disjunctive Domain Pushdown
 
-Derives a WEAKER, per-column predicate from an OR-of-AND filter, so a
-correlated disjunction that can never be pushed down whole still gets *some*
-of its filtering pushed to the scan.
+Type: Heuristic
+Goal: Derive a weaker, per-column predicate from an OR-of-AND filter, so part of its
+      filtering reaches the scan even though the OR itself never can
+
+Order:
+    After:  DisjunctionSimplification (only the OR shape that survives exact
+            factoring is considered).
+    Before: SplitConjunctivePredicates (the derived predicates are ANDed onto the
+            condition and must be split into their own Filter nodes), after which
+            PredicatePushdown pushes them.
+
+Rewrite:
+    WHERE (n1.n_name = 'KENYA' AND n2.n_name = 'PERU')
+       OR (n1.n_name = 'PERU'  AND n2.n_name = 'KENYA')
+    ->
+    WHERE n1.n_name IN ('KENYA', 'PERU') AND n2.n_name IN ('KENYA', 'PERU')
+      AND ( <the original OR, unchanged> )
+
+    WHERE id IN (1, 2) OR id IN (3, 4)   ->   WHERE id IN (1, 2, 3, 4)   (REPLACED: equivalent)
 
 This is deliberately NOT the same job as DisjunctionSimplificationStrategy.
 That strategy finds predicates repeated IDENTICALLY across every OR-branch
@@ -56,12 +72,6 @@ Scope (v1): only Eq/InList leaves (-> IN-list) and Gt/GtEq/Lt/LtEq leaves
 the same column, wraps the column in a function/CAST, or simply doesn't
 constrain a given column at all, makes that column ineligible — the strategy
 silently derives nothing for it rather than guess.
-
-Runs after DisjunctionSimplificationStrategy (so it only has to deal with
-whatever OR shape survives that pass) and before
-SplitConjunctivePredicatesStrategy, so the derived predicates this strategy
-ANDs onto the original condition get split into their own Filter steps and
-become independently pushable by PredicatePushdownStrategy.
 
 A WHERE clause with join conditions and a disjunction (the normal shape —
 e.g. `p_partkey = l_partkey AND (A OR B OR C)`) reaches this strategy as ONE

@@ -889,14 +889,18 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/avro/avro_reader.cpp",
                     # Python edge of the avro reader (wrap_avro_column); rugo_native only.
                     "rugo/src/avro/_avro_column_wrap.cpp",
+                    # avro writer C++ core (docs/AVRO_WRITER_DESIGN.md); rugo_native only —
+                    # the engine never writes Avro (READ_AVRO is its only Avro surface).
+                    "rugo/src/avro/avro_writer.cpp",
                     # libdeflate (third_party/libdeflate, upstream v1.26): raw DEFLATE
                     # inflate for Avro's `deflate` codec and gzip member inflate (with
                     # CRC32/ISIZE verification) for the parquet GZIP codec — ~2x faster
                     # than miniz tinfl, byte-identical (LIBDEFLATE_VERSION.txt).
-                    # Decompression TUs only; C sources, compiled as C by the
-                    # mixed-extension path.
+                    # C sources, compiled as C by the mixed-extension path.
                     "third_party/libdeflate/lib/deflate_decompress.c",
                     "third_party/libdeflate/lib/gzip_decompress.c",
+                    # raw DEFLATE compress: the Avro writer's `deflate` codec.
+                    "third_party/libdeflate/lib/deflate_compress.c",
                     "third_party/libdeflate/lib/crc32.c",
                     "third_party/libdeflate/lib/utils.c",
                     "third_party/libdeflate/lib/arm/cpu_features.c",
@@ -978,6 +982,8 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/avro/avro_reader.hpp",
                 "rugo/src/avro/_avro_column_wrap.hpp",
                 "rugo/src/avro/_avro_reader.pxi",
+                "rugo/src/avro/avro_writer.hpp",
+                "rugo/src/avro/_avro_writer.pxi",
                 # Generated from the same string as -DRUGO_PARQUET_CREATED_BY;
                 # rewritten only on change (write_rugo_build_identity).
                 "rugo/_build_identity.py",

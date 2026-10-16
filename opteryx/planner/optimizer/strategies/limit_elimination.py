@@ -7,7 +7,18 @@
 Optimization Rule - Limit Elimination
 
 Type: Heuristic
-Goal: Reduce Work
+Goal: Reduce work — drop a LIMIT that is provably a no-op, so the strategies it
+      would block can fire
+
+Order:
+    After:  ConstantFolding (a LIMIT's value is a literal).
+    Before: StatisticsOnlyResponse (so `SELECT COUNT(*) FROM t LIMIT n` is answered
+            from the manifest in the same optimizer pass), LimitPushdown.
+
+Rewrite:
+    SELECT COUNT(*) FROM t LIMIT 5      ->   SELECT COUNT(*) FROM t
+    SELECT 1 LIMIT 1                    ->   SELECT 1
+    SELECT * FROM t LIMIT 1000000       ->   SELECT * FROM t   (manifest proves fewer rows)
 
 Drops a LIMIT node when it is provably a no-op. A no-op LIMIT costs nothing by
 itself, but its mere presence in the plan blocks other strategies that require
@@ -15,9 +26,6 @@ a LIMIT-free plan to fire — notably StatisticsOnlyResponseStrategy, which
 cannot answer `SELECT COUNT(*) FROM t LIMIT n` from the manifest while a LIMIT
 node sits between the aggregate and the exit, even though an ungrouped
 aggregate always returns exactly one row and the LIMIT can never bind.
-
-Runs before StatisticsOnlyResponseStrategy so a query eliminated here is
-answered from statistics in the same optimizer pass.
 
 Three provably-safe cases. All require a LIMIT with no OFFSET (an OFFSET can
 still discard rows down to zero even when the total is under the limit, so a

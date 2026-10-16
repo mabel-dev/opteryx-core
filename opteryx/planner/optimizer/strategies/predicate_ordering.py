@@ -6,8 +6,25 @@
 """
 Optimization Rule - Predicate Ordering
 
-Type: Cost
-Goal: Faster Execution
+Type: Cost-based (`optimization_technique = "cost"`)
+Goal: Faster execution — run the cheapest, most-reducing predicates first
+
+Order:
+    After:  PredicatePushdown, CorrelatedFilters, SemiJoinReducer, JoinRewrite —
+            every strategy that adds, moves or consumes Filter nodes, so the chain it
+            merges is the final one; SplitConjunctivePredicates (the chain exists
+            because of the split; this is the pass that re-merges it, in cost order).
+    Before: RedundantOperations, OperatorFusion, ProjectFusion. WindowTopKFusion runs
+            later and matches a single-comparison Filter; a one-node chain is left
+            untouched here, so the two do not interact.
+
+Rewrite:
+    Filter(c)                        Filter(DNF[b, a, c])     -- cheapest, most
+    └─ Filter(b)            ->       └─ Scan                     selective first
+       └─ Filter(a)
+          └─ Scan
+
+    a = ANY(z) AND b = ANY(z) AND c = ANY(z)    ->    z @>> (a, b, c)
 
 We combine adjacent predicates into chains of ANDed conditions in a single
 filtering step. We order the filters by estimated cost-per-row weighted by

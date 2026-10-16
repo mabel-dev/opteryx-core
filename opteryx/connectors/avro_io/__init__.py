@@ -25,10 +25,13 @@ from opteryx.types.logical_type import ColumnType
 _LOGICAL_TIMESTAMP = 1
 _LOGICAL_TIME = 2
 _LOGICAL_DECIMAL = 3
+_LOGICAL_IPV4 = 5
 
 
 def _column_type(column: dict) -> ColumnType:
     kind = column["logical_kind"]
+    if kind == _LOGICAL_IPV4:
+        return _lt.IPV4
     if kind == _LOGICAL_TIMESTAMP:
         return _lt.TIMESTAMP(_lt.TimestampUnit.MICROSECONDS)
     if kind == _LOGICAL_TIME:

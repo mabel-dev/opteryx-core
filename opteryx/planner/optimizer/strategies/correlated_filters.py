@@ -6,8 +6,38 @@
 """
 Optimization Rule - Correlated Filters
 
-Type: Cost-based (consumes propagated statistics)
-Goal: Reduce Rows / IO
+Type: Cost-based (consumes propagated statistics; `optimization_technique = "cost"`)
+Goal: Reduce rows / IO by transporting one join leg's realized key range, or known
+      constant, onto the opposite leg's scan
+
+For a join predicate `a.k <op> b.k + delta`, the rows that can match on one side are
+bounded by the realized value range of the correlated column on the other side.
+That range is read from the propagated `PlanContext.statistics`, shifted by `delta`
+and appended to the opposite scan's `predicates` as a range filter. A single-row
+parameter relation (`WITH params AS (SELECT 'X' AS id)`) transports the literal
+itself as an equality.
+
+Order:
+    After:  PredicatePushdown (requires predicates-pushed: the original predicates
+            are already on the scans and their effect is in the propagated key
+            ranges), CrossJoinFilterPushdown (the equi-join ON conditions it
+            transports across exist by then).
+    Before: the second PredicateCompaction (merges the transported bounds with the
+            leg's own, which is where contradictions first become visible),
+            ManifestPruning (the derived ranges prune files).
+    Declares: requires predicates-pushed.
+
+Rewrite:
+    SELECT ... FROM a JOIN b ON a.k = b.k WHERE a.k > 5 AND a.k < 100
+    ->
+    SELECT ... FROM a JOIN b ON a.k = b.k
+    WHERE a.k > 5 AND a.k < 100 AND b.k >= <min a.k> AND b.k <= <max a.k>
+        -- the bounds are the REALIZED range of a.k after its own filters
+
+    WITH params AS (SELECT 'X' AS id)
+    SELECT ... FROM t JOIN params ON t.id = params.id
+    ->
+    ... WHERE t.id = 'X'        -- pushed onto t's scan as an equality
 
 For a join predicate ``a.k <op> b.k + delta`` the matching rows on one side are
 bounded by the realized value range of the correlated column on the other side.

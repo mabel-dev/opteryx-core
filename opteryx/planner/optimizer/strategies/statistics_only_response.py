@@ -4,10 +4,22 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Statistics-Only Response Strategy and File Pruning
+Optimization Rule - Statistics-Only Response
 
-Detects queries that can be answered entirely from table statistics without
-reading any data, or optimizes file access when LIMIT is present.
+Type: Heuristic (manifest statistics; exact values only, never estimates)
+Goal: Answer an aggregate from the manifest without reading any data file
+
+Order:
+    After:  LimitElimination (a no-op LIMIT between the aggregate and the exit would
+            otherwise block the match), ConstantFolding.
+    Before: every pushdown and fusion: it matches the planner's own shape — one
+            ungrouped Aggregate over one Scan, no Filter, Join, Unnest, GROUP BY,
+            DISTINCT, ORDER BY or LIMIT — and replaces it outright.
+
+Rewrite:
+    SELECT COUNT(*), MIN(ts), MAX(ts) FROM t
+    ->
+    SELECT 1234567 AS "COUNT(*)", <min> AS "MIN(ts)", <max> AS "MAX(ts)" FROM $one_row
 
 Currently supports:
 

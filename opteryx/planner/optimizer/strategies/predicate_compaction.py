@@ -7,32 +7,33 @@
 Optimization Rule - Predicate Compaction
 
 Type: Heuristic
-Goal: Compact multiple predicates on the same column into simplified ranges
+Goal: Compact multiple predicates on the same column into one simplified range,
+      point set or contradiction
+
+Order:
+    Runs TWICE.
+    First (position 16): after SplitConjunctivePredicates (each Filter is one
+        conjunct and a chain of adjacent Filters is what is compacted) and
+        PredicateRewrite (IN / LIKE / range forms are final); before
+        PredicatePushdown, so the scan receives the compacted form.
+    Second: after CorrelatedFilters, which copies ranges across equi-join keys onto
+        the opposite leg where they meet that leg's own bounds for the first time
+        (`p.id > 5 AND s.id < 3` over `p.id = s.id` lands `id > 5 AND id < 3` on
+        BOTH legs — a contradiction the first pass ran too early to see); before
+        ManifestPruning.
+
+Rewrite:
+    col > 5 AND col < 10 AND col > 7 AND col < 9     ->  col > 7 AND col < 9
+    col > 10 AND col < 5                             ->  FALSE
+    col IN (1, 2, 3) AND col IN (2, 3, 4) AND col > 2 ->  col = 3
+    col != 1 AND col != 2 AND col != 3               ->  col NOT IN (1, 2, 3)
+    col = 5 AND col IS NOT NULL                      ->  col = 5
+    col > 5 AND col IS NULL                          ->  FALSE
 
 This strategy reduces predicate complexity by consolidating multiple conditions
 on the same column into a single simplified range or predicate.
 
-Example:
-    col > 5 AND col < 10 AND col > 7 AND col < 9
-    => col > 7 AND col < 9 (only the most restrictive bounds)
-
-    col > 10 AND col < 5
-    => FALSE (contradictory condition)
-
-    col IN (1, 2, 3) AND col IN (2, 3, 4) AND col > 2
-    => col = 3 (point sets intersect, then the range prunes the points)
-
-    col != 1 AND col != 2 AND col != 3
-    => col NOT IN (1, 2, 3) (one probe, not three passes)
-
-    col = 5 AND col IS NOT NULL   => col = 5 (the test is implied)
-    col > 5 AND col IS NULL       => FALSE (nothing is both)
-
 This enables better predicate pushdown by simplifying the filter expression.
-
-The strategy runs TWICE: once after the split (the WHERE clause's own conjuncts),
-and again after CorrelatedFilters has copied ranges across equi-join keys onto
-the opposite leg, where they meet that leg's own bounds for the first time.
 """
 
 from dataclasses import dataclass

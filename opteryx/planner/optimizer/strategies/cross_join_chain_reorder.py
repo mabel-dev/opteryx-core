@@ -4,7 +4,30 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Strategy: Cross Join Chain Reorder
+Optimization Rule - Cross Join Chain Reorder
+
+Type: Heuristic
+Goal: Reorder a left-deep chain of implicit cross joins so every adjacent pair shares
+      an equality edge, so each one can become an inner join
+
+Status: ⛔ NOT IN THE PIPELINE. Imported and exported by strategies/__init__.py but
+never added to `OptimizerVisitor.strategies` (noted 2026-07-28, see
+tests/unit/optimizer/test_strategy_disable_flags.py). JoinPlanning (DPccp) now
+chooses the join tree for the same chains and reuses this module's chain-collection
+and predicate-gathering helpers. The helpers and the tests are live; the strategy
+class is not.
+
+Order (if it were wired in):
+    After:  DecorrelateSubquery, JoinConditionHoist, SplitConjunctivePredicates (the
+            equalities it reads from the WHERE must be split conjuncts).
+    Before: JoinPlanning / CrossJoinFilterPushdown, which convert the reordered cross
+            joins into inner joins.
+
+Rewrite:
+    FROM part, supplier, partsupp
+    WHERE p_partkey = ps_partkey AND s_suppkey = ps_suppkey
+    ->
+    FROM part, partsupp, supplier WHERE ...      -- adjacent pairs now share an edge
 
 A `FROM A, B, C, D` clause is built by the logical planner as a left-deep chain
 of implicit cross joins in the order written:
@@ -21,7 +44,7 @@ direct predicate between `part` and `supplier` (they connect via `partsupp`),
 so the bottom `part x supplier` cross join cannot be converted and produces a
 40M-row Cartesian.
 
-This strategy runs *before* `CrossJoinFilterPushdownStrategy` and reorders the
+This strategy reorders the
 chain of cross joins so that each adjacent pair shares an equality edge in the
 join graph derived from the WHERE clause. After reordering, the pushdown
 strategy converts every cross join into an inner join.

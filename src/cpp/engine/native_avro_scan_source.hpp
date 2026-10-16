@@ -216,11 +216,17 @@ inline void build_column(rugo::avro::AvroColumn& c, CxxColumn& out) {
             break;
         }
         default: {
-            // Raw, Decimal64/128, Timestamp, Time64: fixed-width data.
+            // Raw, Decimal64/128, Timestamp, Time64, Ipv4: fixed-width data.
             DrakenVector v = draken_vector_from_dense(c.data, c.length, c.type, c.validity);
             out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(c.data),
                                                     OwnedBuffer<uint8_t>(c.validity));
-            out.own->logical_type = logical_for(c.type, c.precision, c.scale);
+            if (c.kind == OutKind::Ipv4) {
+                LogicalType lt;
+                lt.kind = LogicalKind::IPV4;
+                out.own->logical_type = logical_type_intern(lt);
+            } else {
+                out.own->logical_type = logical_for(c.type, c.precision, c.scale);
+            }
             out.view = out.own->vec;
             break;
         }

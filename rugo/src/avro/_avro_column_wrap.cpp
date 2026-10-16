@@ -31,6 +31,10 @@ PyObject* wrap_avro_column(AvroColumn& c) {
         case OutKind::Time64:
             v = draken_vector_own_time64(c.data, c.validity, c.length, "us");
             break;
+        case OutKind::Ipv4:
+            // LogicalKind ordinal 5 = IPV4 (draken/logical_type.h); no unit / scale / dimension.
+            v = draken_vector_own_raw_logical(c.data, c.validity, c.length, c.type, 5, 0, 0, 0, 0, 0);
+            break;
         case OutKind::ConstRaw:
             if (c.type == DRAKEN_TIMESTAMP64 || c.type == DRAKEN_TIME64 || c.type == DRAKEN_DECIMAL ||
                 c.type == DRAKEN_DECIMAL128) {

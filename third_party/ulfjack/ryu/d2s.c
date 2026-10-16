@@ -507,3 +507,40 @@ char* d2s(double f) {
   d2s_buffered(f, result);
   return result;
 }
+// ---- Opteryx addition (2026-10-16), not upstream ryu ----
+// The shortest round-trip decimal that d2s_buffered_n prints, as integers
+// rather than text: |f| == mantissa * 10^exponent, with the same digits
+// d2s_buffered_n would emit (for scientific text, "D.DDD" is the decimal
+// digits of *mantissa and the printed exponent is *exponent + digits - 1).
+// Lets a caller lay the digits out itself without printing scientific text and
+// parsing it back. Returns false for the special values (zero, infinities,
+// NaN), which have no such decimal; the caller handles those.
+bool d2s_decimal(double f, bool* sign, uint64_t* mantissa, int32_t* exponent) {
+  const uint64_t bits = double_to_bits(f);
+  const bool ieeeSign = ((bits >> (DOUBLE_MANTISSA_BITS + DOUBLE_EXPONENT_BITS)) & 1) != 0;
+  const uint64_t ieeeMantissa = bits & ((1ull << DOUBLE_MANTISSA_BITS) - 1);
+  const uint32_t ieeeExponent = (uint32_t) ((bits >> DOUBLE_MANTISSA_BITS) & ((1u << DOUBLE_EXPONENT_BITS) - 1));
+  if (ieeeExponent == ((1u << DOUBLE_EXPONENT_BITS) - 1u) || (ieeeExponent == 0 && ieeeMantissa == 0)) {
+    return false;
+  }
+  floating_decimal_64 v;
+  const bool isSmallInt = d2d_small_int(ieeeMantissa, ieeeExponent, &v);
+  if (isSmallInt) {
+    // Same trailing-zero move as d2s_buffered_n.
+    for (;;) {
+      const uint64_t q = div10(v.mantissa);
+      const uint32_t r = ((uint32_t) v.mantissa) - 10 * ((uint32_t) q);
+      if (r != 0) {
+        break;
+      }
+      v.mantissa = q;
+      ++v.exponent;
+    }
+  } else {
+    v = d2d(ieeeMantissa, ieeeExponent);
+  }
+  *sign = ieeeSign;
+  *mantissa = v.mantissa;
+  *exponent = v.exponent;
+  return true;
+}

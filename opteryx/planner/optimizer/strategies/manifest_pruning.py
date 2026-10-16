@@ -6,8 +6,23 @@
 """
 Optimization Rule - Manifest-Based File Pruning
 
-Type: Heuristic
-Goal: Eliminate files from scan operations based on statistics
+Type: Heuristic (from file-level statistics; a prune is a proof, never an estimate)
+Goal: Eliminate files from a scan that provably hold no row the predicates admit
+
+Order:
+    After:  PredicatePushdown (requires predicates-pushed: it reads the scan's pushed
+            predicates AND the declined Filters directly above it), CorrelatedFilters
+            and the second PredicateCompaction (transported and compacted ranges
+            prune too).
+    Before: TopNManifestPruning and LimitFilesPruning (both narrow the file list
+            further), ProjectionPushdown.
+    Declares: requires predicates-pushed.
+
+Rewrite:
+    none in SQL. `SELECT * FROM t WHERE ts > '2026-01-01'` is unchanged; every file
+    whose min/max bounds, k-hashes or histograms prove it holds no qualifying row is
+    removed from the scan's manifest (copy-on-write: the scan gets a new, smaller
+    Manifest).
 
 This strategy uses manifest data (file-level bounds, k-hashes, histograms) to
 determine which data files can be safely skipped based on query predicates.
@@ -20,7 +35,7 @@ file-level statistics from the catalog.
 Architecture:
 - Binder attaches Manifest to READ nodes (if connector supports it)
 - This strategy calls manifest.prune_files(predicates) during optimization
-- Pruned file list is stored in node properties
+- The scan's manifest is replaced by the pruned Manifest (copy-on-write)
 - Execution reads only the predetermined files
 
 Key benefits:

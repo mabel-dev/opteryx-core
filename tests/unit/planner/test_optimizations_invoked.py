@@ -51,6 +51,9 @@ STATEMENTS = [
         # De Morgan's n-ary tests (NOT of multiple OR conditions) - creates multiple AND predicates for pushdown
         ("SELECT * FROM $planets WHERE NOT(id = 1 OR id = 2 OR id = 3)", "optimization_boolean_rewrite_demorgan_nary"),  # NOT(A OR B OR C) => A!=1 AND A!=2 AND A!=3
         ("SELECT * FROM $planets WHERE NOT(id = 1 OR id = 2 OR id = 3 OR id = 4)", "optimization_boolean_rewrite_demorgan_nary"),  # 4 conditions
+        # The equality has been pushed INTO the parquet scan (no Filter node survives);
+        # the strategy must read it from scan.predicates to strip `name` from the keys.
+        ("SELECT name, birth_place, COUNT(*) FROM testdata.astronauts WHERE name = 'Neil A. Armstrong' GROUP BY name, birth_place", "optimization_filter_implied_group_key_reduction"),
         # Predicate compaction tests - multiple predicates on same column get compacted to most restrictive
         ("SELECT * FROM $planets WHERE id > 1 AND id > 3", "optimization_predicate_compaction"),  # id > 1 AND id > 3 => id > 3
         ("SELECT * FROM $planets WHERE id < 8 AND id < 5", "optimization_predicate_compaction"),  # id < 8 AND id < 5 => id < 5

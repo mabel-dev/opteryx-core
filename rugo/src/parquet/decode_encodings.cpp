@@ -500,6 +500,39 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 // DecodeRLEBitPackedIndicesSelected
 // ---------------------------------------------------------------------------
 
+// The selective decode is specialised PER ARCH (measured 2026-10-16): on ARM
+// (NEON) the masked count tail, per-group NEON unpack and branchless compress
+// below won (adv_wide wall 0.939); on x86 the same code regressed guard shapes
+// (counter62 wall 1.010, cb_q12 CPU 1.007), so x86 keeps the plain scalar
+// path. Re-measure on x86 before changing either side.
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#  define RUGO_SELECTED_DECODE_NEON 1
+#endif
+
+#ifdef RUGO_SELECTED_DECODE_NEON
+// Number of set 0/1 bytes in sel[0..n). `avail` (>= n) is how many bytes from
+// sel are readable: when 8 are, the 1-7 byte tail is one masked word load
+// instead of a byte loop whose variable trip count mispredicts on the short
+// RLE runs this is called per.
+static inline int32_t count_selected(const uint8_t *sel, int32_t n, int32_t avail) {
+  int32_t c = 0;
+  int32_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    std::memcpy(&w, sel + i, 8);
+    c += __builtin_popcountll(w);
+  }
+  const int32_t rem = n - i;
+  if (rem == 0) return c;
+  if (i + 8 <= avail) {
+    uint64_t w;
+    std::memcpy(&w, sel + i, 8);
+    return c + __builtin_popcountll(w & (~0ULL >> (64 - 8 * rem)));
+  }
+  for (; i < n; ++i) c += sel[i];
+  return c;
+}
+#else
 // Number of set 0/1 bytes in sel[0..n).
 static inline int32_t count_selected(const uint8_t *sel, int32_t n) {
   int32_t c = 0;
@@ -512,6 +545,39 @@ static inline int32_t count_selected(const uint8_t *sel, int32_t n) {
   for (; i < n; ++i) c += sel[i];
   return c;
 }
+#endif
+
+#ifdef RUGO_SELECTED_DECODE_NEON
+// Selected-lane compress of one unpacked group of 8: every lane is written at
+// the cursor and the cursor advances by that lane's 0/1 selection byte, so
+// there is no per-value branch. `dst` needs 8 slots of headroom past `n`.
+static inline size_t compress_group_8(const int32_t *__restrict__ vals, uint64_t sel8,
+                                      int32_t *__restrict__ dst, size_t n) {
+  for (int i = 0; i < 8; ++i) {
+    dst[n] = vals[i];
+    n += (size_t)((sel8 >> (8 * i)) & 1u);
+  }
+  return n;
+}
+
+// `groups` whole groups of 8 that are NOT the last group of their run, so the
+// over-reading group unpackers are safe. Groups with no selected value are
+// never unpacked.
+template <void (*Unpack)(const uint8_t *, int32_t *, int)>
+static inline size_t select_groups_8(const uint8_t *src, int bpg, const uint8_t *sel,
+                                     int32_t groups, int bit_width,
+                                     int32_t *dst, size_t n) {
+  for (int32_t g = 0; g < groups; ++g) {
+    uint64_t w;
+    std::memcpy(&w, sel + g * 8, 8);
+    if (w == 0) continue;
+    int32_t tmp[8];
+    Unpack(src + g * bpg, tmp, bit_width);
+    n = compress_group_8(tmp, w, dst, n);
+  }
+  return n;
+}
+#endif  // RUGO_SELECTED_DECODE_NEON
 
 int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
@@ -521,10 +587,19 @@ int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
   out.clear();
   if (bit_width == 0) {
     // Single-entry dictionary: every value is index 0, no bits on wire.
+#ifdef RUGO_SELECTED_DECODE_NEON
+    out.resize_fill((size_t)count_selected(sel, num_values, num_values), 0);
+#else
     out.resize_fill((size_t)count_selected(sel, num_values), 0);
+#endif
     return num_values;
   }
+#ifdef RUGO_SELECTED_DECODE_NEON
+  // +8: compress_group_8 writes all 8 lanes at the cursor.
+  out.reserve((size_t)num_values + 8);
+#else
   out.reserve((size_t)num_values);
+#endif
 
   const uint8_t *ptr = data;
   const uint8_t *end = data + data_size;
@@ -548,6 +623,30 @@ int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
       if (ptr + bytes_needed > end) break;
 
       const int32_t to_walk = std::min(values_in_run, num_values - walked);
+#ifdef RUGO_SELECTED_DECODE_NEON
+      // Whole groups that are not the run's last take the over-reading
+      // unpackers; the run's last group and a page-end partial group take the
+      // safe scalar one below. Capacity was reserved up front, so no growth.
+      const int32_t fast_groups = std::max(0, std::min(to_walk / 8, num_groups - 1));
+      int32_t *const dst = out.data();
+      size_t n = out.size();
+      if (bit_width <= 8)
+        n = select_groups_8<unpack_group_8_neon>(ptr, bpg, sel + walked, fast_groups, bit_width, dst, n);
+      else if (bit_width <= 16)
+        n = select_groups_8<unpack_group_8_neon_wide>(ptr, bpg, sel + walked, fast_groups, bit_width, dst, n);
+      else
+        n = select_groups_8<unpack_group_8_scalar_fast>(ptr, bpg, sel + walked, fast_groups, bit_width, dst, n);
+      for (int32_t g = fast_groups; g * 8 < to_walk; ++g) {
+        const int32_t in_group = std::min(8, to_walk - g * 8);
+        uint64_t w = 0;  // lanes past in_group stay 0: written, never counted
+        std::memcpy(&w, sel + walked + g * 8, (size_t)in_group);
+        if (w == 0) continue;  // nothing selected: never unpacked
+        int32_t tmp[8];
+        unpack_group_8_scalar(ptr + g * bpg, tmp, bit_width);
+        n = compress_group_8(tmp, w, dst, n);
+      }
+      out.resize_uninit(n);
+#else
       for (int32_t g = 0; g * 8 < to_walk; ++g) {
         const int32_t base = walked + g * 8;
         const int32_t in_group = std::min(8, to_walk - g * 8);
@@ -559,6 +658,7 @@ int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
         for (int32_t i = 0; i < in_group; ++i)
           if (sel[base + i]) out.push_back(tmp[i]);
       }
+#endif
       ptr += bytes_needed;
       walked += to_walk;
     } else {
@@ -570,7 +670,11 @@ int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
       if (bit_width < 32) value &= (1U << bit_width) - 1;
       if (count <= 0) return -1;
       const int32_t to_fill = std::min(count, num_values - walked);
+#ifdef RUGO_SELECTED_DECODE_NEON
+      const int32_t n_sel = count_selected(sel + walked, to_fill, num_values - walked);
+#else
       const int32_t n_sel = count_selected(sel + walked, to_fill);
+#endif
       out.resize_fill(out.size() + (size_t)n_sel, (int32_t)value);
       walked += to_fill;
     }

@@ -237,7 +237,79 @@ inline void fmt_shortest(std::string &out, const char *sci, int n) {
   fmt_shortest_digits(out, neg, digits, nd, exp);
 }
 
+// Number of decimal digits in m (1..17 for a ryu double mantissa, <= 9 float).
+inline int decimal_digits(uint64_t m) {
+  int n = 1;
+  while (m >= 10000) { m /= 10000; n += 4; }
+  while (m >= 10) { m /= 10; n += 1; }
+  return n;
+}
+
+// The same text fmt_shortest_digits lays out, built straight from ryu's
+// integer decimal (|v| == m * 10^e10, see d2s_decimal) instead of from
+// scientific text: no "D.DDDE±X" print, no parse back, and the digit runs move
+// as FIXED-size copies the compiler keeps inline (a variable-length memcpy is a
+// libc call per value). Byte-identical to fmt_shortest_digits by construction —
+// same nd digits, same exp (= e10 + nd - 1), same layout rules — and pinned by
+// tests/rugo/test_float_text_direct.py.
+inline void fmt_decimal_shortest(std::string &out, bool neg, uint64_t m, int32_t e10) {
+  const int nd = decimal_digits(m);
+  const int exp = e10 + nd - 1;
+  // Digits right-aligned in dig[0, nd); dig is oversized so the fixed 17- and
+  // 16-byte copies below never read past it.
+  char dig[40];
+  {
+    char *q = dig + nd;
+    while (m >= 100) {
+      const uint32_t r = (uint32_t)(m % 100);
+      m /= 100;
+      q -= 2;
+      std::memcpy(q, kTwoDigits + 2 * r, 2);
+    }
+    if (m >= 10) { q -= 2; std::memcpy(q, kTwoDigits + 2 * m, 2); }
+    else *--q = (char)('0' + m);
+  }
+  // Worst case is "-0.000" + 17 digits (23 bytes); a fixed copy may write up
+  // to 17 bytes past the last real one, so 64 leaves headroom.
+  char buf[64];
+  char *q = buf;
+  if (neg) *q++ = '-';
+  if (exp >= -4 && exp < 16) {
+    if (exp < 0) {
+      *q++ = '0'; *q++ = '.';
+      for (int k = 0; k < -exp - 1; k++) *q++ = '0';
+      std::memcpy(q, dig, 17); q += nd;
+    } else {
+      const int intDigits = exp + 1;
+      if (nd <= intDigits) {
+        std::memcpy(q, dig, 17); q += nd;
+        for (int k = nd; k < intDigits; k++) *q++ = '0';
+        *q++ = '.'; *q++ = '0';
+      } else {
+        std::memcpy(q, dig, 16); q += intDigits; // intDigits <= 16 here
+        *q++ = '.';
+        std::memcpy(q, dig + intDigits, 17); q += nd - intDigits;
+      }
+    }
+  } else {
+    *q++ = dig[0];
+    if (nd > 1) { *q++ = '.'; std::memcpy(q, dig + 1, 16); q += nd - 1; }
+    *q++ = 'e';
+    *q++ = exp < 0 ? '-' : '+';
+    int aexp = exp < 0 ? -exp : exp;
+    if (aexp >= 100) { *q++ = (char)('0' + aexp / 100); aexp %= 100; }
+    q = put2(q, aexp); // %02d: two digits minimum
+  }
+  out.append(buf, q - buf);
+}
+
 inline void fmt_double(std::string &out, double v) {
+  bool neg; uint64_t m; int32_t e10;
+  if (d2s_decimal(v, &neg, &m, &e10)) {
+    fmt_decimal_shortest(out, neg, m, e10);
+    return;
+  }
+  // Zero / infinities / NaN have no ryu decimal: d2s_buffered_n's own text.
   char sci[32];
   int n = d2s_buffered_n(v, sci);
   fmt_shortest(out, sci, n);
@@ -250,6 +322,12 @@ inline void fmt_double(std::string &out, double v) {
 // -- widening is exact but not distance-preserving among neighbouring
 // doubles. f2s_buffered_n runs ryu's algorithm on the actual 24-bit mantissa.
 inline void fmt_float(std::string &out, float v) {
+  bool neg; uint32_t m; int32_t e10;
+  if (f2s_decimal(v, &neg, &m, &e10)) {
+    fmt_decimal_shortest(out, neg, m, e10);
+    return;
+  }
+  // Zero / infinities / NaN have no ryu decimal: f2s_buffered_n's own text.
   char sci[32];
   int n = f2s_buffered_n(v, sci);
   fmt_shortest(out, sci, n);

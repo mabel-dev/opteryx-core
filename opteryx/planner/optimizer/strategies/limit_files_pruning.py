@@ -6,25 +6,28 @@
 """
 Optimization Rule - File Pruning for LIMIT Queries
 
-Type: Heuristic
-Goal: Reduce file I/O for SELECT queries with LIMIT and no filters
+Type: Heuristic (from manifest record counts)
+Goal: Reduce file I/O for `SELECT ... FROM table LIMIT n` with no filters
 
-This strategy detects queries of the form:
-    SELECT ... FROM table LIMIT n
+For a Scan carrying a pushed LIMIT and no predicate, sort its files by size (largest
+first), keep the fewest whose record counts cover the LIMIT, and narrow the scan's
+manifest to them. A scan with ANY predicate is left alone: the record-count
+accumulation is unsound the moment any row of a file may be filtered out (same
+guard, same reason, as TopNManifestPruning).
 
-Where there are no WHERE filters, and optimizes by:
-1. Sorting files by size (largest first)
-2. Selecting minimum files needed to satisfy LIMIT
-3. Updating manifest to contain only selected files
+Order:
+    After:  LimitPushdown (requires limits-pushed: it reads the LIMIT the pushdown
+            stamped on the Scan; a declined predicate stays a Filter node that
+            LimitPushdown refuses to push past, so `scan.limit` is None whenever one
+            survives), ManifestPruning (pipeline position).
+    Before: nothing depends on it.
+    Declares: requires limits-pushed.
 
-This dramatically reduces I/O for LIMIT queries on partitioned data.
+Rewrite:
+    none in SQL. `SELECT * FROM events LIMIT 1000` is unchanged; with ten files of
+    100K rows each, the manifest is narrowed to one file instead of ten.
 
-Example:
-    SELECT * FROM events LIMIT 1000
-    - If we have 10 files with 100K rows each
-    - We only need to read 1 file instead of all 10
-
-Expected Speedup: 2-10x (depending on data distribution)
+Expected speedup: 2-10x, depending on data distribution.
 """
 
 from opteryx.compiled.structures.plan_steps import PlanStep

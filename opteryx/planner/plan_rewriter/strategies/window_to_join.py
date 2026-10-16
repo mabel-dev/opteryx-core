@@ -4,29 +4,38 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Rewrites Window logical nodes (OVER (...)) as joins.
+Plan Rewrite Rule - Window To Join
 
+Stage: Plan Rewriter (unbound plan, after the Relation Resolver, before the Binder)
+Type: Correctness (the Binder and the engine have no aggregate-window operator)
+Goal: Express `agg(e) OVER (PARTITION BY c)` as a grouped CTE joined back on c
+
+Order:
+    After:  the Relation Resolver (every CTE and view is expanded, so a window inside
+            one is rewritten by the same pass).
+    Before: the Binder, and join planning in the Optimizer (an aggregate Window must
+            be a join by then). Declared first in the Plan Rewriter's fixed-point
+            loop; IntersectExceptAllToWindowJoin inserts RANKING windows, which this
+            does not match.
+
+Rewrite:
     SELECT agg(e) OVER (PARTITION BY c) FROM t
-
-is rewritten at the plan level to:
-
+    ->
     WITH _win AS (SELECT c, agg(e) AS $win_xxx FROM t GROUP BY c)
     SELECT $win_xxx FROM t INNER JOIN _win ON t.c = _win.c
+
+    SELECT agg(e) OVER () FROM t
+    ->
+    WITH _win AS (SELECT agg(e) AS $win_xxx FROM t)      -- UNGROUPED: exactly one row
+    SELECT $win_xxx FROM t CROSS JOIN _win
 
 The Window node carries the aggregate expressions and the partition columns. The
 rewriter COPIES the whole sub-plan feeding the Window node, hangs an aggregate off
 that copy, wraps it in a Subquery node, replaces the Window node with a Join, and
 wires the subquery as the right-hand input of the join.
 
-An empty `OVER ()` is the same rewrite with the partition list empty — one partition
-holding every row:
-
-    SELECT agg(e) OVER () FROM t
-    WITH _win AS (SELECT agg(e) AS $win_xxx FROM t)      -- UNGROUPED: exactly one row
-    SELECT $win_xxx FROM t CROSS JOIN _win
-
-The CTE is an ungrouped `Aggregate` rather than an `AggregateAndGroup` over no keys,
-because "exactly one row for any input" is what makes the cross join a BROADCAST and
+For an empty `OVER ()` the CTE is an ungrouped `Aggregate` rather than an
+`AggregateAndGroup` over no keys, because "exactly one row for any input" is what makes the cross join a BROADCAST and
 not a multiplication of the outer rows — and only the ungrouped node states that. With
 no partition key there is no ON condition, and an inner join with no ON is a cross
 join; the binder back-fills a join's left relation names from its bound ON condition,

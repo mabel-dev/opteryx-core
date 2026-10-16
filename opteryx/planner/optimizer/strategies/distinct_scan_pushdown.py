@@ -9,6 +9,20 @@ Optimization Rule - Distinct Scan Pushdown
 Type: Heuristic
 Goal: Deduplicate at the source instead of shipping every row
 
+Order:
+    After:  PredicatePushdown, ProjectionPushdown (the scan's projection is exactly
+            the DISTINCT set), RedundantOperations and ProjectFusion (the Distinct
+            reads DIRECTLY from the scan). Same ordering as AggregateScanPushdown,
+            for the same reasons.
+    Before: nothing depends on it.
+    Declares: requires projection-pushed, predicates-pushed, project-fused;
+              provides distinct-pushed.
+
+Rewrite:
+    SELECT DISTINCT a, b FROM postgres.t
+    ->
+    SELECT a, b FROM postgres.t      -- the connector runs SELECT DISTINCT a, b FROM t
+
     DISTINCT                          SCAN [POSTGRES] (t) [a, b] DISTINCT
     └─ SCAN [POSTGRES] (t) [a, b]  →
 
@@ -23,8 +37,6 @@ the SELECT list under DISTINCT.
 `DISTINCT ON` is not pushed: the server keeps the first row per key in sort
 order where the engine's DistinctSink keeps an arbitrary survivor, and
 changing which row survives is a behaviour change to rule on, not to slip in.
-
-Same ordering as AggregateScanPushdownStrategy, for the same reasons.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan

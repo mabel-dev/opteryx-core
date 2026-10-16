@@ -245,6 +245,12 @@ void unbzip2(const uint8_t* src, size_t n, draken::AppendBuffer<uint8_t>& out) {
 
 }  // namespace
 
+int take_bz_internal_error() {
+    const int code = bz_internal_code;
+    bz_internal_code = 0;
+    return code;
+}
+
 BlockDecoder::BlockDecoder() = default;
 
 BlockDecoder::~BlockDecoder() {

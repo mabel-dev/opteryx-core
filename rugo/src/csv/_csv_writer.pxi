@@ -7,10 +7,11 @@
 from libc.stdint cimport uint8_t, uint32_t, int32_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 
 from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY, DRAKEN_VECTOR_FP16
 from draken.morsels.morsel cimport Morsel
@@ -19,10 +20,12 @@ from draken.vectors.vector cimport Vector
 cdef extern from "_text_render.hpp" namespace "rugo_text":
     # for_excel raises std::invalid_argument (-> ValueError) on a morsel Excel
     # would silently mangle, hence `except +`.
-    string csv_write(const DrakenVector** dvs,
-                     const ColumnDesc* descs,
-                     const string* names, size_t ncols, size_t nrows,
-                     char delim, bint header, bint for_excel) except +
+    # Returns the rendered bytes as one buffer per worker (parallel render),
+    # header first.
+    vector[string] csv_write(const DrakenVector** dvs,
+                             const ColumnDesc* descs,
+                             const string* names, size_t ncols, size_t nrows,
+                             char delim, bint header, bint for_excel) except + nogil
 
 
 def write_csv(Morsel morsel not None, str delimiter=",", bint header=True,
@@ -65,7 +68,10 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True,
     cdef const DrakenVector* dv
     cdef Py_ssize_t c
     cdef object nm
-    cdef string out
+    cdef vector[string] chunks
+    cdef size_t total = 0, off = 0, k
+    cdef bytes result
+    cdef char* dst
     cdef bytes nb_name
     cdef vector[string] cnames
 
@@ -86,9 +92,20 @@ def write_csv(Morsel morsel not None, str delimiter=",", bint header=True,
             nb_name = nm if isinstance(nm, bytes) else str(nm).encode("utf-8")
             cnames.push_back(string(<const char*>nb_name, len(nb_name)))
 
-        out = csv_write(dvs, descs.data(),
-                        cnames.data(), <size_t>ncols, <size_t>nrows, delim, header,
-                        for_excel)
-        return PyBytes_FromStringAndSize(out.data(), out.size())
+        with nogil:
+            chunks = csv_write(dvs, descs.data(),
+                               cnames.data(), <size_t>ncols, <size_t>nrows, delim,
+                               header, for_excel)
+        for k in range(chunks.size()):
+            total += chunks[k].size()
+        # Allocate the result bytes once and concatenate the per-worker chunks
+        # straight into it, as write_jsonl does.
+        result = PyBytes_FromStringAndSize(NULL, <Py_ssize_t>total)
+        dst = PyBytes_AS_STRING(result)
+        with nogil:
+            for k in range(chunks.size()):
+                memcpy(dst + off, chunks[k].data(), chunks[k].size())
+                off += chunks[k].size()
+        return result
     finally:
         free(dvs)

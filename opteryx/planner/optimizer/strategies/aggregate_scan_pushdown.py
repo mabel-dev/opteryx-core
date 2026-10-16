@@ -9,6 +9,22 @@ Optimization Rule - Aggregate Scan Pushdown
 Type: Heuristic
 Goal: Answer an aggregate at the source instead of shipping every row
 
+Order:
+    After:  PredicatePushdown (the WHERE is in the scan and HAVING is folded onto
+            the aggregate), ProjectionPushdown (the scan's columns are settled),
+            RedundantOperations and ProjectFusion (the Project the planner leaves
+            between the aggregate and the Exit is gone, so the aggregate reads
+            DIRECTLY from the scan).
+    Before: nothing depends on it.
+    Declares: requires projection-pushed, predicates-pushed, project-fused;
+              provides aggregates-pushed.
+
+Rewrite:
+    SELECT k, COUNT(*), SUM(x) FROM postgres.t GROUP BY k
+    ->
+    SELECT k, "COUNT(*)", "SUM(x)" FROM postgres.t
+        -- the connector runs SELECT k, COUNT(*), SUM(x) FROM t GROUP BY k
+
     Aggregate / AggregateAndGroup           SCAN [POSTGRES] (t)
     └─ SCAN [POSTGRES] (t)          →          AGGREGATE [COUNT(*), SUM(x)] GROUP BY [k]
 
@@ -32,11 +48,6 @@ Declined by shape here, before the connector is asked:
   - HAVING (`having_condition`): not rendered remotely yet;
   - a scan already carrying a pushed LIMIT, top-N or DISTINCT;
   - an Aggregate that does not read DIRECTLY from the Scan.
-
-Ordering: after PredicatePushdown (the Filter is absorbed into the scan and
-HAVING has been folded into `having_condition`) and ProjectionPushdown; after
-ProjectFusion/RedundantOperations so the Project the planner leaves between the
-aggregate and the Exit is already gone.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan

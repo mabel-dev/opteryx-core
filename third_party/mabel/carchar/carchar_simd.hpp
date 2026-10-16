@@ -121,73 +121,6 @@ inline ProbeResult probe_find_slot_scalar(
     return {0, false, capacity};
 }
 
-template <std::size_t HStride>
-inline ProbeResult probe_find_bucket_scalar(
-    const std::uint8_t* control,
-    const std::uint64_t* hashes,
-    std::size_t capacity,
-    std::uint64_t key,
-    std::uint8_t tag
-) noexcept {
-    const std::size_t bucket_count = capacity / kProbeGroupWidth;
-    const std::size_t bucket_mask = bucket_count - 1U;
-    std::size_t bucket_index = static_cast<std::size_t>(key) & bucket_mask;
-    std::size_t probes = 0;
-
-    while (probes < capacity) {
-        const std::size_t slot = bucket_index * kProbeGroupWidth;
-        const std::uint64_t group_lo = load_u64(control + slot);
-        std::uint64_t matches_lo = match_mask64(group_lo, tag);
-        const std::uint64_t empties_lo = group_lo & kByteHighBits64;
-
-        while (matches_lo != 0U) {
-            const std::size_t index = first_group_index64(matches_lo);
-            if (empties_lo != 0U && index >= first_group_index64(empties_lo)) {
-                break;
-            }
-            const std::size_t candidate = slot + index;
-            if (hashes[candidate * HStride] == key) {
-                return {candidate, true, probes + index + 1U};
-            }
-            matches_lo &= (matches_lo - 1U);
-        }
-
-        if (empties_lo != 0U) {
-            const std::size_t stop = first_group_index64(empties_lo);
-            return {slot + stop, false, probes + stop + 1U};
-        }
-
-#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__) || \
-    (defined(__riscv) && defined(__riscv_vector))
-        const std::uint64_t group_hi = load_u64(control + slot + 8U);
-        std::uint64_t matches_hi = match_mask64(group_hi, tag);
-        const std::uint64_t empties_hi = group_hi & kByteHighBits64;
-
-        while (matches_hi != 0U) {
-            const std::size_t index = first_group_index64(matches_hi);
-            if (empties_hi != 0U && index >= first_group_index64(empties_hi)) {
-                break;
-            }
-            const std::size_t candidate = slot + 8U + index;
-            if (hashes[candidate * HStride] == key) {
-                return {candidate, true, probes + 8U + index + 1U};
-            }
-            matches_hi &= (matches_hi - 1U);
-        }
-
-        if (empties_hi != 0U) {
-            const std::size_t stop = 8U + first_group_index64(empties_hi);
-            return {slot + stop, false, probes + stop + 1U};
-        }
-#endif
-
-        bucket_index = (bucket_index + 1U) & bucket_mask;
-        probes += kProbeGroupWidth;
-    }
-
-    return {0, false, capacity};
-}
-
 #if defined(__AVX2__)
 template <std::size_t HStride>
 inline ProbeResult probe_find_slot_avx2(
@@ -235,58 +168,20 @@ inline ProbeResult probe_find_slot_avx2(
 
     return {0, false, capacity};
 }
-
-template <std::size_t HStride>
-inline ProbeResult probe_find_bucket_avx2(
-    const std::uint8_t* control,
-    const std::uint64_t* hashes,
-    std::size_t capacity,
-    std::uint64_t key,
-    std::uint8_t tag
-) noexcept {
-    const std::size_t bucket_count = capacity / 16U;
-    const std::size_t bucket_mask = bucket_count - 1U;
-    std::size_t bucket_index = static_cast<std::size_t>(key) & bucket_mask;
-    std::size_t probes = 0;
-    const __m128i tag_vec = _mm_set1_epi8(static_cast<char>(tag));
-    const __m128i empty_vec = _mm_set1_epi8(static_cast<char>(0x80U));
-
-    while (probes < capacity) {
-        const std::size_t slot = bucket_index * 16U;
-        const __m128i group = _mm_loadu_si128(reinterpret_cast<const __m128i*>(control + slot));
-        std::uint32_t matches = static_cast<std::uint32_t>(
-            _mm_movemask_epi8(_mm_cmpeq_epi8(group, tag_vec))
-        );
-        const std::uint32_t empties = static_cast<std::uint32_t>(
-            _mm_movemask_epi8(_mm_cmpeq_epi8(group, empty_vec))
-        );
-        const std::size_t group_stop = empties == 0U ? 16U : first_mask_index(empties);
-
-        while (matches != 0U) {
-            const std::size_t index = first_mask_index(matches);
-            if (index >= group_stop) {
-                break;
-            }
-            const std::size_t candidate = slot + index;
-            if (hashes[candidate * HStride] == key) {
-                return {candidate, true, probes + index + 1U};
-            }
-            matches &= (matches - 1U);
-        }
-
-        if (group_stop < 16U) {
-            return {slot + group_stop, false, probes + group_stop + 1U};
-        }
-
-        bucket_index = (bucket_index + 1U) & bucket_mask;
-        probes += 16U;
-    }
-
-    return {0, false, capacity};
-}
 #endif
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+// One bit per lane out of a 16-lane byte compare: bit 4*i+3 is set iff lane i of
+// `eq` is all-ones. The narrowing shift packs each lane into a nibble, so a whole
+// 16-byte group becomes ONE 64-bit word (lane_index = ctz(mask) >> 2; clear the
+// lowest match with m & (m - 1)). Replaces the older two-getlane + SWAR byte
+// arithmetic, which did the same job in a longer dependent chain
+// (scratch/carchar_contest: 1.2-2.8x on the hit path, ARM).
+inline std::uint64_t neon_lane_mask(uint8x16_t eq) noexcept {
+    return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(eq), 4)), 0) &
+           0x8888888888888888ULL;
+}
+
 template <std::size_t HStride>
 inline ProbeResult probe_find_slot_neon(
     const std::uint8_t* control,
@@ -303,148 +198,30 @@ inline ProbeResult probe_find_slot_neon(
 
     while (probes < capacity) {
         const uint8x16_t group = vld1q_u8(control + slot);
-        const uint8x16_t interesting =
-            vorrq_u8(vceqq_u8(group, tag_vec), vceqq_u8(group, empty_vec));
-        const uint64x2_t interesting_lanes = vreinterpretq_u64_u8(interesting);
-        const std::uint64_t interesting_lo = vgetq_lane_u64(interesting_lanes, 0);
-        const std::uint64_t interesting_hi = vgetq_lane_u64(interesting_lanes, 1);
+        std::uint64_t matches = neon_lane_mask(vceqq_u8(group, tag_vec));
+        const std::uint64_t empties = neon_lane_mask(vceqq_u8(group, empty_vec));
+        // Same contract as the AVX2 probe: a tag match at or after the first empty
+        // lane is never a candidate (nothing is inserted past an empty slot).
+        const std::size_t group_stop =
+            empties == 0U ? 16U : static_cast<std::size_t>(__builtin_ctzll(empties) >> 2U);
 
-        if ((interesting_lo | interesting_hi) == 0U) {
-            slot = (slot + 16U) & mask;
-            probes += 16U;
-            continue;
+        while (matches != 0U) {
+            const std::size_t index = static_cast<std::size_t>(__builtin_ctzll(matches) >> 2U);
+            if (index >= group_stop) {
+                break;
+            }
+            const std::size_t candidate = (slot + index) & mask;
+            if (hashes[candidate * HStride] == key) {
+                return {candidate, true, probes + index + 1U};
+            }
+            matches &= (matches - 1U);
         }
 
-        if (interesting_lo != 0U) {
-            const std::uint64_t group_lo = load_u64(control + slot);
-            std::uint64_t matches_lo = match_mask64(group_lo, tag);
-            const std::uint64_t empties_lo = group_lo & kByteHighBits64;
-
-            while (matches_lo != 0U) {
-                const std::size_t index = first_group_index64(matches_lo);
-                if (empties_lo != 0U && index >= first_group_index64(empties_lo)) {
-                    break;
-                }
-                const std::size_t candidate = (slot + index) & mask;
-                if (hashes[candidate * HStride] == key) {
-                    return {candidate, true, probes + index + 1U};
-                }
-                matches_lo &= (matches_lo - 1U);
-            }
-
-            if (empties_lo != 0U) {
-                const std::size_t stop = first_group_index64(empties_lo);
-                return {(slot + stop) & mask, false, probes + stop + 1U};
-            }
-        }
-
-        if (interesting_hi != 0U) {
-            const std::uint64_t group_hi = load_u64(control + slot + 8U);
-            std::uint64_t matches_hi = match_mask64(group_hi, tag);
-            const std::uint64_t empties_hi = group_hi & kByteHighBits64;
-
-            while (matches_hi != 0U) {
-                const std::size_t index = first_group_index64(matches_hi);
-                if (empties_hi != 0U && index >= first_group_index64(empties_hi)) {
-                    break;
-                }
-                const std::size_t candidate = (slot + 8U + index) & mask;
-                if (hashes[candidate * HStride] == key) {
-                    return {candidate, true, probes + 8U + index + 1U};
-                }
-                matches_hi &= (matches_hi - 1U);
-            }
-
-            if (empties_hi != 0U) {
-                const std::size_t stop = 8U + first_group_index64(empties_hi);
-                return {(slot + stop) & mask, false, probes + stop + 1U};
-            }
+        if (group_stop < 16U) {
+            return {(slot + group_stop) & mask, false, probes + group_stop + 1U};
         }
 
         slot = (slot + 16U) & mask;
-        probes += 16U;
-    }
-
-    return {0, false, capacity};
-}
-
-template <std::size_t HStride>
-inline ProbeResult probe_find_bucket_neon(
-    const std::uint8_t* control,
-    const std::uint64_t* hashes,
-    std::size_t capacity,
-    std::uint64_t key,
-    std::uint8_t tag
-) noexcept {
-    const std::size_t bucket_count = capacity / 16U;
-    const std::size_t bucket_mask = bucket_count - 1U;
-    std::size_t bucket_index = static_cast<std::size_t>(key) & bucket_mask;
-    std::size_t probes = 0;
-    const uint8x16_t tag_vec = vdupq_n_u8(tag);
-    const uint8x16_t empty_vec = vdupq_n_u8(0x80U);
-
-    while (probes < capacity) {
-        const std::size_t slot = bucket_index * 16U;
-        const uint8x16_t group = vld1q_u8(control + slot);
-        const uint8x16_t interesting =
-            vorrq_u8(vceqq_u8(group, tag_vec), vceqq_u8(group, empty_vec));
-        const uint64x2_t interesting_lanes = vreinterpretq_u64_u8(interesting);
-        const std::uint64_t interesting_lo = vgetq_lane_u64(interesting_lanes, 0);
-        const std::uint64_t interesting_hi = vgetq_lane_u64(interesting_lanes, 1);
-
-        if ((interesting_lo | interesting_hi) == 0U) {
-            bucket_index = (bucket_index + 1U) & bucket_mask;
-            probes += 16U;
-            continue;
-        }
-
-        if (interesting_lo != 0U) {
-            const std::uint64_t group_lo = load_u64(control + slot);
-            std::uint64_t matches_lo = match_mask64(group_lo, tag);
-            const std::uint64_t empties_lo = group_lo & kByteHighBits64;
-
-            while (matches_lo != 0U) {
-                const std::size_t index = first_group_index64(matches_lo);
-                if (empties_lo != 0U && index >= first_group_index64(empties_lo)) {
-                    break;
-                }
-                const std::size_t candidate = slot + index;
-                if (hashes[candidate * HStride] == key) {
-                    return {candidate, true, probes + index + 1U};
-                }
-                matches_lo &= (matches_lo - 1U);
-            }
-
-            if (empties_lo != 0U) {
-                const std::size_t stop = first_group_index64(empties_lo);
-                return {slot + stop, false, probes + stop + 1U};
-            }
-        }
-
-        if (interesting_hi != 0U) {
-            const std::uint64_t group_hi = load_u64(control + slot + 8U);
-            std::uint64_t matches_hi = match_mask64(group_hi, tag);
-            const std::uint64_t empties_hi = group_hi & kByteHighBits64;
-
-            while (matches_hi != 0U) {
-                const std::size_t index = first_group_index64(matches_hi);
-                if (empties_hi != 0U && index >= first_group_index64(empties_hi)) {
-                    break;
-                }
-                const std::size_t candidate = slot + 8U + index;
-                if (hashes[candidate * HStride] == key) {
-                    return {candidate, true, probes + 8U + index + 1U};
-                }
-                matches_hi &= (matches_hi - 1U);
-            }
-
-            if (empties_hi != 0U) {
-                const std::size_t stop = 8U + first_group_index64(empties_hi);
-                return {slot + stop, false, probes + stop + 1U};
-            }
-        }
-
-        bucket_index = (bucket_index + 1U) & bucket_mask;
         probes += 16U;
     }
 
@@ -535,76 +312,6 @@ inline ProbeResult probe_find_slot_rvv(
 
     return {0, false, capacity};
 }
-
-template <std::size_t HStride>
-inline ProbeResult probe_find_bucket_rvv(
-    const std::uint8_t* control,
-    const std::uint64_t* hashes,
-    std::size_t capacity,
-    std::uint64_t key,
-    std::uint8_t tag
-) noexcept {
-    const std::size_t bucket_count = capacity / 16U;
-    const std::size_t bucket_mask = bucket_count - 1U;
-    std::size_t bucket_index = static_cast<std::size_t>(key) & bucket_mask;
-    std::size_t probes = 0;
-
-    while (probes < capacity) {
-        const std::size_t slot = bucket_index * 16U;
-        if (!group_has_tag_or_empty_rvv(control + slot, tag)) {
-            bucket_index = (bucket_index + 1U) & bucket_mask;
-            probes += 16U;
-            continue;
-        }
-
-        const std::uint64_t group_lo = load_u64(control + slot);
-        std::uint64_t matches_lo = match_mask64(group_lo, tag);
-        const std::uint64_t empties_lo = group_lo & kByteHighBits64;
-
-        while (matches_lo != 0U) {
-            const std::size_t index = first_group_index64(matches_lo);
-            if (empties_lo != 0U && index >= first_group_index64(empties_lo)) {
-                break;
-            }
-            const std::size_t candidate = slot + index;
-            if (hashes[candidate * HStride] == key) {
-                return {candidate, true, probes + index + 1U};
-            }
-            matches_lo &= (matches_lo - 1U);
-        }
-
-        if (empties_lo != 0U) {
-            const std::size_t stop = first_group_index64(empties_lo);
-            return {slot + stop, false, probes + stop + 1U};
-        }
-
-        const std::uint64_t group_hi = load_u64(control + slot + 8U);
-        std::uint64_t matches_hi = match_mask64(group_hi, tag);
-        const std::uint64_t empties_hi = group_hi & kByteHighBits64;
-
-        while (matches_hi != 0U) {
-            const std::size_t index = first_group_index64(matches_hi);
-            if (empties_hi != 0U && index >= first_group_index64(empties_hi)) {
-                break;
-            }
-            const std::size_t candidate = slot + 8U + index;
-            if (hashes[candidate * HStride] == key) {
-                return {candidate, true, probes + 8U + index + 1U};
-            }
-            matches_hi &= (matches_hi - 1U);
-        }
-
-        if (empties_hi != 0U) {
-            const std::size_t stop = 8U + first_group_index64(empties_hi);
-            return {slot + stop, false, probes + stop + 1U};
-        }
-
-        bucket_index = (bucket_index + 1U) & bucket_mask;
-        probes += 16U;
-    }
-
-    return {0, false, capacity};
-}
 #endif
 
 // Direct, INLINABLE probe. The ISA variant is fixed at compile time
@@ -620,16 +327,6 @@ inline ProbeResult probe_find_slot_direct(const std::uint8_t* control,
                                           std::uint8_t tag) noexcept {
     return SIMD_STATIC_SELECT(probe_find_slot_avx2<HStride>, probe_find_slot_neon<HStride>,
                               probe_find_slot_rvv<HStride>, probe_find_slot_scalar<HStride>)(
-        control, hashes, capacity, key, tag);
-}
-
-template <std::size_t HStride = 1>
-inline ProbeResult probe_find_bucket_direct(const std::uint8_t* control,
-                                            const std::uint64_t* hashes,
-                                            std::size_t capacity, std::uint64_t key,
-                                            std::uint8_t tag) noexcept {
-    return SIMD_STATIC_SELECT(probe_find_bucket_avx2<HStride>, probe_find_bucket_neon<HStride>,
-                              probe_find_bucket_rvv<HStride>, probe_find_bucket_scalar<HStride>)(
         control, hashes, capacity, key, tag);
 }
 

@@ -52,6 +52,7 @@ enum Code : uint8_t {
     R_BOOL, R_INT32, R_INT64, R_FLOAT, R_DOUBLE, R_BYTES, R_FIXED, R_ENUM,
     R_TIME_MS,       // int millis -> int64 micros
     R_TS_MS,         // long millis -> int64 micros (checked)
+    R_IPV4,          // long 0..4294967295 -> uint32 (anything else fails)
     R_DEC_BYTES64, R_DEC_BYTES128, R_DEC_FIXED64, R_DEC_FIXED128,
     R_UUID_STR,      // string uuid -> 16 bytes (strict 8-4-4-4-12; anything else fails)
     R_UUID_FIXED,    // fixed(16) uuid -> its 16 bytes
@@ -524,6 +525,13 @@ private:
                 if (t->logical == Logical::TimeMicros) {
                     set_spec(col, OutKind::Time64, DRAKEN_TIME64, 8);
                     push(Op{R_INT64, 0, col, 0, 0});
+                    return;
+                }
+                if (t->logical == Logical::None && t->opteryx_type == "IPV4") {
+                    // The rugo writer's side channel (docs/AVRO_WRITER_DESIGN.md D9): a long
+                    // carrying a Draken IPV4 reads back as UINT32 + the IPV4 descriptor.
+                    set_spec(col, OutKind::Ipv4, DRAKEN_UINT32, 4);
+                    push(Op{R_IPV4, 0, col, 0, 0});
                     return;
                 }
                 if (t->logical == Logical::TimestampMillis || t->logical == Logical::TimestampMicros) {
@@ -1281,6 +1289,13 @@ private:
                     c.p += op->arg;
                     break;
                 }
+                case R_IPV4: {
+                    const int64_t v = read_long(c);
+                    if (v < 0 || v > 0xFFFFFFFFLL)
+                        fail("an IPV4 value (" + std::to_string(v) + ") is outside 0..4294967295");
+                    *at<uint32_t>(op->col, r) = static_cast<uint32_t>(v);
+                    break;
+                }
                 case R_UUID_STR: {
                     const uint64_t n = read_length(c);
                     need(c, n);
@@ -1753,6 +1768,7 @@ std::vector<AvroColumnType> AvroFile::column_types() const {
         t.type = cs.type;
         if (cs.type == DRAKEN_TIMESTAMP64) t.logical_kind = 1;
         else if (cs.type == DRAKEN_TIME64) t.logical_kind = 2;
+        else if (cs.kind == OutKind::Ipv4) t.logical_kind = 5;
         else if (cs.type == DRAKEN_DECIMAL || cs.type == DRAKEN_DECIMAL128) {
             t.logical_kind = 3;
             t.precision = cs.precision;

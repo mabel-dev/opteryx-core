@@ -4,7 +4,29 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 r"""
-Rewrites INTERSECT ALL / EXCEPT ALL using ROW_NUMBER + semi/anti join.
+Plan Rewrite Rule - INTERSECT ALL / EXCEPT ALL To Window + Semi/Anti Join
+
+Stage: Plan Rewriter (unbound plan, after the Relation Resolver, before the Binder)
+Type: Correctness (no multiset set-operation operator exists; the DISTINCT forms
+      lower in the Binder, these cannot because they insert a Window node)
+Goal: Turn multiset INTERSECT ALL / EXCEPT ALL into ROW_NUMBER tagging plus a
+      semi / anti join on (cols AND rn)
+
+Order:
+    After:  WindowToJoin (declaration order in the fixed-point loop; the ROW_NUMBER
+            windows inserted here are ranking windows WindowToJoin does not match).
+    Before: the Binder (binder/set_ops lowers the DISTINCT forms there, once the
+            legs' output columns are positionally known).
+
+Rewrite:
+    L INTERSECT ALL R
+    ->
+    SELECT <cols> FROM
+        (SELECT *, ROW_NUMBER() OVER (PARTITION BY <cols>) AS rn FROM L) l
+        LEFT SEMI JOIN
+        (SELECT *, ROW_NUMBER() OVER (PARTITION BY <cols>) AS rn FROM R) r
+        ON l.<cols> = r.<cols> AND l.rn = r.rn
+    (EXCEPT ALL: LEFT ANTI JOIN)
 
 Multiset semantics need occurrence counts, which a plain semi/anti join (existence
 only) cannot express. Tagging each row with its occurrence index within its

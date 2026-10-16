@@ -374,7 +374,7 @@ def cmd_split(args) -> int:
     import os
     stem, ext = os.path.splitext(args.path)
     dst_fmt = args.format or src_fmt
-    out_ext = {"parquet": ".parquet", "csv": ".csv", "jsonl": ".jsonl"}[dst_fmt]
+    out_ext = {"parquet": ".parquet", "csv": ".csv", "jsonl": ".jsonl", "avro": ".avro"}[dst_fmt]
 
     outputs = []
     offset = 0

@@ -297,7 +297,7 @@ class MabelTable(BaseTable, Diachronic):
             stream.close()
 
         infos = self.filesystem.get_file_info(data_blobs)
-        sizes: Dict[str, int] = {i.path: (getattr(i, "size", 0) or 0) for i in infos}
+        sizes: Dict[str, int] = {i.path: i.size for i in infos}
 
         # Mabel computes NO plan-time statistics. The manifest lists the files and
         # their sizes; every row count and column bound comes from reading them.
@@ -311,7 +311,11 @@ class MabelTable(BaseTable, Diachronic):
             True,
         )
         for blob_name in data_blobs:
-            builder.add_file(blob_name, "PARQUET", -1, sizes.get(blob_name, 0))
+            if blob_name not in sizes:
+                raise InvalidInternalStateError(
+                    f"MabelConnector: get_file_info returned no entry for '{blob_name}'."
+                )
+            builder.add_file(blob_name, "PARQUET", -1, sizes[blob_name])
 
         self.schema = schema
         self._manifest = Manifest(builder.build({}), schema)

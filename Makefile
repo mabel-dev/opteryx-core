@@ -67,7 +67,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test bench-is-null
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test bench-is-null carchar-contest-check carchar-contest-build
 
 # Default target
 .DEFAULT_GOAL := help
@@ -216,6 +216,7 @@ q:
 	@$(PYTEST) tests/integration/sql_battery/test_is_json.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
 	@$(PYTEST) tests/integration/test_row_identity_native_scan_local.py -q
+	@$(PYTEST) tests/storage/test_mabel_connector.py -q
 	@$(MAKE) --no-print-directory chunk-cache-test
 	@$(MAKE) --no-print-directory gb-block-store-test
 
@@ -315,6 +316,22 @@ medius-test: ## Build and run the Medius bounded middle-tier tests
 	    -I$(CURDIR)/third_party/mabel/medius \
 	    -o medius_test $(CURDIR)/third_party/mabel/medius/medius_test.cpp
 	@/tmp/opteryx-tests/medius_test
+
+CARCHAR_CONTEST_CXX = clang++ -std=c++20 -O2 -Wall -Wextra -DNDEBUG -DCONTEST_WITH_PROD \
+	    -I$(CURDIR) -I$(CURDIR)/draken -I$(CURDIR)/draken/simd \
+	    -I$(CURDIR)/third_party/mabel/carchar -I$(CURDIR)/scratch/carchar_contest \
+	    $(CURDIR)/scratch/carchar_contest/contest.cpp $(CURDIR)/draken/core/mem_account.cpp
+
+carchar-contest-check: ## Build and run the carchar beauty-contest correctness check (light; no timing)
+	$(call print_blue,"Building and running carchar contest correctness check...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && $(CARCHAR_CONTEST_CXX) -o carchar_contest
+	@/tmp/opteryx-tests/carchar_contest check
+
+carchar-contest-build: ## Build the carchar beauty-contest bench binary only (does not run it)
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && $(CARCHAR_CONTEST_CXX) -o carchar_contest
+	@echo "built /tmp/opteryx-tests/carchar_contest (run: see scratch/carchar_contest/RUNBOOK.md)"
 
 decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completeness test
 	$(call print_blue,"Building and running DecodedColumn reset completeness test...")
@@ -780,7 +797,7 @@ clickbench-json: ## Run ClickBench on upstream's hits.json.gz split into 100 x 1
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (json) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant json --iterations 3
 
-clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split converted to 1M-row deflate Avro shards (converts scratch/hits_rugo_262k to scratch/hits_avro on first run, ~5 min)
+clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split converted to 1M-row deflate Avro shards by rugo's writer (converts scratch/hits_rugo_262k to scratch/hits_avro on first run)
 	@# Avro is reachable only through READ_AVRO, never as a stored dataset, so the
 	@# runner's `avro` variant rewrites each query's relation to
 	@# READ_AVRO('scratch/hits_avro/*.avro'). Its ratio column is ClickHouse local
@@ -793,7 +810,11 @@ clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split convert
 	@# source row is accounted for, and a mirror written another way (another
 	@# codec, block size or shard size) must not satisfy the gate. Changing any of
 	@# those in dev/clickbench/parquet_to_avro.py means bumping the stamp.
-	@test -f scratch/hits_avro.deflate-v1 || { rm -rf scratch/hits_avro scratch/hits_avro.partial && $(PYTHON) dev/clickbench/parquet_to_avro.py scratch/hits_rugo_262k scratch/hits_avro deflate && touch scratch/hits_avro.deflate-v1; }
+	@# 2026-10-16: shards written by rugo.avro.write_avro (stamp deflate-rugo-v1). The
+	@# earlier fastavro shards (64,000-byte blocks, the JVM default) were deleted; the
+	@# converter's `fastavro` writer rebuilds them. ClickHouse's ratio
+	@# (results.local.avro.json) was measured on those, not on these.
+	@test -f scratch/hits_avro.deflate-rugo-v1 || { rm -rf scratch/hits_avro scratch/hits_avro.partial && $(PYTHON) dev/clickbench/parquet_to_avro.py scratch/hits_rugo_262k scratch/hits_avro deflate rugo && touch scratch/hits_avro.deflate-rugo-v1; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (avro) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant avro
@@ -819,7 +840,7 @@ clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/r
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
 clickbench-duckdb-avro: ## DuckDB (avro extension) over the clickbench-avro shards (regenerates duckdb/results.local.avro.json; run `make clickbench-avro` first to build scratch/hits_avro)
-	@test -f scratch/hits_avro.deflate-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
+	@test -f scratch/hits_avro.deflate-rugo-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --avro-dir scratch/hits_avro
 
 clickbench-duckdb-aistor-canon-split-10: ## DuckDB (iceberg_scan) over AIStor clickbench.hits_canon_split_10 - the same table as clickbench-aistor-canon-split-10 (regenerates duckdb/results.aistor.hits_canon_split_10.json)
@@ -832,7 +853,7 @@ clickbench-duckdb-aistor-rugo-split-10: ## DuckDB (iceberg_scan) over AIStor cli
 
 CLICKHOUSE ?= scratch/clickhouse/clickhouse
 clickbench-clickhouse-avro: ## ClickHouse local over the clickbench-avro shards, 1 try per query (writes clickhouse/results.local.avro.json; needs a clickhouse binary at CLICKHOUSE and scratch/hits_avro built by make clickbench-avro)
-	@test -f scratch/hits_avro.deflate-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
+	@test -f scratch/hits_avro.deflate-rugo-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
 	@test -x $(CLICKHOUSE) || { echo "no clickhouse binary at $(CLICKHOUSE) (set CLICKHOUSE=...)" >&2; exit 1; }
 	@$(PYTHON) tests/performance/clickbench/clickhouse/runner.py --binary $(CLICKHOUSE) --avro-dir scratch/hits_avro
 

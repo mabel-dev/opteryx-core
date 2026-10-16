@@ -6,8 +6,23 @@
 """
 Optimization Rule - Vector Search (docs/VECTOR_INDEX_DESIGN.md §7, D-4)
 
-Type: Physical planning
-Goal: run `ORDER BY COSINE_DISTANCE(col, 'query') LIMIT k` through the column's index
+Type: Physical planning (costed per file by vector_search_cost.py from manifest
+      figures and measured constants — not from plan statistics)
+Goal: Run `ORDER BY COSINE_DISTANCE(col, 'query') LIMIT k` through the column's index
+
+Order:
+    After:  OperatorFusion (requires heapsort-fused: the HeapSort it reads),
+            ProjectFusion (requires project-fused), PredicatePushdown (a WHERE pushed
+            into the scan is applied before the search; one left above it blocks the
+            route).
+    Before: TopNScanPushdown (pipeline position).
+    Declares: requires heapsort-fused, project-fused; provides vector-search.
+
+Rewrite:
+    SELECT * FROM docs ORDER BY COSINE_DISTANCE(body, 'query') LIMIT 10
+    ->
+    the same plan; the scan is stamped (`scan.vector_search`) and the compiler
+    admits only the rows the index returns, plus every row of files searched exactly.
 
 When the shape allows, the scan is stamped (`scan.vector_search`) and the compiler gives it
 a row admission (src/cpp/engine/vector_index_admission.hpp) that decodes only the rows the
@@ -24,8 +39,6 @@ Dropping rows with no embedding from a COSINE_DISTANCE-led sort is the query's m
 not this rule's: planner/unsearchable_sorts.py marks it straight after binding, so
 disabling this strategy (FEATURE_DISABLE_VECTOR_INDEX_ROUTING) only stops the index being
 used - it never changes an answer.
-
-Ordering: after OperatorFusion (the HeapSort it reads) and ProjectFusion.
 """
 
 from opteryx.expression import NodeType

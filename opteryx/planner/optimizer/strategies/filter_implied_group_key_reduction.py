@@ -7,17 +7,30 @@
 Optimization Rule - Filter-Implied Group Key Reduction
 
 Type: Heuristic
-Goal: Strip GROUP BY keys that are provably single-valued because a Filter
-      below the aggregate constrains them with a col = literal equality.
+Goal: Strip GROUP BY keys a Filter below the aggregate pins to a single literal
 
-A query like:
-    SELECT name, COUNT(*) FROM t WHERE name = 'bob' GROUP BY name
-has `name` forced constant by the filter. Grouping on it adds no information
-to the partition. This rule strips such keys from the aggregate and
-reconstructs them as literals in a Project inserted immediately above.
+A key constrained by a `col = literal` equality below the aggregate adds nothing to
+the partition. It is removed from the aggregate's keys and re-emitted as a literal
+by a Project inserted directly above. The equalities are read from the Filter nodes
+in the chain AND from the predicates the Scan has absorbed — after pushdown the
+WHERE equality lives on the scan for every connector that accepts predicates, and
+a pushed predicate is a filter the reader applies, so it gives the same guarantee.
+
+Order:
+    After:  PredicatePushdown (the equality it reads is in `scan.predicates` or a
+            declined Filter node, both in their final place), GroupKeyReduction
+            (strips derived expressions first, so this sees bare keys).
+    Before: ProjectionPushdown and ProjectFusion (the inserted Project is pruned and
+            fused like any other).
+
+Rewrite:
+    SELECT name, city, COUNT(*) FROM t WHERE name = 'bob' GROUP BY name, city
+    ->
+    SELECT 'bob' AS name, city, COUNT(*) FROM t WHERE name = 'bob' GROUP BY city
 
 Walk rule: descend through Filter, Project, Limit, Order, Distinct, and
-similar pass-through nodes. Stop at Join, Union, Intersect, Except,
+similar pass-through nodes, reading Filter conditions and a Scan's absorbed
+predicates. Stop at Join, Union, Intersect, Except,
 Subquery, Aggregate, or another AggregateAndGroup — any of those
 can invalidate the equality guarantee.
 
@@ -96,7 +109,17 @@ def _extract_equalities(expr, equalities: dict) -> None:
 
 
 def _collect_equality_predicates(plan: LogicalPlan, start_nid) -> dict:
-    """Walk downward from start_nid collecting col=literal equalities from Filters."""
+    """Walk downward from start_nid collecting col=literal equalities.
+
+    Two sources, both filters on the rows that reach the aggregate:
+      - Filter nodes in the chain (predicates a connector declined, or that no
+        connector was offered);
+      - the predicates a Scan has ABSORBED (`scan.predicates`). This strategy runs
+        after PredicatePushdown, so on every connector that accepts pushdown
+        (parquet, skene, SQL) the WHERE equality is here and nowhere else; the
+        reader applies it, so the scan emits only rows satisfying it — exactly
+        the guarantee a Filter node gives.
+    """
     equalities: dict = {}
     stack = list(plan.ingoing_edges(start_nid))
     while stack:
@@ -106,6 +129,9 @@ def _collect_equality_predicates(plan: LogicalPlan, start_nid) -> dict:
             continue
         if node.node_type == LogicalPlanStepType.Filter:
             _extract_equalities(node.condition, equalities)
+        elif node.node_type == LogicalPlanStepType.Scan:
+            for predicate in node.predicates or ():
+                _extract_equalities(predicate, equalities)
         stack.extend(plan.ingoing_edges(child_id))
     return equalities
 

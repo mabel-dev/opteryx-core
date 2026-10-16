@@ -7,7 +7,24 @@
 Optimization Rule - Top-N Scan Pushdown
 
 Type: Heuristic
-Goal: Reduce Rows read for ORDER BY ... LIMIT n
+Goal: Reduce rows read for `ORDER BY ... LIMIT n`
+
+Order:
+    After:  OperatorFusion (requires heapsort-fused: it matches the HeapSort),
+            RedundantOperations and ProjectFusion (requires project-fused: the
+            Project a SELECT list leaves between HeapSort and Scan is gone — before
+            them the HeapSort is adjacent to a Scan only for `SELECT *`),
+            PredicatePushdown (a Filter left between them blocks the stamp),
+            VectorSearch (pipeline position).
+    Before: TopNManifestPruning (requires topn-scan-pushdown).
+    Declares: requires heapsort-fused, project-fused; provides topn-scan-pushdown.
+
+Rewrite:
+    SELECT * FROM t ORDER BY ts DESC LIMIT 10
+    ->
+    the same plan; the Scan carries `topn_order_by = [(ts, DESC)]`, `topn_limit = 10`
+    and the reader (or a SQL server, as `ORDER BY ts DESC LIMIT 10`) returns a
+    superset of the top 10 for the HeapSort above to make the final cut.
 
 When a HeapSort (a fused Order+Limit) reads directly from a Scan whose
 connector can honour the sort spec, the spec is stamped on the Scan:
@@ -32,11 +49,6 @@ strategy only checks the plan shape — HeapSort directly over a single Scan
 (no intervening node; a Filter or Join between them would make the spec
 describe a different row set), positive LIMIT, no OFFSET (fusion already
 excludes it).
-
-Ordering: runs AFTER RedundantOperations/ProjectFusion have removed the
-Project a SELECT list leaves between the HeapSort and the Scan — before them
-the HeapSort is adjacent to a Scan only for `SELECT *`, and the stamp is never
-applied to a real query.
 """
 
 from opteryx.expression import NodeType

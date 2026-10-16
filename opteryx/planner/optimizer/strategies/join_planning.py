@@ -4,7 +4,29 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Strategy: Cost-based join planning (DPccp).
+Optimization Rule - Join Planning (DPccp)
+
+Type: Cost-based (`optimization_technique = "cost"`)
+Goal: Choose the join tree — which relations pair, in what order, possibly bushy —
+      for each chain of implicit cross joins
+
+Order:
+    After:  DecorrelateSubquery, JoinKeyMaterialization (expression keys are real
+            columns, so they classify as equi edges), SplitConjunctivePredicates
+            (the predicates above the chain are individual conjuncts).
+    Before: PredicatePushdown and then CrossJoinFilterPushdown, which converts the
+            cross-join shells this emits into inner joins keyed by their equi
+            predicates; JoinAlgorithm (requires joins-planned) and SemiJoinReducer
+            (needs the sibling conjuncts materialised below the join).
+    Declares: provides joins-planned.
+
+Rewrite:
+    FROM part, supplier, partsupp
+    WHERE p_partkey = ps_partkey AND s_suppkey = ps_suppkey
+    ->
+    FROM (part CROSS JOIN partsupp) CROSS JOIN supplier WHERE ...
+        -- the chain is re-shaped to the costed tree; the shells stay cross joins
+        -- until CrossJoinFilterPushdown keys them
 
 For each chain of unconverted cross joins:
   1. Identify the chain (reusing helpers from `cross_join_chain_reorder`).
@@ -13,8 +35,8 @@ For each chain of unconverted cross joins:
   4. Rewrite the chain's internal nodes to match the chosen tree, which may
      be bushy (not just left-deep).
 
-The rewritten internal nodes stay as ``cross join`` shells; the immediately
-following ``CrossJoinFilterPushdownStrategy`` converts each one to an inner
+The rewritten internal nodes stay as ``cross join`` shells; the later
+``CrossJoinFilterPushdownStrategy`` converts each one to an inner
 join with the appropriate equi-key predicate from the upper Filter. Predicates
 themselves are not moved by this strategy.
 

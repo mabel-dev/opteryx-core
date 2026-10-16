@@ -54,6 +54,7 @@ from opteryx.planner.optimizer.strategies import (
     FilterImpliedGroupKeyReductionStrategy,
     FunctionRewriteStrategy,
     GroupKeyReductionStrategy,
+    GroupJoinStrategy,
     GroupLimitKeyBoundStrategy,
     JsonlNestedExtractionStrategy,
     JoinConditionHoistStrategy,
@@ -117,6 +118,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "FilterImpliedGroupKeyReductionStrategy": lambda: config.features.disable_filter_implied_group_key_reduction,
     "FunctionRewriteStrategy": lambda: config.features.disable_function_rewrite,
     "GroupKeyReductionStrategy": lambda: config.features.disable_group_key_reduction,
+    "GroupJoinStrategy": lambda: config.features.disable_groupjoin,
     "GroupLimitKeyBoundStrategy": lambda: config.features.disable_group_limit_key_bound,
     "JsonlNestedExtractionStrategy": lambda: config.features.disable_jsonl_nested_extraction,
     "JoinConditionHoistStrategy": lambda: config.features.disable_join_condition_hoist,
@@ -349,6 +351,10 @@ class OptimizerVisitor:
             # and after RedundantOperationsStrategy so Subquery boundary nodes
             # between two Projects are already gone.
             ProjectFusionStrategy(telemetry),
+            # Fuses a join with the aggregate that consumes it (annotation only; the
+            # compiler lowers the pair). After ProjectFusion so the join order and
+            # build sides are final and no boundary node sits between the two.
+            GroupJoinStrategy(telemetry),
             # The scan-absorbing pushdowns. All three need the operator to read
             # DIRECTLY from the Scan, and the Project a SELECT list leaves between
             # them and the Scan is only removed by RedundantOperations/ProjectFusion

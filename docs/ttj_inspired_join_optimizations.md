@@ -45,9 +45,13 @@ existing optimizer and join infrastructure can capture a significant share of th
 
 ### Join execution
 
-Opteryx's primary equi-join path is `DrakenInnerJoinNode`
+> **Status 2026-10-16:** the path described in this section is historical. `DrakenInnerJoinNode` and
+> `carchar_join_engine.hpp` no longer exist (the engine was dead code and was deleted); the live
+> equi-join is the native CSR / radix build and probe in `src/cpp/engine/native_join2.hpp`.
+
+Opteryx's primary equi-join path was `DrakenInnerJoinNode`
 (`opteryx/operators/hashed_inner_join/hashed_inner_join.pyx`), backed by the Carchar C++ hash
-table engine (`third_party/mabel/carchar/carchar_join_engine.hpp`). Execution is morsel-based:
+table engine (`third_party/mabel/carchar/carchar_join_engine.hpp`, now deleted). Execution was morsel-based:
 the left (probe) side is fully buffered and hashed, then right (build) morsels are probed. A
 bloom filter is optionally created for the build side when cardinality is ≤ 16M rows, which
 eliminates probes for keys not present in the build relation. This filter operates in the

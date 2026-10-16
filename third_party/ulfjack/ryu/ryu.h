@@ -39,6 +39,15 @@ int d2exp_buffered_n(double d, uint32_t precision, char* result);
 void d2exp_buffered(double d, uint32_t precision, char* result);
 char* d2exp(double d, uint32_t precision);
 
+// Opteryx addition (2026-10-16), not upstream ryu: the shortest decimal as
+// integers (|f| == mantissa * 10^exponent); false for zero / inf / NaN. See
+// the definitions at the end of d2s.c and f2s.c.
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
+bool d2s_decimal(double f, bool* sign, uint64_t* mantissa, int32_t* exponent);
+bool f2s_decimal(float f, bool* sign, uint32_t* mantissa, int32_t* exponent);
+
 #ifdef __cplusplus
 }
 #endif

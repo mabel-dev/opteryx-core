@@ -7,16 +7,34 @@
 Optimization Rule - Constant Folding
 
 Type: Heuristic
-Goal: Evaluate Once
+Goal: Evaluate once
+
+Sub-expressions with no identifiers are evaluated at plan time and replaced by a
+literal — in Filter conditions, Project columns, ORDER BY keys and GROUP BY keys. A
+Filter whose whole condition folds to TRUE is removed; one that folds to NULL becomes
+FALSE (a NULL condition keeps no rows). Identity rewrites such as `x * 1 -> x`
+replace the expression with a transparent NESTED wrapper around its operand, the
+same device RedundantCastElimination uses.
+
+Order:
+    Runs TWICE.
+    First pass (position 4): after JoinConditionHoist, before every other expression
+        rewrite, so BooleanSimplification, RedundantCastElimination, PredicateRewrite
+        and the pushdowns see literals rather than constant arithmetic.
+    Second pass (second to last): after every strategy that rewrites or synthesises an
+        expression (PredicateRewrite, CorrelatedFilters, GroupKeyReduction, the
+        fusions), so what they produced is folded too. Only LengthOnlyColumn runs
+        after it.
+
+Rewrite:
+    WHERE a > 1 + 2 AND LENGTH('abc') = 3
+    ->
+    WHERE a > 3
 
 We identify branches in expressions where there are no identifiers, these usually
 mean we can evaluate them once, in the optimization phase, and replace them with a
 constant for handling in the execution phase, reducing the amount of work done by
 the execution engine.
-
-We run this strategy twice, once at the beginning, which primarily handles user
-entered expressions we can optimize, and again at the end which handles where
-we've rewritten expressions at part of other optimizations which can be folded.
 """
 
 import math

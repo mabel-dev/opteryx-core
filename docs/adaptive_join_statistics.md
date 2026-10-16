@@ -3,6 +3,12 @@
 **Source:** "Adaptive Factorization Using Linear-Chained Hash Tables", Groß, ten Wolde, Boncz — CIDR 2025  
 **Status:** Design / Pre-implementation
 
+> **Update 2026-10-16:** every reference below to `CarcharJoinEngine`, `carchar_join_engine.hpp`,
+> `insert_batch()`, `seal()` and `HashedInnerJoinNode` is HISTORICAL. That engine was dead code (no translation unit
+> compiled it) and has been deleted. The live join build is the CSR / radix table in
+> `src/cpp/engine/native_join2.hpp`; `CarcharJoinIndex` survives only for ASOF joins. The proposals here (runtime
+> sketches during the build, chain-length statistics) still stand but must be re-targeted at that native build.
+
 ---
 
 ## 1. Problem Statement
@@ -83,7 +89,7 @@ There is no communication between the join operator and the aggregate operator. 
 | File | Change |
 |---|---|
 | `third_party/mabel/carchar/carchar_join_index.hpp` | Add `average_chain_length()` → `(double)total_rows / unique_keys` using existing `row_counts_` sum |
-| `third_party/mabel/carchar/carchar_join_engine.hpp` | Aggregate per-partition chain stats; expose `average_chain_length()` and `unique_key_count()` |
+| ~~`third_party/mabel/carchar/carchar_join_engine.hpp`~~ (deleted; target `src/cpp/engine/native_join2.hpp`) | Aggregate per-partition chain stats; expose `average_chain_length()` and `unique_key_count()` |
 | `opteryx/compiled/joins/draken_inner_join.pyx` | Capture chain stats post-seal; include in `get_last_draken_inner_join_metrics()` |
 | `opteryx/operators/hashed_inner_join/hashed_inner_join.pyx` | Read new metrics; log or store on the node for planner feedback |
 
@@ -103,7 +109,7 @@ There is no communication between the join operator and the aggregate operator. 
 
 | File | Change |
 |---|---|
-| `third_party/mabel/carchar/carchar_join_engine.hpp` | Add `hllpp.h` (already vendored for `_collectors_approx.pxi`); maintain one HLL sketch per `CarcharJoinEngine`; feed each key hash into it during `insert_batch()` |
+| ~~`third_party/mabel/carchar/carchar_join_engine.hpp`~~ (deleted; target `src/cpp/engine/native_join2.hpp`) | Add `hllpp.h` (already vendored for `_collectors_approx.pxi`); maintain one HLL sketch per `CarcharJoinEngine`; feed each key hash into it during `insert_batch()` |
 | `opteryx/compiled/joins/draken_inner_join.pyx` | Expose `hll_distinct_count()` from the sealed engine; include in metrics |
 | `opteryx/planner/optimizer/statistics.py` | Accept runtime-measured chain statistics as an alternative to histogram-derived selectivity; use when histogram estimates are absent (Parquet) or stale |
 

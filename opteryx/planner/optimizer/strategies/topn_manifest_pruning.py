@@ -6,16 +6,22 @@
 """
 Optimization Rule - Manifest-Based File Pruning for Top-N
 
-Type: Heuristic
-Goal: Skip whole files that cannot contain any of the top-N rows of a
-single-column `ORDER BY <col> [ASC|DESC] LIMIT n` query, using the per-file
-min/max bounds and record_count already carried in the manifest.
+Type: Heuristic (manifest bounds and record counts; a prune is a proof)
+Goal: Skip whole files that cannot contain any of the top-N rows of a single-column
+      `ORDER BY <col> [ASC|DESC] LIMIT n` query
 
-Runs strictly after TopNScanPushdownStrategy (WP-2) has stamped
-topn_sort_name/topn_descending/topn_limit onto the Scan, and after
-WHERE-predicate manifest pruning (ManifestPruningStrategy) has already
-narrowed the file list - this strategy narrows it further, using the sort
-key instead of a WHERE predicate.
+Order:
+    After:  TopNScanPushdown (requires topn-scan-pushdown: it reads the top-N spec
+            stamped on the Scan), ManifestPruning and PredicatePushdown (requires
+            predicates-pushed: it narrows the already-pruned list, and declines a
+            scan carrying ANY predicate).
+    Before: nothing depends on it.
+    Declares: requires predicates-pushed, topn-scan-pushdown.
+
+Rewrite:
+    none in SQL. `SELECT * FROM t ORDER BY ts DESC LIMIT 10` is unchanged; files
+    whose max(ts) cannot reach the 10th-largest row proven by the other files'
+    bounds and record counts are removed from the manifest.
 
 Algorithm: see Manifest.prune_files_for_topn's docstring for the
 threshold-accumulation itself.

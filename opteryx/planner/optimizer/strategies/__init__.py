@@ -31,6 +31,7 @@ from .predicate_pushdown import PredicatePushdownStrategy
 from .function_rewriter import FunctionRewriteStrategy
 from .filter_implied_group_key_reduction import FilterImpliedGroupKeyReductionStrategy
 from .group_key_reduction import GroupKeyReductionStrategy
+from .groupjoin import GroupJoinStrategy
 from .predicate_rewriter import PredicateRewriteStrategy
 from .project_fusion import ProjectFusionStrategy
 from .projection_pushdown import ProjectionPushdownStrategy
@@ -79,6 +80,7 @@ __all__ = [
     "FunctionRewriteStrategy",
     "FilterImpliedGroupKeyReductionStrategy",
     "GroupKeyReductionStrategy",
+    "GroupJoinStrategy",
     "PredicateRewriteStrategy",
     "ProjectFusionStrategy",
     "ProjectionPushdownStrategy",

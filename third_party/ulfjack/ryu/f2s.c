@@ -343,3 +343,22 @@ char* f2s(float f) {
   f2s_buffered(f, result);
   return result;
 }
+
+// ---- Opteryx addition (2026-10-16), not upstream ryu ----
+// FLOAT32 counterpart of d2s_decimal (d2s.c): the shortest round-trip decimal
+// f2s_buffered_n prints, as |f| == mantissa * 10^exponent. Returns false for
+// zero, infinities and NaN.
+bool f2s_decimal(float f, bool* sign, uint32_t* mantissa, int32_t* exponent) {
+  const uint32_t bits = float_to_bits(f);
+  const bool ieeeSign = ((bits >> (FLOAT_MANTISSA_BITS + FLOAT_EXPONENT_BITS)) & 1) != 0;
+  const uint32_t ieeeMantissa = bits & ((1u << FLOAT_MANTISSA_BITS) - 1);
+  const uint32_t ieeeExponent = (bits >> FLOAT_MANTISSA_BITS) & ((1u << FLOAT_EXPONENT_BITS) - 1);
+  if (ieeeExponent == ((1u << FLOAT_EXPONENT_BITS) - 1u) || (ieeeExponent == 0 && ieeeMantissa == 0)) {
+    return false;
+  }
+  const floating_decimal_32 v = f2d(ieeeMantissa, ieeeExponent);
+  *sign = ieeeSign;
+  *mantissa = v.mantissa;
+  *exponent = v.exponent;
+  return true;
+}

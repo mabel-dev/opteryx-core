@@ -4,10 +4,33 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule - Split Conjections
+Optimization Rule - Split Conjunctive Predicates
 
 Type: Heuristic
-Goal: Break filters into units which are easier to handle
+Goal: One Filter node per ANDed conjunct, so each moves and pushes independently
+
+Conjunctive predicates (ANDs) can be split and evaluated in any order for the same
+result. Smaller expressions have fewer dependencies and so move further through
+the plan, and each predicate then runs on the rows the previous one let through.
+Before splitting, same-operand NOT LIKE conjuncts are fused into a single negated
+LIKE ANY — this is the last point where the conjuncts are still one list and LIKE
+is still spelled LIKE. Rebuilds the plan.
+
+Order:
+    After:  JoinConditionHoist, ConstantFolding, BooleanSimplification (AND chains
+            are flat), DisjunctionSimplification and DisjunctiveDomainPushdown (both
+            need the WHOLE WHERE in one Filter and add conjuncts for this to split).
+    Before: PredicateRewrite (visits one conjunct at a time and lowers LIKE),
+            PredicateCompaction, PredicatePushdown, JoinPlanning (reads the split
+            conjuncts above a chain), PredicateOrdering (which later re-merges the
+            chain in cost order).
+
+Rewrite:
+    WHERE a > 1 AND b = 'x' AND c IS NULL
+    ->
+    Filter(c IS NULL) -> Filter(b = 'x') -> Filter(a > 1)       (three nodes)
+
+    WHERE x NOT LIKE 'a%' AND x NOT LIKE '%b'   ->   WHERE NOT (x LIKE ANY ('a%', '%b'))
 """
 
 from opteryx.expression import NodeType

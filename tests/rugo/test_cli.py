@@ -39,13 +39,14 @@ def _run(capsys, *argv):
 
 @pytest.fixture
 def fixture_paths(tmp_path):
-    """A small, known morsel written out as parquet/csv/jsonl siblings."""
+    """A small, known morsel written out as parquet/csv/jsonl/avro siblings."""
     import draken.draken_native as dn
     from draken.vectors.vector import Vector
     from draken.morsels.morsel import Morsel
     from rugo import parquet as rugo_parquet
     from rugo import csv as rugo_csv
     from rugo import jsonl as rugo_jsonl
+    from rugo import avro as rugo_avro
 
     ids = [1, 2, 3, 4, 5]
     names = ["alpha", "bravo", "charlie", "delta", "echo"]
@@ -64,6 +65,7 @@ def fixture_paths(tmp_path):
         "parquet": str(tmp_path / "fixture.parquet"),
         "csv": str(tmp_path / "fixture.csv"),
         "jsonl": str(tmp_path / "fixture.jsonl"),
+        "avro": str(tmp_path / "fixture.avro"),
     }
     with open(paths["parquet"], "wb") as f:
         f.write(rugo_parquet.write_parquet(morsel))
@@ -71,6 +73,8 @@ def fixture_paths(tmp_path):
         f.write(rugo_csv.write_csv(morsel))
     with open(paths["jsonl"], "wb") as f:
         f.write(rugo_jsonl.write_jsonl(morsel))
+    with open(paths["avro"], "wb") as f:
+        f.write(rugo_avro.write_avro(morsel))
 
     return paths
 
@@ -79,7 +83,7 @@ def fixture_paths(tmp_path):
 # info / schema / columns / count
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("fmt", ["parquet", "csv", "jsonl"])
+@pytest.mark.parametrize("fmt", ["parquet", "csv", "jsonl", "avro"])
 def test_info(fixture_paths, capsys, fmt):
     code, out, err = _run(capsys, "info", "--json", fixture_paths[fmt])
     assert code == 0, err
@@ -89,7 +93,7 @@ def test_info(fixture_paths, capsys, fmt):
     assert info["format"] == fmt
 
 
-@pytest.mark.parametrize("fmt", ["parquet", "csv", "jsonl"])
+@pytest.mark.parametrize("fmt", ["parquet", "csv", "jsonl", "avro"])
 def test_schema(fixture_paths, capsys, fmt):
     code, out, err = _run(capsys, "schema", "--json", fixture_paths[fmt])
     assert code == 0, err
@@ -164,7 +168,7 @@ def test_inspect_reports_row_groups(fixture_paths, capsys):
 
 
 @pytest.mark.parametrize("verb", ["describe", "stats", "inspect"])
-@pytest.mark.parametrize("fmt", ["csv", "jsonl"])
+@pytest.mark.parametrize("fmt", ["csv", "jsonl", "avro"])
 def test_footer_verbs_reject_non_parquet(fixture_paths, capsys, verb, fmt):
     code, out, err = _run(capsys, verb, fixture_paths[fmt])
     assert code == 1
@@ -222,6 +226,46 @@ def test_convert_round_trip_preserves_row_count(fixture_paths, capsys, tmp_path)
     code, out, err = _run(capsys, "convert", jsonl_out, csv_out)
     assert code == 0, err
     code, out, err = _run(capsys, "count", csv_out)
+    assert code == 0, err
+    assert out.strip() == "5"
+
+
+def test_avro_schema_types_and_round_trips(fixture_paths, capsys, tmp_path):
+    """.avro reads (info/schema/count/preview) and writes (convert/split/merge) like the
+    other formats; the schema verb reports the types rugo decodes to."""
+    code, out, err = _run(capsys, "schema", "--json", fixture_paths["avro"])
+    assert code == 0, err
+    assert {c["name"]: c["type"] for c in json.loads(out)["columns"]} == {
+        "id": "INT64", "name": "VARCHAR", "score": "FLOAT64"}
+
+    code, out, err = _run(capsys, "preview", "-n", "5", "-c", "name,score", "--json", fixture_paths["avro"])
+    assert code == 0, err
+    want = [["alpha", 1.5], ["bravo", 2.5], ["charlie", None], ["delta", 4.5], ["echo", 5.5]]
+    rows = json.loads(out)["rows"]
+    assert [[r["name"], r["score"]] for r in rows] == want
+
+    avro_out = str(tmp_path / "converted.avro")
+    code, out, err = _run(capsys, "convert", fixture_paths["parquet"], avro_out)
+    assert code == 0, err
+    code, out, err = _run(capsys, "count", avro_out)
+    assert code == 0, err
+    assert out.strip() == "5"
+
+    jsonl_out = str(tmp_path / "back.jsonl")
+    code, out, err = _run(capsys, "convert", avro_out, jsonl_out)
+    assert code == 0, err
+    with open(jsonl_out) as f:
+        assert [json.loads(line)["id"] for line in f] == [1, 2, 3, 4, 5]
+
+    code, out, err = _run(capsys, "split", "--rows", "2", "--format", "avro", "--json", fixture_paths["parquet"])
+    assert code == 0, err
+    parts = [o["path"] for o in json.loads(out)["outputs"]]
+    assert [p.endswith(".avro") for p in parts] == [True, True, True]
+
+    merged = str(tmp_path / "merged.avro")
+    code, out, err = _run(capsys, "merge", *parts, merged)
+    assert code == 0, err
+    code, out, err = _run(capsys, "count", merged)
     assert code == 0, err
     assert out.strip() == "5"
 

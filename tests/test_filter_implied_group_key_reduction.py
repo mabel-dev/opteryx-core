@@ -146,3 +146,21 @@ if __name__ == "__main__":
     test_single_group_key_implied_not_collapsed()
     test_aggregate_and_group_empty_input_returns_zero_rows()
     print("OK")
+
+
+# --- the equality pushed INTO a parquet scan (no Filter node left in the plan) ---
+
+def test_pushed_scan_predicate_is_read():
+    session = opteryx.session(memberships=["Apollo 11", "opteryx"])
+    sql = (
+        "SELECT name, birth_place, COUNT(*) AS n FROM testdata.astronauts "
+        "WHERE name = 'Neil A. Armstrong' GROUP BY name, birth_place"
+    )
+    rows = []
+    for m in session.execute_to_morsels(sql):
+        if m is not None and m.num_rows > 0:
+            for i in range(m.num_rows):
+                rows.append((m.column(b"name", b"name")[i], m.column(b"n", b"n")[i]))
+    assert session.telemetry.get("optimization_predicate_pushdown_into_scan"), "predicate was not pushed"
+    assert session.telemetry.get("optimization_filter_implied_group_key_reduction") == 1
+    assert rows == [("Neil A. Armstrong", 1)], rows

@@ -4,11 +4,23 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-JSONL Nested Extraction Strategy
-================================
+Optimization Rule - JSONL Nested Extraction
 
-Goal — read `col ->> 'key'` / `col -> 'key'` out of a READ_JSONL object column at
-SCAN time, instead of materialising the whole object and re-parsing it per row.
+Type: Heuristic
+Goal: Read `col ->> 'key'` / `col -> 'key'` out of a READ_JSONL object column at
+      SCAN time, instead of materialising the whole object and re-parsing it per row
+
+Order:
+    After:  the expression rewrites (the extraction nodes are in their final form).
+    Before: PredicatePushdown (a comparison on the new column is column-vs-literal
+            and pushes into rugo's inline filter) and ProjectionPushdown (the object
+            column drops out of the read once no raw use of it remains).
+
+Rewrite:
+    SELECT commit ->> 'collection' FROM READ_JSONL('f.jsonl') WHERE commit ->> 'op' = 'create'
+    ->
+    SELECT "commit->>'collection'" FROM READ_JSONL('f.jsonl') WHERE "commit->>'op'" = 'create'
+        -- both are columns rugo reads directly; `commit` itself is no longer read
 
 ``SELECT commit ->> 'collection' ... FROM READ_JSONL(...)`` read every record's whole
 ``commit`` object as VARIANT text, then parsed that text again (yyjson, once per
@@ -28,11 +40,6 @@ bound identity:
 * the READ_JSONL step gains the column — in its schema (which is what makes it the
   column's origin for predicate pushdown), its columns, and its physical-name map,
   as ``<physical>->>'<key>'`` / ``<physical>->'<key>'``.
-
-Runs BEFORE predicate and projection pushdown, so the ordinary machinery does the
-rest: ``commit ->> 'operation' = 'create'`` is now a column-vs-literal comparison
-that pushes into rugo's inline filter, and ``commit`` itself drops out of the read
-once no raw use of it is left.
 
 Eligibility — the answer can never change
 -----------------------------------------

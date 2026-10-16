@@ -4,10 +4,24 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Length-Only Column Strategy
-===========================
+Optimization Rule - Length-Only Columns
 
-Goal — stop decoding string bytes that no operation in the query ever reads.
+Type: Heuristic (annotation only — it rewrites nothing)
+Goal: Stop decoding string bytes that no operation in the query ever reads
+
+Order:
+    After:  EVERYTHING — runs dead last. It enumerates every reference to a column,
+            so every strategy that can add, remove or rewrite one must already have
+            run; PredicateRewrite in particular has already turned `col <> ''` into
+            IsNotEmpty, and the second ConstantFolding has folded what the others
+            produced.
+    Before: nothing.
+    Declares: requires projection-pushed; provides length-only-analysed.
+
+Rewrite:
+    none. `SELECT AVG(LENGTH(url)) FROM hits WHERE url <> ''` is unchanged; the
+    Scan is annotated (`length_only_columns = [url]`) so the reader decodes lengths
+    and never copies the payload.
 
 A string column referenced *only* through length-answerable operations
 (``col <> ''``, ``LENGTH(col)``) needs its per-value **length**, never its
@@ -183,7 +197,22 @@ class LengthOnlyColumnStrategy(OptimizationStrategy):
         needs: dict = {}
         raw: set = set()
 
-        for _, node in plan.nodes(True):
+        for nid, node in plan.nodes(True):
+            if node.node_type == LogicalPlanStepType.Distinct and not node.on:
+                # A plain DISTINCT dedups on EVERY column that reaches it,
+                # comparing actual values, yet names none of them: `columns` and
+                # `on` are both empty, so expression_roots() yields nothing. Count
+                # every column emitted by a Scan beneath it as a raw use. This is
+                # conservative (a column consumed below the Distinct, e.g.
+                # `SELECT DISTINCT LENGTH(s)`, is disqualified too), which only
+                # forgoes the optimisation. Without it, `SUM(LENGTH(t)) FROM
+                # (SELECT DISTINCT s AS t ...)` elided s and the DistinctSink
+                # hashed the STR_ELIDED_PAYLOAD_OFFSET trap (SIGSEGV).
+                for producer_nid in plan.depth_first_order(nid):
+                    producer = plan[producer_nid]
+                    if producer.node_type == LogicalPlanStepType.Scan:
+                        for column in producer.columns or []:
+                            _classify(column, needs, raw)
             if node.node_type == LogicalPlanStepType.Scan:
                 # A Scan's `columns` is its emit list, not a read — a column
                 # emitted and never consumed is dead, not raw. Its pushed

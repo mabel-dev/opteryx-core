@@ -6,7 +6,7 @@
 """
 rugo.cli — the `rugo` command-line tool.
 
-A Python entry point over the existing rugo.parquet / rugo.csv / rugo.jsonl
+A Python entry point over the existing rugo.parquet / rugo.csv / rugo.jsonl / rugo.avro
 facades: a user interface on top of the engine, not part of it. The engine
 (draken + rugo native extensions) still runs without Python; only this CLI
 process requires it.
@@ -27,7 +27,7 @@ def _add_json_flag(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rugo", description="Inspect and transform Parquet/CSV/JSONL files.")
+    parser = argparse.ArgumentParser(prog="rugo", description="Inspect and transform Parquet/CSV/JSONL/Avro files.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("info", help="display high-level file metadata")
@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json_flag(p)
     p.set_defaults(func=commands.cmd_diff)
 
-    p = sub.add_parser("convert", help="convert between parquet/csv/jsonl")
+    p = sub.add_parser("convert", help="convert between parquet/csv/jsonl/avro")
     p.add_argument("source")
     p.add_argument("dest")
     _add_json_flag(p)
@@ -100,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("split", help="split a file into multiple files by row count")
     p.add_argument("path")
     p.add_argument("--rows", type=int, required=True, help="max rows per output file")
-    p.add_argument("--format", choices=["parquet", "csv", "jsonl"], help="output format (default: same as input)")
+    p.add_argument("--format", choices=["parquet", "csv", "jsonl", "avro"], help="output format (default: same as input)")
     _add_json_flag(p)
     p.set_defaults(func=commands.cmd_split)
 

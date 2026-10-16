@@ -181,6 +181,44 @@ def test_sorted_dictionary_with_nulls_roundtrip():
     assert _dictionary_values(buf, "s") == ["x", "y", "z"]
 
 
+def _string_morsel(values, name="s"):
+    from rugo import csv as rugo_csv
+
+    with rugo_csv.read_csv((name + "\n" + "\n".join(values) + "\n").encode()) as r:
+        return next(iter(r))
+
+
+def test_sorted_dictionary_prefix_ties():
+    """The sorted dictionary is in unsigned-byte order (str_lt): shared 8+ byte
+    prefixes, values that are prefixes of others, and bytes >= 0x80 (UTF-8 'é'
+    after 'z')."""
+    base = ["abcdefgh", "abcdefghi", "abcdefgh0", "abcdefgg", "abcdefghz", "abc",
+            "ab", "abcdefghij", "zz", "é", "éa", "a", "abcdefgh!", "abcdefghé"]
+    values = base * 3
+    buf = write_parquet(_string_morsel(values))
+    used, encs, vals = _meta(buf)
+    assert used, f"expected dictionary encoding, got {encs}"
+    assert vals == values
+    assert _dictionary_values(buf, "s") == sorted(set(base), key=lambda s: s.encode())
+
+
+def test_sorted_dictionary_int_extremes():
+    """Signed order across the sign boundary and the int64 extremes."""
+    import draken.draken_native as dn
+    from draken.morsels.morsel import Morsel
+    from draken.vectors.vector import Vector
+
+    base = [5, -1, 2**63 - 1, -(2**63), 0, -7, 3]
+    values = base * 4
+    m = Morsel.from_vectors(["i"], [Vector(dn.vector_int64_from_sequence(values))])
+    buf = write_parquet(m)
+    used, encs, vals = _meta(buf)
+    assert used, f"expected dictionary encoding, got {encs}"
+    assert vals == values
+    with rugo_parquet.read_parquet(buf) as r:
+        assert [x for mm in r for x in mm.column(b"i").to_pylist()] == values
+
+
 if __name__ == "__main__":
     test_sorted_dictionary_string_roundtrip("zstd")
     test_sorted_dictionary_string_roundtrip("none")

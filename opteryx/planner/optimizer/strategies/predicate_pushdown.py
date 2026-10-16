@@ -9,7 +9,35 @@ Optimization Rule - Predicate Pushdown
 Type: Heuristic
 Goal: Filter rows as early as possible
 
-One main heuristic strategy is it eliminate rows to be processed as early
+Order:
+    After:  DecorrelateSubquery, JoinConditionHoist, ConstantFolding,
+            BooleanSimplification, RedundantCastElimination,
+            DisjunctionSimplification, DisjunctiveDomainPushdown,
+            SplitConjunctivePredicates, PredicateRewrite, PredicateCompaction (every
+            predicate is a single, final-form conjunct), JoinKeyMaterialization,
+            JoinPlanning (the join tree is settled), GroupLimitKeyBound and
+            JsonlNestedExtraction (both add predicates for this to push).
+    Before: everything that reads a scan's predicates or a Filter's final position —
+            CrossJoinFilterPushdown, CorrelatedFilters, SemiJoinPushdown,
+            SemiJoinReducer, ManifestPruning, TopNManifestPruning,
+            AggregateScanPushdown, DistinctScanPushdown, GroupJoin (all declare
+            requires predicates-pushed), LimitPushdown, JoinRewrite, JoinAlgorithm,
+            PredicateOrdering, TimestampCastSink, ProjectionPushdown.
+    Declares: provides predicates-pushed.
+
+Rewrite:
+    SELECT * FROM a JOIN b ON a.k = b.k WHERE a.x > 1 AND b.y = 'z' AND a.p < b.q
+    ->
+    SELECT * FROM (SELECT * FROM a WHERE a.x > 1) a
+           JOIN (SELECT * FROM b WHERE b.y = 'z') b ON a.k = b.k AND a.p < b.q
+        -- a single-leg predicate lands on its leg's scan (INTO the reader where the
+        -- connector accepts it); a two-sided one joins the ON condition.
+    ... GROUP BY k HAVING COUNT(*) > 1   ->   folded onto the aggregate as having_condition
+
+Barriers a predicate never crosses: Limit, Union, Window, FramedWindow and the
+ungrouped Aggregate.
+
+One main heuristic strategy is to eliminate rows to be processed as early
 as possible, to do that we try to push filter conditions to as close to the
 read step as much as possible, including pushing to the system actually
 performing the read.

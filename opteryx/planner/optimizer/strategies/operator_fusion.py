@@ -4,17 +4,41 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule - Operator Fusion
+Optimization Rule - Operator Fusion (Order + Limit -> HeapSort)
 
 Type: Heuristic
-Goal: Chose more efficient physical implementations.
+Goal: Choose the more efficient physical implementation for an Order feeding a Limit
+
+An Order whose single consumer is a Limit is fused into a HeapSort that keeps only
+the top `limit + offset` rows as it goes, discarding records it knows will not be
+kept. With an OFFSET the Limit stays above the HeapSort to skip it.
+
+Order:
+    After:  RedundantOperations (a Subquery boundary between the Order and the Limit
+            blocks the fusion; `FROM (... ORDER BY ...) LIMIT n` never fused before
+            this ordering), RedundantSortElimination (the surviving sort is the one
+            fused), ProjectionPushdown (the HeapSort takes the Order's active-column
+            set), LimitPushdown (Order is a barrier there, so the Limit is still
+            above its sort).
+    Before: VectorSearch and TopNScanPushdown (requires heapsort-fused: both match
+            the HeapSort this produces).
+    Declares: provides heapsort-fused.
+
+Rewrite:
+    SELECT * FROM t ORDER BY x LIMIT 10
+    ->
+    Limit(10)             HeapSort(x, 10)
+    └─ Order(x)    ->     └─ Scan
+       └─ Scan
+
+    ... ORDER BY x LIMIT 10 OFFSET 5   ->   Limit(10, offset 5) over HeapSort(x, 15)
 
 Some operators can be fused to be faster.
 
-'Fused' opertors are when physical operations perform multiple logical operations.
+'Fused' operators are when physical operations perform multiple logical operations.
 
 Initially we fused Limit and Order operators, this allows us to use a heap sort
-algorithm (basically we dicard records we know aren't going to be kept early).
+algorithm (basically we discard records we know aren't going to be kept early).
 
 Note that predicate and projection pushdowns may also fuse operators. Most commonly
 we fuse the READ operator with SELECTION and PROJECTION operators, we also push into

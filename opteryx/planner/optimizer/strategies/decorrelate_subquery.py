@@ -4,11 +4,37 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Decorrelate scalar subqueries (post-bind).
+Optimization Rule - Decorrelate Subquery
 
+Type: Correctness (the engine has no subquery operator: every subquery form in a
+      predicate or SELECT list must become a join here, or the query fails to
+      compile — never silently wrong)
+Goal: Turn scalar, EXISTS and IN subqueries into joins, on the BOUND plan
+
+Order:
+    After:  nothing — runs FIRST (position 1).
+    Before: every strategy that reasons about joins or moves predicates
+            (JoinConditionHoist, JoinKeyMaterialization, JoinPlanning,
+            PredicatePushdown, SemiJoinPushdown, SemiJoinReducer, JoinAlgorithm):
+            it mints joins and moves predicates across them.
+
+Rewrite (the complete set, with the conditions on each, is in the detail below):
     WHERE outer.c < (SELECT AGG(x) FROM T WHERE T.k = outer.k)
-->  INNER JOIN (SELECT k, AGG(x) FROM T GROUP BY k) ON outer.k = T.k
-    WHERE outer.c < AGG(x)
+    ->  INNER JOIN (SELECT k, AGG(x) FROM T GROUP BY k) ON outer.k = T.k
+        WHERE outer.c < AGG(x)
+
+    WHERE (SELECT COUNT(*) FROM T WHERE T.k = outer.k) = 0
+    ->  LEFT OUTER JOIN (SELECT k, COUNT(*) FROM T GROUP BY k) ON outer.k = T.k
+        WHERE CASE WHEN T.k IS NULL THEN 0 ELSE COUNT(*) END = 0
+
+    WHERE EXISTS (SELECT 1 FROM T WHERE T.k = outer.k)
+    ->  LEFT SEMI JOIN T ON outer.k = T.k          (NOT EXISTS -> LEFT ANTI JOIN)
+
+    WHERE x IN (SELECT y FROM T)
+    ->  LEFT SEMI JOIN T ON x = T.y                (NOT IN -> LEFT ANTI NULL-AWARE JOIN)
+
+    SELECT ..., EXISTS (SELECT 1 FROM T WHERE T.k = outer.k) ...
+    ->  outer LEFT EXISTENCE JOIN T ON outer.k = T.k, emitting the BOOL column
 
 The join is INNER only when the predicate above provably rejects the value an outer
 row with NO matching group must receive (`_unmatched_row_is_dropped`): the INNER join
@@ -907,6 +933,9 @@ def _graft_key_reducer(
 
     reducer = JoinStep()
     reducer.type = "left semi"
+    # A key reducer never changes an answer (see above); the stamp is what lets the
+    # groupjoin rewrite drop it when it fuses the aggregate it protects.
+    reducer.key_reducer = True
     reducer.on = on_condition
     reducer.using = None
     reducer.columns = join_columns

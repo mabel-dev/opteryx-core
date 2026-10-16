@@ -4,12 +4,24 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Timestamp Cast Sink Strategy
-============================
+Optimization Rule - Timestamp Cast Sink
 
-Goal — eliminate a redundant per-row buffer pass for the common shape
+Type: Heuristic
+Goal: Eliminate a redundant per-row buffer pass for `<int64 column>::TIMESTAMP[unit]`
 
-    <int64 column>::TIMESTAMP[unit]
+Order:
+    After:  ProjectionPushdown (requires projection-pushed: `scan.columns` and
+            `scan.predicates` are settled), PredicatePushdown,
+            RedundantCastElimination.
+    Before: nothing depends on it; the second ConstantFolding runs after it.
+    Declares: requires projection-pushed.
+
+Rewrite:
+    SELECT ts_int::TIMESTAMP[ms] FROM t          -- ts_int stored INT64
+    ->
+    SELECT ts_int FROM t                          -- the scan declares ts_int as
+                                                  -- TIMESTAMP64[ms]; the CAST
+                                                  -- resolves to identity
 
 When an int64-stored column is referenced *only* as ``CAST(col AS TIMESTAMP[unit])``
 with a single consistent unit, the cast is a pure logical retag: INT64 and

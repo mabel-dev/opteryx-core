@@ -2500,6 +2500,9 @@ class _Compiler:
             out_layout = [spec[0] for spec in specs]
             return p2, out_layout
 
+        if kind == "GroupedAggregateHashedNode" and node.step.groupjoin is not None:
+            return self._compile_groupjoin_organic(node)
+
         if kind == "GroupedAggregateHashedNode":
             # Statistics coverage (P4): registered before the scan below compiles -
             # it classifies its row groups at plan time, folding each covered one
@@ -5149,6 +5152,8 @@ class _Compiler:
         build row shares one empty key → cartesian). nested_loop = an equi-join
         with a residual `on` predicate applied as a post-join filter."""
         join_type = node.join_type
+        if node.step.groupjoin is not None:
+            return self._compile_groupjoin_outer(nid, node)
         if join_type == "asof":
             return self._compile_asof_join(nid, node)
         if join_type == "band":
@@ -5592,6 +5597,202 @@ class _Compiler:
             self.nplan.set_buffer_source(p2, buf)
             return p2, out_layout
         return pp, out_layout
+
+    # ---- GROUPJOIN (docs/GROUPJOIN_DESIGN.md; native_groupjoin.hpp) -----------------
+    #
+    # Lowers a GroupJoinStrategy annotation to three pipelines — build, accumulate,
+    # emit — the same sequencing the RIGHT SEMI exchange relies on (pipelines run in
+    # creation order). The plan's nodes are unchanged; the annotated pair compiles
+    # here instead of as a join followed by a GROUP BY.
+
+    def _wire_groupjoin(self, owner, join_node, build_id, stream_id, build_keys,
+                        stream_keys, payload_ids, aggregates, per_key, multiply_d,
+                        unmatched, prefilter=True):
+        build_co, stream_co = self._join_key_coercions(join_node, build_keys, stream_keys)
+        bp, blayout = self.compile_node(build_id)
+        self.nplan.set_current_identity(owner.identity)
+        self.nplan.set_current_display_name("GroupJoinNode")
+        bkeyout, bkeys = self._coerce_join_keys(bp, blayout, build_keys, build_co)
+        build_key_idx = []
+        for identity in bkeys:
+            if identity not in bkeyout:
+                _unsupported("a groupjoin build key the engine could not resolve here")
+            build_key_idx.append(bkeyout.index(identity))
+        # None = the build leg's whole output (the outer-leg form: everything the plan
+        # above may read from O travels on the emitted rows).
+        if payload_ids is None:
+            payload_ids = list(blayout)
+        for identity in payload_ids:
+            if identity not in blayout:
+                _unsupported("a groupjoin build column the engine could not resolve here")
+        build_payload = [blayout.index(identity) for identity in payload_ids]
+        types, logical, element = self._payload_types(build_id, list(payload_ids))
+        ref = self.nplan.new_join2_ref()
+        # track_matches retains the NULL-keyed build rows a LEFT form must still emit.
+        self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
+                                        types, logical, element,
+                                        unmatched != 0, -1, False)
+
+        sp, slayout = self.compile_node(stream_id)
+        self.nplan.set_current_identity(owner.identity)
+        self.nplan.set_current_display_name("GroupJoinNode")
+        skeyout, skeys = self._coerce_join_keys(sp, slayout, stream_keys, stream_co)
+        stream_key_idx = []
+        for identity in skeys:
+            if identity not in skeyout:
+                _unsupported("a groupjoin stream key the engine could not resolve here")
+            stream_key_idx.append(skeyout.index(identity))
+        # An EXPRESSION operand would otherwise be computed on every streamed row,
+        # matched or not (TPC-H Q12: 15M rows computed, 312K used — 1.237x slower
+        # fused). A SEMI probe against the same build table first keeps only rows
+        # that match, so the projection below runs on exactly the joined rows; the
+        # accumulate sink then probes those again for their slot.
+        if prefilter and any(agg.parameters and agg.parameters[0].node_type
+                             not in (NodeType.IDENTIFIER, NodeType.WILDCARD)
+                             for agg in aggregates):
+            self.nplan.add_join2_probe(sp, ref, stream_key_idx,
+                                       list(range(len(skeyout))), 2)
+        oplayout = self._project_agg_operands(sp, aggregates, skeyout)
+        specs = self._parse_aggregates(aggregates, oplayout)
+        if len(specs) != len(aggregates):
+            _unsupported("a groupjoin aggregate list the engine could not lower one-to-one")
+        operand_types, operand_logical = [], []
+        for spec, agg in zip(specs, aggregates):
+            if spec[1] == "CountStar":
+                operand_types.append(DrakenType.INT64.value)
+                operand_logical.append(None)
+                continue
+            psc = agg.parameters[0].schema_column
+            pt = _physical_type(psc)
+            if pt is None:
+                _unsupported("a groupjoin aggregate operand with no resolved type")
+            operand_types.append(pt.value)
+            operand_logical.append(_logical_tuple(psc.column_type))
+        gj = self.nplan.new_groupjoin_state(ref, specs, operand_types, operand_logical)
+        self.nplan.set_groupjoin_accum_sink(sp, gj, stream_key_idx)
+
+        ep = self.nplan.new_pipeline()
+        self.nplan.set_current_identity(owner.identity)
+        self.nplan.set_current_display_name("GroupJoinNode")
+        self.nplan.set_groupjoin_source(ep, gj, per_key, multiply_d, unmatched)
+        self._remember_types(aggregates)
+        return ep, list(payload_ids) + [spec[0] for spec in specs]
+
+    def _compile_groupjoin_organic(self, node):
+        """`Γ_k;F(R ⋈ S)` with k = R's join key: one row per distinct build key, the
+        partials multiplied by the key's build multiplicity. Replaces the join AND the
+        GROUP BY."""
+        ann = node.step.groupjoin
+        join_nid = ann["join"]
+        join_node = self.plan[join_nid]
+        left_leg, right_leg = self.plan.legs(join_nid)
+        left_cols = list(join_node.step.left_columns or [])
+        right_cols = list(join_node.step.right_columns or [])
+        if ann["build"] == "left":
+            build_id, stream_id, build_keys, stream_keys = left_leg, right_leg, left_cols, right_cols
+        else:
+            build_id, stream_id, build_keys, stream_keys = right_leg, left_leg, right_cols, left_cols
+        if list(ann["keys"]) != build_keys:
+            raise InvalidInternalStateError(
+                "groupjoin annotation's build keys no longer match the join it names")
+        aggregates = list(node.step.aggregates or [])
+        ep, layout = self._wire_groupjoin(
+            node, join_node, build_id, stream_id, build_keys, stream_keys,
+            list(ann["payload"]), aggregates, ann["per_key"], ann["multiply_d"],
+            ann["unmatched"], ann["prefilter"])
+        having = node.step.having_condition
+        if ann["per_key"]:
+            # Registered unarmed: no GROUP BY sink exists for a HeapSort to cut.
+            self._groupby_sinks[node.identity] = (ep, [], [], False, frozenset(layout))
+            self._apply_having(ep, having, layout)
+            return ep, layout
+
+        # PER ROW: one partial (F¹) per build row, re-aggregated by an ordinary GROUP
+        # BY over the build-side group columns (F²: counts and sums add, extremes
+        # fold). A streamed join-key group column is its build-side equal, re-labelled.
+        alias = dict(ann["alias"])
+        group_ids = _group_by_identities(node.step)
+        if alias:
+            indices = list(range(len(layout))) + [layout.index(alias[g]) for g in alias]
+            layout = layout + list(alias)
+            self.nplan.add_select(ep, indices, layout)
+        # The source emits payload then one partial per aggregate; the alias select
+        # only appended, so the partials keep their positions.
+        partial_ids = layout[len(ann["payload"]):len(ann["payload"]) + len(aggregates)]
+        fold = {"CountStar": "Sum", "Count": "Sum", "Sum": "Sum", "Min": "Min",
+                "Max": "Max", "AnyValue": "AnyValue"}
+        specs = []
+        for identity, agg in zip(partial_ids, aggregates):
+            fn = self._groupjoin_partial_fn(agg)
+            if fn not in fold:
+                raise InvalidInternalStateError(
+                    f"groupjoin per-row partial {fn} has no re-aggregation")
+            specs.append((identity, fold[fn], layout.index(identity)))
+        key_idx = []
+        for gid in group_ids:
+            if gid not in layout:
+                _unsupported("a groupjoin GROUP BY key the engine could not resolve here")
+            key_idx.append(layout.index(gid))
+        buf = self.nplan.new_buffer()
+        self.nplan.set_groupby_sink(
+            ep, key_idx, group_ids, [True] * len(group_ids), specs, buf,
+            _estimate_to_int64(node.group_count_estimate, "group-count estimate for GROUP BY"))
+        p2 = self.nplan.new_pipeline()
+        self.nplan.set_buffer_source(p2, buf)
+        out_layout = list(group_ids) + [spec[0] for spec in specs]
+        self._groupby_sinks[node.identity] = (
+            ep, [spec[0] for spec in specs], [spec[1] for spec in specs],
+            having is None, frozenset(out_layout))
+        self._apply_having(p2, having, out_layout)
+        return p2, out_layout
+
+    @staticmethod
+    def _groupjoin_partial_fn(agg):
+        if agg.value == "COUNT":
+            operand = (agg.parameters or [None])[0]
+            return "CountStar" if operand is not None and operand.node_type == NodeType.WILDCARD else "Count"
+        return {"SUM": "Sum", "MIN": "Min", "MAX": "Max", "ANY_VALUE": "AnyValue"}.get(agg.value, agg.value)
+
+    def _compile_groupjoin_outer(self, nid, node):
+        """`O ⋈_k Π*(Γ_k;F(S [⋉ reducer]))`: build O, stream S, emit every O row with
+        its key's aggregate. The Projects between the join and the aggregate are
+        evaluated over the emitted rows; a nested_loop residual becomes a filter."""
+        ann = node.step.groupjoin
+        step = node.step
+        outer_id = ann["outer_leg"]
+        agg_node = self.plan[ann["aggregate"]]
+        aggregates = list(agg_node.step.aggregates or [])
+        outer_keys = list(ann["outer_keys"])
+        stream_keys = list(ann["stream_keys"])
+        residual = None
+        if node.join_type == "nested_loop":
+            residual = _residual_without_keyed_equalities(
+                step.on, step.left_relation_names or [], step.right_relation_names or [])
+        # Payload: O's whole output. Narrowing it to what the plan above reads is a
+        # separate optimisation (the join path's `pre_update_columns` pruning).
+        ep, layout = self._wire_groupjoin(
+            node, node, outer_id, ann["stream"], outer_keys, stream_keys, None,
+            aggregates, False, False, ann["unmatched"])
+        # The aggregate's GROUP BY keys are S columns; every emitted row is a MATCHED
+        # row (INNER only — GroupJoinStrategy), where they equal O's keys, so they are
+        # O's key columns re-labelled.
+        if ann["unmatched"] != 0:
+            raise InvalidInternalStateError(
+                "outer-leg groupjoin annotated on a non-INNER join")
+        indices = list(range(len(layout))) + [layout.index(k) for k in outer_keys]
+        layout = layout + stream_keys
+        self.nplan.add_select(ep, indices, layout)
+        for project_nid in reversed(list(ann["projects"])):
+            pstep = self.plan[project_nid].step
+            emitted = list(pstep.columns or []) + list(pstep.passthrough_columns or [])
+            exprs = list(pstep.hoisted_columns or []) + emitted
+            eval_nodes = [col for col in exprs if col.node_type != NodeType.IDENTIFIER]
+            if eval_nodes:
+                layout = self._add_computed(ep, eval_nodes, layout)
+        if residual is not None:
+            bc = self._lower_expression(residual, "a nested-loop join condition")
+            self.nplan.add_expr_filter(ep, bc, layout)
+        return ep, layout
 
     def _compile_swapped_semi_anti(self, node, legs, mode, left_cols, right_cols,
                                    filter_residual):
@@ -7462,6 +7663,11 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                 _join_builds = nplan.collect_join2_build_stats()
                 if _join_builds:
                     telemetry._reading["join_build_diagnostics"] = _join_builds
+                # Per groupjoin: actual streamed / matched / emitted rows — the
+                # measured selectivities the plan-time decision can be checked against.
+                _groupjoins = nplan.collect_groupjoin_stats()
+                if _groupjoins:
+                    telemetry._reading["groupjoin_diagnostics"] = _groupjoins
 
                 _scan_plans = getattr(nplan, "scan_plans", None)
                 if _scan_plans:

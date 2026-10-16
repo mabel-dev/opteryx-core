@@ -6,8 +6,24 @@
 """
 Optimization Rule - Join Algorithm
 
-Type: Cost-Based / Correctness
-Goal: Faster Joins
+Type: Cost-based / Correctness (`optimization_technique = "cost"`)
+Goal: Faster joins — pick the build side and the algorithm for each join whose shape
+      is already fixed; retype a theta join so it can run at all
+
+Order:
+    After:  JoinPlanning (requires joins-planned), PredicatePushdown (theta conjuncts
+            absorbed into ON are what force the nested-loop / band retype),
+            CrossJoinFilterPushdown, SemiJoinPushdown, SemiJoinReducer,
+            JoinElimination, JoinRewrite — every strategy that changes a join's
+            type, legs or condition, because the build side and algorithm are chosen
+            for the FINAL join.
+    Before: nothing re-parents or retypes a join after it.
+    Declares: requires joins-planned.
+
+Rewrite:
+    none expressible in SQL — the join tree and semantics are unchanged. It sets
+    `node.type` (hash / nested loop / band with its band descriptors), swaps
+    left/right legs, and sets `swap_build_side` for SEMI/ANTI.
 
 This pass makes the PHYSICAL decisions for a join whose shape and semantics are
 already fixed: which leg builds and which leg probes, and which join algorithm

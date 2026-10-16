@@ -8,22 +8,28 @@ Optimization Rule - Window Top-K Fusion
 
 Type: Heuristic
 Goal: Avoid emitting every ranked row from a ranking window when the query only
-      keeps a bounded prefix per partition (`WHERE <rank> <= K`).
+      keeps a bounded prefix per partition (`WHERE <rank> <= K`)
 
-`ROW_NUMBER()/RANK()/DENSE_RANK() OVER (PARTITION BY ... ORDER BY ...)` computes a
-rank for every row before any outer filter runs — a query like:
+A Window node whose single ranking output (`ROW_NUMBER() / RANK() / DENSE_RANK()
+OVER (PARTITION BY ... ORDER BY ...)`) feeds, through zero or more pass-through
+Project/Subquery nodes, a Filter of the form `<rank> <= K` (or the `<` and
+literal-first spellings) has the filter fused into it as `top_k`; the Filter node is
+removed.
 
+Order:
+    After:  RedundantOperations and ProjectFusion (the chain between the Window and
+            its `rank <= K` Filter is collapsed — fewer hops to walk),
+            PredicatePushdown (the Filter has settled directly above the chain;
+            Window is a pushdown barrier).
+    Before: the second ConstantFolding.
+
+Rewrite:
     SELECT id6, v3 FROM (
         SELECT id6, v3, ROW_NUMBER() OVER (PARTITION BY id6 ORDER BY v3 DESC) AS rn
         FROM t
     ) WHERE rn <= 2
-
-still sorts and ranks every row of `t`, then a separate Filter drops all but the
-top 2 per partition. This rule finds that shape — a Window node whose single
-ranking output feeds, through zero or more pass-through Project/Subquery nodes,
-a Filter of the form `<rank> <= K` (or the reversed/`<` spellings) — and fuses the
-filter into the Window node itself (`top_k`), then removes the now-redundant
-Filter node.
+    ->
+    the same SELECT; the Window node carries `top_k = 2` and the Filter is gone.
 
 The native WindowNode still computes an exact rank for every row (correctness
 requires it — ties for RANK/DENSE_RANK can only be resolved once every row's

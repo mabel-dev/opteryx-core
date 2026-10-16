@@ -4,18 +4,27 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Strategy: Join Key Materialization
+Optimization Rule - Join Key Materialization
 
-Turns an ON-clause equality whose operand is an EXPRESSION into an ordinary
-equi-join by projecting that expression as a real column on the leg it belongs
-to:
+Type: Heuristic (whether an operand MAY be hoisted is the Binder's shared decision;
+      this only performs the rewrite)
+Goal: Turn an ON-clause equality whose operand is an expression into an ordinary
+      equi-join by projecting the expression as a real column on its leg
 
+Order:
+    After:  ConstantFolding, RedundantCastElimination, PredicateRewrite (a cast or
+            arithmetic that folds away is never materialised as a column).
+    Before: JoinPlanning (DPccp classifies the materialised key as an equi edge),
+            PredicatePushdown, ProjectionPushdown (the projected column must be
+            carried to the join).
+
+Rewrite:
     FROM flows f INNER JOIN lookups l ON CAST(f.client AS VARCHAR) = l.client
-    →
-    FROM (SELECT *, CAST(client AS VARCHAR) FROM flows) f
-         INNER JOIN lookups l ON <projected column> = l.client
+    ->
+    FROM (SELECT *, CAST(client AS VARCHAR) AS <key> FROM flows) f
+         INNER JOIN lookups l ON f.<key> = l.client
 
-which is the CTE rewrite a user would otherwise have to write by hand. The
+That is the CTE rewrite a user would otherwise have to write by hand. The
 motivating shape is a key carrying different types on the two sides — an IPV4
 `src_addr` against a VARCHAR `client` that holds hostnames as well as addresses —
 where the cast is the whole point and cannot be optimised away.

@@ -7,8 +7,26 @@
 Optimization Rule - Join Condition Hoist
 
 Type: Heuristic / Correctness
-Goal: Every ON-clause conjunct is either a join condition the engine evaluates,
-      a WHERE predicate, or a loud refusal — never silently dropped.
+Goal: Every ON-clause conjunct is either a join condition the engine evaluates, a
+      WHERE predicate, or a loud refusal — never silently dropped
+
+Order:
+    After:  DecorrelateSubquery (which mints joins with ON clauses of their own).
+    Before: ConstantFolding, BooleanSimplification, DisjunctionSimplification,
+            DisjunctiveDomainPushdown, SplitConjunctivePredicates, PredicateRewrite,
+            PredicateCompaction, PredicatePushdown — every expression rewrite visits
+            Filter nodes only, so the hoisted conjuncts must be Filters before any of
+            them runs.
+
+Rewrite:
+    FROM a INNER JOIN b ON a.id = b.id AND (a.x = 1 OR a.x = 2) AND a.y > b.y
+    ->
+    FROM a INNER JOIN b ON a.id = b.id AND a.y > b.y
+    WHERE (a.x = 1 OR a.x = 2)
+        -- the key and the two-sided theta comparison stay in ON; everything else
+        -- becomes an ordinary WHERE predicate directly above the join
+
+    FROM p LEFT JOIN s ON p.id = s.id AND p.id > 3    ->   refused, naming the rewrite
 
 A join's ON clause is an AND of conjuncts, and each conjunct is one of:
 
@@ -49,7 +67,7 @@ most likely meant. A LEFT SEMI join is the one non-inner type where a
 preserved-side conjunct IS a WHERE (a semi join emits exactly the left rows that
 match), so it is left for pushdown as before.
 
-Runs first (after decorrelation, which mints joins of its own). Only the join
+Only the join
 types named in `_PRESERVED_LEGS` / "inner" / "left semi" are touched; ASOF,
 UNNEST and CROSS joins have no ON in this sense and are left alone.
 """

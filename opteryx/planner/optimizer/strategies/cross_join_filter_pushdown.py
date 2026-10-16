@@ -4,14 +4,31 @@
 # AS IS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 
 """
-Optimization Strategy: Cross Join Filter Pushdown
+Optimization Rule - Cross Join Filter Pushdown
 
-Converts CROSS JOINs with join-like WHERE conditions into INNER JOINs.
+Type: Heuristic
+Goal: Convert a CROSS JOIN with a join-like WHERE equality into an INNER JOIN
 
-Example:
-  FROM A CROSS JOIN B WHERE A.id = B.id
-  →
-  FROM A INNER JOIN B ON A.id = B.id
+For every Filter, walk the subtree beneath it for unconverted cross joins and move
+each equality conjunct that spans a join's two legs out of the Filter into that
+join's ON condition, retyping it "inner". An equality whose operand is an
+expression (`a.x = b.y - 53`) is first materialised as a real column on its leg,
+through the primitives `join_key_materialization` owns.
+
+Order:
+    After:  PredicatePushdown (requires predicates-pushed: the equalities still in
+            Filters are the two-sided ones, and the pushdown may have interposed
+            inner joins between a Filter and the remaining cross joins — the walk
+            sees through them), JoinPlanning (the cross-join shells DPccp emits are
+            what this keys; without it DPccp's tree is not runnable).
+    Before: CorrelatedFilters, JoinElimination, JoinRewrite, JoinAlgorithm — all of
+            which reason about an inner join's ON keys.
+    Declares: requires predicates-pushed.
+
+Rewrite:
+    FROM A CROSS JOIN B WHERE A.id = B.id
+    ->
+    FROM A INNER JOIN B ON A.id = B.id
 
 This can provide 100,000× speedup for large cartesian products by avoiding
 intermediate materialization of the full cross product.

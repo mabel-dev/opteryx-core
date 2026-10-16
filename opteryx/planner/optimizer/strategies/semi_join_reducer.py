@@ -6,8 +6,29 @@
 """
 Optimization Rule - Semi-Join Key Reducer
 
-Type: Cost-based (runs after predicates are on the scans)
-Goal: Reduce Rows
+Type: Cost-based (`optimization_technique = "cost"`)
+Goal: Reduce rows — a decorrelated subquery's expensive leg reads only the keys the
+      restricted opposite leg can reach
+
+Order:
+    After:  PredicatePushdown (requires predicates-pushed) and JoinPlanning — the
+            sibling conjuncts must be MATERIALISED below the join where they can be
+            copied, not sitting in the Filter above a cross-join chain (see below);
+            SemiJoinPushdown.
+    Before: JoinAlgorithm (build side of the grafted join), ProjectionPushdown (the
+            copied leg is pruned to its key).
+    Declares: requires predicates-pushed.
+
+Rewrite:
+    SELECT ... FROM orders o
+    WHERE o.status = 'F' AND EXISTS (SELECT 1 FROM lineitem l WHERE l.ok = o.ok)
+    ->
+    SELECT ... FROM (SELECT * FROM orders WHERE status = 'F') o
+      LEFT SEMI JOIN (lineitem l
+                      LEFT SEMI JOIN (SELECT ok FROM orders WHERE status = 'F') r
+                      ON l.ok = r.ok)
+      ON l.ok = o.ok
+        -- lineitem's hash build now holds only keys the restricted orders leg holds
 
 A decorrelated subquery reads its whole relation and lets the join above discard
 what the outer query cannot consume. The original subquery was evaluated once per
@@ -413,6 +434,10 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         # This node is itself a `left semi` join, so without the stamp the next pass
         # picks it up as a target and reduces the reducer, recursively.
         reducer.reducer_applied = True
+        # Distinct from reducer_applied, which the REDUCED join carries too: this
+        # marks the node as a reducer (never answer-changing), so the groupjoin
+        # rewrite may drop it.
+        reducer.key_reducer = True
         reducer.on = on_condition
         reducer.using = None
         reducer.columns = join_columns

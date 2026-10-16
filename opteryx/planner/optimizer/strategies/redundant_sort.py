@@ -7,7 +7,18 @@
 Optimization Rule - Redundant Sort Elimination
 
 Type: Heuristic
-Goal: Reduce Work
+Goal: Reduce work — drop a sort whose output a later sort fully re-sorts
+
+Order:
+    After:  nothing it depends on; runs with the late structural passes.
+    Before: OperatorFusion (the sort that SURVIVES is the one considered for
+            Order+Limit fusion), RedundantOperations (it walks through Subquery
+            boundary nodes itself; it does not need them gone).
+
+Rewrite:
+    SELECT * FROM (SELECT * FROM t ORDER BY a) ORDER BY b DESC
+    ->
+    SELECT * FROM (SELECT * FROM t) ORDER BY b DESC
 
 Drops a sort whose output is fully re-sorted further up the plan. The common
 shape is a view (or an inline subquery) that carries its own ORDER BY, read by

@@ -7,12 +7,20 @@
 Optimization Rule - Join Rewriter
 
 Type: Heuristic / Correctness
-Goal: Faster Joins, and closing the "no RIGHT OUTER JOIN operator" native gap
+Goal: Faster joins (the anti-join idiom), and closing the "no RIGHT OUTER JOIN
+      operator" native gap
 
-Recognise the SQL anti-join idiom and rewrite to a native LEFT ANTI JOIN:
+Order:
+    After:  PredicatePushdown (the IS NULL Filter has settled directly above the
+            outer join — pushdown does not push into an outer join's null-supplying
+            side), JoinElimination.
+    Before: JoinAlgorithm (it must see "left anti" or the canonical "left outer",
+            never a "right outer", when it pins the build side).
 
-    A LEFT  OUTER JOIN B ON A.k = B.k WHERE B.k IS NULL  →  A LEFT ANTI JOIN B
-    A RIGHT OUTER JOIN B ON A.k = B.k WHERE A.k IS NULL  →  B LEFT ANTI JOIN A
+Rewrite:
+    A LEFT  OUTER JOIN B ON A.k = B.k WHERE B.k IS NULL   →   A LEFT ANTI JOIN B ON A.k = B.k
+    A RIGHT OUTER JOIN B ON A.k = B.k WHERE A.k IS NULL   →   B LEFT ANTI JOIN A ON A.k = B.k
+    A RIGHT OUTER JOIN B ON ...                            →   B LEFT OUTER JOIN A ON ...
 
 The rewrite is sound iff:
 
@@ -25,7 +33,8 @@ The rewrite is sound iff:
   4. No node above the join references columns from the non-preserved side —
      the runtime LEFT ANTI operator emits only the preserved side.
 
-The runtime support already exists (filter_join.pyx, "left anti").
+The engine implements "left anti" natively (native_join2.hpp; see
+`_compile_join` in managers/execution/compiler.py).
 
 Second, unconditional rewrite: any RIGHT OUTER JOIN that survives the pass
 above (i.e. didn't match the anti-join idiom) is canonicalised to LEFT OUTER

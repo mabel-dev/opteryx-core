@@ -20,7 +20,7 @@
 #include "ops/vec_result.h"      // VecResult
 #include "ops/kernels/cast_kernels.h"
 
-#include "BS_thread_pool.hpp"    // vendored bshoshany pool (same as the readers)
+#include "_writer_pool.hpp"      // shared writer pool (also the Parquet writer's)
 
 #include <algorithm>
 #include <future>
@@ -479,22 +479,22 @@ static inline void jsonl_render_rows(std::vector<Col> &cols, const std::string *
   }
 }
 
-// Shared render pool, sized once to the core count (capped). Reused across every
-// write so a large multi-morsel export doesn't spawn a fresh set of threads per
-// morsel. Sound because the writer runs one export at a time per process (Cloud
-// Run serves a single request per instance); submit_task is mutex-guarded, so
-// even an accidental concurrent call stays correct, just capped at this width.
-static constexpr size_t kJsonlMaxThreads = 8;
-static inline size_t jsonl_pool_width() {
-  size_t hw = std::thread::hardware_concurrency();
-  if (hw == 0) hw = 1;
-  if (hw > kJsonlMaxThreads) hw = kJsonlMaxThreads;
-  return hw;
+// Render logical rows [r0, r1) of the resolved columns as CSV records into
+// `out`. `seps` holds each column's leading separator (0 for column 0), so the
+// row loop has no per-field branch beyond that byte.
+static inline void csv_render_rows(std::vector<Col> &cols, const char *seps,
+                                   size_t ncols, size_t r0, size_t r1,
+                                   size_t est_row_bytes, std::string &out) {
+  out.reserve(out.size() + (r1 - r0) * est_row_bytes);
+  for (size_t i = r0; i < r1; i++) {
+    for (size_t c = 0; c < ncols; c++) { if (seps[c]) out.push_back(seps[c]); cols[c].emit(out, cols[c], i); }
+    out.push_back('\n');
+  }
 }
-static inline BS::thread_pool<> &jsonl_render_pool() {
-  static BS::thread_pool<> pool(jsonl_pool_width()); // magic-static: init once
-  return pool;
-}
+
+// Rows per render partition: below this a morsel renders on the calling
+// thread, and no partition is smaller (both writers).
+static constexpr size_t kTextMinRowsPerTask = 16384;
 
 // Serialize a morsel to JSONL, returning the rendered bytes as one buffer per
 // worker (the caller concatenates straight into a Python `bytes`, so the whole
@@ -518,17 +518,16 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs,
     est += baked[c].size() + est_cell_bytes(cols[c]);
   }
 
-  // One partition per ~MIN_ROWS rows, capped at the pool width.
-  const size_t MIN_ROWS = 16384;
-  size_t nt = nrows / MIN_ROWS;
+  // One partition per ~kTextMinRowsPerTask rows, capped at the pool width.
+  size_t nt = nrows / kTextMinRowsPerTask;
   if (nt < 1) nt = 1;
-  if (nt > jsonl_pool_width()) nt = jsonl_pool_width();
+  if (nt > rugo_writer::pool_width()) nt = rugo_writer::pool_width();
 
   std::vector<std::string> chunks(nt);
   if (nt <= 1) {
     jsonl_render_rows(cols, baked.data(), ncols, 0, nrows, est, chunks[0]);
   } else {
-    BS::thread_pool<> &pool = jsonl_render_pool();
+    BS::thread_pool<> &pool = rugo_writer::pool();
     std::vector<std::future<void>> futs;
     futs.reserve(nt);
     size_t per = (nrows + nt - 1) / nt;
@@ -543,13 +542,20 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs,
         jsonl_render_rows(local, baked.data(), ncols, r0, r1, est, chunks[t]);
       }));
     }
+    // Every task reads `cols` / `baked` and writes `chunks`: all must finish
+    // before a failure unwinds them.
+    for (auto &f : futs) f.wait();
     for (auto &f : futs) f.get();
   }
   free_cols(cols);
   return chunks;
 }
 
-inline std::string csv_write(const DrakenVector **dvs,
+// Serialize a morsel to CSV, returning the bytes as one buffer per worker in
+// file order (header in the first), exactly as jsonl_write does — the caller
+// concatenates them straight into a Python `bytes`. Rows are partitioned into
+// contiguous ranges rendered in parallel on the shared writer pool.
+inline std::vector<std::string> csv_write(const DrakenVector **dvs,
                              const ColumnDesc *descs,
                              const std::string *names, size_t ncols, size_t nrows,
                              char delim, bool header, bool for_excel) {
@@ -587,25 +593,50 @@ inline std::string csv_write(const DrakenVector **dvs,
     namesum += names[c].size();
     est += est_cell_bytes(cols[c]);
   }
-  std::string out;
-  out.reserve(nrows * est + namesum + ncols + 4);
+  // One partition per ~kTextMinRowsPerTask rows, capped at the pool width.
+  size_t nt = nrows / kTextMinRowsPerTask;
+  if (nt < 1) nt = 1;
+  if (nt > rugo_writer::pool_width()) nt = rugo_writer::pool_width();
+
+  std::vector<std::string> chunks(nt);
   if (header) {
+    std::string &out = chunks[0];
+    out.reserve(namesum + ncols + 4);
     for (size_t c = 0; c < ncols; c++) { if (seps[c]) out.push_back(seps[c]); csv_field(out, names[c].data(), names[c].size(), delim); }
     out.push_back('\n');
   }
   // for_excel's cell-width check throws from inside an emitter; the cast blocks
   // held by `cols` are ours to release on the way out.
   try {
-    for (size_t i = 0; i < nrows; i++) {
-      for (size_t c = 0; c < ncols; c++) { if (seps[c]) out.push_back(seps[c]); cols[c].emit(out, cols[c], i); }
-      out.push_back('\n');
+    if (nt <= 1) {
+      csv_render_rows(cols, seps.data(), ncols, 0, nrows, est, chunks[0]);
+    } else {
+      BS::thread_pool<> &pool = rugo_writer::pool();
+      std::vector<std::future<void>> futs;
+      futs.reserve(nt);
+      size_t per = (nrows + nt - 1) / nt;
+      for (size_t t = 0; t < nt; t++) {
+        size_t r0 = t * per;
+        size_t r1 = std::min(nrows, r0 + per);
+        if (r0 >= r1) break;
+        futs.push_back(pool.submit_task([&, t, r0, r1]() {
+          // Shallow copy, as in jsonl_write: shares the read-only cast arenas,
+          // owns an independent `scratch`. Freed once, on `cols`, below.
+          std::vector<Col> local = cols;
+          csv_render_rows(local, seps.data(), ncols, r0, r1, est, chunks[t]);
+        }));
+      }
+      // Every task reads `cols` / `seps` and writes `chunks`: all must finish
+      // before a failure unwinds them.
+      for (auto &f : futs) f.wait();
+      for (auto &f : futs) f.get();
     }
   } catch (...) {
     free_cols(cols);
     throw;
   }
   free_cols(cols);
-  return out;
+  return chunks;
 }
 
 } // namespace rugo_text

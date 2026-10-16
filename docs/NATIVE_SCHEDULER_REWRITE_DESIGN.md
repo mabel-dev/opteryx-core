@@ -346,7 +346,7 @@ Four cross-cutting patterns drive the work:
    split must make explicit.
 
 Joins (the exemplar) are the *best* case for the build/probe shape:
-hashed_inner_join already runs a read-only shared `CarcharJoinEngine` with
+hashed_inner_join already ran a read-only shared `CarcharJoinEngine` (removed 2026-10-16: no translation unit compiled it; the live join build is the CSR / radix table in `src/cpp/engine/native_join2.hpp`) with
 stack-local `ProbeScratch` for concurrent probe; cross_join/non_equi are clean.
 Caveats to fix: per-instance telemetry (`kernel_metrics`/`join_readings`) is not
 per-worker (lost-update race if shared); outer_join shares a build only for LEFT

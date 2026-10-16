@@ -4,9 +4,33 @@
 # AS IS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 
 """
-Optimization Strategy: Disjunction Simplification
+Optimization Rule - Disjunction Simplification
 
-Global DNF normalisation across the OR-branches of a filter condition.
+Type: Heuristic
+Goal: Factor what every OR branch shares out of the OR, so it can be split and pushed
+
+Global DNF normalisation across the OR branches of a Filter condition: within-clause
+dedup, cross-clause dedup, absorption and common-predicate factoring. Every rewrite
+is an exact equivalence; nothing weaker is derived (that is
+DisjunctiveDomainPushdown).
+
+Order:
+    After:  BooleanSimplification (NOTs are at the leaves and AND chains are flat),
+            JoinConditionHoist.
+    Before: DisjunctiveDomainPushdown (only has to handle what survives this),
+            SplitConjunctivePredicates (a Filter's condition must still be the WHOLE
+            WHERE clause here, or the OR it factors is already a separate node),
+            PredicatePushdown and CrossJoinFilterPushdown (which recognise the
+            factored predicate as a join key).
+
+Rewrite:
+    WHERE (p_partkey = l_partkey AND a) OR (p_partkey = l_partkey AND b)
+    ->
+    WHERE p_partkey = l_partkey AND (a OR b)
+
+    A AND A AND B            ->  A AND B
+    (A AND B) OR (A AND B)   ->  A AND B
+    A OR (A AND B)           ->  A
 
 Conceptually distinct from BooleanSimplificationStrategy: that strategy applies
 local algebraic rewrites (De Morgan's, double-negation, constant folding,

@@ -175,6 +175,11 @@ struct SchemaParser {
             Node& n = make();
             n.kind = k;
             apply_logical(v, n, path);
+            yyjson_val* ot = yyjson_obj_get(v, "opteryx.type");
+            if (ot != nullptr) {
+                if (!yyjson_is_str(ot)) fail(path, "'opteryx.type' is not a string");
+                n.opteryx_type = str_of(ot);
+            }
             return &n;
         }
         if (type == "record" || type == "error") return parse_record(v, ns, path);

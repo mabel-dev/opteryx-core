@@ -20,6 +20,7 @@ _EXT_TO_FORMAT = {
     ".tsv": "csv",
     ".jsonl": "jsonl",
     ".ndjson": "jsonl",
+    ".avro": "avro",
 }
 
 
@@ -62,7 +63,37 @@ def read_metadata(path: str, fmt: str = None):
     if fmt == "jsonl":
         from rugo import jsonl
         return jsonl.read_metadata(path)
+    if fmt == "avro":
+        return _AvroCliMetadata(path)
     raise RugoCliError(f"unsupported format: {fmt!r}")
+
+
+class _AvroCliMetadata:
+    """The CLI's view of an Avro file: `num_rows` and `schema_columns` like the other
+    formats' metadata. rugo.avro.read_metadata is header-only (schema, codec, metadata
+    map); the row count comes from the block headers (a read of no columns decodes
+    nothing), and each column's type is what rugo decodes it to — the same names a
+    Morsel's columns report."""
+
+    __slots__ = ("num_rows", "schema_columns")
+
+    def __init__(self, path: str):
+        import draken.draken_native as dn
+        from draken.vectors.vector import type_display_name
+        from rugo import avro
+        from rugo.rugo_native import read_avro_column_types
+
+        with open(path, "rb") as f:
+            data = f.read()
+        with avro.read_avro(data, columns=[]) as reader:
+            self.num_rows = sum(m.num_rows for m in reader)
+        cols = []
+        for c in read_avro_column_types(data):
+            kind = c["logical_kind"]
+            name = type_display_name(dn.DrakenType(c["type"]), dn.LogicalKind(kind) if kind else None,
+                                     "us" if kind in (1, 2) else None, c["precision"], c["scale"])
+            cols.append({"name": c["name"], "type": name, "nullable": True})
+        self.schema_columns = cols
 
 
 def open_reader(path: str, fmt: str = None, columns=None, predicates=None):
@@ -78,6 +109,11 @@ def open_reader(path: str, fmt: str = None, columns=None, predicates=None):
     if fmt == "jsonl":
         from rugo import jsonl
         return jsonl.read_jsonl(path, columns=columns, predicates=predicates)
+    if fmt == "avro":
+        if predicates:
+            raise RugoCliError("Avro reads take no predicates")
+        from rugo import avro
+        return avro.read_avro(path, columns=columns)
     raise RugoCliError(f"unsupported format: {fmt!r}")
 
 
@@ -92,6 +128,9 @@ def write_morsel(morsel, path: str, fmt: str = None) -> None:
     elif fmt == "jsonl":
         from rugo import jsonl
         data = jsonl.write_jsonl(morsel)
+    elif fmt == "avro":
+        from rugo import avro
+        data = avro.write_avro(morsel)
     else:
         raise RugoCliError(f"unsupported format: {fmt!r}")
     with open(path, "wb") as f:

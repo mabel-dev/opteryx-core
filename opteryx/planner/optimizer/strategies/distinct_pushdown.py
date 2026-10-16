@@ -4,20 +4,35 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule - Distinct Pushdown
+Optimization Rule - Distinct Pushdown (into CROSS JOIN UNNEST)
 
-Type: Heuristic
-Goal: Reduce Rows
+Type: Heuristic (vetoed only on positive manifest evidence; unknown statistics arm it)
+Goal: Pre-reduce duplicates inside the unnest when the unnested column is the sole
+      DISTINCT column
 
-This is a very specific rule, on a CROSS JOIN UNNEST, if the result
-is the only column in a DISTINCT clause, we push the DISTINCT into
-the JOIN.
+When the only column a plain DISTINCT (no ON) dedups on is the output of a
+CROSS JOIN UNNEST, the Unnest node is marked so each worker skips an element value it
+has already emitted (native_unnest.hpp::apply_distinct). This is a PRE-REDUCTION and
+the Distinct node STAYS: operator state is per worker, so only the DistinctSink
+dedups across workers. The gate vetoes only on positive evidence that the source
+array is unique per row (manifest NDV / rows >= 0.95); with no manifest, no KMV
+statistics or no record count it arms, because a user who wrote DISTINCT expects
+rows to be removed.
 
-We've written as a Optimization rule rather than in the JOIN code
-as it is expected other instances of pushing DISTINCT may be found.
+Written as an optimizer rule rather than inside the join code because other
+instances of pushing DISTINCT are expected to be found.
 
 Order:
-    This plan must run after the Projection Pushdown
+    After:  ProjectionPushdown (requires projection-pushed: the Distinct's column set
+            is final).
+    Before: nothing depends on it.
+    Declares: requires projection-pushed.
+
+Rewrite:
+    SELECT DISTINCT e FROM t CROSS JOIN UNNEST(arr) AS e
+    ->
+    the same plan; the Unnest emits each value once per worker and the Distinct
+    above makes the final cut.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan

@@ -41,6 +41,7 @@ enum class OutKind : uint8_t {
     Decimal128,  // DECIMAL128 (p <= 38), __int128 unscaled
     Timestamp,   // TIMESTAMP64, microseconds, UTC
     Time64,      // TIME64, microseconds
+    Ipv4,        // UINT32 with the IPV4 logical descriptor (`{"type":"long","opteryx.type":"IPV4"}`)
     Array,       // ARRAY: offsets + a child (numeric `data` or string `slots`/`arena`)
     // Constants (a reader-schema field the file does not hold): a value list of one
     // item and positions all 0 (`codes`), per the unified vector (CLAUDE.md §11).

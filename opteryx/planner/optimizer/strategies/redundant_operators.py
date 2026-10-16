@@ -9,6 +9,18 @@ Optimization Rule - Remove Redundant Operators
 Type: Heuristic
 Goal: Remove steps which don't affect the result
 
+Order:
+    After:  ProjectionPushdown (a Project is judged no-op against the pruned width
+            of the provider beneath it), RedundantSortElimination (walks through
+            Subquery nodes itself and allows for them), PredicateOrdering.
+    Before: OperatorFusion, ProjectFusion, TopNScanPushdown, WindowTopKFusion — each
+            needs the Subquery boundary nodes gone so the pair it fuses is adjacent.
+
+Rewrite:
+    SELECT a, b FROM (SELECT a, b FROM t) AS s
+    ->
+    SELECT a, b FROM t
+
 This optimization runs toward the end of the set, it removes operators which
 were useful during planning and optimization.
 

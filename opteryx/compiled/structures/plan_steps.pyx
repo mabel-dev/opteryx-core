@@ -1022,13 +1022,14 @@ cdef class AggregateAndGroupStep(PlanStep):
     cdef object _having_condition
     cdef tuple _projection
     cdef object _schema
+    cdef object _groupjoin
 
     cdef void _sync_row(self) except *:
         PlanStep._sync_row(self)
         _row_keys(self._row, self._groups, self._row.groups)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, grouping_set_identities=None, grouping_sets=None, groups=None, having_condition=None, projection=None, schema=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, grouping_set_identities=None, grouping_sets=None, groups=None, having_condition=None, projection=None, schema=None, groupjoin=None):
         self.node_type = _step_types().AggregateAndGroup
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.aggregates = aggregates
@@ -1038,6 +1039,7 @@ cdef class AggregateAndGroupStep(PlanStep):
         self.having_condition = having_condition
         self.projection = projection
         self.schema = schema
+        self.groupjoin = groupjoin
 
     @property
     def aggregates(self):
@@ -1105,6 +1107,17 @@ cdef class AggregateAndGroupStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
+    @property
+    def groupjoin(self):
+        return self._groupjoin
+
+    @groupjoin.setter
+    def groupjoin(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        if value is not None and type(value) is not dict:
+            raise TypeError("AggregateAndGroupStep.groupjoin must be a dict or None")
+        self._groupjoin = value
+
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -1131,6 +1144,7 @@ cdef class AggregateAndGroupStep(PlanStep):
         out["having_condition"] = self._having_condition
         out["projection"] = self._projection
         out["schema"] = self._schema
+        out["groupjoin"] = self._groupjoin
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -1150,6 +1164,7 @@ cdef class AggregateAndGroupStep(PlanStep):
         new._having_condition = _copy_field(self._having_condition, memo)
         new._projection = _copy_field(self._projection, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._groupjoin = _copy_field(self._groupjoin, memo)
         new._sync_row()
         return new
 
@@ -1164,6 +1179,7 @@ cdef class AggregateAndGroupStep(PlanStep):
         new._having_condition = self._having_condition
         new._projection = self._projection
         new._schema = self._schema
+        new._groupjoin = self._groupjoin
         new._row[0] = self._row[0]
         return new
 
@@ -6630,6 +6646,8 @@ cdef class JoinStep(PlanStep):
     cdef dict _schemas
     cdef tuple _setop_leg_columns
     cdef object _swap_build_side
+    cdef object _groupjoin
+    cdef object _key_reducer
     cdef str _type
     cdef tuple _using
     cdef tuple _using_merged
@@ -6642,7 +6660,7 @@ cdef class JoinStep(PlanStep):
         _row_keys(self._row, self._right_columns, self._row.right_keys)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, asof_condition=None, asof_left_column=None, asof_op=None, asof_right_column=None, band_column=None, band_column_name=None, band_lower=None, band_lower_closed=None, band_upper=None, band_upper_closed=None, existence_column=None, existence_three_valued=None, implied_join=None, is_window_join=None, left_column=None, left_columns=None, left_readers=None, left_relation_names=None, on=None, reducer_applied=None, relation_names=None, residual=None, right_column=None, right_columns=None, right_readers=None, right_relation_names=None, schemas=None, setop_leg_columns=None, swap_build_side=None, type=None, using=None, using_merged=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, asof_condition=None, asof_left_column=None, asof_op=None, asof_right_column=None, band_column=None, band_column_name=None, band_lower=None, band_lower_closed=None, band_upper=None, band_upper_closed=None, existence_column=None, existence_three_valued=None, implied_join=None, is_window_join=None, left_column=None, left_columns=None, left_readers=None, left_relation_names=None, on=None, reducer_applied=None, relation_names=None, residual=None, right_column=None, right_columns=None, right_readers=None, right_relation_names=None, schemas=None, setop_leg_columns=None, swap_build_side=None, type=None, using=None, using_merged=None, key_reducer=None, groupjoin=None):
         self.node_type = _step_types().Join
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -6678,6 +6696,8 @@ cdef class JoinStep(PlanStep):
         self.type = type
         self.using = using
         self.using_merged = using_merged
+        self.key_reducer = key_reducer
+        self.groupjoin = groupjoin
 
     @property
     def alias(self):
@@ -6995,6 +7015,27 @@ cdef class JoinStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._using_merged = _frozen_list("JoinStep.using_merged", value)
 
+    @property
+    def key_reducer(self):
+        return self._key_reducer
+
+    @key_reducer.setter
+    def key_reducer(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("JoinStep.key_reducer", value)
+        self._key_reducer = value
+
+    @property
+    def groupjoin(self):
+        return self._groupjoin
+
+    @groupjoin.setter
+    def groupjoin(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        if value is not None and type(value) is not dict:
+            raise TypeError("JoinStep.groupjoin must be a dict or None")
+        self._groupjoin = value
+
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -7050,6 +7091,8 @@ cdef class JoinStep(PlanStep):
         out["schemas"] = self._schemas
         out["setop_leg_columns"] = self._setop_leg_columns
         out["swap_build_side"] = self._swap_build_side
+        out["groupjoin"] = self._groupjoin
+        out["key_reducer"] = self._key_reducer
         out["type"] = self._type
         out["using"] = self._using
         out["using_merged"] = self._using_merged
@@ -7095,6 +7138,8 @@ cdef class JoinStep(PlanStep):
         new._schemas = _copy_field(self._schemas, memo)
         new._setop_leg_columns = _copy_field(self._setop_leg_columns, memo)
         new._swap_build_side = _copy_field(self._swap_build_side, memo)
+        new._groupjoin = _copy_field(self._groupjoin, memo)
+        new._key_reducer = _copy_field(self._key_reducer, memo)
         new._type = _copy_field(self._type, memo)
         new._using = _copy_field(self._using, memo)
         new._using_merged = _copy_field(self._using_merged, memo)
@@ -7135,6 +7180,8 @@ cdef class JoinStep(PlanStep):
         new._schemas = self._schemas
         new._setop_leg_columns = self._setop_leg_columns
         new._swap_build_side = self._swap_build_side
+        new._groupjoin = self._groupjoin
+        new._key_reducer = self._key_reducer
         new._type = self._type
         new._using = self._using
         new._using_merged = self._using_merged
@@ -11288,6 +11335,8 @@ cpdef frozenset steps_with(str field):
             "statement_name": frozenset({T.Merge}),
             "suspended": frozenset({T.AlterMaterializedViewSuspended, T.AlterTriggerSuspended}),
             "swap_build_side": frozenset({T.Join}),
+            "key_reducer": frozenset({T.Join}),
+            "groupjoin": frozenset({T.AggregateAndGroup, T.Join}),
             "table_name": frozenset({T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.Analyze, T.CreateTrigger, T.DropTrigger}),
             "tag_name": frozenset({T.CreateTag, T.DropTag}),
             "index_name": frozenset({T.VectorIndexDdl}),

@@ -163,11 +163,10 @@ class OpteryxLocalFileSystem:
 
         infos = []
         for path in paths:
-            if os.path.isfile(path):
-                stat = os.stat(path)
-                infos.append(FileInfoLike(path=path, size=stat.st_size, mtime=stat.st_mtime))
-            else:
-                infos.append(FileInfoLike(path=path, size=0))
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"get_file_info: '{path}' is not a file")
+            stat = os.stat(path)
+            infos.append(FileInfoLike(path=path, size=stat.st_size, mtime=stat.st_mtime))
 
         return infos[0] if single_path else infos
 

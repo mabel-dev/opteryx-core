@@ -7,7 +7,20 @@
 Optimization Rule - Redundant Cast Elimination
 
 Type: Heuristic
-Goal: Evaluate Once (don't evaluate at all)
+Goal: Evaluate once (don't evaluate at all) — a CAST to the operand's own type runs
+      no kernel
+
+Order:
+    After:  ConstantFolding (first pass).
+    Before: PredicateRewrite, PredicatePushdown, ManifestPruning — every predicate
+            strategy keys on a raw IDENTIFIER, and a CAST around it hides the column
+            behind a runtime calculation; FunctionRewrite, JoinKeyMaterialization (a
+            cast that folds away is never materialised as a key column).
+
+Rewrite:
+    SELECT CAST(x AS INTEGER) FROM t WHERE CAST(x AS INTEGER) > 5     -- x is INTEGER
+    ->
+    SELECT x AS "CAST(x AS INTEGER)" FROM t WHERE x > 5
 
 A CAST whose operand already has the cast's target type is impotent: it produces
 a value indistinguishable from the operand. We never promised to *perform* a cast,

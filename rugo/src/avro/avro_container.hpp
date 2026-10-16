@@ -74,4 +74,10 @@ private:
     draken::AppendBuffer<uint8_t> scratch_;
 };
 
+// libbzip2 (built with BZ_NO_STDIO) reports an internal consistency failure through
+// bz_internal_error() and then carries on; the code is kept per thread. Returns the code
+// recorded since the last call (0 = none) and clears it. Checked after every
+// BZ2_bz*Compress / Decompress call by the reader and the writer.
+int take_bz_internal_error();
+
 }  // namespace rugo::avro

@@ -4,10 +4,36 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule - Demorgan's Laws
+Optimization Rule - Boolean Simplification (De Morgan's Laws)
 
 Type: Heuristic
-Goal: Preposition for following actions
+Goal: Normalise every Filter condition into a flat chain of plain ANDed predicates
+
+Applies local, equivalence-preserving algebraic rewrites to each Filter condition:
+De Morgan's laws (binary, n-ary and the AND form), negation absorbed into the
+comparison or unary operator (`NOT (a = b)` -> `a != b`, `NOT (x IS NULL)` ->
+`x IS NOT NULL`, `NOT (x IN (...))` -> `x NOT IN (...)`), double-negation removal,
+boolean constant folding (`A AND TRUE` -> `A`, `A OR TRUE` -> `TRUE`), AND-chain
+flattening and duplicate-conjunct removal. It preserves the shape of the boolean
+tree; reasoning ACROSS OR branches is DisjunctionSimplification's job. The class
+docstring lists every law applied.
+
+Order:
+    After:  JoinConditionHoist (hoisted ON conjuncts are Filter conditions by then,
+            so they are simplified exactly as a WHERE is), ConstantFolding (literal
+            sub-expressions are already folded).
+    Before: DisjunctionSimplification, DisjunctiveDomainPushdown,
+            SplitConjunctivePredicates, PredicateRewrite, PredicatePushdown — every
+            one of them consumes the AND-chain shape produced here.
+
+Rewrite:
+    WHERE NOT (a = 1 OR b IS NULL)
+    ->
+    WHERE a != 1 AND b IS NOT NULL
+
+    WHERE NOT (x IN (1, 2))   ->   WHERE x NOT IN (1, 2)
+    WHERE a AND TRUE          ->   WHERE a
+    WHERE a AND a             ->   WHERE a
 """
 
 from opteryx.expression import NodeType

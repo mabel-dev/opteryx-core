@@ -870,3 +870,18 @@ x86 only). None is more than tens of percent faster: inverse BWT is memory-laten
   macOS's allocator only; glibc's mmap threshold adapts upward after the first free, so
   the same is expected on Linux, but that is not measured.)
 
+
+## 30. The `opteryx.type` attribute (RULED 2026-10-16, writer design D9)
+
+The rugo Avro writer (docs/AVRO_WRITER_DESIGN.md) writes a Draken IPV4 column as
+`{"type": "long", "opteryx.type": "IPV4"}`: Avro has no type for it, and a bare `long`
+would read back as INT64 with no error — the parquet bug its key_value side channel
+fixed. The spec permits unknown attributes on a type and every other reader ignores them.
+
+Reader side: the schema parser keeps a primitive type object's `opteryx.type` string on
+the `Node`; the compiler, on a `long` with no logical type and `opteryx.type == "IPV4"`,
+emits `OutKind::Ipv4` (UINT32, width 4) through the `R_IPV4` opcode, which refuses a
+value outside 0..4294967295 as corrupt. The Python edge wraps it with
+`draken_vector_own_raw_logical` (LogicalKind IPV4); the engine's `NativeAvroScanSource`
+attaches the same descriptor; `column_types()` reports `logical_kind` 5 and
+`opteryx.connectors.avro_io` binds `IPV4`. The attribute on any other type is ignored.

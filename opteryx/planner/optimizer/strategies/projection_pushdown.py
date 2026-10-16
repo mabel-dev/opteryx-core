@@ -7,9 +7,31 @@
 Optimization Rule - Projection Pushdown
 
 Type: Heuristic
-Goal: Limit columns which need to be moved around
+Goal: Read and carry only the columns some operator above actually uses
 
-We bind from the the scans, exposing the available columns to each operator
+Walks the plan top-down collecting the identities each operator reads and narrows
+every node's output — and, at the leaf, the Scan's column list — to what is
+demanded above it. Unlike the other strategies it moves nothing; it only collects
+and updates the used-column sets. Rebuilds the plan.
+
+Order:
+    After:  every strategy that adds or removes a column reference —
+            PredicatePushdown (a predicate's columns are demanded where it landed),
+            JoinKeyMaterialization, JsonlNestedExtraction, GroupKeyReduction,
+            FilterImpliedGroupKeyReduction, SemiJoinReducer, ManifestPruning.
+    Before: TimestampCastSink, DistinctPushdown, ProjectFusion, LengthOnlyColumn
+            (all declare requires projection-pushed), OperatorFusion (the HeapSort
+            takes the Order's active-column set), RedundantOperations (a Project is
+            judged no-op against the pruned width beneath it), JoinElimination,
+            AggregateScanPushdown, DistinctScanPushdown.
+    Declares: provides projection-pushed.
+
+Rewrite:
+    SELECT a FROM t WHERE b > 1
+    ->
+    SELECT a FROM (SELECT a, b FROM t) WHERE b > 1      -- the scan reads a and b, not t.*
+
+We bind from the scans, exposing the available columns to each operator
 as we make our way to the top of the plan (usually the SELECT). The projection
 pushdown is done as part of the optimizers, but isn't quite like the other
 optimizations; this is collecting used column information as it goes from the

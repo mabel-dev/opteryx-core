@@ -4,10 +4,26 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule - Predicate rewriter
+Optimization Rule - Predicate Rewriter
 
 Type: Heuristic
-Goal: Chose more efficient predicate evaluations
+Goal: Choose more efficient predicate evaluations
+
+Order:
+    After:  SplitConjunctivePredicates (this visits ONE conjunct at a time; the
+            same-operand NOT LIKE fusion that needs several together is done in the
+            split, while LIKE is still spelled LIKE), BooleanSimplification,
+            ConstantFolding, RedundantCastElimination (a bare identifier is what the
+            rewrites key on).
+    Before: PredicateCompaction and PredicatePushdown (the rewritten forms are the
+            compactable and pushable ones), LengthOnlyColumn (consumes the
+            IsEmpty / IsNotEmpty it produces). FunctionRewrite shares its table.
+
+Rewrite:
+    WHERE x LIKE 'abc' AND y IN (1) AND z LIKE '%needle%'
+    ->
+    WHERE x = 'abc' AND y = 1 AND z INSTR 'needle'
+    (the full table is below)
 
 We rewrite conditions to a more optimal form based on two objectives:
 1) the execution of the condition is faster

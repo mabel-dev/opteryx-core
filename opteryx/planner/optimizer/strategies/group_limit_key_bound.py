@@ -6,10 +6,22 @@
 """
 Optimization Rule - Key Bound for GROUP BY ... LIMIT (no ORDER BY)
 
-Type: Heuristic
+Type: Heuristic (a PROOF from manifest min/max; an estimated count never qualifies)
 Goal: Read only the files that can hold the groups a LIMIT will return
 
+Order:
+    After:  LimitElimination (a no-op LIMIT is already gone), the expression
+            rewrites, and before anything touches the Scan — the proof requires a
+            Scan with no predicate, limit or top-N spec.
+    Before: PredicatePushdown (the `k <= T` Filter it adds is pushed to the scan),
+            ManifestPruning and the reader's row-group pruning, which do the actual
+            skipping.
+
+Rewrite:
     SELECT k, COUNT(*) FROM t GROUP BY k LIMIT 10
+    ->
+    SELECT k, COUNT(*) FROM t WHERE k <= T GROUP BY k LIMIT 10
+        -- T: a value the manifest proves at least 10 distinct keys lie at or below
 
 With no ORDER BY, ANY 10 groups are a correct answer, so the planner may choose
 which. It chooses the ones a manifest can PROVE exist below a bound T, and adds

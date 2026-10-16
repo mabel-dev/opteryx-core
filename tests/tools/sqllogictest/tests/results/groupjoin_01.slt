@@ -1,0 +1,144 @@
+# GROUPJOIN (docs/GROUPJOIN_DESIGN.md §9, src/cpp/engine/native_groupjoin.hpp).
+#
+# Fixture, inline in every query:
+#   R(k, g) = (1,'a'), (1,'b'), (2,'a'), (3,'c'), (NULL,'d'), (NULL,'e')
+#   S(k, x) = (1,10), (1,NULL), (2,5), (4,7), (NULL,3)
+# Expected values are derived from SQL semantics (T14 from the fixture) and equal the
+# answer the engine gives with the rule disabled (FEATURE_DISABLE_GROUPJOIN=1).
+
+# T1 — organic LEFT, grouped on the build key: per key x d (k=1 has d=2 build rows).
+# COUNT(*) counts an unmatched preserved row once; COUNT(col) does not. The two
+# NULL-keyed R rows are ONE group; S's NULL key matches nothing.
+query IIIIIIR rowsort
+SELECT r.k, COUNT(*), COUNT(s.x), COUNT(s.k), SUM(s.x), MIN(s.x), AVG(s.x)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+LEFT JOIN (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) ON r.k = s.k
+GROUP BY r.k
+----
+1 4 2 4 20 10 10.000
+2 1 1 1 5 5 5.000
+3 1 0 0 NULL NULL NULL
+NULL 2 0 0 NULL NULL NULL
+
+# T2 — organic INNER: keys with no match are not emitted.
+query IIII rowsort
+SELECT r.k, COUNT(*), COUNT(s.x), SUM(s.x)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+INNER JOIN (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) ON r.k = s.k
+GROUP BY r.k
+----
+1 4 2 20
+2 1 1 5
+
+# T3 — grouped on a non-key build column: per build row, re-aggregated above.
+query TII rowsort
+SELECT r.g, COUNT(*), SUM(s.x)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+INNER JOIN (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) ON r.k = s.k
+GROUP BY r.g
+----
+a 3 15
+b 2 10
+
+# T6 — outer leg as build (correlated scalar, INNER): duplicate outer keys each get
+# their key's value.
+query IT rowsort
+SELECT r.k, r.g
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+WHERE 5 < (SELECT SUM(s.x) FROM (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) WHERE s.k = r.k)
+----
+1 a
+1 b
+
+# T5 — static COUNT(*) over an empty partner set is 0 (COUNT bug), not d.
+query IT rowsort
+SELECT r.k, r.g
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+WHERE (SELECT COUNT(*) FROM (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) WHERE s.k = r.k) = 0
+----
+3 c
+NULL d
+NULL e
+
+# T8 — organic LEFT over an EMPTY stream: every key emitted, COUNT(*) = d.
+query IIII rowsort
+SELECT r.k, COUNT(*), COUNT(s.x), SUM(s.x)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+LEFT JOIN (SELECT * FROM (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) WHERE s.x > 100) AS s ON r.k = s.k
+GROUP BY r.k
+----
+1 2 0 NULL
+2 1 0 NULL
+3 1 0 NULL
+NULL 2 0 NULL
+
+# T10 — composite key, organic INNER.
+query IIII rowsort
+SELECT r.a, r.b, COUNT(*), SUM(s.x)
+FROM (VALUES (1,1),(1,2),(1,2),(2,1)) AS r(a,b)
+INNER JOIN (VALUES (1,1,5),(1,2,7),(1,2,1),(2,2,9)) AS s(a,b,x) ON r.a = s.a AND r.b = s.b
+GROUP BY r.a, r.b
+----
+1 1 1 5
+1 2 4 16
+
+# T12 — DISTINCT is not fused; answer pinned.
+query II rowsort
+SELECT r.k, COUNT(DISTINCT s.x)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+LEFT JOIN (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) ON r.k = s.k
+GROUP BY r.k
+----
+1 1
+2 1
+3 0
+NULL 0
+
+# T14 — real fixture, skewed fan-out; planets with no moon count 1 / 0.
+query IIIR rowsort
+SELECT p.id, COUNT(*), COUNT(s.id), MAX(s.radius)
+FROM $planets AS p LEFT JOIN testdata.satellites AS s ON p.id = s.planetId
+GROUP BY p.id
+----
+1 1 0 NULL
+2 1 0 NULL
+3 1 1 1737.500
+4 2 2 11.100
+5 67 67 2631.200
+6 61 61 2574.730
+7 27 27 788.900
+8 14 14 1353.400
+9 5 5 603.600
+
+# Window aggregate (rewritten to a join to a GROUP BY on the partition key, which
+# takes the outer-leg-as-build path).
+query TI rowsort
+SELECT name, COUNT(*) OVER (PARTITION BY number_of_moons) AS c FROM $planets WHERE id < 4
+----
+Earth 1
+Mercury 2
+Venus 2
+
+# T3b — per row, LEFT: unmatched and NULL-keyed build rows each count once.
+query TIII rowsort
+SELECT r.g, COUNT(*), COUNT(s.x), SUM(s.x)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+LEFT JOIN (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) ON r.k = s.k
+GROUP BY r.g
+----
+a 3 2 15
+b 2 1 10
+c 1 0 NULL
+d 1 0 NULL
+e 1 0 NULL
+
+# T3c — a streamed join-key column stands for its build-side equal; expression operand.
+query ITI rowsort
+SELECT s.k, r.g, SUM(s.x * 2)
+FROM (VALUES (1,'a'),(1,'b'),(2,'a'),(3,'c'),(NULL,'d'),(NULL,'e')) AS r(k,g)
+INNER JOIN (VALUES (1,10),(1,NULL),(2,5),(4,7),(NULL,3)) AS s(k,x) ON r.k = s.k
+GROUP BY s.k, r.g
+----
+1 a 20
+1 b 20
+2 a 10

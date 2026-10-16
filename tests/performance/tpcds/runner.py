@@ -3,16 +3,23 @@
 TPC-DS smoke runner.
 
 Not a performance benchmark (yet) — see `make tpch` / `make clickbench` for
-that shape. This runs each of the 99 TPC-DS queries once against Opteryx and
-reports pass/fail, so the suite's *coverage* (how much of TPC-DS the engine
-currently accepts and executes) is visible before anyone chases its numbers.
+that shape. This runs each of the 99 TPC-DS queries against Opteryx and reports
+pass/fail, so the suite's *coverage* (how much of TPC-DS the engine currently
+accepts and executes) is visible. Each query runs --iterations times (default 3);
+its reported time is the min, and the suite total is the sum of those mins — the
+same min-of-N the TPC-H and SSB runners report.
 
-Each query runs in its own subprocess (`_query_worker.py`) with a hard
-wall-clock timeout (default 30s, --timeout to change): a query that never
-yields control back to Python — e.g. a missing join-key detection turning a
-6-table query into a real cross join — can't be stopped by an in-process
-signal-based timeout, only by killing the process. See _query_worker.py's
-docstring for why.
+Queries run in a worker subprocess (`_query_worker.py`) with a hard wall-clock
+timeout (default 30s, --timeout to change): a query that never yields control
+back to Python — e.g. a missing join-key detection turning a 6-table query into
+a real cross join — can't be stopped by an in-process signal-based timeout, only
+by killing the process. See _query_worker.py's docstring for why.
+
+The worker is REUSED across queries and replaced only after a timeout or a
+crash, so the suite's wall time is query execution, not 99 interpreter starts and
+`import opteryx` (which was ~85% of an SF1 run). Consequence: the engine's
+in-process caches (footers, chunks) persist from one query to the next, as they
+would in a server — later queries are not cold-process runs.
 
 Usage:
     make tpcds-sf1 | tpcds-sf001
@@ -36,8 +43,10 @@ import argparse
 import glob
 import json
 import os
+import select
 import subprocess
 import sys
+import tempfile
 import time
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -81,34 +90,75 @@ def _load_queries(scale: str, only: str = "", variant: str = "") -> list[tuple[s
     return queries
 
 
-def _run_query(sql: str, timeout_s: float, variant: str) -> tuple[str, float, int, str]:
-    """Run one query in a subprocess. Returns (status, elapsed_ms, rows, error)
-    with status in {"ok", "error", "timeout"}."""
-    worker_args = ["--aistor"] if variant == AISTOR_WORKSPACE else []
-    t0 = time.monotonic_ns()
-    try:
-        proc = subprocess.run(
-            [sys.executable, _WORKER_PATH, *worker_args],
-            input=sql,
-            capture_output=True,
+class _Worker:
+    """One long-lived `_query_worker.py` process. `run()` sends a query and waits up
+    to the timeout for its result line; on a timeout or a dead process the worker is
+    killed and the next `run()` starts a fresh one."""
+
+    def __init__(self, variant: str):
+        self._args = ["--aistor"] if variant == AISTOR_WORKSPACE else []
+        self._proc = None
+        self._stderr = None
+        self.starts = 0
+
+    def _start(self) -> None:
+        # stderr to a file, not a pipe: a chatty worker must not block on a full pipe
+        # the runner is not reading, and a crash's last line is still recoverable.
+        self._stderr = tempfile.TemporaryFile(mode="w+")
+        self._proc = subprocess.Popen(
+            [sys.executable, _WORKER_PATH, *self._args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self._stderr,
             text=True,
-            timeout=timeout_s,
+            bufsize=1,
         )
-    except subprocess.TimeoutExpired:
-        elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-        return "timeout", elapsed_ms, 0, f"exceeded {timeout_s:.0f}s timeout"
+        self.starts += 1
 
-    elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-    last_line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
-    try:
-        data = json.loads(last_line)
-    except json.JSONDecodeError:
-        stderr_tail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no output"
-        return "error", elapsed_ms, 0, f"worker crashed (exit {proc.returncode}): {stderr_tail}"
+    def _stderr_tail(self) -> str:
+        self._stderr.seek(0)
+        lines = self._stderr.read().strip().splitlines()
+        return lines[-1] if lines else "no output"
 
-    if data["ok"]:
-        return "ok", data["elapsed_ms"], data["rows"], ""
-    return "error", elapsed_ms, 0, data["error"]
+    def stop(self) -> None:
+        if self._proc is None:
+            return
+        if self._proc.poll() is None:
+            self._proc.kill()
+        self._proc.wait()
+        self._stderr.close()
+        self._proc = None
+
+    def run(self, sql: str, iterations: int, timeout_s: float) -> tuple[str, list, int, str]:
+        """Runs `sql` `iterations` times. Returns (status, runs_ms, rows, error), status
+        in {"ok", "error", "timeout"}. `timeout_s` is PER RUN: the wait for the whole
+        request is iterations x timeout_s."""
+        if self._proc is None or self._proc.poll() is not None:
+            self.stop()
+            self._start()
+        try:
+            self._proc.stdin.write(json.dumps({"sql": sql, "iterations": iterations}) + "\n")
+            self._proc.stdin.flush()
+        except BrokenPipeError:
+            tail = self._stderr_tail()
+            code = self._proc.poll()
+            self.stop()
+            return "error", [], 0, f"worker crashed (exit {code}): {tail}"
+        ready, _, _ = select.select([self._proc.stdout], [], [], timeout_s * iterations)
+        if not ready:
+            self.stop()
+            return "timeout", [], 0, (f"exceeded {timeout_s:.0f}s per run "
+                                      f"({iterations} runs)")
+        line = self._proc.stdout.readline()
+        if not line:
+            tail = self._stderr_tail()
+            code = self._proc.wait()
+            self.stop()
+            return "error", [], 0, f"worker crashed (exit {code}): {tail}"
+        data = json.loads(line)
+        if data["ok"]:
+            return "ok", data["runs_ms"], data["rows"], ""
+        return "error", [], 0, data["error"]
 
 
 def main() -> int:
@@ -126,7 +176,11 @@ def main() -> int:
         "`aistor` runs against the parquet source on AIStor (aistor.tpcds_sf<scale>).",
     )
     parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Per-query wall-clock timeout in seconds (default: 30)"
+        "--timeout", type=float, default=30.0, help="Per-run wall-clock timeout in seconds (default: 30)"
+    )
+    parser.add_argument(
+        "--iterations", type=int, default=3,
+        help="Timed runs per query; the min is reported and summed (default: 3)",
     )
     args = parser.parse_args()
 
@@ -155,26 +209,34 @@ def main() -> int:
             ("Scale factor", f"{args.scale}  (testdata.{suffix})"),
             ("Format", args.variant or "parquet"),
             ("Queries", str(len(queries))),
+            ("Iterations", f"{args.iterations} runs per query; reported = min, total = sum of mins"),
+            ("Worker", "one process reused across queries (in-process caches stay warm); "
+                       "replaced after a timeout or crash"),
         ],
     )
 
     csv_writer, csv_path, csv_handle = open_results_csv(
         _RESULTS_DIR,
-        fieldnames=["scale", "variant", "query", "status", "elapsed_ms", "row_count", "error"],
+        fieldnames=["scale", "variant", "query", "status", "elapsed_ms", "runs_ms", "row_count", "error"],
     )
 
+    worker = _Worker(args.variant)
     passed = 0
     failed = 0
+    total_min_ms = 0.0
     timed_out = 0
     failures: list[tuple[str, str]] = []
     suite_start = time.monotonic_ns()
 
     try:
         for name, sql in queries:
-            status, elapsed_ms, rows, err = _run_query(sql, args.timeout, args.variant)
+            status, runs_ms, rows, err = worker.run(sql, args.iterations, args.timeout)
+            elapsed_ms = min(runs_ms) if runs_ms else 0.0
             if status == "ok":
                 passed += 1
-                print(f"{name:<8} \033[38;2;26;185;67mOK\033[0m     {elapsed_ms:>10.1f}ms   {rows:>12,} rows")
+                total_min_ms += elapsed_ms
+                print(f"{name:<8} \033[38;2;26;185;67mOK\033[0m     {elapsed_ms:>10.1f}ms   {rows:>12,} rows"
+                      f"   runs {' '.join(f'{r:.1f}' for r in runs_ms)}")
             elif status == "timeout":
                 timed_out += 1
                 failures.append((name, f"TIMEOUT: {err}"))
@@ -190,12 +252,14 @@ def main() -> int:
                     "query": name,
                     "status": status,
                     "elapsed_ms": f"{elapsed_ms:.3f}" if status == "ok" else "",
+                    "runs_ms": ";".join(f"{r:.3f}" for r in runs_ms),
                     "row_count": rows,
                     "error": err,
                 }
             )
             csv_handle.flush()
     finally:
+        worker.stop()
         csv_handle.close()
 
     elapsed_s = (time.monotonic_ns() - suite_start) / 1e9
@@ -204,7 +268,8 @@ def main() -> int:
         f"\033[38;2;26;185;67m{passed} passed\033[0m, "
         f"\033[38;2;255;121;198m{failed} failed\033[0m, "
         f"\033[38;2;255;184;108m{timed_out} timed out\033[0m   "
-        f"({elapsed_s:.1f}s)"
+        f"   sum of min-of-{args.iterations}: {total_min_ms / 1000:.2f}s over {passed} queries"
+        f"   (wall {elapsed_s:.1f}s, worker processes: {worker.starts})"
     )
     print(f"  results: {os.path.relpath(csv_path, _REPO_ROOT)}")
 

@@ -110,7 +110,8 @@ endif
 
 BENCH_INCLUDES := $(INCLUDES) \
                   -I$(DRAKEN_ROOT)/rugo/src \
-                  -I$(DRAKEN_ROOT)/third_party/zstd
+                  -I$(DRAKEN_ROOT)/third_party/zstd \
+                  -I$(DRAKEN_ROOT)/third_party/bshoshany
 BENCH_FLAGS    := $(CXXSTD) $(OPT) $(BENCH_INCLUDES) -DHAVE_ZSTD
 
 .PHONY: all test clean check-draken bench probe convert bakeoff fsst slots coverage bloomsz prune

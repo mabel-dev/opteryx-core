@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Subprocess worker for tpcds/runner.py — runs exactly one query, prints a
-JSON result line, exits.
+Subprocess worker for tpcds/runner.py — a long-lived process that runs queries
+one at a time: one JSON request line in, one JSON result line out.
 
 Why a subprocess at all: a query that never yields control back to the
 Python interpreter (a native call that just spins — see the Q13 join-
@@ -13,9 +13,15 @@ timeout with `subprocess.run(..., timeout=...)`, which SIGKILLs the process
 (and everything in it, including any native thread pool) at the OS level —
 the only version of "timeout" that's actually true.
 
-Reads the SQL to run from stdin, writes one line of JSON to stdout:
-    {"ok": true, "elapsed_ms": ..., "rows": ...}
-    {"ok": false, "error": "..."}
+The process is reused across queries, so the suite pays interpreter startup and
+`import opteryx` once, not per query. The timeout still holds: the runner kills
+this process (and its native threads) when a query overruns, and starts a fresh
+one for the next query.
+
+Protocol, one line each way per query:
+    in:  {"sql": "...", "iterations": N}
+    out: {"ok": true, "runs_ms": [N timings], "rows": ...}
+         {"ok": false, "error": "..."}
 """
 
 from __future__ import annotations
@@ -42,22 +48,47 @@ if "--aistor" in sys.argv[1:]:
 
 
 def main() -> int:
-    sql = sys.stdin.read()
-    session = opteryx.session()
-    try:
+    # One-time engine initialisation (lazy imports, native setup) is paid here, before
+    # the first request, instead of landing on whichever query happens to run first:
+    # measured ~550-690 ms on the first query of a fresh worker vs ~3 ms after.
+    warm = opteryx.session()
+    for _ in warm.execute_to_morsels("SELECT COUNT(*) FROM $planets"):
+        pass
+    warm.close()
+    # One JSON request per line on stdin, one JSON result per line on stdout, until EOF.
+    # The runner keeps this process for the whole suite (so the suite times queries,
+    # not interpreter startup + `import opteryx`), and kills / replaces it only when a
+    # query exceeds its timeout or the process dies.
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request = json.loads(line)
+        sql = request["sql"]
+        iterations = request["iterations"]
+        # `iterations` timed runs, each in a fresh session; the runner keeps the min
+        # (the same min-of-N the TPC-H and SSB runners report). The first run is not
+        # discarded — the min already excludes its cold cost.
+        runs_ms: list = []
         rows = 0
-        t0 = time.monotonic_ns()
-        for morsel in session.execute_to_morsels(sql):
-            if morsel is not None and hasattr(morsel, "num_rows"):
-                rows += morsel.num_rows
-        elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-        print(json.dumps({"ok": True, "elapsed_ms": elapsed_ms, "rows": rows}))
-        return 0
-    except Exception as err:
-        print(json.dumps({"ok": False, "error": f"{type(err).__name__}: {err}"}))
-        return 1
-    finally:
-        session.close()
+        result = None
+        for _ in range(iterations):
+            session = opteryx.session()
+            try:
+                rows = 0
+                t0 = time.monotonic_ns()
+                for morsel in session.execute_to_morsels(sql):
+                    rows += morsel.num_rows
+                runs_ms.append((time.monotonic_ns() - t0) / 1e6)
+            except Exception as err:
+                result = {"ok": False, "error": f"{type(err).__name__}: {err}"}
+                break
+            finally:
+                session.close()
+        if result is None:
+            result = {"ok": True, "runs_ms": runs_ms, "rows": rows}
+        sys.stdout.write(json.dumps(result) + "\n")
+        sys.stdout.flush()
+    return 0
 
 
 if __name__ == "__main__":

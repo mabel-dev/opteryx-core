@@ -751,6 +751,7 @@ class Features:
     disable_filter_implied_group_key_reduction = get_bool("FEATURE_DISABLE_FILTER_IMPLIED_GROUP_KEY_REDUCTION", False)
     disable_function_rewrite = get_bool("FEATURE_DISABLE_FUNCTION_REWRITE", False)
     disable_group_key_reduction = get_bool("FEATURE_DISABLE_GROUP_KEY_REDUCTION", False)
+    disable_groupjoin = get_bool("FEATURE_DISABLE_GROUPJOIN", False)
     disable_join_algorithm = get_bool("FEATURE_DISABLE_JOIN_ALGORITHM", False)
     disable_join_condition_hoist = get_bool("FEATURE_DISABLE_JOIN_CONDITION_HOIST", False)
     disable_join_elimination = get_bool("FEATURE_DISABLE_JOIN_ELIMINATION", False)

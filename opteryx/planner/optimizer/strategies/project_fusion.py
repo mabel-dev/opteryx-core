@@ -9,6 +9,21 @@ Optimization Rule - Project Fusion
 Type: Heuristic
 Goal: Fewer physical passes over the row
 
+Order:
+    After:  ProjectionPushdown (requires projection-pushed: it sees already-pruned
+            column lists), RedundantOperations (Subquery boundaries between two
+            Projects are gone, so the pair is adjacent), OperatorFusion.
+    Before: GroupJoin, VectorSearch, TopNScanPushdown, AggregateScanPushdown,
+            DistinctScanPushdown, WindowTopKFusion (all declare requires
+            project-fused: each needs the boundary nodes gone so the pair it reads
+            is adjacent, or the operator reads DIRECTLY from the Scan).
+    Declares: requires projection-pushed; provides project-fused.
+
+Rewrite:
+    SELECT a + 1 AS c FROM (SELECT x AS a FROM t)
+    ->
+    SELECT x + 1 AS c FROM t
+
 Two consecutive Project nodes (an inner SELECT/view feeding an outer SELECT) each
 compile to their own physical ProjectionNode pass. When the lower Project's sole
 consumer is the upper Project, they can be fused into one: the upper's expressions

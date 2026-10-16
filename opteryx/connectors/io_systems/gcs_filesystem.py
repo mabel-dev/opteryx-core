@@ -303,6 +303,18 @@ class OpteryxGcsFileSystem:
             object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
             return f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
+        def _content_length(path: str, headers: dict) -> int:
+            # head()/head_many() already raise on 4xx/5xx; a 2xx HEAD without
+            # content-length leaves the object's size unknown - fail rather
+            # than record it as an empty object.
+            content_length = headers.get("content-length")
+            if content_length is None:
+                raise DatasetReadError(
+                    f"Unable to size {md_code(path)}: the GCS HEAD response carried no "
+                    "content-length header."
+                )
+            return int(content_length)
+
         # Capture a single valid bearer token for this batch.
         bearer = self._bearer
 
@@ -312,7 +324,7 @@ class OpteryxGcsFileSystem:
                 _object_url(paths[0]),
                 headers={"Authorization": bearer},
             )
-            size = int(headers.get("content-length", 0))
+            size = _content_length(paths[0], headers)
             info = FileInfo(path=paths[0], type=FileType.File, size=size)
             return info if single_path else [info]
 
@@ -325,7 +337,7 @@ class OpteryxGcsFileSystem:
         requests = [(_object_url(path), {"Authorization": bearer}) for path in paths]
         headers_list = self.http_client.head_many(requests)
         infos = [
-            FileInfo(path=path, type=FileType.File, size=int(headers.get("content-length", 0)))
+            FileInfo(path=path, type=FileType.File, size=_content_length(path, headers))
             for path, headers in zip(paths, headers_list)
         ]
 

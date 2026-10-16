@@ -6,8 +6,30 @@
 """
 Optimization Rule - Semi-Join Pushdown
 
-Type: Cost-based (a costed pair — see OptimizationStrategy.record_decision)
+Type: Cost-based (a costed pair — see OptimizationStrategy.record_decision;
+      `optimization_technique = "cost"`)
 Goal: Filter before the joins multiply rows, not after
+
+Order:
+    After:  PredicatePushdown (requires predicates-pushed), CrossJoinFilterPushdown
+            (the inner-join chain it sinks through is keyed), CorrelatedFilters and
+            the second PredicateCompaction (the estimates it compares reflect the
+            final scan predicates).
+    Before: SemiJoinReducer (a pushed semi then sits on a bare scan whose leg the
+            reducer's `_is_restricted` gate correctly refuses to copy), JoinAlgorithm
+            (owns the build-side decision for the new shape).
+    Declares: requires predicates-pushed.
+
+Rewrite:
+    SELECT ... FROM customer c JOIN orders o ON ... JOIN lineitem l ON ...
+    WHERE o_orderkey IN (SELECT l_orderkey FROM lineitem
+                         GROUP BY l_orderkey HAVING SUM(l_quantity) > 300)
+    ->
+    SELECT ... FROM customer c
+      JOIN (SELECT * FROM orders WHERE o_orderkey IN (SELECT ...)) o ON ...
+      JOIN lineitem l ON ...
+        -- SEMI(A ⋈ B, S) = SEMI(A, S) ⋈ B, sunk one join at a time while the
+        -- estimated rows arriving at the semi do not materially grow
 
 A decorrelated IN/EXISTS subquery arrives as a SEMI (or ANTI) join sitting ABOVE
 the query's whole inner-join chain, filtering the joined intermediate on a key
@@ -40,10 +62,7 @@ accepted step keeps the probe count roughly non-increasing while strictly
 moving the filter below one more join, whose input then shrinks by the semi's
 selectivity — bounded downside (the margin), unbounded upside.
 
-Runs before SemiJoinReducerStrategy: a pushed semi then sits on a bare scan
-whose leg the reducer's `_is_restricted` gate correctly refuses to copy, and
-JoinAlgorithmStrategy later still owns the build-side decision for the new
-shape. The decision — either way — is recorded with its numbers in EXPLAIN's
+The decision — either way — is recorded with its numbers in EXPLAIN's
 OPTIMIZATIONS block.
 """
 

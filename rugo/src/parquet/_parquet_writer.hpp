@@ -20,6 +20,7 @@
 #include "_thrift_writer.hpp"
 #include "page_index_writer.hpp"
 #include "_bloom_writer.hpp"
+#include "../_writer_pool.hpp"   // shared writer pool: column chunks encode in parallel
 #include "chunk_sum.hpp"
 
 #include "core/kmv_sketch.h"  // THE shared KMV sketch (draken, header-only)
@@ -421,34 +422,47 @@ inline std::vector<uint8_t> encode_def_levels(const uint8_t *validity,
 
 // ---- PLAIN value encoders (non-null values only) ----
 
+// PLAIN is little-endian, and so is every target (ARM64, x86-64, RISC-V), so a
+// fixed-width value's in-memory bytes ARE its PLAIN bytes.
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+              "parquet writer: PLAIN encoding copies native little-endian bytes");
+
+// Fixed-width PLAIN: the present values' bytes, appended with the output sized
+// once (no per-byte push_back). No validity mask = one contiguous copy.
+template <size_t W>
+inline void encode_fixed_plain(const uint8_t *src, const uint8_t *validity,
+                               size_t num_rows, std::vector<uint8_t> &out) {
+  if (validity == nullptr) {
+    out.insert(out.end(), src, src + num_rows * W);
+    return;
+  }
+  size_t present = 0;
+  for (size_t i = 0; i < num_rows; i++)
+    present += is_valid(validity, i);
+  size_t at = out.size();
+  out.resize(at + present * W);
+  uint8_t *dst = out.data() + at;
+  for (size_t i = 0; i < num_rows; i++)
+    if (is_valid(validity, i)) {
+      std::memcpy(dst, src + i * W, W);
+      dst += W;
+    }
+}
+
 inline void encode_values(const ColumnInput &col, size_t num_rows,
                           std::vector<uint8_t> &out) {
   switch (col.type) {
   case PT_INT32:
-    for (size_t i = 0; i < num_rows; i++)
-      if (is_valid(col.validity, i))
-        put_u32_le(out, (uint32_t)col.i32[i]);
-    break;
-  case PT_INT64:
-    for (size_t i = 0; i < num_rows; i++)
-      if (is_valid(col.validity, i))
-        put_u64_le(out, (uint64_t)col.i64[i]);
+    encode_fixed_plain<4>((const uint8_t *)col.i32, col.validity, num_rows, out);
     break;
   case PT_FLOAT:
-    for (size_t i = 0; i < num_rows; i++)
-      if (is_valid(col.validity, i)) {
-        uint32_t bits;
-        std::memcpy(&bits, &col.f32[i], 4);
-        put_u32_le(out, bits);
-      }
+    encode_fixed_plain<4>((const uint8_t *)col.f32, col.validity, num_rows, out);
+    break;
+  case PT_INT64:
+    encode_fixed_plain<8>((const uint8_t *)col.i64, col.validity, num_rows, out);
     break;
   case PT_DOUBLE:
-    for (size_t i = 0; i < num_rows; i++)
-      if (is_valid(col.validity, i)) {
-        uint64_t bits;
-        std::memcpy(&bits, &col.f64[i], 8);
-        put_u64_le(out, bits);
-      }
+    encode_fixed_plain<8>((const uint8_t *)col.f64, col.validity, num_rows, out);
     break;
   case PT_BOOLEAN: {
     // bit-pack non-null values, LSB-first.
@@ -469,14 +483,24 @@ inline void encode_values(const ColumnInput &col, size_t num_rows,
       out.push_back(cur);
     break;
   }
-  case PT_BYTE_ARRAY:
+  case PT_BYTE_ARRAY: {
+    // 4-byte length + payload per present value, output sized once.
+    size_t total = 0;
+    for (size_t i = 0; i < num_rows; i++)
+      if (is_valid(col.validity, i))
+        total += 4u + (size_t)col.strs[i].len;
+    size_t at = out.size();
+    out.resize(at + total);
+    uint8_t *dst = out.data() + at;
     for (size_t i = 0; i < num_rows; i++)
       if (is_valid(col.validity, i)) {
         const StrSlice &s = col.strs[i];
-        put_u32_le(out, s.len);
-        out.insert(out.end(), s.ptr, s.ptr + s.len);
+        std::memcpy(dst, &s.len, 4);
+        if (s.len) std::memcpy(dst + 4, s.ptr, s.len);
+        dst += 4u + s.len;
       }
     break;
+  }
   case PT_FLBA:
     // DECIMAL: big-endian unscaled value. INTERVAL: 12 bytes verbatim (the
     // edge already laid them out as 3 little-endian uint32 months/days/millis).
@@ -862,10 +886,26 @@ inline std::vector<uint64_t> compact_present_hashes(
   }
   return present;
 }
-inline size_t bloom_ndv(std::vector<uint64_t> hashes) {
-  std::sort(hashes.begin(), hashes.end());
-  hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
-  return hashes.size();
+// EXACT count of distinct hashes — it sizes the bloom filter and is written as
+// the chunk's distinct_count statistic, so it must not be an estimate. Counted
+// with an open-addressed set (load <= 0.5, linear probing) rather than a sort:
+// one pass, no copy of the input. XXH64 bits are already uniformly mixed, so
+// the hash indexes the table directly. 0 is the empty-slot marker, so the
+// value 0 is counted on the side.
+inline size_t bloom_ndv(const std::vector<uint64_t> &hashes) {
+  size_t cap = 16;
+  while (cap < hashes.size() * 2) cap <<= 1;
+  const size_t mask = cap - 1;
+  std::vector<uint64_t> table(cap, 0);
+  size_t ndv = 0;
+  bool have_zero = false;
+  for (uint64_t h : hashes) {
+    if (h == 0) { have_zero = true; continue; }
+    size_t s = (size_t)h & mask;
+    while (table[s] != 0 && table[s] != h) s = (s + 1) & mask;
+    if (table[s] == 0) { table[s] = h; ndv++; }
+  }
+  return ndv + (have_zero ? 1 : 0);
 }
 
 // Serialize a BloomFilterHeader (Compact Protocol): numBytes(1),
@@ -2359,21 +2399,32 @@ struct EncodedRowGroup {
   RGMeta meta;                                 // offsets are filled by placement
 };
 
-// Encode every column chunk of ONE row group. `rg_cols` are the already-sliced
-// per-row-group column views; `rg_rows` their row count. Nothing here knows
-// where the bytes will land: data_offsets / dict_offsets / bloom_offset and
-// the page offsets are assigned by place_chunk / place_bloom.
-inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
-                                        size_t rg_rows, int codec, int profile,
-                                        size_t max_page_bytes, bool want_index) {
-  const size_t ncols = rg_cols.size();
+// An empty EncodedRowGroup for `ncols` columns of `rg_rows` rows: every
+// per-column slot exists before any column is encoded, so the columns can fill
+// their own slots concurrently.
+inline EncodedRowGroup init_encoded_row_group(size_t ncols, size_t rg_rows,
+                                              int codec) {
   EncodedRowGroup erg;
   erg.rows = rg_rows;
   erg.chunks.resize(ncols);
   erg.blooms.resize(ncols);
+  erg.meta.row_count = rg_rows;
+  erg.meta.init_columns(ncols, codec);
+  return erg;
+}
+
+// Encode column chunk `i` of ONE row group into `erg`. `rg_cols` are the
+// already-sliced per-row-group column views; `rg_rows` their row count. Writes
+// ONLY erg's index-i slots (meta.*[i], chunks[i], blooms[i]) and reads nothing
+// another column writes, which is what lets encode_row_groups run every column
+// of a block at once. Nothing here knows where the bytes will land:
+// data_offsets / dict_offsets / bloom_offset and the page offsets are assigned
+// by place_chunk / place_bloom.
+inline void encode_column_chunk(EncodedRowGroup &erg,
+                                const std::vector<ColumnInput> &rg_cols,
+                                size_t i, size_t rg_rows, int codec, int profile,
+                                size_t max_page_bytes, bool want_index) {
   RGMeta &meta = erg.meta;
-  meta.row_count = rg_rows;
-  meta.init_columns(ncols, codec);
 
   // Settle each page's stored-vs-plain size and its offset RELATIVE to the
   // chunk's first byte, now that the chunk's variant is decided. Data pages run
@@ -2408,7 +2459,7 @@ inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
     meta.codecs[i] = CODEC_UNCOMPRESSED;
   };
 
-  for (size_t i = 0; i < ncols; i++) {
+  {
     const int level = zstd_level_for(rg_cols[i], profile);
     if (rg_cols[i].is_array) {
       PageBuild pb = build_array_data_pages(rg_cols[i], codec, level,
@@ -2417,7 +2468,7 @@ inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
       erg.chunks[i].bytes  = std::move(pb.bytes);
-      continue;   // arrays carry no statistics, no bloom and no page index
+      return;   // arrays carry no statistics, no bloom and no page index
     }
 
     meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
@@ -2433,7 +2484,7 @@ inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
     if (rg_cols[i].bloom || wants_dict_decision)
       have_row_hashes = hash_column_rows(rg_cols[i], rg_rows, row_hashes);
 
-    // Set by the bloom block below, which sorts the hashes and therefore knows
+    // Set by the bloom block below, which counts the distinct hashes and therefore knows
     // the distinct count EXACTLY. The dictionary decision reuses it rather than
     // estimating a number it has already been handed.
     size_t exact_ndv = 0;
@@ -2470,7 +2521,7 @@ inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
       bool built = false;
       if (have_row_hashes) {
         // Bracket the distinct count. With an EXACT one in hand (the bloom
-        // filter already sorted these hashes) the bracket collapses to a point
+        // filter already counted these hashes) the bracket collapses to a point
         // and no margin is bought; otherwise the KMV sketch estimates it and
         // the bracket spans the estimator's error. dict_byte_budget uses the
         // two ends in the directions that keep it honest.
@@ -2557,10 +2608,65 @@ inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
       erg.chunks[i].bytes = std::move(pb.bytes);
     }
   }
+}
 
-  meta.total_byte_size = 0;
-  for (size_t s : meta.uncompressed) meta.total_byte_size += s;
-  return erg;
+// One row group to encode: its sliced column views and row count. The views
+// must outlive the encode_row_groups call.
+struct RowGroupJob {
+  const std::vector<ColumnInput> *cols;
+  size_t rows;
+};
+
+// Encode every column chunk of every row group in `jobs` — normally one block —
+// as independent tasks on the shared writer pool, then return the row groups in
+// `jobs` order. The bytes are identical to encoding them one after another:
+// each chunk is a pure function of its own column slice, and placement (which
+// fixes the file order) happens afterwards, serially, in place_chunk.
+inline std::vector<EncodedRowGroup> encode_row_groups(
+    const std::vector<RowGroupJob> &jobs, int codec, int profile,
+    size_t max_page_bytes, bool want_index) {
+  std::vector<EncodedRowGroup> out;
+  out.reserve(jobs.size());
+  size_t ntasks = 0;
+  for (const RowGroupJob &j : jobs) {
+    out.push_back(init_encoded_row_group(j.cols->size(), j.rows, codec));
+    ntasks += j.cols->size();
+  }
+  auto run = [&](size_t g, size_t i) {
+    encode_column_chunk(out[g], *jobs[g].cols, i, jobs[g].rows, codec, profile,
+                        max_page_bytes, want_index);
+  };
+  if (ntasks <= 1 || rugo_writer::pool_width() <= 1) {
+    for (size_t g = 0; g < jobs.size(); g++)
+      for (size_t i = 0; i < jobs[g].cols->size(); i++)
+        run(g, i);
+  } else {
+    BS::thread_pool<> &pool = rugo_writer::pool();
+    std::vector<std::future<void>> futs;
+    futs.reserve(ntasks);
+    for (size_t g = 0; g < jobs.size(); g++)
+      for (size_t i = 0; i < jobs[g].cols->size(); i++)
+        futs.push_back(pool.submit_task([&run, g, i]() { run(g, i); }));
+    // Every task reads `jobs` and writes `out`, so ALL of them must finish
+    // before either can go out of scope — wait for every one, then surface the
+    // first failure.
+    for (std::future<void> &f : futs) f.wait();
+    for (std::future<void> &f : futs) f.get();
+  }
+  for (EncodedRowGroup &erg : out) {
+    erg.meta.total_byte_size = 0;
+    for (size_t s : erg.meta.uncompressed) erg.meta.total_byte_size += s;
+  }
+  return out;
+}
+
+// Encode every column chunk of ONE row group (see encode_row_groups).
+inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
+                                        size_t rg_rows, int codec, int profile,
+                                        size_t max_page_bytes, bool want_index) {
+  std::vector<EncodedRowGroup> one = encode_row_groups(
+      {RowGroupJob{&rg_cols, rg_rows}}, codec, profile, max_page_bytes, want_index);
+  return std::move(one[0]);
 }
 
 // Append column `i`'s chunk to `out` and pin its absolute offsets (dictionary
@@ -2982,13 +3088,24 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   const char *MAGIC = "PAR1";
   file.insert(file.end(), MAGIC, MAGIC + 4);
 
-  // One block of encoded row groups is held at a time; its chunk bytes are
+  // One block of encoded row groups is held at a time — every chunk of the
+  // block encoded at once (encode_row_groups) — and its chunk bytes are
   // released as the block is placed, so peak memory is the file so far plus
-  // one block plus the file's bloom filters.
-  std::vector<EncodedRowGroup> block;
-  block.reserve(row_groups_per_block);
-  size_t block_first = 0;
-  auto flush_block = [&]() {
+  // one block plus the file's bloom filters. The file's last block may be
+  // partial.
+  for (size_t block_first = 0; block_first < n_rg;
+       block_first += row_groups_per_block) {
+    const size_t block_end = std::min(n_rg, block_first + row_groups_per_block);
+    std::vector<RowGroupJob> jobs;
+    jobs.reserve(block_end - block_first);
+    for (size_t rg = block_first; rg < block_end; rg++) {
+      size_t rg_start = rg * rg_size;
+      size_t rg_rows  = std::min(rg_size, num_rows - rg_start);
+      all_rg_cols[rg] = slice_row_group_cols(cols, rg_start, rg_rows);
+      jobs.push_back(RowGroupJob{&all_rg_cols[rg], rg_rows});
+    }
+    std::vector<EncodedRowGroup> block =
+        encode_row_groups(jobs, codec, profile, max_page_bytes, want_index);
     // base_offset == 0: `file` already starts at absolute 0 and includes the
     // leading PAR1, so file.size() is the absolute position.
     write_block(file, /*base_offset=*/0, block);
@@ -2996,21 +3113,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
       rg_meta[block_first + k] = std::move(block[k].meta);
       blooms[block_first + k]  = std::move(block[k].blooms);
     }
-    block_first += block.size();
-    block.clear();
-  };
-
-  for (size_t rg = 0; rg < n_rg; rg++) {
-    size_t rg_start = rg * rg_size;
-    size_t rg_rows  = std::min(rg_size, num_rows - rg_start);
-    all_rg_cols[rg] = slice_row_group_cols(cols, rg_start, rg_rows);
-    block.push_back(encode_row_group(all_rg_cols[rg], rg_rows, codec, profile,
-                                     max_page_bytes, want_index));
-    if (block.size() == row_groups_per_block)
-      flush_block();
   }
-  if (!block.empty())
-    flush_block();   // the file's last, possibly partial, block
 
   write_bloom_tail(file, /*base_offset=*/0, rg_meta, blooms);
   if (want_index)

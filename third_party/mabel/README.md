@@ -73,9 +73,12 @@ probe-heavy join pay zero hash cost after the first hit.
 - `kEmpty = 0x80` (high bit set) never collides with a valid tag (tags use bits
   0–6 of the tag byte, i.e. `(key >> 57) & 0x7F`), so empty-slot detection is a
   single bit test.
-- Two probe variants are compiled: `probe_find_slot` (linear, wrapping) and
-  `probe_find_bucket` (bucket-aligned). The aggregation engine uses the slot
-  variant; the join engine uses buckets to keep related rows spatially close.
+- One probe is compiled per ISA: `probe_find_slot` (linear, wrapping, 16-byte
+  window). GROUP BY (`CarcharIndex`), DISTINCT / IN sets (`CarcharSet`) and the
+  Medius front map all use it. A bucket-aligned `probe_find_bucket` variant and
+  the `CarcharJoinEngine` that was its only caller were deleted on 2026-10-16:
+  nothing compiled them, and the live join build lives in
+  `src/cpp/engine/native_join2.hpp`.
 
 ---
 

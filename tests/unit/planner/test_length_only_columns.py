@@ -170,6 +170,24 @@ def test_unrelated_column_is_not_marked():
     )
 
 
+def test_plain_distinct_key_is_not_length_only():
+    # A plain DISTINCT (no ON) dedups on every column that reaches it, comparing
+    # actual values, but carries no expression naming them — `columns` and `on`
+    # are both empty, so expression_roots() yields nothing for it. Title was
+    # marked length-only and the DistinctSink hashed the elided payload at the
+    # STR_ELIDED_PAYLOAD_OFFSET trap (SIGSEGV in str_hash_seed).
+    assert "Title" not in _length_only_names(
+        "SELECT SUM(LENGTH(t)) FROM (SELECT DISTINCT Title AS t FROM testdata.clickbench_tiny)"
+    )
+    assert "Title" not in _length_only_names(
+        "SELECT SUM(LENGTH(Title)) FROM (SELECT DISTINCT Title FROM testdata.clickbench_tiny)"
+    )
+    assert "Title" not in _length_only_names(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT Title AS t FROM testdata.clickbench_tiny) "
+        "WHERE t <> ''"
+    )
+
+
 # ─── results are unchanged (the strategy must be inert) ──────────────────────
 
 
@@ -187,3 +205,43 @@ def test_results_unchanged_for_eligible_shapes():
             assert rows > 0, sql
         finally:
             session.close()
+
+
+def test_length_over_plain_distinct_does_not_crash():
+    # End-to-end for test_plain_distinct_key_is_not_length_only. Run in a child
+    # process: the failure mode is a SIGSEGV that would take pytest down with it.
+    # The reference is the GROUP BY spelling of the same dedup, which carries its
+    # key as an expression and so was never marked length-only.
+    import subprocess
+
+    import opteryx
+
+    distinct_sql = (
+        "SELECT SUM(LENGTH(t)) FROM (SELECT DISTINCT Title AS t FROM testdata.clickbench_tiny)"
+    )
+    group_sql = (
+        "SELECT SUM(LENGTH(t)) FROM (SELECT Title AS t FROM testdata.clickbench_tiny GROUP BY Title)"
+    )
+    child = (
+        "import opteryx\n"
+        "session = opteryx.session()\n"
+        f"for m in session.execute_to_morsels({distinct_sql!r}):\n"
+        "    print(m.column(m.column_names[0]).to_pylist()[0])\n"
+    )
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+    result = subprocess.run(
+        [sys.executable, "-c", child], cwd=repo_root, capture_output=True, text=True, timeout=300
+    )
+    assert result.returncode == 0, (
+        f"rc={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr[-2000:]}"
+    )
+
+    session = opteryx.session()
+    try:
+        expected = [
+            m.column(m.column_names[0]).to_pylist()[0]
+            for m in session.execute_to_morsels(group_sql)
+        ][0]
+    finally:
+        session.close()
+    assert int(result.stdout.strip()) == expected

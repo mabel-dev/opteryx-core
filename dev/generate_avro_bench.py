@@ -8,7 +8,7 @@ compared on decode alone (null), and with decompression (deflate, zstandard, bzi
     testdata/avro_bench/events_<rows>_zstandard.avro
     testdata/avro_bench/events_<rows>_bzip2.avro
 
-fastavro is the writer (rugo has no Avro writer). The output is git-ignored
+fastavro is the writer — an independent implementation, so the files are not rugo's own. The output is git-ignored
 (testdata/avro_bench/**) — regenerate it rather than commit it:
 
     python dev/generate_avro_bench.py                 # 1,000,000 rows

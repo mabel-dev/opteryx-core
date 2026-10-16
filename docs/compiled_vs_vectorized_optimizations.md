@@ -43,7 +43,7 @@ The paper (Section 3.2) notes that the test system encodes a small Bloom filter 
 bits on each hash table entry to short-circuit non-matching probes before traversing the collision
 chain. This is described as a "dictionary" that improves performance on selective joins.
 
-Opteryx's `CarcharJoinEngine` already builds a Bloom filter from all build-side hashes after
+Opteryx's `CarcharJoinEngine` (REMOVED 2026-10-16: it was dead code, and the live join is `native_join2.hpp`; the rest of this paragraph is historical) already builds a Bloom filter from all build-side hashes after
 sealing the build phase, and checks it per probe-side row before touching the main hash table. The
 filter eliminates rows whose hash does not appear in the build set at all. This is equivalent to —
 and structurally cleaner than — the pointer-tag trick in the paper.
@@ -374,8 +374,8 @@ The paper provides an empirical basis for several architectural choices already 
   covers this correctly.
 
 - **Bloom pre-filtering on joins** eliminates probe-side rows before hash table access, which
-  is the right optimization for selective joins (Section 3.2). Opteryx's CarcharJoinEngine
-  implements this.
+  is the right optimization for selective joins (Section 3.2). Opteryx's former CarcharJoinEngine
+  (removed 2026-10-16) implemented this.
 
 - **Two-tier hash table for aggregation** (Parvi + Carchar) directly addresses the
   low-cardinality aggregation penalty that the paper identifies as a weakness of vectorized

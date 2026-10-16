@@ -33,6 +33,7 @@
 #include "native_group_sinks.hpp"   // UngroupedAggSink, GroupBySink, DistinctSink, AggSpec2
 #include "native_key_hash.hpp"     // compute_row_hashes — the shared equi-key hash
 #include "native_join2.hpp"         // Join2BuildSink/Probe — multi-key, semi/anti/outer
+#include "native_groupjoin.hpp"      // GroupJoinAccumSink/Source — join fused with its aggregate
 #include "native_parquet_scan_source.hpp"  // NativeParquetScanSource (zero-Python pull)
 #include "native_latmat_scan_source.hpp"   // LatmatScanSource (R3 two-pass late-mat)
 #include "native_skene_scan_source.hpp"    // NativeSkeneScanSource (zero-Python skene)
@@ -262,6 +263,7 @@ public:
     std::vector<LoopSpan> loops;   // v1: at most one (compiler-enforced)
     SpillEnv spill_env;   // shared spill config/store for every buffer this run
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
+    std::vector<std::unique_ptr<GroupJoinState>> groupjoin_states;
     // Runtime min/max join filter slots. unique_ptr because a probe Source holds
     // the ADDRESS of a slot from plan time until it builds its claim list, and
     // the vector grows as more joins are compiled. Written once each, by run(),
@@ -546,6 +548,83 @@ public:
     size_t new_join2_ref() {
         join2_refs.push_back(std::make_unique<Join2Ref>());
         return join2_refs.size() - 1;
+    }
+    // GROUPJOIN shared state (docs/GROUPJOIN_DESIGN.md): the plan-known aggregate
+    // specs and operand types, fixed here so every kind is decided before the first
+    // morsel and an empty stream still emits typed columns. Only the row-kind
+    // aggregates are admitted; anything else is a planner/engine disagreement.
+    size_t new_groupjoin_state(size_t ref, std::vector<AggSpec2> specs,
+                               std::vector<DrakenType> operand_types,
+                               std::vector<int> lt_kind, std::vector<int> lt_unit,
+                               std::vector<int> lt_precision, std::vector<int> lt_scale,
+                               std::vector<int> lt_dimension) {
+        if (operand_types.size() != specs.size())
+            throw std::runtime_error(
+                "new_groupjoin_state: one operand type per aggregate spec is required");
+        auto logical = intern_logical_vec(lt_kind, lt_unit, lt_precision, lt_scale,
+                                          lt_dimension);
+        auto st = std::make_unique<GroupJoinState>();
+        st->ref = join2_refs.at(ref).get();
+        st->meta.resize(specs.size());
+        st->kinds.resize(specs.size());
+        for (size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].distinct_operand)
+                throw std::runtime_error("new_groupjoin_state: DISTINCT aggregates are not "
+                                         "groupjoin-eligible");
+            if (specs[s].col_idx == kAggNoOperand) {
+                if (specs[s].fn != AggFn::CountStar)
+                    throw std::runtime_error("new_groupjoin_state: operand-less aggregate "
+                                             "that is not COUNT(*)");
+                st->kinds[s] = GBKind::Rows;
+                continue;
+            }
+            const DrakenType t = operand_types[s];
+            AggColMeta& m = st->meta[s];
+            m.type = t;
+            m.logical = logical[s];
+            m.is_float = (t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64);
+            m.is_string = false;
+            m.captured = true;
+            if (specs[s].fn != AggFn::Count && !agg2_operand_supported(t))
+                throw std::runtime_error("new_groupjoin_state: unsupported aggregate operand "
+                                         "type");
+            st->kinds[s] = gb_kind_of(specs[s], m);
+            if (!gj_kind_admitted(st->kinds[s]))
+                throw std::runtime_error("new_groupjoin_state: aggregate kind is not "
+                                         "groupjoin-eligible (planner and engine disagree)");
+        }
+        st->specs = std::move(specs);
+        groupjoin_states.push_back(std::move(st));
+        return groupjoin_states.size() - 1;
+    }
+    // GROUPJOIN, stream half: accumulate the streamed leg into the shared state.
+    // Like Join2MarkSink, it must NOT fill the join ref — only the build pipeline does.
+    void set_groupjoin_accum_sink(size_t p, size_t gj, std::vector<size_t> key_idx) {
+        set_sink_(p, std::make_unique<GroupJoinAccumSink>(groupjoin_states.at(gj).get(),
+                                                          std::move(key_idx)));
+    }
+    // GROUPJOIN, emit half. `unmatched`: 0 drop (INNER), 1 organic LEFT (COUNT(*) counts
+    // the padded row), 2 null-pad (a LEFT JOIN to a grouped relation).
+    void set_groupjoin_source(size_t p, size_t gj, bool per_key, bool multiply_d,
+                              int unmatched) {
+        if (unmatched < 0 || unmatched > 2)
+            throw std::runtime_error("set_groupjoin_source: unknown unmatched policy");
+        set_source_(p, std::make_unique<GroupJoinSource>(
+            groupjoin_states.at(gj).get(), per_key, multiply_d,
+            static_cast<GJUnmatched>(unmatched)));
+    }
+    struct GroupJoinReading {
+        uint64_t streamed_rows, matched_rows, emitted_rows, workers, build_rows;
+    };
+    std::vector<GroupJoinReading> collect_groupjoin_stats() const {
+        std::vector<GroupJoinReading> out;
+        for (const auto& st : groupjoin_states) {
+            out.push_back(GroupJoinReading{
+                st->streamed_rows.load(), st->matched_rows.load(),
+                st->emitted_atomic.load(), st->workers,
+                st->ref && st->ref->g ? st->ref->g->total_rows : 0u});
+        }
+        return out;
     }
     // A fresh, UNFILLED runtime bound slot (valid == 0 -> prunes nothing). The
     // compiler allocates one per (join, eligible key column) pair and hands the

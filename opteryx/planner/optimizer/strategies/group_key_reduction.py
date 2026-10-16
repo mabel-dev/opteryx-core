@@ -8,7 +8,19 @@ Optimization Rule - Group Key Reduction
 
 Type: Heuristic
 Goal: Remove GROUP BY expressions that are deterministic scalar functions of a bare
-      column already present in the GROUP BY, reducing the grouping key set.
+      column already in the GROUP BY
+
+Order:
+    After:  ConstantFolding, FunctionRewrite (GROUP BY expressions are in their
+            final spelling before the dependency is judged).
+    Before: FilterImpliedGroupKeyReduction (both strip keys; this one runs first on
+            the raw key list), ProjectionPushdown and ProjectFusion (the inserted
+            Project is pruned and fused like any other).
+
+Rewrite:
+    SELECT x, x + 1, COUNT(*) FROM t GROUP BY x, x + 1
+    ->
+    SELECT x, x + 1, "COUNT(*)" FROM (SELECT x, COUNT(*) FROM t GROUP BY x)
 
 If GROUP BY contains (x, f(x), g(x)), the partition is determined entirely by x.
 The derived expressions are removed from the aggregate and recomputed in a Project
