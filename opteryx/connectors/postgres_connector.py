@@ -540,13 +540,19 @@ class PostgresTable(
         """
         return self._schema_from_catalog
 
-    def _catalog_columns(self) -> Optional[List[dict]]:
+    def _catalog_columns(self) -> Optional[list]:
         """This relation's columns as the catalog holds them, or None if it holds
         no description of it.
 
         None is NOT "the relation is empty" and must never be read as one: it is
         "this catalog entry has never been refreshed from the source", which the
         caller turns into a refusal naming the refresh.
+
+        `metadata.schema` is the catalog's `RelationSchema` (opteryx_catalog
+        builds the stored column list into one where it loads the record), and
+        its columns are `SchemaColumn`s carrying the stored `remote-type` as
+        `remote_type`. It was once the raw stored list; reading it as one raised
+        on every PostgreSQL relation once the catalog changed (2026-10-15).
         """
         record = self._catalog_record
         if record is None:
@@ -554,12 +560,12 @@ class PostgresTable(
         metadata = getattr(record, "metadata", None)
         if metadata is None:
             return None
-        columns = metadata.schema
-        if not columns:
+        schema = metadata.schema
+        if schema is None or not schema.columns:
             return None
-        return list(columns)
+        return list(schema.columns)
 
-    def _schema_from_catalog_record(self, columns: List[dict]) -> RelationDescriptor:
+    def _schema_from_catalog_record(self, columns: list) -> RelationDescriptor:
         """Build the relation's schema from the catalog's record of it.
 
         THE CATALOG IS AUTHORITATIVE. Nothing here asks the server what its
@@ -582,8 +588,8 @@ class PostgresTable(
         built: List[SchemaColumn] = []
         self._meta = {}
         for column in columns:
-            name = column.get("name")
-            oid = column.get("remote-type")
+            name = column.name
+            oid = column.remote_type
             if name is None or oid is None:
                 raise DatasetReadError(
                     f"the catalog's record of {self.qualified_name} is out of date - it does "
@@ -593,8 +599,8 @@ class PostgresTable(
             oid = int(oid)
             typmod = -1
             if oid == _OID_NUMERIC:
-                precision = column.get("precision")
-                scale = column.get("scale")
+                precision = column.precision
+                scale = column.scale
                 if precision is None or scale is None:
                     raise DatasetReadError(
                         f"the catalog's record of {self.qualified_name} is out of date - "

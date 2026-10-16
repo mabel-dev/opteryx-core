@@ -12,24 +12,38 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 import pytest
+from opteryx_catalog.catalog.dataset import relation_schema_from_stored
+from opteryx_catalog.catalog.metadata import DatasetMetadata
 
 from opteryx.connectors.postgres_connector import PostgresConnector
 from opteryx.exceptions import DatasetReadError
 from opteryx.types.logical_type import DrakenType
 
 
-class _Metadata:
-    def __init__(self, schema, statistics=None):
-        self.schema = schema
-        self.statistics = statistics
-
-
 class _Record:
-    """Shaped like the catalog's SimpleDataset, for the connector only."""
+    """The catalog's record of a relation, for the connector only.
 
-    def __init__(self, schema, statistics=None):
-        self.metadata = _Metadata(schema, statistics)
+    The metadata and its schema are the catalog's OWN types, built from the
+    stored column documents by the catalog's own reader - the one its load path
+    runs. A hand-shaped stand-in here restated what the record USED to look like
+    and stayed green while every PostgreSQL relation in production failed on
+    what it had become (2026-10-15)."""
+
+    def __init__(self, stored_columns, statistics=None):
+        self.metadata = DatasetMetadata(
+            dataset_identifier="pg.public.orders",
+            schema=None
+            if stored_columns is None
+            else relation_schema_from_stored("pg.public.orders", stored_columns),
+        )
+        self.metadata.statistics = statistics
 
 
 def _columns():
