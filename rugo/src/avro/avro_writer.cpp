@@ -942,7 +942,8 @@ bool build_enum(const DrakenVector* v, size_t max_symbols, size_t max_threads, s
         for (uint32_t i = first; i < end; ++i) {
             if (validity != nullptr && !row_valid(validity, i)) continue;
             const uint32_t j = sel[i];
-            std::atomic_ref<uint8_t>(used[j]).store(1, std::memory_order_relaxed);
+            // The builtin, not std::atomic_ref: the macOS CI toolchain's libc++ does not ship atomic_ref.
+            __atomic_store_n(&used[j], static_cast<uint8_t>(1), __ATOMIC_RELAXED);
             const uint32_t len = str_length(&sa->slots[j]);
             bytes += varint_len(static_cast<uint64_t>(len) << 1) + len;
             ++rows;
