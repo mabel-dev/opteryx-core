@@ -2095,6 +2095,14 @@ cdef Py_ssize_t _linearize(
         # clears is_all_c_native). Only value-exact numeric coercions are applied;
         # everything else is left to the fallback, unchanged. The literal node's
         # physical_type is consumed by _materialise_constant_literal below.
+        #
+        # The literal's TYPE moves with it (as the arithmetic path below does), so
+        # every check after this one sees the type the literal is materialised in.
+        # Re-typing only the node left the mixed-type gate further down comparing
+        # the column with the literal's natural INT64: `INT16_col <> 0` read as a
+        # type mismatch and ran the generic per-row int128 draken_numeric_cmp
+        # instead of the same-type compare (81% of ClickBench Q1's work samples,
+        # 2026-10-17 profile).
         if not right_is_inlist_literal:
             if (node.right.node_type == _NT_LITERAL
                     and node.left.node_type != _NT_LITERAL
@@ -2103,6 +2111,7 @@ cdef Py_ssize_t _linearize(
                 coerce_phys = _coerce_literal_physical(left_type, coerce_lit_val)
                 if coerce_phys >= 0:
                     node.right.physical_type = coerce_phys
+                    right_type = _column_type_for_physical(coerce_phys)
             elif (node.left.node_type == _NT_LITERAL
                     and node.right.node_type != _NT_LITERAL
                     and node.left.value != NULL):
@@ -2110,6 +2119,7 @@ cdef Py_ssize_t _linearize(
                 coerce_phys = _coerce_literal_physical(right_type, coerce_lit_val)
                 if coerce_phys >= 0:
                     node.left.physical_type = coerce_phys
+                    left_type = _column_type_for_physical(coerce_phys)
 
         sub_depth = _linearize(node.left, bc, depth)
         if not right_is_inlist_literal:

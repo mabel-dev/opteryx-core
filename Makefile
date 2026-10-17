@@ -67,7 +67,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test bench-is-null carchar-contest-check carchar-contest-build
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -220,6 +220,7 @@ q:
 	@$(MAKE) --no-print-directory chunk-cache-test
 	@$(MAKE) --no-print-directory gb-block-store-test
 	@$(MAKE) --no-print-directory packed-codes-test
+	@$(MAKE) --no-print-directory carchar-set-test
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
@@ -360,6 +361,15 @@ chunk-cache-test: ## Build and run the chunk cache policy tests (S3-FIFO admissi
 	    -o chunk_cache_test
 	@/tmp/opteryx-tests/chunk_cache_test
 	$(call print_green,"✓ chunk cache policy tests passed")
+
+carchar-set-test: ## Build and run the CarcharSet batched-probe (mark_new) oracle test under ASan/UBSan
+	$(call print_blue,"Building and running CarcharSet batched-probe tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -I$(CURDIR)/third_party/mabel/carchar -I$(CURDIR)/draken/simd \
+	    $(CURDIR)/src/cpp/engine/test_carchar_set_batch.cpp \
+	    -o /tmp/opteryx-tests/test_carchar_set_batch
+	@/tmp/opteryx-tests/test_carchar_set_batch
 
 gb-block-store-test: ## Build and run the GROUP BY block store tests (pool, segmented arrays, arena) under ASan
 	$(call print_blue,"Building and running GROUP BY block store tests...")

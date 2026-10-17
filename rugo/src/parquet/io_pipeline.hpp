@@ -73,16 +73,18 @@
 #include "core/trace_bridge_c.h"
 #include "core/chunk_cache.h"     // C7: the planner pins cached chunks and skips their GET
 
-// H6 (2026-08-14, unratified): per-architecture default for the whole-file
-// local mmap cache — see the use_mmap_cache lambda in decode_row_group for the
-// measurements behind each arm. Overridable at build time
-// (-DRUGO_LOCAL_MMAP_CACHE_DEFAULT=0|1) and at run time (RUGO_LOCAL_MMAP_CACHE).
+// H6 whole-file local mmap cache: ON on every architecture. It shipped per-arch
+// (x86 on, ARM off) on 2026-08-14 because ARM measured 2-5% slower — with the
+// whole-file mapping still MAP_PRIVATE, whose cost scales with FILE size on
+// macOS (fixed 2026-09-29, now MAP_SHARED). Re-measured 2026-10-17 on the M-series
+// box, 7 interleaved rounds, hits_rugo_262k: Q01 0.686, Q07 0.652, Q40 0.747
+// (7/7), Q36 0.883; string scans Q21/Q28/Q33 0.98-1.01; no consistent loser. The
+// per-row-group arm pays ~70 µs of kernel time per row group (mmap/munmap + TLB
+// shootdowns: Q01 120 ms vs 43 ms sys CPU per query), which is the whole gap on
+// narrow scans. Overridable at build time (-DRUGO_LOCAL_MMAP_CACHE_DEFAULT=0|1)
+// and at run time (RUGO_LOCAL_MMAP_CACHE) so both arms stay measurable.
 #ifndef RUGO_LOCAL_MMAP_CACHE_DEFAULT
-  #if defined(__x86_64__) || defined(_M_X64)
-    #define RUGO_LOCAL_MMAP_CACHE_DEFAULT 1
-  #else
-    #define RUGO_LOCAL_MMAP_CACHE_DEFAULT 0
-  #endif
+  #define RUGO_LOCAL_MMAP_CACHE_DEFAULT 1
 #endif
 
 namespace rugo {
@@ -3203,17 +3205,16 @@ class ParquetIOPipeline {
         int64_t mmap_offset = 0;  // file offset of the mapping (0: whole file)
 
         // H6 whole-file mapping cache. The default is a BUILD-TIME decision
-        // (§3: prefer compile-time decisions over runtime decisions) because
-        // the measured verdict differs by ARCHITECTURE, and the two wheels are
-        // already built per-arch:
+        // (§3: prefer compile-time decisions over runtime decisions); see the
+        // RUGO_LOCAL_MMAP_CACHE_DEFAULT comment at the top of this file for the
+        // per-arch history and the 2026-10-17 re-measurement that made it ON
+        // everywhere:
         //
         //   x86_64 : full ClickBench hot suite 131.5 → 130.0s, narrow-int
         //            scans -11% (ranges separated), string scans +2%.  ON.
-        //   arm64  : consistently 2-5% SLOWER across two independent 7-round
-        //            interleaved A/Bs, on every query shape measured.  OFF.
+        //   arm64  : 2026-08-14 2-5% SLOWER under MAP_PRIVATE; 2026-10-17 under
+        //            MAP_SHARED Q01/Q07 -33%, string scans flat.  ON.
         //
-        // ⚠ The ARM regression is NOT diagnosed — this split ships the x86 win
-        // while that remains open, which is a deliberate call, not a finding.
         // RUGO_LOCAL_MMAP_CACHE=0/1 overrides in either direction so a single
         // binary can still run both arms of an A/B.
         static const bool use_mmap_cache = []() {

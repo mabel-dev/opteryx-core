@@ -638,6 +638,18 @@ static inline VecResult fi_compare_vector_impl(
         return r;
     }
 
+    // constant ⇄ non-constant → the scalar path, which carries the dict
+    // (compressed) and dense fast paths on the non-constant side — the same
+    // §11-ratified reduction int64_compare.h's compare_vector_impl makes. Without
+    // it `WHERE int16_col <> literal` ran the two-gather vector kernel over every
+    // row (ClickBench Q01/Q07: 36% of busy samples, 2026-10-17). A NULL constant
+    // (validity present) stays on the validity-aware generic path below.
+    if (draken_is_constant(&b) && b.validity == nullptr)
+        return fi_compare_scalar_impl<T, Op>(a, static_cast<int64_t>(b_data[0]));
+    if (draken_is_constant(&a) && a.validity == nullptr)
+        return fi_compare_scalar_impl<T, typename ReversedOp<Op>::type>(
+            b, static_cast<int64_t>(a_data[0]));
+
     uint8_t* out_null = cmp_and_validity(a.validity, b.validity, n);
     uint8_t* dst = nullptr;
     try { dst = cmp_alloc_bool_buf(n); }

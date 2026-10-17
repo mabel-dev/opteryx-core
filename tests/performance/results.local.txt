@@ -1,6 +1,6 @@
-make clickbench-rugo    4.69s     (17-OCT) [0.44x]
+make clickbench-rugo    4.45s     (17-OCT) [0.42x]
 make clickbench-skene   6.10s     (14-OCT) [0.57x]
-make clickbench-canon   6.35s     (14-OCT) [0.60x]
+make clickbench-canon   6.04s     (17-OCT) [0.57x]
 make clickbench-json    427.18s   (12-OCT) [3-runs only]
 make clickbench-avro    140.63s   (12-OCT) [3-runs only]
 make clickbench-odata   228.69s   (11-OCT) [8 fails]

@@ -131,21 +131,69 @@ class CarcharSet {
         return inserted;
     }
 
-    // Bulk build for DISTINCT-style filtering.
-    // Writes 1 into out_is_new[i] when keys[i] is new, else 0.
-    // Returns total number of newly inserted keys.
+    // Keys per block of the batched probe (mark_new): phase 1 issues this many
+    // independent first-probe loads before phase 2 consumes any of them.
+    static constexpr std::size_t kBatch = 32;
+
+    // BATCHED insert-or-ignore over a key run. out_is_new[i] = 1 iff keys[i] was
+    // absent (it is present afterwards); returns how many were inserted.
+    //
+    // One key at a time, every probe is a dependent chain — tag word, then stored
+    // hash, then the hit/miss branch — and the core cannot start the next key's
+    // misses until this one's resolve. Here a block of kBatch keys runs in two
+    // phases. Phase 1 performs each key's FIRST probe step with no dependence on
+    // any other key: the home group's first viable tag match (group_first_candidate)
+    // and that candidate's stored hash. Those loads are all in flight together.
+    // Phase 2 consumes them: a candidate hash equal to the key is a hit decided on
+    // the spot — the slot was occupied when read and keys are never moved or
+    // removed, so an insert earlier in the same block cannot stale it. Every other
+    // key (no candidate, a tag false-positive, a full home group, a duplicate
+    // inserted earlier in the block) takes the ordinary probe, now against lines
+    // phase 1 brought in. The block's headroom is ensured before it starts, so no
+    // resize can run between a key's phase 1 and its phase 2.
+    //
+    // No capacity is reserved for the whole run — the table keeps its doubling
+    // policy, one block of headroom at a time (feedback_hashtable_sizing).
     std::size_t mark_new(const std::uint64_t* keys, std::uint8_t* out_is_new, std::size_t length) {
         if (keys == nullptr || out_is_new == nullptr || length == 0) {
             return 0;
         }
-        reserve(size_ + length);
         std::size_t inserted = 0;
-        for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i])) {
-                out_is_new[i] = 1U;
-                ++inserted;
-            } else {
-                out_is_new[i] = 0U;
+        std::uint64_t cand_hash[kBatch];
+        std::uint8_t  has_cand[kBatch];
+        static constexpr std::uint64_t kNoHash = 0;
+        for (std::size_t base = 0; base < length; base += kBatch) {
+            const std::size_t n = std::min(kBatch, length - base);
+            while (size_ + n > resize_threshold_) {
+                resize(capacity_ * 2U);
+            }
+            const std::uint8_t*  ctrl = control_.data();
+            const std::uint64_t* hs   = hashes_.data();
+            const std::size_t    mask = capacity_ - 1U;
+            const std::uint64_t* run  = keys + base;
+            // Phase 1: independent first-probe loads for every key in the block.
+            for (std::size_t j = 0; j < n; ++j) {
+                const std::uint64_t key = run[j];
+                const std::size_t home = static_cast<std::size_t>(key & mask);
+                const std::size_t index = detail::group_first_candidate(ctrl + home, key_tag(key));
+                const bool has = index < detail::kProbeGroupWidth;
+                // Branch-free: a key without a candidate reads the sentinel, never
+                // an empty slot's (uninitialised) hash.
+                const std::uint64_t* src = has ? hs + ((home + index) & mask) : &kNoHash;
+                has_cand[j] = static_cast<std::uint8_t>(has);
+                cand_hash[j] = *src;
+            }
+            // Phase 2: consume the loads; anything undecided takes the full probe.
+            std::uint8_t* verdict = out_is_new + base;
+            for (std::size_t j = 0; j < n; ++j) {
+                const std::uint64_t key = run[j];
+                if (has_cand[j] != 0U && cand_hash[j] == key) {
+                    verdict[j] = 0U;
+                    continue;
+                }
+                const bool fresh = insert_or_ignore_no_reserve(key);
+                verdict[j] = static_cast<std::uint8_t>(fresh);
+                inserted += static_cast<std::size_t>(fresh);
             }
         }
         return inserted;

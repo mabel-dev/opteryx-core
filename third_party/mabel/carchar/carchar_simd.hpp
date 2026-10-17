@@ -330,4 +330,47 @@ inline ProbeResult probe_find_slot_direct(const std::uint8_t* control,
         control, hashes, capacity, key, tag);
 }
 
+// Phase-1 step of a BATCHED probe (CarcharSet::mark_new): the first lane of the
+// group at `control` whose tag equals `tag` and that lies before the group's
+// first empty lane — kProbeGroupWidth when there is none. A hint, not a verdict:
+// the caller confirms the candidate's stored hash against the key, and anything
+// else falls through to the full probe above. Reads kProbeGroupWidth bytes, so it
+// stays inside the control array's (kGroupWidth - 1)-byte mirror tail exactly as
+// the probes do. RVV builds take the scalar form (8 of the 16 lanes): fewer
+// phase-1 hits, never a wrong one.
+#if defined(__AVX2__)
+inline std::size_t group_first_candidate(const std::uint8_t* control, std::uint8_t tag) noexcept {
+    const __m128i group = _mm_loadu_si128(reinterpret_cast<const __m128i*>(control));
+    const std::uint32_t matches = static_cast<std::uint32_t>(
+        _mm_movemask_epi8(_mm_cmpeq_epi8(group, _mm_set1_epi8(static_cast<char>(tag)))));
+    if (matches == 0U) return kProbeGroupWidth;
+    const std::uint32_t empties = static_cast<std::uint32_t>(
+        _mm_movemask_epi8(_mm_cmpeq_epi8(group, _mm_set1_epi8(static_cast<char>(0x80U)))));
+    const std::size_t index = first_mask_index(matches);
+    const std::size_t stop = empties == 0U ? 16U : first_mask_index(empties);
+    return index < stop ? index : kProbeGroupWidth;
+}
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+inline std::size_t group_first_candidate(const std::uint8_t* control, std::uint8_t tag) noexcept {
+    const uint8x16_t group = vld1q_u8(control);
+    const std::uint64_t matches = neon_lane_mask(vceqq_u8(group, vdupq_n_u8(tag)));
+    if (matches == 0U) return kProbeGroupWidth;
+    const std::uint64_t empties = neon_lane_mask(vceqq_u8(group, vdupq_n_u8(0x80U)));
+    const std::size_t index = static_cast<std::size_t>(__builtin_ctzll(matches) >> 2U);
+    const std::size_t stop =
+        empties == 0U ? 16U : static_cast<std::size_t>(__builtin_ctzll(empties) >> 2U);
+    return index < stop ? index : kProbeGroupWidth;
+}
+#else
+inline std::size_t group_first_candidate(const std::uint8_t* control, std::uint8_t tag) noexcept {
+    const std::uint64_t group = load_u64(control);
+    const std::uint64_t matches = match_mask64(group, tag);
+    if (matches == 0U) return kProbeGroupWidth;
+    const std::uint64_t empties = group & kByteHighBits64;
+    const std::size_t index = first_group_index64(matches);
+    const std::size_t stop = empties == 0U ? 8U : first_group_index64(empties);
+    return index < stop ? index : kProbeGroupWidth;
+}
+#endif
+
 }  // namespace opteryx::carchar::detail
