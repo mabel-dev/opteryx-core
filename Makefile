@@ -219,6 +219,7 @@ q:
 	@$(PYTEST) tests/storage/test_mabel_connector.py -q
 	@$(MAKE) --no-print-directory chunk-cache-test
 	@$(MAKE) --no-print-directory gb-block-store-test
+	@$(MAKE) --no-print-directory packed-codes-test
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
@@ -370,6 +371,19 @@ gb-block-store-test: ## Build and run the GROUP BY block store tests (pool, segm
 	    -o /tmp/opteryx-tests/test_gb_block_store
 	@/tmp/opteryx-tests/test_gb_block_store
 	$(call print_green,"✓ GROUP BY block store tests passed")
+
+packed-codes-test: ## Build and run the one-pass packed dictionary code decoder tests under ASan/UBSan
+	$(call print_blue,"Building and running packed dictionary code tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -I$(CURDIR)/rugo/src/parquet -I$(CURDIR)/src/cpp -I$(CURDIR)/draken/simd \
+	    -I$(CURDIR)/draken -I$(CURDIR)/draken/core -I$(CURDIR) \
+	    $(CURDIR)/rugo/src/parquet/packed_codes_test.cpp \
+	    $(CURDIR)/rugo/src/parquet/decode_encodings.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
+	    -o /tmp/opteryx-tests/packed_codes_test
+	@/tmp/opteryx-tests/packed_codes_test
+	$(call print_green,"✓ packed dictionary code tests passed")
 
 page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse + page-predicate tests
 	$(call print_blue,"Building and running PageIndex tests...")

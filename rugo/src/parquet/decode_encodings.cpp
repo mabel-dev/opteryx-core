@@ -497,6 +497,123 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 }
 
 // ---------------------------------------------------------------------------
+// DecodeRLEBitPackedCodesPacked
+// The hybrid stream decoded straight into the packed per-row code array, in
+// one pass (docs/PARQUET_PACKED_CODES_ONE_PASS_DESIGN.md §3a). Bit-packed
+// groups unpack through the same per-arch group unpackers as the int32 decoder
+// into an L1-resident tile, then narrow-store at the code width while keeping a
+// running max; RLE runs are a fill at the code width. The width is a template
+// parameter, so the store and the max reduction carry no per-value switch.
+// ---------------------------------------------------------------------------
+
+template <typename CodeT>
+static int32_t decode_codes_packed(const uint8_t *data, size_t data_size,
+                                   int32_t num_values, int bit_width,
+                                   CodeT *__restrict__ dst, uint32_t *max_code) {
+  // 64 groups = 512 values = 2 KiB of int32: stays in L1 between unpack and store.
+  constexpr int32_t kTileGroups = 64;
+  alignas(64) int32_t tile[kTileGroups * 8];
+  const unpack_groups_fn_t unpack = get_unpack_fn();
+  const int bpg = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
+  const uint32_t value_mask = (bit_width == 32) ? 0xFFFFFFFFu : ((1u << bit_width) - 1u);
+
+  const uint8_t *ptr = data;
+  const uint8_t *end = data + data_size;
+  int32_t decoded = 0;
+  uint32_t mx = 0;
+
+  while (decoded < num_values && ptr < end) {
+    uint32_t header = 0;
+    int shift = 0;
+    while (ptr < end && shift < 32) {
+      uint8_t byte = *ptr++;
+      header |= ((uint32_t)(byte & 0x7F)) << shift;
+      if ((byte & 0x80) == 0) break;
+      shift += 7;
+    }
+
+    if ((header & 1) == 1) {
+      const int32_t num_groups    = (int32_t)(header >> 1);
+      const int32_t values_in_run = num_groups * 8;
+      const int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
+      if (ptr + bytes_needed > end) break;
+
+      const int32_t to_decode   = std::min(values_in_run, num_values - decoded);
+      const int32_t full_groups = to_decode / 8;
+      const int32_t remainder   = to_decode - full_groups * 8;
+      CodeT *out = dst + decoded;
+      for (int32_t g = 0; g < full_groups; g += kTileGroups) {
+        const int32_t n_groups = std::min(kTileGroups, full_groups - g);
+        unpack(ptr + (size_t)g * bpg, tile, n_groups, bit_width);
+        const int32_t n = n_groups * 8;
+        uint32_t tile_max = 0;
+        for (int32_t i = 0; i < n; i++) {
+          const uint32_t v = (uint32_t)tile[i];
+          tile_max = v > tile_max ? v : tile_max;
+          out[i] = (CodeT)v;
+        }
+        mx = tile_max > mx ? tile_max : mx;
+        out += n;
+      }
+      if (remainder > 0) {
+        int32_t tmp[8] = {};
+        unpack_group_8_scalar(ptr + (size_t)full_groups * bpg, tmp, bit_width);
+        for (int32_t i = 0; i < remainder; i++) {
+          const uint32_t v = (uint32_t)tmp[i];
+          mx = v > mx ? v : mx;
+          out[i] = (CodeT)v;
+        }
+      }
+      decoded += to_decode;
+      ptr += bytes_needed;
+    } else {
+      const int32_t count        = (int32_t)(header >> 1);
+      const int     value_bytes  = (bit_width + 7) / 8;
+      uint32_t value = 0;
+      for (int i = 0; i < value_bytes && ptr < end; i++)
+        value |= ((uint32_t)(*ptr++)) << (i * 8);
+      value &= value_mask;
+
+      const int32_t to_fill = std::min(count, num_values - decoded);
+      if (to_fill > 0) {
+        std::fill_n(dst + decoded, to_fill, (CodeT)value);
+        mx = value > mx ? value : mx;
+        decoded += to_fill;
+      }
+    }
+  }
+
+  *max_code = mx;
+  return (decoded == num_values) ? decoded : -1;
+}
+
+int32_t DecodeRLEBitPackedCodesPacked(const uint8_t *data, size_t data_size,
+                                      int32_t num_values, int bit_width,
+                                      uint8_t *dst, uint8_t code_width,
+                                      uint32_t *max_code) {
+  *max_code = 0;
+  if (bit_width < 0 || bit_width > 32 || num_values < 0) return -1;
+  if (code_width != 1 && code_width != 2 && code_width != 4) return -1;
+  if (bit_width == 0) {
+    // Single-entry dictionary: every value is code 0, no bits on the wire.
+    std::memset(dst, 0, (size_t)num_values * code_width);
+    return num_values;
+  }
+  switch (code_width) {
+    case 1:
+      return decode_codes_packed<uint8_t>(data, data_size, num_values, bit_width,
+                                          dst, max_code);
+    case 2:
+      return decode_codes_packed<uint16_t>(data, data_size, num_values, bit_width,
+                                           reinterpret_cast<uint16_t *>(dst), max_code);
+    case 4:
+      return decode_codes_packed<uint32_t>(data, data_size, num_values, bit_width,
+                                           reinterpret_cast<uint32_t *>(dst), max_code);
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
 // DecodeRLEBitPackedIndicesSelected
 // ---------------------------------------------------------------------------
 

@@ -44,8 +44,11 @@ cramjam  # fastavro's snappy codec (tests/rugo/test_avro_corpus.py reads snappy 
 avro
 python-snappy
 # Iceberg manifest oracle for tests/rugo/test_avro_iceberg_manifests.py and
-# test_avro_reader_schema.py (SqlCatalog needs the sqlite extra).
-pyiceberg[sql-sqlite]
+# test_avro_reader_schema.py (SqlCatalog needs the sqlite extra). Also the
+# opteryx-iceberg suite regression_suite.yaml runs: pyiceberg-core computes the
+# partition transforms when its Lakekeeper fixtures write a partitioned test
+# table - never on the read path under test.
+pyiceberg[sql-sqlite,pyiceberg-core]
 
 setuptools_rust
 

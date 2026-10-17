@@ -129,3 +129,44 @@ jobs:
 
       - name: Check Coverage
         run: python -m coverage report -m
+
+      # opteryx-iceberg (its own repo, because it depends on pyiceberg) is how a
+      # workspace reads external Iceberg tables through this engine. Its whole
+      # suite - SqlCatalog tests and the Lakekeeper REST-catalog-over-S3 tests -
+      # runs here against THIS build, so a core change that breaks Iceberg reads
+      # is red on the core PR rather than after a release. Its main branch is
+      # used, not the PyPI wheel, and it is put on PYTHONPATH behind the
+      # in-tree core, so nothing installed can shadow the engine under test.
+      # The Lakekeeper stack is opteryx-iceberg's own script (host network,
+      # Postgres + Silo S3); its environment is loaded per step, never into
+      # GITHUB_ENV, so no AWS_* setting reaches the core tests above.
+      - name: Checkout opteryx-iceberg
+        uses: actions/checkout@v4
+        with:
+          repository: mabel-dev/opteryx-iceberg
+          path: opteryx-iceberg
+
+      - name: Start Lakekeeper
+        id: lakekeeper
+        working-directory: opteryx-iceberg
+        run: |
+          set -a; source scripts/lakekeeper.env; set +a
+          scripts/lakekeeper.sh up
+
+      - name: Run opteryx-iceberg tests
+        working-directory: opteryx-iceberg
+        run: |
+          set -a; source scripts/lakekeeper.env; set +a
+          python -m pytest tests/ -v --color=yes
+        env:
+          # Fail, don't skip, if the Lakekeeper tests cannot see the stack.
+          LAKEKEEPER_REQUIRED: 1
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/opteryx-iceberg
+          # The query battery's data and TPC-H SQL: this checkout's testdata/
+          # and tests/performance/tpch/opteryx/queries.
+          OPTERYX_CORE_ROOT: ${{ github.workspace }}
+
+      - name: Lakekeeper logs
+        if: failure() && steps.lakekeeper.outcome != 'skipped'
+        working-directory: opteryx-iceberg
+        run: scripts/lakekeeper.sh logs

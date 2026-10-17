@@ -219,6 +219,27 @@ cdef unordered_map[string, _AdmitEntry] _ADMIT_CACHE
 # map: the cost is one re-proof per file, never a wrong answer.
 cdef size_t _ADMIT_CACHE_MAX_ENTRIES = 1 << 15
 
+# Process-lifetime decode pools for LOCAL scans, one per width, the way rugo's
+# page-decode pool is (rugo/src/parquet/thread_pool.hpp). Constructing and then
+# joining a 16-thread pool for every query cost ~1 ms + ~0.5 ms of a 10 ms query.
+# Each pipeline reaches its pool through ParquetIOPipeline's injection path: a
+# ticket only claims from its own pipeline's pending queue, a blocked consumer
+# decodes items itself, and teardown waits on the pipeline's own in-flight
+# tickets, never on the pool. Nothing but parquet decode tickets is ever submitted
+# here, so the reentrant exec-pool deadlock that disabled exec-pool sharing
+# (2026-07-07) has no path. Concurrent queries in one process share the threads.
+# Like that page pool, these are not fork-safe: a child forked after a scan
+# inherits pools with no threads.
+cdef dict _LOCAL_DECODE_POOLS = {}
+
+
+cdef CppThreadPool _local_decode_pool(int width):
+    cdef CppThreadPool decode_pool = _LOCAL_DECODE_POOLS.get(width)
+    if decode_pool is None:
+        decode_pool = CppThreadPool(width, "parquet-local-decode")
+        _LOCAL_DECODE_POOLS[width] = decode_pool
+    return decode_pool
+
 
 cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
     """Stage 4b: wrap direct DK_VARCHAR column i into a dense Vector tagged
@@ -3418,48 +3439,28 @@ cpdef NativeScanPlan open_native_scan_plan(
         dyn_pool_size = 256*1024*1024
     cdef bint _remote_scan = _any_remote_path([_wi_path for _wi_path, _ in work_items])
     cdef shared_ptr[PriorityPool] _shared_handle
-    # Size the self-constructed decode pool to the WORK, not to the machine.
-    # `decode_workers` arrives already resolved from config + CPU count (see
-    # `config.resolve_parquet_local_io_workers`) and never consults how many row
-    # groups this scan actually has, so a single local file holding one row group
-    # constructed — and then joined — a 16-thread pool for every query. The threads
-    # past `n_items` cannot be given work: submission is one task per work item.
+    # LOCAL scans decode on a process-lifetime pool (`_local_decode_pool`), so no
+    # query constructs or joins threads; a scan with fewer work items than threads
+    # dispatches one ticket per item and the rest stay idle. This replaced a
+    # per-query pool clamped to `n_items` (measured 2026-09-16: a 16-thread pool for
+    # a 1-row-group scan cost 0.45 ms to join and 0.07 ms to build).
     #
-    # Measured 2026-09-16, 18-core Apple Silicon, DOP pinned to 1, min-of-15 with
-    # the arms interleaved and their order alternated per round (uncompressed PLAIN
-    # int64, `SELECT c0`):
+    # REMOTE scans keep a pool of their own at the configured width: they are
+    # latency-bound, so the fan-out is the point (the `parquet_gcs_io_workers`
+    # sweep and the fetch-ahead gate rest on it), and a partially-remote scan
+    # counts as remote, since one network item is enough to want the fan-out.
     #
-    #     fixture                 width  teardown_close_scans   compile    total
-    #     1 file,  1 rg,  10k      16          0.454 ms        0.111 ms   1.240 ms
-    #     1 file,  1 rg,  10k       1          0.011 ms        0.043 ms   0.710 ms
-    #     1 file, 32 rg,   1M      16 (both arms — clamp inert)           ~2.04 ms
-    #     16 files, 1 rg,  1M      16 (both arms — clamp inert)           ~2.04 ms
-    #
-    # The construction half lands in `time_engine_compile` rather than the scan,
-    # because the pool is built HERE, at plan time; the join half is
-    # `time_engine_teardown_close_scans`. Both move, and the multi-row-group and
-    # multi-file fixtures are untouched by construction — they have work for all 16.
-    #
-    # LOCAL ONLY. A remote scan is latency-bound rather than work-bound: its threads
-    # sit on the network, so a width beyond the row-group count is the entire point
-    # there (the `parquet_gcs_io_workers` production sweep and the fetch-ahead gate
-    # both rest on that). `_remote_scan` keeps this clamp off that path — and note
-    # a partially-remote scan is treated as remote, since one network item is enough
-    # to want the fan-out.
-    #
-    # `plan.in_flight_limit` above is deliberately NOT re-derived from the clamped
-    # width. It is the submission window, and left at the configured width it stays
-    # >= n_items + 2 whenever this clamp fires, so the window can never become the
-    # thing that serialises a scan.
-    cdef int _pool_workers = decode_workers
+    # `plan.in_flight_limit` above is the submission window at the configured
+    # width; it stays >= n_items + 2 for a small scan, so the window never
+    # serialises one.
     if pool is not None:
         _shared_handle = (<CppThreadPool>pool).pool_handle()
         plan.pipeline_ptr = new ParquetIOPipeline(_shared_handle, 1024)
+    elif not _remote_scan:
+        _shared_handle = _local_decode_pool(decode_workers).pool_handle()
+        plan.pipeline_ptr = new ParquetIOPipeline(_shared_handle, 1024)
     else:
-        if not _remote_scan and plan.n_items < _pool_workers:
-            # n_items > 0 is guaranteed: the zero-item plan returned above.
-            _pool_workers = plan.n_items
-        plan.pipeline_ptr = new ParquetIOPipeline(_pool_workers, 1024)
+        plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
     # The bearer credential for remote paths that were not pre-signed (the gate
     # admitted them on it) - as every other pipeline constructor here sets it.
     _auth = _native_auth_header(filesystem)

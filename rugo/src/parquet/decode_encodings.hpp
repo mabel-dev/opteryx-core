@@ -51,6 +51,20 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
                                           draken::AppendBuffer<int32_t> &indices);
 
+// Width-targeted variant of DecodeRLEBitPackedIndicesNoPrefix: decodes the
+// `num_values` codes straight into `dst` at `code_width` bytes per value (1, 2
+// or 4, little-endian, value i at dst + i * code_width) — the packed per-row
+// code array a nullable dictionary column carries — with no int32 index buffer
+// and no per-value bounds check. `*max_code` receives the largest code written
+// (0 when num_values == 0), so the caller bounds-checks once against the
+// dictionary size; a code wider than code_width is truncated in `dst` but still
+// reported whole in `*max_code`. Returns num_values on success, -1 on a short or
+// malformed stream or an unsupported width.
+int32_t DecodeRLEBitPackedCodesPacked(const uint8_t *data, size_t data_size,
+                                      int32_t num_values, int bit_width,
+                                      uint8_t *dst, uint8_t code_width,
+                                      uint32_t *max_code);
+
 // Selective variant of DecodeRLEBitPackedIndicesNoPrefix: walks the same stream
 // of `num_values` codes but APPENDS only the codes whose `sel` byte is non-zero
 // (sel has one 0/1 byte per value). An RLE run appends its code once per

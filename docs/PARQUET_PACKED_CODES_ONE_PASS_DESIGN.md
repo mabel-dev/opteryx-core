@@ -1,6 +1,8 @@
 # One-pass packed dictionary codes for nullable int columns
 
-Status: **PROPOSAL — not built. Awaiting the architect's ruling.**
+Status: **RULED 2026-10-17 (option D): build 3a-3c with ClickBench Q1/Q7 added as
+wall targets; 3d and RLE-run counting decided after. 3a-3c BUILT and measured on ARM
+and x86 (§9); keep/ship ruling pending.**
 Source profile: 2026-10-16, samply + dSYM, `scratch.hits_part0` (one ClickBench
 shard, 14,155,776 rows, 216 row groups, every column declared nullable with
 `null_count = 0`). Query: 20 int columns, `GROUP BY OS`.
@@ -167,3 +169,86 @@ A build that shows no CPU reduction is deleted.
   emitted shape — not a §11 shape specialisation needing its own ruling.
 - Go / no-go on 3a-3c given §6: a CPU win with no single-query wall win on the
   profiled shape.
+
+## 9. As built (2026-10-17, ARM)
+
+- `DecodeRLEBitPackedCodesPacked` (decode_encodings.cpp/.hpp). Bit-packed groups
+  unpack through the existing per-arch group unpackers into a 512-value stack tile
+  (L1), then narrow-store at the code width with a running max; RLE runs are a
+  `fill_n` at the code width; `bit_width == 0` is a memset. The code width is a
+  template parameter, so neither the store nor the max carries a per-value branch.
+  This is §3a with one stated difference: the int32 lanes survive only in the tile,
+  never in a page-sized buffer.
+- Call site (decode_column.cpp, dense dict path): taken when the packed array is in
+  use, the page is a dictionary page, `page_all_present`, and `page_vsel == nullptr`.
+  Every failure sets `error_message` (count mismatch, page past the chunk, short
+  stream, code outside the dictionary). Pages with nulls and selective decode keep
+  the two-pass path unchanged (§3c); its bare returns are still on the silent-failure
+  worklist. 3d not built.
+- Test: `make packed-codes-test` (in `make q`), ASan/UBSan, bit widths 0-32 x code
+  widths 1/2/4, mixed RLE/bit-packed streams, cut and halved streams, a bit-packed
+  run one byte short, invalid widths; checked against the stream's own values and
+  against the two-pass path.
+- Found, not fixed (outside scope): `DecodeRLEBitPackedIndicesNoPrefix` masks an RLE
+  value with `(1U << bit_width) - 1`, an undefined shift at `bit_width == 32`
+  (decode_encodings.cpp ~487; only reachable with a dictionary over 2^31 entries).
+
+### 9.1 Measured (Mac, interleaved, A/B order alternating, both .so swapped)
+
+12 rounds x 8 reps (B/A median of per-round minima, wins out of 12). Result hashes
+identical on every query except q41, whose answer is nondeterministic within ONE arm
+(12 distinct hashes in A alone: ties at `OFFSET 10000`).
+
+| shape | wall | CPU |
+|---|---|---|
+| 20 int columns `GROUP BY OS` (hits_part0) | 0.771 (12/12) | 0.736 (12/12) |
+| `OS, MIN(WatchID), MAX(UserID) GROUP BY OS` | 0.897 (12/12) | 0.872 (12/12) |
+| ClickBench Q1 | 0.840 (12/12) | 0.778 (12/12) |
+| ClickBench Q7 | 0.836 (12/12) | 0.785 (12/12) |
+| Q15 | 0.955 (12/12) | 0.953 (12/12) |
+| Q36 / Q41 | 0.975 / 0.960 | 0.964 / 0.856 |
+
+Guards, 16-round rerun (the 12-round run showed q12 1.007/1.009): q12 1.000 / 0.997,
+q19 0.996 / 1.005, multi-page nullable fixture with pages with and without nulls in
+one chunk 1.011 wall (7/16; best-of B 2.01 ms vs A 2.13 ms) / 0.951 CPU (15/16),
+second fixture query 0.988 / 0.913. The §7 keep rule's "no shape worse than 1.00"
+is met by every shape except the 2 ms fixture query's median wall (1.011) — reported
+for the ruling, not waived. `make q` + `make slt` green. x86: §9.2.
+
+### 9.2 Measured on x86 (2026-10-17, i5-8500 6c, Debian 12, GCC 12 build, -march=haswell)
+
+Isolated tree (`dev/arch_tree.sh`), arms = the same tree with only decode_column.cpp
+reverted, both .so swapped, 12 rounds x 8 reps, order alternating. `packed_codes_test`
+passes on this box under clang 14 AND GCC 12 (ASan/UBSan, AVX2 unpackers). Result hashes
+identical except q41 (nondeterministic within each arm, as on ARM).
+
+| shape | wall | CPU |
+|---|---|---|
+| 20 int columns `GROUP BY OS` | 0.808 (12/12) | 0.673 (12/12) |
+| `OS, MIN(WatchID), MAX(UserID) GROUP BY OS` | 0.833 (12/12) | 0.793 (12/12) |
+| ClickBench Q1 | 0.743 (12/12) | 0.723 (12/12) |
+| ClickBench Q7 | 0.743 (12/12) | 0.723 (12/12) |
+| Q15 | 0.980 (11/12) | 0.933 (12/12) |
+| Q36 / Q41 | 0.979 / 0.937 | 0.969 / 0.787 |
+| null-page fixture (2 queries) | 0.963 / 0.962 (12/12) | 0.920 / 0.912 (12/12) |
+| q12 (strings, path untouched) | 1.001 (5/12) | 0.999 (8/12) |
+| q19 | 0.995 | 0.997 |
+
+The fixture shape that read 1.011 on ARM is a clear win here. The one median above 1.00
+is q12 wall at 1.001 with CPU 0.999 — a string-only query this change does not reach,
+the same reading as ARM's 16-round 1.000. Reported for the ruling.
+
+### 9.3 Step 3d — built, measured, REVERTED (2026-10-17, ARM)
+
+Built as specified: `dict_codes_array` allocated with `resize_uninit`, each page that
+takes the null path zeroing its own slice (with a bounds check) before the scatter.
+Safety was proven before measuring: a poison build (fill `0xA5`) kept every result hash,
+and a temporary end-of-chunk check that every null row holds code 0 fired with the
+per-page `memset` removed (negative control) and stayed silent with it in place across
+the harness queries, `make q` and `make slt`. Result hashes identical in the A/B.
+
+12 rounds vs the kept one-pass build: int20 0.994 (8/12), `OS, MIN(WatchID)…` 0.974
+(9/12), Q1 1.002 (6/12), Q7 1.006 (5/12), q12 1.011, others 0.96-1.00. No target
+reached 0.98 with >= 10/12 wins, so by the §7 keep rule it was reverted (the zero fill
+it removes is ~1 byte/row in one streaming memset — too small to see). The tree is back
+to the §9.1 state; `make q` + `make slt` green after the revert. Not run on x86.

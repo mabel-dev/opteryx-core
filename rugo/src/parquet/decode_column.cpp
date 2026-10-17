@@ -2658,48 +2658,95 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         } else {
           // ── Dense path: nullable columns or non-RLE-mode dict types ─────
           draken::AppendBuffer<int32_t>& indices = _page_dict_indices;  // chunk-scoped; cleared by the decoder
-          { RUGO_TEL_START(_rle_t0);
-            // sel_mode: only the selected codes land in `indices`; everything
-            // below then gathers / appends survivors only.
-            int32_t decoded = page_vsel != nullptr
-                ? DecodeRLEBitPackedIndicesSelected(
-                      data_ptr, data_size, present_count, bit_width, page_vsel, indices)
-                : DecodeRLEBitPackedIndicesNoPrefix(
-                      data_ptr, data_size, present_count, bit_width, indices);
-            RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
-            if (decoded != present_count) { return; } }
-
-          // ── Scatter packed codes for nullable dict columns ──
-          if (!result.dict_codes_array.empty() && page_uses_dictionary) {
-            // Scatter sparse indices into full-width packed codes array
-            if (indices.size() != (size_t)present_count) return;
-            int32_t max_def = target_col->max_definition_level;
-            int32_t code_idx = 0;
-            int32_t row_offset = total_collected;
-
-            if (page_all_present) {
-              // Fast-path page: def_levels was never expanded, and every slot
-              // is present, so the value stream is positional — code_idx == i.
-              // Walking the (empty) def_levels here would scatter NOTHING and
-              // leave every code at its zero placeholder.
-              if ((int32_t)indices.size() < page_values) return;
-              for (int32_t i = 0; i < page_values; ++i) {
-                int32_t code = indices[i];
-                if (code < 0 || code >= (int32_t)dict_size) return;
-                WritePackedCode(result.dict_codes_array.data(), row_offset + i,
-                               code, result.code_width);
-              }
-            } else {
-            for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
-              if (def_levels[i] == max_def) {
-                if (code_idx >= (int32_t)indices.size()) return;
-                int32_t code = indices[code_idx++];
-                if (code < 0 || code >= (int32_t)dict_size) return;
-                WritePackedCode(result.dict_codes_array.data(), row_offset + i,
-                               code, result.code_width);
-              }
-              // Null rows already zero-initialized
+          // One pass (docs/PARQUET_PACKED_CODES_ONE_PASS_DESIGN.md §3b): an
+          // all-present page of a nullable dict column is positional, so its
+          // codes decode straight into dict_codes_array at code_width — no int32
+          // index buffer, no per-row scatter, one bounds check per page. Pages
+          // with nulls (def levels expanded) and selective decode keep the
+          // two-pass path below. `indices` stays untouched: every consumer below
+          // skips it while dict_codes_array is in use.
+          if (!result.dict_codes_array.empty() && page_uses_dictionary &&
+              page_all_present && page_vsel == nullptr) {
+            if (present_count != page_values) {
+              result.error_message = "column '" + target_col->name +
+                  "': all-present dictionary page has " + std::to_string(present_count) +
+                  " values for " + std::to_string(page_values) + " rows";
+              return;
             }
+            const size_t code_width = result.code_width;
+            if ((size_t)(total_collected + page_values) * code_width >
+                result.dict_codes_array.size()) {
+              result.error_message = "column '" + target_col->name +
+                  "': dictionary page at row " + std::to_string(total_collected) +
+                  " runs past the column chunk's " +
+                  std::to_string(result.dict_codes_array.size() / code_width) + " rows";
+              return;
+            }
+            uint32_t max_code = 0;
+            RUGO_TEL_START(_rle_t0);
+            const int32_t decoded = DecodeRLEBitPackedCodesPacked(
+                data_ptr, data_size, present_count, bit_width,
+                result.dict_codes_array.data() + (size_t)total_collected * code_width,
+                result.code_width, &max_code);
+            RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
+            if (decoded != present_count) {
+              result.error_message = "column '" + target_col->name +
+                  "': dictionary code stream of the page at row " +
+                  std::to_string(total_collected) + " ends before its " +
+                  std::to_string(present_count) + " values";
+              return;
+            }
+            if (present_count > 0 && max_code >= (uint32_t)dict_size) {
+              result.error_message = "column '" + target_col->name +
+                  "': dictionary code " + std::to_string(max_code) +
+                  " in the page at row " + std::to_string(total_collected) +
+                  " is outside the " + std::to_string(dict_size) + "-entry dictionary";
+              return;
+            }
+          } else {
+            { RUGO_TEL_START(_rle_t0);
+              // sel_mode: only the selected codes land in `indices`; everything
+              // below then gathers / appends survivors only.
+              int32_t decoded = page_vsel != nullptr
+                  ? DecodeRLEBitPackedIndicesSelected(
+                        data_ptr, data_size, present_count, bit_width, page_vsel, indices)
+                  : DecodeRLEBitPackedIndicesNoPrefix(
+                        data_ptr, data_size, present_count, bit_width, indices);
+              RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
+              if (decoded != present_count) { return; } }
+
+            // ── Scatter packed codes for nullable dict columns ──
+            if (!result.dict_codes_array.empty() && page_uses_dictionary) {
+              // Scatter sparse indices into full-width packed codes array
+              if (indices.size() != (size_t)present_count) return;
+              int32_t max_def = target_col->max_definition_level;
+              int32_t code_idx = 0;
+              int32_t row_offset = total_collected;
+
+              if (page_all_present) {
+                // Fast-path page: def_levels was never expanded, and every slot
+                // is present, so the value stream is positional — code_idx == i.
+                // Walking the (empty) def_levels here would scatter NOTHING and
+                // leave every code at its zero placeholder.
+                if ((int32_t)indices.size() < page_values) return;
+                for (int32_t i = 0; i < page_values; ++i) {
+                  int32_t code = indices[i];
+                  if (code < 0 || code >= (int32_t)dict_size) return;
+                  WritePackedCode(result.dict_codes_array.data(), row_offset + i,
+                                 code, result.code_width);
+                }
+              } else {
+              for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
+                if (def_levels[i] == max_def) {
+                  if (code_idx >= (int32_t)indices.size()) return;
+                  int32_t code = indices[code_idx++];
+                  if (code < 0 || code >= (int32_t)dict_size) return;
+                  WritePackedCode(result.dict_codes_array.data(), row_offset + i,
+                                 code, result.code_width);
+                }
+                // Null rows already zero-initialized
+              }
+              }
             }
           }
 
