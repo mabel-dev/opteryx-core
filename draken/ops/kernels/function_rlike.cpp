@@ -28,6 +28,7 @@
 #include "ops/kernels/kernel_context.h"  // binary_op_ctx
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/dfa_walk.h"        // draken_dfa::match — shared byte-DFA walk
+#include "ops/kernels/compressed_helpers.h"   // kernel_pred_compressed_live
 
 namespace {
 
@@ -64,7 +65,7 @@ VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t narg
         return draken_error_sentinel("draken_rlike: string operand required");
     if (p->type != DRAKEN_VARBINARY)
         return draken_error_sentinel("draken_rlike: pattern operand must be a compiled DFA blob");
-    if (p->data_length != 1)
+    if (!draken_is_constant(p))
         return draken_error_sentinel("draken_rlike: pattern must be a single compiled value");
 
     const uint32_t n = v->length;
@@ -96,6 +97,18 @@ VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t narg
     const DrakenStringSlot* pslot = &psa->slots[p->selection[0]];
     const uint8_t* blob = reinterpret_cast<const uint8_t*>(str_data(pslot, psa->arena));
     const size_t blob_len = str_length(pslot);
+
+    // Compressed subject: match each live value once, scatter the verdicts.
+    if (draken_is_compressed(v))
+        return kernel_pred_compressed_live(v, [&](uint32_t j, bool* hit) -> const char* {
+            const DrakenStringSlot* vs = &vsa->slots[j];
+            const int m = rk_dfa_match(blob, blob_len,
+                                       reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena)),
+                                       str_length(vs));
+            if (m < 0) return "draken_rlike: malformed compiled DFA blob";
+            *hit = (m != 0) != negate;
+            return nullptr;
+        });
 
     auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
     if (out == nullptr) return draken_error_sentinel("allocation failed");

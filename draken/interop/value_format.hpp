@@ -135,6 +135,29 @@ inline void fmt_int64(std::string &out, int64_t v) {
   out.append(buf, r.ptr - buf);
 }
 
+// ---- char* writers ----
+// The same text as the std::string formatters, written in place for a caller
+// that has already claimed the room (the Avro reader renders nested JSON
+// straight into a column's string arena). Each says the most it may write.
+
+// Copy n bytes with no libc call for n <= 32: two overlapping fixed-size moves
+// the compiler keeps inline (a variable-length memcpy is a call per value, the
+// measured cost of short JSON pieces). Touches only [s, s+n) and [d, d+n).
+inline void copy_short(char *d, const char *s, size_t n) {
+  if (n >= 16) {
+    if (n > 32) { std::memcpy(d, s, n); return; }
+    std::memcpy(d, s, 16);
+    std::memcpy(d + n - 16, s + n - 16, 16);
+    return;
+  }
+  if (n >= 8) { std::memcpy(d, s, 8); std::memcpy(d + n - 8, s + n - 8, 8); return; }
+  if (n >= 4) { std::memcpy(d, s, 4); std::memcpy(d + n - 4, s + n - 4, 4); return; }
+  if (n > 0) { d[0] = s[0]; d[n >> 1] = s[n >> 1]; d[n - 1] = s[n - 1]; }
+}
+
+// <= 20 bytes ("-9223372036854775808").
+inline char *wr_int64(char *p, int64_t v) { return std::to_chars(p, p + 20, v).ptr; }
+
 // Unsigned counterpart. UINT64 values above INT64_MAX are not representable as
 // int64_t, so the unsigned family must NOT be funnelled through fmt_int64 —
 // 2^63 would render as -9223372036854775808.
@@ -251,8 +274,9 @@ inline int decimal_digits(uint64_t m) {
 // as FIXED-size copies the compiler keeps inline (a variable-length memcpy is a
 // libc call per value). Byte-identical to fmt_shortest_digits by construction —
 // same nd digits, same exp (= e10 + nd - 1), same layout rules — and pinned by
-// tests/rugo/test_float_text_direct.py.
-inline void fmt_decimal_shortest(std::string &out, bool neg, uint64_t m, int32_t e10) {
+// tests/rugo/test_float_text_direct.py. Writes at most 64 bytes at p (the text
+// is <= 23; the fixed digit copies run past it).
+inline char *wr_decimal_shortest(char *buf, bool neg, uint64_t m, int32_t e10) {
   const int nd = decimal_digits(m);
   const int exp = e10 + nd - 1;
   // Digits right-aligned in dig[0, nd); dig is oversized so the fixed 17- and
@@ -271,7 +295,6 @@ inline void fmt_decimal_shortest(std::string &out, bool neg, uint64_t m, int32_t
   }
   // Worst case is "-0.000" + 17 digits (23 bytes); a fixed copy may write up
   // to 17 bytes past the last real one, so 64 leaves headroom.
-  char buf[64];
   char *q = buf;
   if (neg) *q++ = '-';
   if (exp >= -4 && exp < 16) {
@@ -300,7 +323,12 @@ inline void fmt_decimal_shortest(std::string &out, bool neg, uint64_t m, int32_t
     if (aexp >= 100) { *q++ = (char)('0' + aexp / 100); aexp %= 100; }
     q = put2(q, aexp); // %02d: two digits minimum
   }
-  out.append(buf, q - buf);
+  return q;
+}
+
+inline void fmt_decimal_shortest(std::string &out, bool neg, uint64_t m, int32_t e10) {
+  char buf[64];
+  out.append(buf, wr_decimal_shortest(buf, neg, m, e10) - buf);
 }
 
 inline void fmt_double(std::string &out, double v) {
@@ -331,6 +359,27 @@ inline void fmt_float(std::string &out, float v) {
   char sci[32];
   int n = f2s_buffered_n(v, sci);
   fmt_shortest(out, sci, n);
+}
+
+// fmt_double / fmt_float written in place: <= 64 bytes at p. Values with no ryu
+// decimal (zero, and the NaN / infinities callers render as null) take the
+// std::string formatter's text, so both forms cannot disagree.
+inline char *wr_double(char *p, double v) {
+  bool neg; uint64_t m; int32_t e10;
+  if (d2s_decimal(v, &neg, &m, &e10)) return wr_decimal_shortest(p, neg, m, e10);
+  std::string s;
+  fmt_double(s, v);
+  std::memcpy(p, s.data(), s.size());
+  return p + s.size();
+}
+
+inline char *wr_float(char *p, float v) {
+  bool neg; uint32_t m; int32_t e10;
+  if (f2s_decimal(v, &neg, &m, &e10)) return wr_decimal_shortest(p, neg, m, e10);
+  std::string s;
+  fmt_float(s, v);
+  std::memcpy(p, s.data(), s.size());
+  return p + s.size();
 }
 
 // Howard Hinnant's civil-from-days (days since 1970-01-01).
@@ -603,36 +652,54 @@ inline size_t json_scan_clean(const char *s, size_t i, size_t n) {
   return i;
 }
 
-// Append a JSON string (quoted + escaped). Clean runs between escapes are
-// appended in bulk, never byte-at-a-time.
-inline void json_string(std::string &out, const char *s, size_t n) {
+// The most wr_json_string writes for n bytes whose first `clean` need no
+// escape (clean = json_scan_clean(s, 0, n)): an escape is at most 6 bytes.
+inline size_t json_string_worst(size_t n, size_t clean) { return 2 + clean + 6 * (n - clean); }
+
+// `"` + s (quoted + escaped) + `"` written at p, given clean =
+// json_scan_clean(s, 0, n); at most json_string_worst(n, clean) bytes. Clean
+// runs between escapes move in bulk, never byte-at-a-time.
+inline char *wr_json_string(char *p, const char *s, size_t n, size_t clean) {
   static const char *HEX = "0123456789abcdef";
+  *p++ = '"';
+  copy_short(p, s, clean);
+  p += clean;
+  size_t i = clean;
+  while (i < n) {
+    unsigned char c = (unsigned char)s[i];
+    *p++ = '\\';
+    switch (c) {
+    case '"':  *p++ = '"'; break;
+    case '\\': *p++ = '\\'; break;
+    case '\n': *p++ = 'n'; break;
+    case '\r': *p++ = 'r'; break;
+    case '\t': *p++ = 't'; break;
+    case '\b': *p++ = 'b'; break;
+    case '\f': *p++ = 'f'; break;
+    default: // remaining control bytes
+      *p++ = 'u'; *p++ = '0'; *p++ = '0';
+      *p++ = HEX[c >> 4];
+      *p++ = HEX[c & 0xF];
+    }
+    size_t run = ++i;
+    i = json_scan_clean(s, i, n);
+    copy_short(p, s + run, i - run);
+    p += i - run;
+  }
+  *p++ = '"';
+  return p;
+}
+
+// Append a JSON string (quoted + escaped).
+inline void json_string(std::string &out, const char *s, size_t n) {
   // Clean string (the overwhelming majority) is a whole cell on its own, so it
   // goes out as one append rather than push_back / append / push_back.
   size_t i = json_scan_clean(s, 0, n);
   if (i == n) { append_quoted_raw(out, s, n); return; }
-  out.push_back('"');
-  out.append(s, i);
-  while (i < n) {
-    unsigned char c = (unsigned char)s[i];
-    switch (c) {
-    case '"':  out.append("\\\"", 2); break;
-    case '\\': out.append("\\\\", 2); break;
-    case '\n': out.append("\\n", 2); break;
-    case '\r': out.append("\\r", 2); break;
-    case '\t': out.append("\\t", 2); break;
-    case '\b': out.append("\\b", 2); break;
-    case '\f': out.append("\\f", 2); break;
-    default: // remaining control bytes
-      out.append("\\u00", 4);
-      out.push_back(HEX[c >> 4]);
-      out.push_back(HEX[c & 0xF]);
-    }
-    size_t run = ++i;
-    i = json_scan_clean(s, i, n);
-    if (i > run) out.append(s + run, i - run);
-  }
-  out.push_back('"');
+  const size_t at = out.size();
+  out.resize(at + json_string_worst(n, i));
+  char *e = wr_json_string(&out[at], s, n, i);
+  out.resize(static_cast<size_t>(e - out.data()));
 }
 
 // ---- value rendering (reads DrakenVector directly) ----

@@ -23,20 +23,15 @@
 //                                       VARBINARY (architect ruling 2026-07-17),
 //                                       where n is the operand's per-row value.
 //
-// DENSE OUTPUT, NOT SHAPE-PRESERVING. The INT64-producing four match the sibling
-// draken_length's fixed-result fold contract (a dense INT64 block). The two
-// string producers are dense per-LOGICAL-ROW like draken_date_format
-// (function_temporal.cpp): they do NOT reduce over data_length physical uniques,
-// because validating/generating per unique would touch physical slots that only
-// NULL rows reference (an out-of-range codepoint hidden behind a null would raise
-// wrongly; a random draw would be shared across the wrong rows). Every valid
-// logical row is read on its own via the uniform data[selection[i]] access, so
-// dense / constant / dict inputs all yield identical answers (CLAUDE.md §11).
-//
-// draken_octet_length stages per-UNIQUE work for compressed inputs the way
-// draken_length does; the other three read a per-row operand pair (position,
-// levenshtein) or are already O(1)-per-slot, so they stay on the plain uniform
-// loop.
+// COMPRESSION-AWARE (compressed_helpers.h). A compressed operand
+// (draken_is_compressed) is processed over its value array — once per value —
+// and the result keeps its encoding: OCTET_LENGTH, TO_ASCII and TO_CHAR always;
+// POSITION when the needle is one non-null constant; LEVENSHTEIN when either side
+// is. A value that can FAIL (malformed UTF-8 for TO_ASCII, a non-scalar codepoint
+// for TO_CHAR) is computed only for slots a valid row reads (kernel_live_slots),
+// so a bad value hidden behind a NULL or a filtered-out dictionary entry never
+// raises. RANDOM_STRING stays per LOGICAL row: a VOLATILE draw shared per value
+// would hand the same bytes to different rows.
 //
 // Ported algorithms (CLAUDE.md §3 — the precedent set by string_replace_soundex.cpp,
 // which ports Soundex byte-for-byte out of opteryx/compiled/nanobind):
@@ -66,6 +61,7 @@
 #include "core/vector_alloc.h"     // draken_identity_sel
 #include "ops/vec_result.h"
 #include "ops/kernels/result_helpers.h"
+#include "ops/kernels/compressed_helpers.h"   // kernel_map_compressed / kernel_map_compressed_live
 #include "ops/kernels/error_handling.h"
 
 namespace {
@@ -191,6 +187,60 @@ inline int64_t fse_lev_myers(const uint8_t* P, uint32_t m,
     return score;
 }
 
+// One LEVENSHTEIN distance with the kernel's reusable workspace (rolling DP rows,
+// grown on demand, and the Myers PEq table). Shared by the row loop and the
+// compressed (per value) path.
+struct FseLev {
+    size_t   cap  = 0u;
+    int64_t* prev = nullptr;
+    int64_t* curr = nullptr;
+    uint64_t PEq[256] = {0};
+    ~FseLev() { draken_free(prev); draken_free(curr); }
+
+    // false only when the DP workspace cannot be allocated.
+    bool distance(const uint8_t* pa, uint32_t la, const uint8_t* pb, uint32_t lb, int64_t* out) {
+        // Keep the shorter string in lb/pb (Myers pattern = shorter side; the DP
+        // fallback workspace is then O(min)).
+        if (la < lb) {
+            const uint8_t* tmp_p = pa; pa = pb; pb = tmp_p;
+            const uint32_t tmp_l = la; la = lb; lb = tmp_l;
+        }
+        // Cheap exact early-outs.
+        if (lb == 0u) { *out = static_cast<int64_t>(la); return true; }
+        if (la == lb && std::memcmp(pa, pb, la) == 0) { *out = 0; return true; }
+        // Bit-parallel path: shorter side (pb, length lb) is the pattern.
+        if (lb <= 64u) { *out = fse_lev_myers(pb, lb, pa, la, PEq); return true; }
+        // DP fallback (shorter side > 64 bytes). Grow the workspace if needed.
+        const size_t s_len = static_cast<size_t>(lb) + 1u;
+        if (s_len > cap) {
+            draken_free(prev); prev = nullptr;
+            draken_free(curr); curr = nullptr;
+            prev = static_cast<int64_t*>(draken_malloc(s_len * sizeof(int64_t)));
+            curr = static_cast<int64_t*>(draken_malloc(s_len * sizeof(int64_t)));
+            if (!prev || !curr) { cap = 0u; return false; }
+            cap = s_len;
+        }
+        // Row 0: dist(empty, pb[0..j-1]) = j.
+        for (uint32_t j = 0u; j <= lb; ++j) prev[j] = j;
+        for (uint32_t r = 1u; r <= la; ++r) {
+            curr[0] = static_cast<int64_t>(r);
+            for (uint32_t c = 1u; c <= lb; ++c) {
+                if (pa[r - 1u] == pb[c - 1u]) {
+                    curr[c] = prev[c - 1u];
+                } else {
+                    int64_t best = prev[c];                        // delete
+                    if (curr[c - 1u] < best) best = curr[c - 1u];  // insert
+                    if (prev[c - 1u] < best) best = prev[c - 1u];  // substitute
+                    curr[c] = 1 + best;
+                }
+            }
+            int64_t* tmp = prev; prev = curr; curr = tmp;   // swap rows (pointers)
+        }
+        *out = prev[lb];
+        return true;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // TO_ASCII
 // ---------------------------------------------------------------------------
@@ -243,8 +293,7 @@ inline bool fse_is_integer(DrakenType t) {
 // intact so the caller rejects it loudly rather than silently wrapping it. A
 // UINT64 above INT64_MAX becomes negative here and is likewise rejected — no valid
 // codepoint or byte-count reaches that magnitude. Caller gates on fse_is_integer.
-inline int64_t fse_read_int(const DrakenVector* v, uint32_t row) {
-    const uint32_t j = v->selection[row];
+inline int64_t fse_read_int_at(const DrakenVector* v, uint32_t j) {
     switch (v->type) {
         case DRAKEN_INT8:   return static_cast<const int8_t*>(v->data)[j];
         case DRAKEN_INT16:  return static_cast<const int16_t*>(v->data)[j];
@@ -256,6 +305,9 @@ inline int64_t fse_read_int(const DrakenVector* v, uint32_t row) {
         case DRAKEN_UINT64: return static_cast<int64_t>(static_cast<const uint64_t*>(v->data)[j]);
         default:            return -1;   // unreachable: fse_is_integer gates every caller
     }
+}
+inline int64_t fse_read_int(const DrakenVector* v, uint32_t row) {
+    return fse_read_int_at(v, v->selection[row]);
 }
 
 // Encode a Unicode scalar value as UTF-8 into buf (≤4 bytes); returns the byte
@@ -346,6 +398,10 @@ VecResult draken_octet_length(void* /*ctx*/, const DrakenVector* const* args, ui
         return draken_error_sentinel("draken_octet_length: string input required");
 
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
+    if (draken_is_compressed(v))
+        return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, [sa](uint32_t j) {
+            return static_cast<int64_t>(str_length(&sa->slots[j]));
+        });
     const uint32_t n = v->length;
 
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
@@ -364,9 +420,6 @@ VecResult draken_octet_length(void* /*ctx*/, const DrakenVector* const* args, ui
         std::memcpy(validity, v->validity, vbytes);
     }
 
-    // str_length is O(1), so the per-unique staging draken_length needs for its
-    // NVARCHAR codepoint scan buys nothing here — the uniform loop IS the fast
-    // path for every shape.
     for (uint32_t i = 0u; i < n; ++i) {
         if (!fse_row_valid(v, i)) { out[i] = 0; continue; }
         out[i] = static_cast<int64_t>(str_length(&sa->slots[v->selection[i]]));
@@ -396,6 +449,18 @@ VecResult draken_position(void* /*ctx*/, const DrakenVector* const* args, uint32
     const uint32_t n = hay->length;
     const auto* sh = static_cast<const DrakenStringArena*>(hay->data);
     const auto* sn = static_cast<const DrakenStringArena*>(ndl->data);
+
+    // One non-null constant needle over a compressed haystack: search each
+    // haystack value once; the result keeps the haystack's encoding.
+    if (draken_is_constant(ndl) && ndl->validity == nullptr && draken_is_compressed(hay)) {
+        const DrakenStringSlot* ns = &sn->slots[0];
+        const uint8_t* nd = str_data(ns, sn->arena);
+        const uint32_t nl = str_length(ns);
+        return kernel_map_compressed<int64_t>(hay, DRAKEN_INT64, [sh, nd, nl](uint32_t j) {
+            const DrakenStringSlot* hs = &sh->slots[j];
+            return fse_substring_position(str_data(hs, sh->arena), str_length(hs), nd, nl);
+        });
+    }
 
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("draken_position: allocation failed");
@@ -441,17 +506,34 @@ VecResult draken_levenshtein(void* /*ctx*/, const DrakenVector* const* args, uin
     const uint32_t n = a->length;
     const auto* sa = static_cast<const DrakenStringArena*>(a->data);
     const auto* sb = static_cast<const DrakenStringArena*>(b->data);
+    FseLev lev;
+
+    // One side a non-null constant, the other compressed: one distance per value
+    // of the compressed side; the result keeps its encoding. (The distance is
+    // symmetric, so which side is constant does not matter.)
+    const DrakenVector* cv = nullptr;   // the constant side
+    const DrakenVector* xv = nullptr;   // the compressed side
+    if (draken_is_constant(b) && b->validity == nullptr && draken_is_compressed(a)) {
+        cv = b; xv = a;
+    } else if (draken_is_constant(a) && a->validity == nullptr && draken_is_compressed(b)) {
+        cv = a; xv = b;
+    }
+    if (cv != nullptr) {
+        const auto* sc = static_cast<const DrakenStringArena*>(cv->data);
+        const auto* sx = static_cast<const DrakenStringArena*>(xv->data);
+        const DrakenStringSlot* cs = &sc->slots[0];
+        const uint8_t* pc = str_data(cs, sc->arena);
+        const uint32_t lc = str_length(cs);
+        return kernel_map_compressed_live<int64_t>(xv, DRAKEN_INT64,
+            [&lev, sx, pc, lc](uint32_t j, int64_t* o) -> const char* {
+                const DrakenStringSlot* xs = &sx->slots[j];
+                return lev.distance(str_data(xs, sx->arena), str_length(xs), pc, lc, o)
+                    ? nullptr : "draken_levenshtein: allocation failed";
+            });
+    }
 
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("draken_levenshtein: allocation failed");
-
-    // Rolling DP workspace: two rows, grown on demand (DP fallback only).
-    size_t   ws_cap = 0u;
-    int64_t* prev   = nullptr;
-    int64_t* curr   = nullptr;
-
-    // Myers PEq table: 256 entries, invariant-zero between rows.
-    uint64_t PEq[256] = {0};
 
     uint8_t* validity = nullptr;
     bool any_null = false;
@@ -461,7 +543,7 @@ VecResult draken_levenshtein(void* /*ctx*/, const DrakenVector* const* args, uin
             if (!validity) {
                 validity = fse_alloc_validity_all_valid(n);
                 if (!validity) {
-                    draken_free(prev); draken_free(curr); draken_free(out);
+                    draken_free(out);
                     return draken_error_sentinel("draken_levenshtein: allocation failed");
                 }
             }
@@ -470,68 +552,16 @@ VecResult draken_levenshtein(void* /*ctx*/, const DrakenVector* const* args, uin
             any_null = true;
             continue;
         }
-
         const DrakenStringSlot* slot_a = &sa->slots[a->selection[i]];
         const DrakenStringSlot* slot_b = &sb->slots[b->selection[i]];
-        const uint8_t* pa = str_data(slot_a, sa->arena);
-        const uint8_t* pb = str_data(slot_b, sb->arena);
-        uint32_t la = str_length(slot_a);
-        uint32_t lb = str_length(slot_b);
-
-        // Keep the shorter string in lb/pb (Myers pattern = shorter side; the DP
-        // fallback workspace is then O(min)).
-        if (la < lb) {
-            const uint8_t* tmp_p = pa; pa = pb; pb = tmp_p;
-            const uint32_t tmp_l = la; la = lb; lb = tmp_l;
+        if (!lev.distance(str_data(slot_a, sa->arena), str_length(slot_a),
+                          str_data(slot_b, sb->arena), str_length(slot_b), &out[i])) {
+            draken_free(out);
+            if (validity) draken_free(validity);
+            return draken_error_sentinel("draken_levenshtein: allocation failed");
         }
-
-        // Cheap exact early-outs.
-        if (lb == 0u) { out[i] = static_cast<int64_t>(la); continue; }
-        if (la == lb && std::memcmp(pa, pb, la) == 0) { out[i] = 0; continue; }
-
-        // Bit-parallel path: shorter side (pb, length lb) is the pattern.
-        if (lb <= 64u) {
-            out[i] = fse_lev_myers(pb, lb, pa, la, PEq);
-            continue;
-        }
-
-        // DP fallback (shorter side > 64 bytes). Grow the workspace if needed.
-        const size_t s_len = static_cast<size_t>(lb) + 1u;
-        if (s_len > ws_cap) {
-            draken_free(prev); prev = nullptr;
-            draken_free(curr); curr = nullptr;
-            prev = static_cast<int64_t*>(draken_malloc(s_len * sizeof(int64_t)));
-            curr = static_cast<int64_t*>(draken_malloc(s_len * sizeof(int64_t)));
-            if (!prev || !curr) {
-                draken_free(prev); draken_free(curr); draken_free(out);
-                if (validity) draken_free(validity);
-                return draken_error_sentinel("draken_levenshtein: allocation failed");
-            }
-            ws_cap = s_len;
-        }
-
-        // Row 0: dist(empty, pb[0..j-1]) = j.
-        for (uint32_t j = 0u; j <= lb; ++j) prev[j] = j;
-
-        for (uint32_t r = 1u; r <= la; ++r) {
-            curr[0] = static_cast<int64_t>(r);
-            for (uint32_t c = 1u; c <= lb; ++c) {
-                if (pa[r - 1u] == pb[c - 1u]) {
-                    curr[c] = prev[c - 1u];
-                } else {
-                    int64_t best = prev[c];                        // delete
-                    if (curr[c - 1u] < best) best = curr[c - 1u];  // insert
-                    if (prev[c - 1u] < best) best = prev[c - 1u];  // substitute
-                    curr[c] = 1 + best;
-                }
-            }
-            int64_t* tmp = prev; prev = curr; curr = tmp;   // swap rows (pointers)
-        }
-        out[i] = prev[lb];
     }
 
-    draken_free(prev);
-    draken_free(curr);
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
     return fse_dense_int64(out, validity, n);
 }
@@ -555,6 +585,15 @@ VecResult draken_to_ascii(void* /*ctx*/, const DrakenVector* const* args, uint32
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
     const uint32_t n = v->length;
     const bool is_utf8 = (v->type == DRAKEN_NVARCHAR);
+
+    if (draken_is_compressed(v))
+        return kernel_map_compressed_live<int64_t>(v, DRAKEN_INT64,
+            [sa, is_utf8](uint32_t j, int64_t* o) -> const char* {
+                const DrakenStringSlot* slot = &sa->slots[j];
+                return fse_first_codepoint(str_data(slot, sa->arena), str_length(slot), is_utf8, o)
+                    ? nullptr
+                    : "draken_to_ascii: malformed UTF-8 leading sequence in NVARCHAR input";
+            });
 
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("draken_to_ascii: allocation failed");
@@ -593,8 +632,8 @@ VecResult draken_to_ascii(void* /*ctx*/, const DrakenVector* const* args, uint32
 // never a silently wrong or replacement character. Null row → null output.
 //
 // Output type is the registrar's declared VARCHAR; its bytes are the codepoint's
-// UTF-8 form (≤4 bytes, always inline — no arena). Dense per-logical-row (see the
-// file header for why this is not shape-preserving). Single overload, so a bare
+// UTF-8 form (≤4 bytes, always inline — no arena). A compressed operand encodes
+// each live value once and keeps its encoding (file header). Single overload, so a bare
 // draken_to_char registry entry captures TO_CHAR/CHR with no _fn_skip_lookup gate.
 VecResult draken_to_char(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 1) return draken_error_sentinel("draken_to_char: expected 1 argument");
@@ -605,6 +644,34 @@ VecResult draken_to_char(void* /*ctx*/, const DrakenVector* const* args, uint32_
     // Explicit try/catch (NOT DRAKEN_KERNEL_TRY): the body's brace-initializer
     // comma lists would be split by the function-like macro's argument parser.
     try {
+        if (draken_is_compressed(v)) {
+            const uint32_t k = v->data_length;
+            std::vector<uint8_t> live;
+            const uint8_t* lv = kernel_live_slots(v, live);
+            DrakenStringSlot* vslots;
+            uint8_t* varena;
+            uint8_t* vunused;
+            uint8_t* block = vecresult_string_block_alloc(k, 0u, 0, &vslots, &varena, &vunused);
+            if (!block) return draken_error_sentinel("draken_to_char: allocation failed");
+            (void)varena; (void)vunused;   // all inline (<= 4 bytes); validity carried per row
+            for (uint32_t j = 0u; j < k; ++j) {
+                if (lv != nullptr && !lv[j]) { str_init_null(&vslots[j]); continue; }
+                const int64_t cp = fse_read_int_at(v, j);
+                uint8_t buf[4];
+                const int len = fse_utf8_encode(cp, buf);
+                if (len < 0) {
+                    draken_free(block);
+                    return draken_error_sentinel_fmt(
+                        "draken_to_char: codepoint %lld is not a Unicode scalar value",
+                        static_cast<long long>(cp));
+                }
+                str_init_inline(&vslots[j], buf, static_cast<uint32_t>(len));
+            }
+            VecResult r = vecresult_from_string_block(block, k, 0u, 0, DRAKEN_VARCHAR);
+            try { kernel_preserve_shape(r, v); }
+            catch (...) { draken_free(block); throw; }
+            return r;
+        }
         const uint32_t n = v->length;
         const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
         auto* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));

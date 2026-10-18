@@ -1,6 +1,7 @@
 #include "ops/kernels/extraction_kernels.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/result_helpers.h"
+#include "core/vector_alloc.h"                // draken_identity_sel
 #include "ops/json_extract.h"
 #include "ops/string_subscript.h"
 #include "ops/array_subscript.h"
@@ -45,6 +46,60 @@ inline VecResult finalize(draken::ops::StringRows& r) {
                                          r.validity, r.length, r.type);
 }
 
+// Run a row producer over a COMPRESSED operand's value array — once per value —
+// and keep the operand's encoding. The producer sees a values-only view: identity
+// selection over the data_length values, and a validity that marks only the LIVE
+// values (kernel_live_slots), so a value no valid row reads is never parsed. A
+// value the producer answers NULL (absent path, index past the end) nulls every
+// row reading it (kernel_null_bad_rows). Returns false — and nothing is owned —
+// if the producer throws: the caller then runs its row loop, which raises the
+// same error with the failing ROW's number (the error contract).
+template <typename Produce>
+inline bool extract_compressed(const DrakenVector* in, Produce&& produce, VecResult* out) {
+    const uint32_t k = in->data_length;
+    std::vector<uint8_t> live;
+    std::vector<uint8_t> live_bits;
+    const uint8_t* lv = kernel_live_slots(in, live);
+    DrakenVector view = *in;
+    view.selection   = draken_identity_sel(k);
+    view.length      = k;
+    view.data_length = k;
+    view.flags       = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    view.validity    = nullptr;
+    if (lv != nullptr) {
+        live_bits.assign(draken::ops::sr_validity_bytes(k), 0u);
+        for (uint32_t j = 0u; j < k; ++j)
+            if (lv[j]) live_bits[j >> 3] |= static_cast<uint8_t>(1u << (j & 7u));
+        view.validity = live_bits.data();
+    }
+    draken::ops::StringRows rows;
+    try {
+        rows = produce(&view);
+    } catch (...) {
+        return false;
+    }
+    // Values the producer answered NULL (dead values are never read by a valid row).
+    std::vector<uint8_t> bad;
+    if (rows.validity != nullptr) {
+        bad.assign(k > 0u ? k : 1u, 0u);
+        for (uint32_t j = 0u; j < k; ++j)
+            if (((rows.validity[j >> 3] >> (j & 7u)) & 1u) == 0u && (lv == nullptr || lv[j]))
+                bad[j] = 1u;
+    }
+    VecResult r = finalize(rows);
+    if (r.data == nullptr) { *out = r; return true; }
+    try {
+        kernel_preserve_shape(r, in);   // per-row validity: a SEPARATE buffer
+        r.validity_embedded = 0u;
+        if (!bad.empty()) kernel_null_bad_rows(r, in, bad.data());
+    } catch (...) {
+        draken_free(r.data);
+        throw;
+    }
+    *out = r;
+    return true;
+}
+
 }  // namespace
 
 extern "C" {
@@ -58,6 +113,13 @@ VecResult draken_map_access_string(void* ctx, const DrakenVector* vector, const 
         if (!is_string_family(vector->type))
             return draken_error_sentinel(
                 "draken_map_access_string: operand must be VARCHAR/NVARCHAR/VARBINARY");
+        if (draken_is_compressed(vector)) {
+            VecResult r;
+            if (extract_compressed(vector, [c](const DrakenVector* view) {
+                    return draken::ops::char_subscript_rows(view, c->index);
+                }, &r))
+                return r;
+        }
         auto rows = draken::ops::char_subscript_rows(vector, c->index);
         return finalize(rows);
     });
@@ -179,9 +241,15 @@ VecResult draken_json_extract(void* ctx, const DrakenVector* json_vec, const Dra
         nav.ntokens = c->ntokens;
         nav.blob    = extraction_ctx_blob(c);
         nav.mode    = 0;
-        auto rows = draken::ops::extract_rows(
-            json_vec, nav, text_mode,
-            text_mode ? "vector_json_extract_text" : "vector_json_extract");
+        const char* const fn_name = text_mode ? "vector_json_extract_text" : "vector_json_extract";
+        if (draken_is_compressed(json_vec)) {
+            VecResult r;
+            if (extract_compressed(json_vec, [&](const DrakenVector* view) {
+                    return draken::ops::extract_rows(view, nav, text_mode, fn_name);
+                }, &r))
+                return r;
+        }
+        auto rows = draken::ops::extract_rows(json_vec, nav, text_mode, fn_name);
         return finalize(rows);
     });
 }

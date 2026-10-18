@@ -70,6 +70,7 @@
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"
 #include "ops/kernels/result_helpers.h"
+#include "core/vector_alloc.h"                // draken_identity_sel / draken_zero_sel
 #include "ops/vec_result.h"
 #include "ops/vector_cosine_row.h"
 #include "xxhash.h"  // XXH3_64bits — must match opteryx xxhash.pyx hash_bytes exactly.
@@ -421,26 +422,56 @@ VecResult cosine_text_kernel(void* ctx, const DrakenVector* const* args, uint32_
     ectx.dimension = c->dimension;
     const auto embed = reinterpret_cast<func_fn_t>(c->embed_fn);
 
-    // Both results are dense VECTOR_FP16 (one row per logical row, identity selection).
+    // EMBED keeps each operand's encoding (draken_embed): one fp16 row per VALUE,
+    // reached through the result's selection — which it OWNS for a dictionary, so
+    // the selection is freed with the rest.
+    auto release = [](VecResult& v) {
+        draken_free(v.data);
+        draken_free(v.validity);
+        if (v.owns_selection) draken_free(const_cast<uint32_t*>(v.selection));
+    };
     VecResult va = embed(&ectx, &a, 1u);
     if (va.data == nullptr) return va;   // propagate the embed kernel's error verbatim
     VecResult vb = embed(&ectx, &b, 1u);
-    if (vb.data == nullptr) { draken_free(va.data); draken_free(va.validity); return vb; }
+    if (vb.data == nullptr) { release(va); return vb; }
 
     uint8_t* val = nullptr;
     try {
+        // One side a non-null constant, the other compressed: one cosine per value of
+        // the compressed side; the result keeps its encoding.
+        const DrakenVector* xv = nullptr;
+        const VecResult* ex = nullptr;   // the compressed side's embedding
+        const VecResult* ec = nullptr;   // the constant side's embedding
+        if (draken_is_constant(b) && b->validity == nullptr && draken_is_compressed(a)) {
+            xv = a; ex = &va; ec = &vb;
+        } else if (draken_is_constant(a) && a->validity == nullptr && draken_is_compressed(b)) {
+            xv = b; ex = &vb; ec = &va;
+        }
+        if (xv != nullptr) {
+            const uint32_t k = xv->data_length;
+            VecResult r = cosine_over_embedded(
+                static_cast<const uint16_t*>(ex->data), draken_identity_sel(k),
+                static_cast<const uint16_t*>(ec->data), draken_zero_sel(k),
+                k, c->dimension, nullptr, as_distance);
+            try {
+                kernel_preserve_shape(r, xv);
+            } catch (...) {
+                draken_free(r.data);
+                throw;
+            }
+            release(va); release(vb);
+            return r;
+        }
         const uint32_t n = a->length;
         val = merged_validity(a, b, n);
         VecResult r = cosine_over_embedded(
             static_cast<const uint16_t*>(va.data), va.selection,
             static_cast<const uint16_t*>(vb.data), vb.selection,
             n, c->dimension, val, as_distance);
-        draken_free(va.data); draken_free(va.validity);
-        draken_free(vb.data); draken_free(vb.validity);
+        release(va); release(vb);
         return r;
     } catch (const std::exception& e) {
-        draken_free(va.data); draken_free(va.validity);
-        draken_free(vb.data); draken_free(vb.validity);
+        release(va); release(vb);
         draken_free(val);
         return draken_error_sentinel_fmt("%s: %s", who, e.what());
     }
@@ -477,11 +508,11 @@ VecResult match_against_kernel(void* ctx, const DrakenVector* const* args, uint3
     }
     std::memset(bits, 0, padded ? padded : 8u);
 
-    // sim is dense with an identity selection (cosine_over_embedded), so row i is data[i];
-    // its validity is already the merged operand validity and carries straight over.
+    // sim is dense, or keeps a compressed operand's encoding (cosine_text_kernel), so
+    // row i reads data[selection[i]]; its validity is per logical row and carries over.
     const double* scores = static_cast<const double*>(sim.data);
     for (uint32_t i = 0; i < n; ++i) {
-        if (scores[i] >= m->threshold) bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        if (scores[sim.selection[i]] >= m->threshold) bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
     }
 
     VecResult r{};
@@ -494,6 +525,7 @@ VecResult match_against_kernel(void* ctx, const DrakenVector* const* args, uint3
     r.type           = DRAKEN_BOOL;
     r.flags          = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     draken_free(sim.data);
+    if (sim.owns_selection) draken_free(const_cast<uint32_t*>(sim.selection));
     return r;
 }
 

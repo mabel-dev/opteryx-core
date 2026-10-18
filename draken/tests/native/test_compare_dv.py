@@ -66,6 +66,9 @@ def test_compare_dv_smoke():
         "bool_eq_bitmap",
         "bool_lt_returns_non_null",
         "bool_lt_bitmap",
+        # compressed BOOL vs a constant on either side (the value-array path)
+        "bool_dict_eq_const_bitmap",
+        "bool_const_lt_dict_bitmap",
         "unsupported_type_returns_null",
         "cross_type_returns_null",
         "length_mismatch_returns_null",

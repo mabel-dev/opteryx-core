@@ -150,11 +150,14 @@ static inline VecResult make_shaped_result(int64_t* values, const DrakenVector& 
     // The SELECTION branch below still keys off src's own flags.
     r.flags       = static_cast<uint8_t>(src.flags & kValueTransformFlags);
     r.validity    = copy_validity(src.validity, src.length);
-    if (src.flags & DRAKEN_SEL_IDENTITY) {
-        r.selection      = draken_identity_sel(src.length);   // dense: shared global
-        r.owns_selection = false;
-    } else if (src.data_length == 1u) {
+    // Shape first, hint second (same rule as kernel_preserve_shape): a constant
+    // restamped to a longer length can carry a stale IDENTITY hint.
+    if (draken_is_constant(&src) && src.length != 1u) {
         r.selection      = draken_zero_sel(src.length);       // constant: shared global
+        r.owns_selection = false;
+        r.flags          = static_cast<uint8_t>(r.flags & ~(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION));
+    } else if (draken_is_dense(&src) && (src.flags & DRAKEN_SEL_IDENTITY)) {
+        r.selection      = draken_identity_sel(src.length);   // dense: shared global
         r.owns_selection = false;
     } else {
         const size_t cn = src.length > 0u ? src.length : 1u;  // dict: copy owned codes

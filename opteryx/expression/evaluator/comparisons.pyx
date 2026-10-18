@@ -236,7 +236,7 @@ cdef _bool_compare(int op_code, left, right):
         rscalar = right
         right_is_scalar = True
     elif isinstance(right, Vector):
-        if (<Vector>right)._nb.data_length == 1:   # constant shape → a literal
+        if (<Vector>right).is_constant:   # constant shape → a literal
             rscalar = right[0]
             right_is_scalar = True
 

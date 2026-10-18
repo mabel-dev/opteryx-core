@@ -362,7 +362,7 @@ static void resolve_col(Col &c, const DrakenVector *dv,
   // the preserved selection, so they only pay off when values repeat
   // (data_length < length, i.e. dictionary-encoded). For dense (== length) or
   // sliced (> length) columns the direct emitters are strictly cheaper.
-  bool dense = dv->data_length >= dv->length;
+  bool dense = !draken_is_compressed(dv);
   switch (dv->type) {
   case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
     if (dense) { c.emit = pick_int_emitter(dv->type, csv); return; }

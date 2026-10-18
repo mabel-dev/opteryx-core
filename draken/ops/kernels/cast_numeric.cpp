@@ -287,6 +287,9 @@ VecResult draken_cast_bool_to_string(void* ctx, const DrakenVector* v) {
         r.length            = n;
         r.validity          = validity;
         r.validity_embedded = 0u;
+        // The dense-2 block carried IDENTITY|PERMUTATION; this is now a dictionary,
+        // and a stale IDENTITY hint sends identity fast paths past the 2 values.
+        r.flags             = 0u;
         return r;
     });
 }
@@ -618,6 +621,34 @@ static inline std::vector<uint8_t> cast_live_slots(const DrakenVector* v) {
     return live;
 }
 
+// --- Compressed-path plumbing for the range-checked DECIMAL cast loops ----------
+// Each loop macro takes PHYS, a literal 0 or 1, so every instantiation folds to
+// one addressing form. PHYS = 0 walks the ROWS: value data[selection[j]], a null
+// row is skipped. PHYS = 1 walks a compressed operand's VALUE ARRAY (the core's
+// `phys`, from draken_is_compressed): value data[j], and a slot no valid row
+// reads is skipped (cast_lv, from kernel_live_slots) — never range-checked, so a
+// dead dictionary entry cannot raise. `bad` is indexed like the output, which
+// kernel_null_bad_rows maps back to rows either way.
+#define DRAKEN_CAST_IDX(PHYS, j)  ((PHYS) ? (j) : v->selection[j])
+#define DRAKEN_CAST_DEAD(PHYS, j)                                                       \
+    ((PHYS) ? (cast_lv != nullptr && cast_lv[j] == 0u)                                  \
+            : (val_in != nullptr && ((val_in[(j) >> 3u] >> ((j) & 7u)) & 1u) == 0u))
+
+// Shape of such a cast's result: compressed keeps the operand's encoding, dense
+// is an identity selection. Throws std::bad_alloc (callers: DRAKEN_KERNEL_TRY).
+static inline void cast_emit_shape(VecResult& r, const DrakenVector* v, bool phys) {
+    if (phys) {
+        kernel_preserve_shape(r, v);
+        return;
+    }
+    const uint32_t n = v->length;
+    r.length = n; r.data_length = n;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.validity = kernel_copy_validity(v);
+    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+}
+
 // E33 — read the j-th physical value of ANY signed integer vector (INT8/16/32/64)
 // as int64_t, sign-extending narrower widths (mirrors draken_cast_integer_to_int64's
 // per-width read, generalized to include INT64 itself so one helper covers all
@@ -805,7 +836,7 @@ DRAKEN_CAST_BOOL_TO_UINT(draken_cast_bool_to_uint64, uint64_t, DRAKEN_UINT64)
 
 // FLOAT → DECIMAL (both tiers; SQL half-away-from-zero rounding at the target
 // scale). ctx = binary_op_ctx: result_scale + result_precision (p>18 → int128
-// tier). DENSE output (uniform selection gather — see the date32 cast lesson).
+// tier). A compressed operand converts once per value and keeps its encoding.
 VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
@@ -817,15 +848,17 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
         const bool wide = c->result_precision > 18;
         double mult = 1.0;
         for (int i = 0; i < scale; ++i) mult *= 10.0;
-        const uint32_t n = v->length;
+        // Compressed: one value per physical slot (no value can fail here).
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = phys ? v->data_length : v->length;
         const size_t es = wide ? 16u : 8u;
         uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
         if (!out) return draken_error_sentinel("Allocation failed");
         for (uint32_t j = 0u; j < n; ++j) {
-            uint32_t phys = v->selection[j];
+            const uint32_t at = phys ? j : v->selection[j];
             double d = (v->type == DRAKEN_FLOAT32)
-                ? static_cast<double>(static_cast<const float*>(v->data)[phys])
-                : static_cast<const double*>(v->data)[phys];
+                ? static_cast<double>(static_cast<const float*>(v->data)[at])
+                : static_cast<const double*>(v->data)[at];
             double scaled = d * mult;
             // half away from zero
             double rounded = scaled >= 0.0 ? std::floor(scaled + 0.5) : std::ceil(scaled - 0.5);
@@ -843,11 +876,7 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
         r.validity_embedded = 0u;
         r.dec_precision = c->result_precision;
         r.dec_scale = static_cast<uint8_t>(scale);
-        r.length = n; r.data_length = n;
-        r.selection = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.validity = kernel_copy_validity(v);
-        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        cast_emit_shape(r, v, phys);
         return r;
     });
 }
@@ -875,8 +904,8 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
 // Null rows are skipped entirely (placeholder 0, validity copied): their payload is
 // undefined, and range-checking undefined bytes would raise on a row SQL never reads.
 //
-// DENSE output (uniform data[selection[j]] gather over logical rows), matching the
-// float→decimal kernel above.
+// A compressed operand converts once per value (dead slots skipped) and keeps its
+// encoding; a dense operand converts per row.
 
 // 10^k as __int128; k is bounded by the DECIMAL(38) precision cap.
 static __int128 dec_pow10(int k) noexcept {
@@ -889,12 +918,12 @@ static __int128 dec_pow10(int k) noexcept {
 // a template because this translation unit is one extern "C" block (templates are
 // not permitted there), and as four specialisations rather than one branchy loop so
 // the per-row path carries no tier test (§3).
-#define DRAKEN_DEC_RESCALE_LOOP(SRC_T, DST_T)                                          \
+#define DRAKEN_DEC_RESCALE_LOOP(SRC_T, DST_T, PHYS)                                          \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
         DST_T* dst = reinterpret_cast<DST_T*>(out) + j;                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { *dst = 0; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { *dst = 0; continue; } \
         __int128 x = static_cast<__int128>(                                            \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]);                      \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]);                      \
         if (delta > 0) {                                                               \
             if (x > mul_lim || x < -mul_lim) {                                         \
                 if (!is_safe) {                                                        \
@@ -950,7 +979,10 @@ static VecResult decimal_to_decimal_core(void* ctx, const DrakenVector* v, bool 
     const __int128 mul_lim = (delta > 0) ? (dec_lim - 1) / factor : 0;
 
     const bool dst128 = c->result_precision > 18u;
-    const uint32_t n = v->length;
+    const bool phys = draken_is_compressed(v);
+    const uint32_t n = phys ? v->data_length : v->length;
+    std::vector<uint8_t> cast_live;
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
     const size_t es = dst128 ? 16u : 8u;
     uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
     if (!out) return draken_error_sentinel("Allocation failed");
@@ -960,11 +992,11 @@ static VecResult decimal_to_decimal_core(void* ctx, const DrakenVector* v, bool 
     bool any_bad = false;
 
     if (src128) {
-        if (dst128) { DRAKEN_DEC_RESCALE_LOOP(__int128, __int128) }
-        else        { DRAKEN_DEC_RESCALE_LOOP(__int128, int64_t) }
+        if (dst128) { if (phys) { DRAKEN_DEC_RESCALE_LOOP(__int128, __int128, 1) } else { DRAKEN_DEC_RESCALE_LOOP(__int128, __int128, 0) } }
+        else        { if (phys) { DRAKEN_DEC_RESCALE_LOOP(__int128, int64_t, 1) } else { DRAKEN_DEC_RESCALE_LOOP(__int128, int64_t, 0) } }
     } else {
-        if (dst128) { DRAKEN_DEC_RESCALE_LOOP(int64_t, __int128) }
-        else        { DRAKEN_DEC_RESCALE_LOOP(int64_t, int64_t) }
+        if (dst128) { if (phys) { DRAKEN_DEC_RESCALE_LOOP(int64_t, __int128, 1) } else { DRAKEN_DEC_RESCALE_LOOP(int64_t, __int128, 0) } }
+        else        { if (phys) { DRAKEN_DEC_RESCALE_LOOP(int64_t, int64_t, 1) } else { DRAKEN_DEC_RESCALE_LOOP(int64_t, int64_t, 0) } }
     }
 
     VecResult r;
@@ -974,11 +1006,7 @@ static VecResult decimal_to_decimal_core(void* ctx, const DrakenVector* v, bool 
     r.ts_unit = 0xFFu;
     r.dec_precision = c->result_precision;
     r.dec_scale = c->result_scale;
-    r.length = n; r.data_length = n;
-    r.selection = draken_identity_sel(n);
-    r.owns_selection = false;
-    r.validity = kernel_copy_validity(v);
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    cast_emit_shape(r, v, phys);
     if (any_bad) kernel_null_bad_rows(r, v, bad.data());
     return r;
 }
@@ -1009,12 +1037,12 @@ VecResult draken_cast_decimal128_to_decimal(void* ctx, const DrakenVector* v) {
 // an out-of-range value fails loud instead of wrapping — same contract as the
 // decimal→decimal rescale above. Null rows are skipped (undefined payload).
 
-#define DRAKEN_INT_TO_DEC_LOOP(SRC_T, DST_T)                                           \
+#define DRAKEN_INT_TO_DEC_LOOP(SRC_T, DST_T, PHYS)                                           \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
         DST_T* dst = reinterpret_cast<DST_T*>(out) + j;                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { *dst = 0; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { *dst = 0; continue; } \
         __int128 x = static_cast<__int128>(                                            \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]);                      \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]);                      \
         if (x > mul_lim || x < -mul_lim) {                                             \
             if (!is_safe) {                                                            \
                 draken_free(out);                                                      \
@@ -1030,8 +1058,8 @@ VecResult draken_cast_decimal128_to_decimal(void* ctx, const DrakenVector* v) {
 // Both destination tiers for one source width. `dst128` is loop-invariant, so this
 // keeps the per-row path free of any tier test (§3).
 #define DRAKEN_INT_TO_DEC_SRC(SRC_T)                                                   \
-    if (dst128) { DRAKEN_INT_TO_DEC_LOOP(SRC_T, __int128) }                            \
-    else        { DRAKEN_INT_TO_DEC_LOOP(SRC_T, int64_t) }
+    if (dst128) { if (phys) { DRAKEN_INT_TO_DEC_LOOP(SRC_T, __int128, 1) } else { DRAKEN_INT_TO_DEC_LOOP(SRC_T, __int128, 0) } }                            \
+    else        { if (phys) { DRAKEN_INT_TO_DEC_LOOP(SRC_T, int64_t, 1) } else { DRAKEN_INT_TO_DEC_LOOP(SRC_T, int64_t, 0) } }
 
 static VecResult int_to_decimal_core(void* ctx, const DrakenVector* v, const char* who) {
     if (!v) return draken_error_sentinel("Input vector is null");
@@ -1046,7 +1074,10 @@ static VecResult int_to_decimal_core(void* ctx, const DrakenVector* v, const cha
     const __int128 mul_lim = (dec_lim - 1) / factor;
 
     const bool dst128 = c->result_precision > 18u;
-    const uint32_t n = v->length;
+    const bool phys = draken_is_compressed(v);
+    const uint32_t n = phys ? v->data_length : v->length;
+    std::vector<uint8_t> cast_live;
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
     const size_t es = dst128 ? 16u : 8u;
     uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
     if (!out) return draken_error_sentinel("Allocation failed");
@@ -1077,11 +1108,7 @@ static VecResult int_to_decimal_core(void* ctx, const DrakenVector* v, const cha
     r.ts_unit = 0xFFu;
     r.dec_precision = c->result_precision;
     r.dec_scale = c->result_scale;
-    r.length = n; r.data_length = n;
-    r.selection = draken_identity_sel(n);
-    r.owns_selection = false;
-    r.validity = kernel_copy_validity(v);
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    cast_emit_shape(r, v, phys);
     if (any_bad) kernel_null_bad_rows(r, v, bad.data());
     return r;
 }
@@ -1122,7 +1149,7 @@ VecResult draken_cast_uint_to_decimal(void* ctx, const DrakenVector* v) {
 // genuinely cannot hold 1. Hoisted out of the loop (`one_fits`) because it depends
 // only on the target type, never on the row (§3).
 //
-// DENSE output, matching every other → DECIMAL kernel in this file.
+// A compressed operand converts once per value and keeps its encoding.
 VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
@@ -1139,7 +1166,10 @@ VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* v) {
         const bool one_fits = factor < dec_lim;   // `true` is the only value that can overflow
 
         const bool dst128 = c->result_precision > 18u;
-        const uint32_t n = v->length;
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = phys ? v->data_length : v->length;
+        std::vector<uint8_t> cast_live;
+        const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
         const size_t es = dst128 ? 16u : 8u;
         uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
         if (!out) return draken_error_sentinel("Allocation failed");
@@ -1151,12 +1181,14 @@ VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* v) {
 
         for (uint32_t j = 0u; j < n; ++j) {
             uint8_t* dst = out + static_cast<size_t>(j) * es;
-            // validity is indexed by LOGICAL row, the payload bit by PHYSICAL slot.
-            if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) {
+            // Rows: validity by LOGICAL row, payload bit by PHYSICAL slot. Value
+            // array: slot j itself, skipped when no valid row reads it.
+            if (phys ? (cast_lv != nullptr && cast_lv[j] == 0u)
+                     : (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u)) {
                 std::memset(dst, 0, es); continue;
             }
-            const uint32_t phys = v->selection[j];
-            const unsigned bit = (src[phys >> 3u] >> (phys & 7u)) & 1u;
+            const uint32_t at = phys ? j : v->selection[j];
+            const unsigned bit = (src[at >> 3u] >> (at & 7u)) & 1u;
             if (bit && !one_fits) {
                 if (!is_safe) {
                     draken_free(out);
@@ -1182,11 +1214,7 @@ VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* v) {
         r.ts_unit = 0xFFu;
         r.dec_precision = c->result_precision;
         r.dec_scale = c->result_scale;
-        r.length = n; r.data_length = n;
-        r.selection = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.validity = kernel_copy_validity(v);
-        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        cast_emit_shape(r, v, phys);
         if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
@@ -1215,13 +1243,14 @@ VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* v) {
 // FLOAT64: value / 10^scale in double. Inexact by construction (that is what
 // binary floating point IS); the caller asked for a float.
 //
-// DENSE output (uniform data[selection[j]] gather), matching the kernels above.
+// A compressed operand converts once per value (dead slots skipped) and keeps its
+// encoding.
 
-#define DRAKEN_DEC_TO_I64_LOOP(SRC_T)                                                  \
+#define DRAKEN_DEC_TO_I64_LOOP(SRC_T, PHYS)                                                  \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { out[j] = 0; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { out[j] = 0; continue; } \
         const __int128 x = static_cast<__int128>(                                      \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]) / factor;             \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]) / factor;             \
         if (x > INT64_LIM || x < -INT64_LIM - 1) {                                     \
             if (!is_safe) {                                                            \
                 draken_free(out);                                                      \
@@ -1247,7 +1276,10 @@ static VecResult decimal_to_int64_core(void* ctx, const DrakenVector* v, bool sr
 
     const __int128 factor = dec_pow10(static_cast<int>(c->left_scale));
     const __int128 INT64_LIM = static_cast<__int128>(INT64_MAX);
-    const uint32_t n = v->length;
+    const bool phys = draken_is_compressed(v);
+    const uint32_t n = phys ? v->data_length : v->length;
+    std::vector<uint8_t> cast_live;
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
     int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
     if (!out) return draken_error_sentinel("Allocation failed");
     const uint8_t* val_in = v->validity;
@@ -1255,30 +1287,26 @@ static VecResult decimal_to_int64_core(void* ctx, const DrakenVector* v, bool sr
     std::vector<uint8_t> bad(n > 0u ? n : 1u, 0u);
     bool any_bad = false;
 
-    if (src128) { DRAKEN_DEC_TO_I64_LOOP(__int128) }
-    else        { DRAKEN_DEC_TO_I64_LOOP(int64_t) }
+    if (src128) { if (phys) { DRAKEN_DEC_TO_I64_LOOP(__int128, 1) } else { DRAKEN_DEC_TO_I64_LOOP(__int128, 0) } }
+    else        { if (phys) { DRAKEN_DEC_TO_I64_LOOP(int64_t, 1) } else { DRAKEN_DEC_TO_I64_LOOP(int64_t, 0) } }
 
     VecResult r;
     r.data = out;
     r.type = DRAKEN_INT64;
     r.validity_embedded = 0u;
     r.ts_unit = 0xFFu;
-    r.length = n; r.data_length = n;
-    r.selection = draken_identity_sel(n);
-    r.owns_selection = false;
-    r.validity = kernel_copy_validity(v);
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    cast_emit_shape(r, v, phys);
     if (any_bad) kernel_null_bad_rows(r, v, bad.data());
     return r;
 }
 
 #undef DRAKEN_DEC_TO_I64_LOOP
 
-#define DRAKEN_DEC_TO_F64_LOOP(SRC_T)                                                  \
+#define DRAKEN_DEC_TO_F64_LOOP(SRC_T, PHYS)                                                  \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { out[j] = 0.0; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { out[j] = 0.0; continue; } \
         out[j] = static_cast<double>(                                                  \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]) / divisor;            \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]) / divisor;            \
     }
 
 static VecResult decimal_to_float64_core(void* ctx, const DrakenVector* v, bool src128) {
@@ -1294,24 +1322,23 @@ static VecResult decimal_to_float64_core(void* ctx, const DrakenVector* v, bool 
                                          (int)c->left_scale);
 
     const double divisor = static_cast<double>(dec_pow10(static_cast<int>(c->left_scale)));
-    const uint32_t n = v->length;
+    const bool phys = draken_is_compressed(v);
+    const uint32_t n = phys ? v->data_length : v->length;
+    std::vector<uint8_t> cast_live;
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
     double* out = static_cast<double*>(draken_malloc((n > 0u ? n : 1u) * sizeof(double)));
     if (!out) return draken_error_sentinel("Allocation failed");
     const uint8_t* val_in = v->validity;
 
-    if (src128) { DRAKEN_DEC_TO_F64_LOOP(__int128) }
-    else        { DRAKEN_DEC_TO_F64_LOOP(int64_t) }
+    if (src128) { if (phys) { DRAKEN_DEC_TO_F64_LOOP(__int128, 1) } else { DRAKEN_DEC_TO_F64_LOOP(__int128, 0) } }
+    else        { if (phys) { DRAKEN_DEC_TO_F64_LOOP(int64_t, 1) } else { DRAKEN_DEC_TO_F64_LOOP(int64_t, 0) } }
 
     VecResult r;
     r.data = out;
     r.type = DRAKEN_FLOAT64;
     r.validity_embedded = 0u;
     r.ts_unit = 0xFFu;
-    r.length = n; r.data_length = n;
-    r.selection = draken_identity_sel(n);
-    r.owns_selection = false;
-    r.validity = kernel_copy_validity(v);
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    cast_emit_shape(r, v, phys);
     return r;
 }
 
@@ -1442,14 +1469,14 @@ VecResult draken_cast_uint_to_float64(void* ctx, const DrakenVector* v) {
 // width. A negative decimal is not an unsigned value and raises; so does a
 // magnitude above the target width. Never wraps.
 //
-// DENSE output (uniform data[selection[j]] gather), matching the decimal kernels
-// above.
+// A compressed operand converts once per value (dead slots skipped) and keeps its
+// encoding.
 
-#define DRAKEN_DEC_TO_UINT_LOOP(SRC_T, UT)                                             \
+#define DRAKEN_DEC_TO_UINT_LOOP(SRC_T, UT, PHYS)                                             \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { out[j] = 0; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { out[j] = 0; continue; } \
         const __int128 x = static_cast<__int128>(                                      \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]) / factor;             \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]) / factor;             \
         if (x < 0 || x > static_cast<__int128>(umax)) {                                \
             if (!is_safe) {                                                            \
                 draken_free(out);                                                      \
@@ -1479,25 +1506,24 @@ static VecResult dec_to_##width_suffix##_core(void* ctx, const DrakenVector* v, 
                                          width_name, (int)c->left_scale);               \
     const __int128 factor = dec_pow10(static_cast<int>(c->left_scale));                 \
     const uint64_t umax = (UMAX);                                                       \
-    const uint32_t n = v->length;                                                       \
+    const bool phys = draken_is_compressed(v);                       \
+    const uint32_t n = phys ? v->data_length : v->length;                                \
+    std::vector<uint8_t> cast_live;                                                      \
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;           \
     UT* out = static_cast<UT*>(draken_malloc((n > 0u ? n : 1u) * sizeof(UT)));           \
     if (!out) return draken_error_sentinel("Allocation failed");                        \
     const uint8_t* val_in = v->validity;                                                \
     const bool is_safe = kernel_cast_is_safe(ctx);                                      \
     std::vector<uint8_t> bad(n > 0u ? n : 1u, 0u);                                      \
     bool any_bad = false;                                                               \
-    if (src128) { DRAKEN_DEC_TO_UINT_LOOP(__int128, UT) }                               \
-    else        { DRAKEN_DEC_TO_UINT_LOOP(int64_t, UT) }                                \
+    if (src128) { if (phys) { DRAKEN_DEC_TO_UINT_LOOP(__int128, UT, 1) } else { DRAKEN_DEC_TO_UINT_LOOP(__int128, UT, 0) } }                               \
+    else        { if (phys) { DRAKEN_DEC_TO_UINT_LOOP(int64_t, UT, 1) } else { DRAKEN_DEC_TO_UINT_LOOP(int64_t, UT, 0) } }                                \
     VecResult r;                                                                        \
     r.data = out;                                                                       \
     r.type = TAG;                                                                       \
     r.validity_embedded = 0u;                                                           \
     r.ts_unit = 0xFFu;                                                                  \
-    r.length = n; r.data_length = n;                                                    \
-    r.selection = draken_identity_sel(n);                                               \
-    r.owns_selection = false;                                                           \
-    r.validity = kernel_copy_validity(v);                                               \
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;                             \
+    cast_emit_shape(r, v, phys);                                                         \
     if (any_bad) kernel_null_bad_rows(r, v, bad.data());                                \
     return r;                                                                           \
 }                                                                                       \
@@ -1717,11 +1743,11 @@ DRAKEN_CAST_BOOL_TO_INT(draken_cast_bool_to_int32, int32_t, DRAKEN_INT32)
 // --- DECIMAL -> narrow signed integer -------------------------------------------
 // The signed twin of the DECIMAL → unsigned family: divide out the source scale
 // (binary_op_ctx.left_scale), truncating toward zero, then range check.
-#define DRAKEN_DEC_TO_INT_LOOP(SRC_T, IT)                                              \
+#define DRAKEN_DEC_TO_INT_LOOP(SRC_T, IT, PHYS)                                              \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { out[j] = 0; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { out[j] = 0; continue; } \
         const __int128 x = static_cast<__int128>(                                      \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]) / factor;             \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]) / factor;             \
         if (x < static_cast<__int128>(imin) || x > static_cast<__int128>(imax)) {       \
             if (!is_safe) {                                                            \
                 draken_free(out);                                                      \
@@ -1752,25 +1778,24 @@ static VecResult dec_to_##width_suffix##_core(void* ctx, const DrakenVector* v, 
     const __int128 factor = dec_pow10(static_cast<int>(c->left_scale));                 \
     const int64_t imin = (IMIN);                                                        \
     const int64_t imax = (IMAX);                                                        \
-    const uint32_t n = v->length;                                                       \
+    const bool phys = draken_is_compressed(v);                       \
+    const uint32_t n = phys ? v->data_length : v->length;                                \
+    std::vector<uint8_t> cast_live;                                                      \
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;           \
     IT* out = static_cast<IT*>(draken_malloc((n > 0u ? n : 1u) * sizeof(IT)));           \
     if (!out) return draken_error_sentinel("Allocation failed");                        \
     const uint8_t* val_in = v->validity;                                                \
     const bool is_safe = kernel_cast_is_safe(ctx);                                      \
     std::vector<uint8_t> bad(n > 0u ? n : 1u, 0u);                                      \
     bool any_bad = false;                                                               \
-    if (src128) { DRAKEN_DEC_TO_INT_LOOP(__int128, IT) }                                \
-    else        { DRAKEN_DEC_TO_INT_LOOP(int64_t, IT) }                                 \
+    if (src128) { if (phys) { DRAKEN_DEC_TO_INT_LOOP(__int128, IT, 1) } else { DRAKEN_DEC_TO_INT_LOOP(__int128, IT, 0) } }                                \
+    else        { if (phys) { DRAKEN_DEC_TO_INT_LOOP(int64_t, IT, 1) } else { DRAKEN_DEC_TO_INT_LOOP(int64_t, IT, 0) } }                                 \
     VecResult r;                                                                        \
     r.data = out;                                                                       \
     r.type = TAG;                                                                       \
     r.validity_embedded = 0u;                                                           \
     r.ts_unit = 0xFFu;                                                                  \
-    r.length = n; r.data_length = n;                                                    \
-    r.selection = draken_identity_sel(n);                                               \
-    r.owns_selection = false;                                                           \
-    r.validity = kernel_copy_validity(v);                                               \
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;                             \
+    cast_emit_shape(r, v, phys);                                                         \
     if (any_bad) kernel_null_bad_rows(r, v, bad.data());                                \
     return r;                                                                           \
 }                                                                                       \
@@ -1918,11 +1943,11 @@ VecResult draken_cast_float_to_float64(void* ctx, const DrakenVector* v) {
 
 // DECIMAL → FLOAT32: same shape as the FLOAT64 twin (divide out the source
 // scale), with the representability guard the narrower type needs.
-#define DRAKEN_DEC_TO_F32_LOOP(SRC_T)                                                  \
+#define DRAKEN_DEC_TO_F32_LOOP(SRC_T, PHYS)                                                  \
     for (uint32_t j = 0u; j < n; ++j) {                                                \
-        if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) { out[j] = 0.0f; continue; } \
+        if (DRAKEN_CAST_DEAD(PHYS, j)) { out[j] = 0.0f; continue; } \
         const double d = static_cast<double>(                                          \
-            static_cast<const SRC_T*>(v->data)[v->selection[j]]) / divisor;            \
+            static_cast<const SRC_T*>(v->data)[DRAKEN_CAST_IDX(PHYS, j)]) / divisor;            \
         if (!f32_representable(d)) {                                                   \
             if (!is_safe) {                                                            \
                 draken_free(out);                                                      \
@@ -1947,7 +1972,10 @@ static VecResult decimal_to_float32_core(void* ctx, const DrakenVector* v, bool 
                                          (int)c->left_scale);
 
     const double divisor = static_cast<double>(dec_pow10(static_cast<int>(c->left_scale)));
-    const uint32_t n = v->length;
+    const bool phys = draken_is_compressed(v);
+    const uint32_t n = phys ? v->data_length : v->length;
+    std::vector<uint8_t> cast_live;
+    const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
     float* out = static_cast<float*>(draken_malloc((n > 0u ? n : 1u) * sizeof(float)));
     if (!out) return draken_error_sentinel("Allocation failed");
     const uint8_t* val_in = v->validity;
@@ -1955,19 +1983,15 @@ static VecResult decimal_to_float32_core(void* ctx, const DrakenVector* v, bool 
     std::vector<uint8_t> bad(n > 0u ? n : 1u, 0u);
     bool any_bad = false;
 
-    if (src128) { DRAKEN_DEC_TO_F32_LOOP(__int128) }
-    else        { DRAKEN_DEC_TO_F32_LOOP(int64_t) }
+    if (src128) { if (phys) { DRAKEN_DEC_TO_F32_LOOP(__int128, 1) } else { DRAKEN_DEC_TO_F32_LOOP(__int128, 0) } }
+    else        { if (phys) { DRAKEN_DEC_TO_F32_LOOP(int64_t, 1) } else { DRAKEN_DEC_TO_F32_LOOP(int64_t, 0) } }
 
     VecResult r;
     r.data = out;
     r.type = DRAKEN_FLOAT32;
     r.validity_embedded = 0u;
     r.ts_unit = 0xFFu;
-    r.length = n; r.data_length = n;
-    r.selection = draken_identity_sel(n);
-    r.owns_selection = false;
-    r.validity = kernel_copy_validity(v);
-    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    cast_emit_shape(r, v, phys);
     if (any_bad) kernel_null_bad_rows(r, v, bad.data());
     return r;
 }

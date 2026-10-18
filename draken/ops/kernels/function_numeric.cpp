@@ -5,8 +5,10 @@
 //
 // Dispatched DIRECTLY from the nogil DV* VM (evaluation.pyx's BC_FUNCTION C-native
 // arm) — no Python, no nanobind, no GIL. Idiom matches function_kernels.cpp: read
-// uniformly via data[selection[i]] (buffers.h contract), return an owned dense
-// VecResult, fail LOUD with an error sentinel for anything outside contract.
+// uniformly via data[selection[i]] (buffers.h contract), return an owned VecResult,
+// fail LOUD with an error sentinel for anything outside contract. A COMPRESSED value
+// operand with a non-null constant second operand is processed once per value and
+// keeps its encoding (compressed_helpers.h).
 //
 // SHAPE: every operand is read through the uniform data[selection[i]] path, so a
 // constant-shaped literal (data_length == 1, selection = global zero vector) needs
@@ -40,6 +42,7 @@
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"            // draken_identity_sel
+#include "ops/kernels/compressed_helpers.h"   // kernel_map_compressed
 #include "ops/vec_result.h"
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx — the (absent) DECIMAL scale vehicle
 #include "ops/kernels/error_handling.h"
@@ -116,8 +119,8 @@ inline bool fn_is_ctx_free_numeric(DrakenType t) {
 // Each reader enumerates EXACTLY the types it accepts — no catch-all default that
 // reinterprets one bit pattern as another element type (a silent wrong answer).
 // Callers gate on fn_is_ctx_free_numeric above.
-inline double fn_read_double(const DrakenVector* v, uint32_t row) {
-    uint32_t phys = v->selection[row];
+// `_at` readers take a PHYSICAL index (compressed paths walk the value array).
+inline double fn_read_double_at(const DrakenVector* v, uint32_t phys) {
     switch (v->type) {
         case DRAKEN_INT8:    return static_cast<const int8_t*>(v->data)[phys];
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[phys];
@@ -132,12 +135,29 @@ inline double fn_read_double(const DrakenVector* v, uint32_t row) {
         default:             return 0.0;   // unreachable: fn_is_ctx_free_numeric gates every caller
     }
 }
+inline double fn_read_double(const DrakenVector* v, uint32_t row) {
+    return fn_read_double_at(v, v->selection[row]);
+}
 
 // DECIMAL's raw storage IS int64_t (same width as DRAKEN_INT64) — the unscaled
 // value. Callers unscale via the bind-time ctx's left_scale; this reader has no
 // business knowing about scale, it just gathers the raw int64.
 inline int64_t fn_read_decimal_raw(const DrakenVector* v, uint32_t row) {
     return static_cast<const int64_t*>(v->data)[v->selection[row]];
+}
+
+// A second operand usable by the compressed path: ONE non-null constant.
+inline bool fn_const_operand(const DrakenVector* v) {
+    return draken_is_constant(v) && v->validity == nullptr;
+}
+
+// One DECIMAL value truncated toward zero to `d` digits from scale `s` (requires
+// d >= s or s - d <= 18; the caller owns the out-of-domain error).
+inline double fn_trunc_dec_value(int64_t raw, int64_t s, int64_t d) {
+    if (d >= s) return static_cast<double>(raw) * std::pow(10.0, -static_cast<double>(s));
+    int64_t p = 1;
+    for (int64_t k = 0; k < s - d; ++k) p *= 10;
+    return static_cast<double>(raw / p) * std::pow(10.0, -static_cast<double>(d));   // `/` truncates toward zero
 }
 
 // Integer-family read for the `digits` operand of TRUNC.
@@ -246,6 +266,26 @@ VecResult draken_power(void* ctx, const DrakenVector* const* args, uint32_t narg
     if (b->length != e->length)
         return draken_error_sentinel("draken_power: operand length mismatch");
 
+    // One side a non-null constant, the other compressed: one pow per value of the
+    // compressed side, whose encoding the result keeps.
+    auto base_at = [b, b_is_decimal, b_dec_unscale](uint32_t phys) {
+        return b_is_decimal
+            ? static_cast<double>(static_cast<const int64_t*>(b->data)[phys]) * b_dec_unscale
+            : fn_read_double_at(b, phys);
+    };
+    if (fn_const_operand(e) && draken_is_compressed(b)) {
+        const double ev = fn_read_double_at(e, 0u);
+        return kernel_map_compressed<double>(b, DRAKEN_FLOAT64, [&](uint32_t j) {
+            return std::pow(base_at(j), ev);
+        });
+    }
+    if (fn_const_operand(b) && draken_is_compressed(e)) {
+        const double bv = base_at(0u);
+        return kernel_map_compressed<double>(e, DRAKEN_FLOAT64, [&](uint32_t j) {
+            return std::pow(bv, fn_read_double_at(e, j));
+        });
+    }
+
     uint32_t n = b->length;
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
     if (out == nullptr) return draken_error_sentinel("draken_power: allocation failed");
@@ -290,6 +330,17 @@ VecResult draken_log(void* ctx, const DrakenVector* const* args, uint32_t nargs)
     if (v->length != b->length)
         return draken_error_sentinel("draken_log: operand length mismatch");
 
+    // A non-null constant base over a compressed value: one log per value.
+    if (fn_const_operand(b) && draken_is_compressed(v)) {
+        const double lb = std::log(fn_read_double_at(b, 0u));
+        return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+            const double vv = v_is_decimal
+                ? static_cast<double>(static_cast<const int64_t*>(v->data)[j]) * v_dec_unscale
+                : fn_read_double_at(v, j);
+            return std::log(vv) / lb;
+        });
+    }
+
     uint32_t n = v->length;
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
     if (out == nullptr) return draken_error_sentinel("draken_log: allocation failed");
@@ -328,6 +379,29 @@ VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t narg
     if (dg != nullptr && dg->length != v->length)
         return draken_error_sentinel("draken_trunc: operand length mismatch");
 
+    // Compressed value with no digits or ONE non-null integer constant: truncate
+    // each value once; the result keeps the value's encoding. Anything else (and
+    // an out-of-domain DECIMAL step) stays on the row loop, which owns its errors.
+    int64_t cd = 0;
+    if (draken_is_compressed(v)
+            && (dg == nullptr || (fn_const_operand(dg) && fn_read_digits(dg, 0u, cd)))) {
+        if (v->type == DRAKEN_DECIMAL && ctx != nullptr) {
+            const int s = static_cast<const binary_op_ctx*>(ctx)->left_scale;
+            if (cd >= s || s - cd <= 18) {
+                const int64_t* raw = static_cast<const int64_t*>(v->data);
+                return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+                    return fn_trunc_dec_value(raw[j], s, cd);
+                });
+            }
+        } else if (fn_is_ctx_free_numeric(v->type)) {
+            const double scale = std::pow(10.0, static_cast<double>(cd));
+            return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+                const double x = fn_read_double_at(v, j);
+                return dg == nullptr ? std::trunc(x) : std::trunc(x * scale) / scale;
+            });
+        }
+    }
+
     uint32_t n = v->length;
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
     if (out == nullptr) return draken_error_sentinel("draken_trunc: allocation failed");
@@ -353,22 +427,12 @@ VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t narg
                 draken_free(out);
                 return draken_error_sentinel("draken_trunc: integer scale required");
             }
-            if (d >= s) {
-                // target scale keeps at least as many decimal places as the value
-                // has — nothing to truncate away.
-                out[i] = static_cast<double>(raw) * std::pow(10.0, -static_cast<double>(s));
-                continue;
-            }
-            int64_t steps = s - d;
-            if (steps > 18) {
+            if (d < s && s - d > 18) {
                 draken_free(out);
                 return draken_error_sentinel(
                     "draken_trunc: truncation step exceeds the int64 decimal domain");
             }
-            int64_t p = 1;
-            for (int64_t k = 0; k < steps; ++k) p *= 10;
-            int64_t q = raw / p;   // C++ integer division truncates TOWARD ZERO
-            out[i] = static_cast<double>(q) * std::pow(10.0, -static_cast<double>(d));
+            out[i] = fn_trunc_dec_value(raw, s, d);
         }
     } else {
         if (!fn_is_ctx_free_numeric(v->type)) {

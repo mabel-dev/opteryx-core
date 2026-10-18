@@ -68,6 +68,11 @@ cdef extern from *:
     """static inline void _eval_decref(PyObject* op) { Py_DECREF(op); }"""
     void _eval_decref(PyObject* op)
 
+# Canonical shape predicates (core/buffers.h) — never open-code data_length tests.
+cdef extern from "core/buffers.h" nogil:
+    int draken_is_dense(const DrakenVector* v)
+    int draken_is_compressed(const DrakenVector* v)
+
 # NodeType integer values — keep in sync with NodeType in opteryx/expression/__init__.py.
 DEF NT_UNKNOWN = 0
 DEF NT_AND = 17
@@ -229,9 +234,9 @@ cdef inline const uint8_t* _bv_bitmap_ptr(
     # Returning dv.data directly is valid ONLY when selection is identity.
     # data_length == length also admits a PERMUTATION, whose bits sit in physical
     # (not logical) order — returning dv.data would silently reorder them.
-    if dv.data_length == dv.length and (dv.flags & DRAKEN_SEL_IDENTITY):
+    if draken_is_dense(dv) and (dv.flags & DRAKEN_SEL_IDENTITY):
         return <const uint8_t*>dv.data
-    if dv.data_length == 1:
+    if draken_is_constant(dv):
         out = <uint8_t*>malloc(<size_t>nbytes)
         if out == NULL:
             raise MemoryError("_bv_bitmap_ptr: malloc failed")
@@ -345,26 +350,6 @@ cdef BoolVector _bv_not_native(
     # bool_vector_from_bits returns a nanobind Vector (not a cdef BoolVector);
     # wrap in _BoolVector so callers get a proper typed BoolVector instance.
     return _BoolVector(result_obj)
-
-
-cdef inline bint _bv_any_native(BoolVector bv, Py_ssize_t nbytes) except -1:
-    """Return True if the BoolVector has at least one True bit (ignoring nulls)."""
-    cdef DrakenVector* dv = bv.unified()
-    if dv.data_length == 1:
-        return bool((<const uint8_t*>dv.data)[0] & 1u)
-    return simd_popcount(<uint8_t*>dv.data, <size_t>nbytes) > 0
-
-
-cdef inline bint _bv_all_native(
-    BoolVector bv, Py_ssize_t nbytes, uint32_t num_rows,
-) except -1:
-    """Return True if all bits are True and there are no nulls."""
-    cdef DrakenVector* dv = bv.unified()
-    if dv.validity != NULL:
-        return False  # has nulls — not all-true
-    if dv.data_length == 1:
-        return bool((<const uint8_t*>dv.data)[0] & 1u)
-    return <uint32_t>simd_popcount(<uint8_t*>dv.data, <size_t>nbytes) == num_rows
 
 
 cdef inline void _fill_is_null_bits(
@@ -1222,9 +1207,9 @@ cdef inline uint8_t* _ensure_dense_bitmap_c(
 ) noexcept nogil:
     """Nogil core of _ensure_dense_bitmap. Returns NULL on arena-alloc failure.
 
-    Dense (data_length == length): returns dv->data directly — no copy.
-    Constant-shape (data_length == 1): expands to a dense arena allocation.
-    Dict-compressed (1 < data_length < length): scatters per-code bits dense.
+    Dense with identity selection: returns dv->data directly — no copy.
+    Constant: expands to a dense arena allocation.
+    Dict or permuted: scatters per-code bits dense.
 
     Shared by the GIL VM (via the raising wrapper below) and the nogil DV* inner
     (S2) — one source of expansion logic, no duplication.
@@ -1235,9 +1220,12 @@ cdef inline uint8_t* _ensure_dense_bitmap_c(
     cdef const uint8_t* src
     cdef uint32_t code
     cdef uint32_t r
-    if dv.data_length == dv.length:
+    # Returning dv.data is valid ONLY under an identity selection: a dense vector may
+    # carry a PERMUTATION, whose bits sit in physical order (the scatter below
+    # handles it, exactly as it handles a compressed vector).
+    if draken_is_dense(dv) and (dv.flags & DRAKEN_SEL_IDENTITY):
         return <uint8_t*>dv.data
-    if dv.data_length == 1:
+    if draken_is_constant(dv):
         fill = 0xFF if ((<uint8_t*>dv.data)[0] & 1u) else 0x00
         out = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
         if out == NULL:
@@ -1246,7 +1234,7 @@ cdef inline uint8_t* _ensure_dense_bitmap_c(
         if num_rows & 7:
             out[nbytes - 1] = fill & <uint8_t>((1u << (num_rows & 7u)) - 1u)
         return out
-    # Dict-compressed (1 < data_length < length): scatter the per-code data bits
+    # Compressed (or permuted): scatter the per-code data bits
     # into a dense per-logical-row bitmap via the uniform data[selection[i]] path
     # (same expansion as the pure-bitmap BC_LOAD_COL). Per-row validity is read
     # separately by the combinator from dv.validity, so only data is expanded.
@@ -1685,7 +1673,7 @@ cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena
             if av._dv != NULL and av._dv.length != dv.length:
                 if av._dv.type == DRAKEN_NULL:
                     return Vector(_draken_native.vector_null_from_length(dv.length))
-                if av._dv.data_length == 1:
+                if draken_is_constant(av._dv):
                     return Vector(_draken_native.vector_constant_view(av._nb, dv.length))
         return anc
     cdef void*    dp = dv.data
@@ -1693,6 +1681,25 @@ cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena
     cdef size_t   vbytes
     cdef uint8_t* vcopy
     cdef uint8_t* sa_arena
+    cdef DrakenVector dense_dv
+    cdef void* dense_data = NULL
+    cdef uint8_t* dense_valid = NULL
+    cdef void* dense_sel = NULL
+    cdef uint8_t* dense_arena = NULL
+    # Every wrap below reads `data` as ONE VALUE PER ROW. A compressed slot (a
+    # compression-preserving kernel's result: data_length values + codes) or a
+    # permuted one is gathered dense first; the arena keeps owning the original.
+    if draken_is_compressed(dv) or (dv.flags & DRAKEN_SEL_IDENTITY) == 0:
+        if _dv_copy_result_dense(dv, &dense_dv, &dense_data, &dense_valid, &dense_sel,
+                                 &dense_arena) != 0:
+            raise ValueError(f"_slot_to_pyobj: cannot densify a type {<int>dv.type} slot")
+        draken_free(dense_sel)
+        if dense_dv.type == DRAKEN_BOOL:
+            return from_decoded(dense_data, dense_valid, <size_t>dense_dv.length)
+        if dense_arena != NULL:
+            return vec_from_decoded_with_arena(dense_data, dense_arena, dense_valid,
+                                               dense_dv.length, dense_dv.type)
+        return vec_from_decoded(dense_data, dense_valid, dense_dv.length, dense_dv.type)
     # from_decoded / vec_from_decoded hand BOTH buffers to draken_vector_own_raw,
     # which takes ownership of each as an INDEPENDENT draken_malloc'd allocation
     # and frees them when the Vector dies. That holds for a dense kernel result
@@ -1922,6 +1929,7 @@ cdef int _dv_lazy_region_c(
         dv_store[sp] = compact
         dv_store[sp].length = num_rows
         dv_store[sp].selection = draken_zero_sel(num_rows)
+        dv_store[sp].flags = 0   # restamped constant: no layout hint survives the length change
         if dv_store[sp].validity != NULL:
             dv_store[sp].validity = <uint8_t*>draken_zero_validity(num_rows)
         dv_stack[sp] = &dv_store[sp]
@@ -2022,6 +2030,7 @@ cdef int c_execute_dv_inner(
             dv_store[sp] = dv_cache[i][0]               # copy the cached const DV
             dv_store[sp].length = num_rows
             dv_store[sp].selection = draken_zero_sel(num_rows)
+            dv_store[sp].flags = 0   # restamped constant: no layout hint survives the length change
             if dv_store[sp].validity != NULL:
                 dv_store[sp].validity = <uint8_t*>draken_zero_validity(num_rows)
             dv_stack[sp] = &dv_store[sp]
@@ -3765,6 +3774,7 @@ cdef Py_ssize_t _gil_run(
                 dv_store[sp] = (<Vector>scalar_obj).unified()[0]
                 dv_store[sp].length = <uint32_t>num_rows
                 dv_store[sp].selection = draken_zero_sel(<uint32_t>num_rows)
+                dv_store[sp].flags = 0   # restamped constant: no layout hint survives the length change
                 if dv_store[sp].validity != NULL:
                     dv_store[sp].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
                 dv_stack[sp] = &dv_store[sp]
@@ -3785,6 +3795,7 @@ cdef Py_ssize_t _gil_run(
                 dv_store[lz_g0] = lz_compact
                 dv_store[lz_g0].length = <uint32_t>num_rows
                 dv_store[lz_g0].selection = draken_zero_sel(<uint32_t>num_rows)
+                dv_store[lz_g0].flags = 0   # restamped constant: no layout hint survives the length change
                 if dv_store[lz_g0].validity != NULL:
                     dv_store[lz_g0].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
                 dv_stack[lz_g0] = &dv_store[lz_g0]
@@ -3888,6 +3899,7 @@ cdef Py_ssize_t _gil_run(
             dv_store[sp] = (<Vector>scalar_obj).unified()[0]
             dv_store[sp].length = <uint32_t>num_rows
             dv_store[sp].selection = draken_zero_sel(<uint32_t>num_rows)
+            dv_store[sp].flags = 0   # restamped constant: no layout hint survives the length change
             if dv_store[sp].validity != NULL:
                 dv_store[sp].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
             dv_stack[sp] = &dv_store[sp]

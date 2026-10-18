@@ -197,8 +197,8 @@ static bool draken_export_to_arrow(const DrakenVector* dv,
 
     const uint32_t   n    = dv->length;
     const DrakenType dt   = dv->type;
-    const bool is_dict    = dv->data_length > 1 && dv->data_length < dv->length;
-    const bool is_const   = dv->data_length == 1 && n > 1;
+    const bool is_dict    = draken_is_dict(dv);
+    const bool is_const   = draken_is_constant(dv) && n > 1;
     const bool is_identity = (dv->flags & DRAKEN_SEL_IDENTITY) != 0;
 
     // Dict and constant: fall back to Python path.

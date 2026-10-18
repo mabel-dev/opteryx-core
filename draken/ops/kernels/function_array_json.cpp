@@ -75,6 +75,7 @@
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"   // in_list_ctx; cast_array_ctx
 #include "ops/kernels/result_helpers.h"   // vecresult_from_string_buffers
+#include "ops/int64_compare.h"               // draken::ops::cmp_constant_bool_result / cmp_dict_bool_result
 #include "yyjson.h"
 
 namespace {
@@ -1325,6 +1326,33 @@ VecResult draken_json_path_exists(void* ctx, const DrakenVector* const* args, ui
         // One parse arena for the whole column — the same ReadPool `->` uses.
         draken::ops::ReadPool pool(draken::ops::max_slot_length(dv));
 
+        // Compressed: parse each LIVE value once and scatter the verdicts. A value
+        // that does not parse falls through to the row loop, which raises with the
+        // failing ROW's number (the error contract), exactly as before.
+        if (draken_is_compressed(dv)) {
+            std::vector<uint8_t> live;
+            const uint8_t* lv = kernel_live_slots(dv, live);
+            const uint32_t k = dv->data_length;
+            std::vector<uint8_t> db(k > 0u ? k : 1u, 0u);
+            bool parsed_all = true;
+            for (uint32_t j = 0u; j < k; ++j) {
+                if (lv != nullptr && !lv[j]) continue;
+                const DrakenStringSlot* slot = &sa->slots[j];
+                yyjson_read_err perr;
+                yyjson_doc* raw = pool.read(reinterpret_cast<const char*>(str_data(slot, sa->arena)),
+                                            static_cast<size_t>(str_length(slot)), &perr);
+                if (!raw) { parsed_all = false; break; }
+                JDocGuard guard{raw};
+                db[j] = draken::ops::nav_tokens(yyjson_doc_get_root(raw), nav) != nullptr ? 1u : 0u;
+            }
+            if (parsed_all) {
+                // `out`/`validity` above are released by the guard on this return.
+                return draken_is_constant(dv)
+                    ? draken::ops::cmp_constant_bool_result(db[0] != 0u, dv->validity, n)
+                    : draken::ops::cmp_dict_bool_result(db.data(), *dv);
+            }
+        }
+
         for (uint32_t i = 0u; i < n; ++i) {
             if (!aj_row_valid(dv, i)) continue;          // NULL row -> NULL, bit stays 0
 
@@ -1788,7 +1816,7 @@ VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t narg
             return draken_error_sentinel("draken_split: first operand must be a string");
         if (!sp_is_string(delim->type))
             return draken_error_sentinel("draken_split: delimiter must be a string");
-        if (delim->data_length != 1u)
+        if (!draken_is_constant(delim))
             return draken_error_sentinel(
                 "draken_split: delimiter must be a scalar literal "
                 "(per-row delimiter not supported natively)");
@@ -1805,7 +1833,7 @@ VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t narg
         int64_t maxsplit = -1;
         if (nargs == 3u) {
             const DrakenVector* lim = args[2];
-            if (lim->data_length != 1u)
+            if (!draken_is_constant(lim))
                 return draken_error_sentinel("draken_split: limit must be a scalar literal");
             if (lim->length > 0u && aj_row_valid(lim, 0u)) {
                 int64_t lv;
@@ -1956,7 +1984,7 @@ constexpr int64_t kGsMaxElements = 1000000;
 inline bool gs_scalar_int(const DrakenVector* v, const char* who, const char* role,
                           int64_t& out, bool& present, std::string& err) {
     if (!v) { err = std::string(who) + ": missing " + role; return false; }
-    if (v->data_length != 1u) {
+    if (!draken_is_constant(v)) {
         err = std::string(who) + ": " + role +
               " must be a constant, not a column - a per-row series is not supported";
         return false;

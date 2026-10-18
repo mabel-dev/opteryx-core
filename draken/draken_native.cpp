@@ -536,7 +536,7 @@ static VectorOwner make_varbinary_constant(nb::object value_obj, uint32_t length
 // materialise this borrowed view at the correct logical length.
 // ---------------------------------------------------------------------------
 static VectorOwner make_constant_view(const VectorOwner& src, uint32_t length) {
-    if (src.vec.data_length != 1u)
+    if (!draken_is_constant(&src.vec))
         throw std::invalid_argument(
             "vector_constant_view: source must be a constant-shape vector (data_length==1)");
     DrakenVector v = src.vec;                 // borrow the single-slot data pointer
@@ -5258,7 +5258,7 @@ static VectorOwner concat_fixed(const std::vector<const VectorOwner*>& parts,
         const DrakenVector& v = p->vec;
         const uint8_t* src = static_cast<const uint8_t*>(v.data);
         const uint32_t len = v.length;
-        if ((v.flags & DRAKEN_SEL_IDENTITY) && v.data_length == v.length) {
+        if ((v.flags & DRAKEN_SEL_IDENTITY) && draken_is_dense(&v)) {
             std::memcpy(data + static_cast<size_t>(out) * itemsize,
                         src, static_cast<size_t>(len) * itemsize);
         } else {
@@ -10385,6 +10385,39 @@ NB_MODULE(draken_native, m) {
             }
             draken_free(bldata);
             draken_free(brdata);
+
+            // ---- BOOL compressed vs constant (draken_compare_dv's value-array path) ----
+            // dict  = values [F, T] (bits 0b10), codes [1, 0, 1, 1, 0, 1]
+            // const TRUE on the right, EQ → rows reading T: 0, 2, 3, 5 → 0b101101
+            // const FALSE on the LEFT, LT (FALSE < x) → the same rows (operand order kept)
+            {
+                const uint32_t dn = 6;
+                uint8_t* dvals = static_cast<uint8_t*>(draken_malloc(8));
+                uint8_t* ctrue = static_cast<uint8_t*>(draken_malloc(8));
+                uint8_t* cfalse = static_cast<uint8_t*>(draken_malloc(8));
+                uint32_t* dcodes = static_cast<uint32_t*>(draken_malloc(dn * sizeof(uint32_t)));
+                std::memset(dvals, 0, 8); std::memset(ctrue, 0, 8); std::memset(cfalse, 0, 8);
+                dvals[0] = 0x02u; ctrue[0] = 0x01u;
+                const uint32_t codes_init[6] = {1u, 0u, 1u, 1u, 0u, 1u};
+                std::memcpy(dcodes, codes_init, sizeof(codes_init));
+                DrakenVector dv = draken_vector_from_dict(dvals, 2u, dcodes, dn, DRAKEN_BOOL, nullptr);
+                DrakenVector tv = draken_vector_from_constant(ctrue, dn, DRAKEN_BOOL, nullptr);
+                DrakenVector fv = draken_vector_from_constant(cfalse, dn, DRAKEN_BOOL, nullptr);
+                auto bits_of = [dn](const DrakenVector* res) {
+                    uint8_t got = 0u;
+                    for (uint32_t i = 0; i < dn; ++i) {
+                        const uint32_t p = res->selection[i];
+                        if ((static_cast<const uint8_t*>(res->data)[p >> 3] >> (p & 7)) & 1u)
+                            got |= static_cast<uint8_t>(1u << i);
+                    }
+                    return got;
+                };
+                DrakenVector* eqr = draken_compare_dv(0, &dv, &tv, 0, 0, dn, arena);
+                r["bool_dict_eq_const_bitmap"] = (eqr != nullptr && eqr->length == dn && bits_of(eqr) == 0x2Du);
+                DrakenVector* ltr = draken_compare_dv(4, &fv, &dv, 0, 0, dn, arena);
+                r["bool_const_lt_dict_bitmap"] = (ltr != nullptr && ltr->length == dn && bits_of(ltr) == 0x2Du);
+                draken_free(dvals); draken_free(ctrue); draken_free(cfalse); draken_free(dcodes);
+            }
 
             // ---- Unsupported type: ARRAY on either side → NULL ----
             // (BOOL used to be this step's subject; it is now a supported

@@ -89,6 +89,43 @@ static VecResult sql_format_to_string(const DrakenVector* v, const format_ctx* c
     return vecresult_from_string_buffers(out_slots, out_arena, arena_used, nullptr, k, DRAKEN_VARCHAR);
 }
 
+namespace {
+
+// The temporal casts below walk either the operand's ROWS (Phys = false: value
+// src[selection[j]], j < length) or its VALUE ARRAY (Phys = true: value src[j],
+// j < data_length — the compressed path). Fixed at compile time per loop.
+template <bool Phys, typename T>
+inline T fk_ts_at(const T* src, const uint32_t* sel, uint32_t j) {
+    if constexpr (Phys) return src[j];
+    else                return src[sel[j]];
+}
+inline uint32_t fk_ts_count(const DrakenVector* v, bool phys) {
+    return phys ? v->data_length : v->length;
+}
+
+// Finish a temporal cast's output buffer. Compressed (`phys`): `out` holds one
+// value per physical slot and the result keeps the operand's encoding. Dense:
+// one value per row, identity selection. Throws std::bad_alloc (callers run
+// under DRAKEN_KERNEL_TRY).
+inline VecResult fk_ts_emit(void* out, DrakenType type, uint8_t ts_unit,
+                            const DrakenVector* v, bool phys) {
+    VecResult r{};
+    r.data = out; r.type = type; r.validity_embedded = 0u; r.ts_unit = ts_unit;
+    if (phys) {
+        kernel_preserve_shape(r, v);
+        return r;
+    }
+    const uint32_t n = v->length;
+    r.length = n; r.data_length = n;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.validity = kernel_copy_validity(v);
+    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    return r;
+}
+
+}  // namespace
+
 extern "C" {
 
 // Gregorian calendar: days-since-epoch (1970-01-01) → (year, month, day).
@@ -163,27 +200,17 @@ VecResult draken_cast_int64_to_timestamp(void* ctx, const DrakenVector* v) {
             default: return draken_error_sentinel_fmt("cast int64->timestamp: bad unit %d", unit_code);
         }
 
-        // DENSE emit (gather through selection, identity-selection output) — a
-        // physical-domain (data_length-indexed) shape-preserving emit here
-        // caused a silent wrong-answer bug in the sibling DATE32->TIMESTAMP
-        // kernel on dict-shaped columns (see draken_cast_date32_to_timestamp).
-        const uint32_t n = v->length;
+        // Compressed: one value per physical slot, operand's encoding kept.
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = fk_ts_count(v, phys);
         const int64_t* src = static_cast<const int64_t*>(v->data);
         int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
         for (uint32_t j = 0u; j < n; ++j) {
-            int64_t raw = src[v->selection[j]];
+            int64_t raw = phys ? src[j] : src[v->selection[j]];
             out[j] = scale_days ? raw * 86'400'000'000LL : raw;
         }
-        VecResult r;
-        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
-        r.ts_unit = static_cast<uint8_t>(ts_unit);
-        r.length = n; r.data_length = n;
-        r.selection = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.validity = kernel_copy_validity(v);
-        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-        return r;
+        return fk_ts_emit(out, DRAKEN_TIMESTAMP64, static_cast<uint8_t>(ts_unit), v, phys);
     });
 }
 
@@ -207,23 +234,21 @@ VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* v) {
             default: return draken_error_sentinel_fmt("cast date32->timestamp: bad unit %d", unit_code);
         }
         const int64_t mult = 86400LL * per_sec;
-        // DENSE output: gather through selection (uniform contract) and emit an
-        // identity-selection result — unambiguous for every downstream consumer.
-        const uint32_t n = v->length;
+        // Compressed: one value per physical slot, operand's encoding kept. (A
+        // shape-preserving emit here once produced garbage: the GIL VM's arena-slot
+        // wrap, _slot_to_pyobj, read a compressed result as one value per row. It
+        // now densifies compressed slots before wrapping.)
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = fk_ts_count(v, phys);
         const int32_t* src = static_cast<const int32_t*>(v->data);
         int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
-        for (uint32_t j = 0u; j < n; ++j)
-            out[j] = static_cast<int64_t>(src[v->selection[j]]) * mult;
-        VecResult r;
-        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
-        r.ts_unit = static_cast<uint8_t>(ts_unit);
-        r.length = n; r.data_length = n;
-        r.selection = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.validity = kernel_copy_validity(v);
-        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-        return r;
+        if (phys) {
+            for (uint32_t j = 0u; j < n; ++j) out[j] = static_cast<int64_t>(src[j]) * mult;
+        } else {
+            for (uint32_t j = 0u; j < n; ++j) out[j] = static_cast<int64_t>(src[v->selection[j]]) * mult;
+        }
+        return fk_ts_emit(out, DRAKEN_TIMESTAMP64, static_cast<uint8_t>(ts_unit), v, phys);
     });
 }
 
@@ -738,50 +763,54 @@ inline int64_t fk_ts_ticks_per_sec(unsigned unit) {
 
 // Narrowing rescale with a compile-time factor (a power of 1000): the floor
 // division lowers to multiply-high + shift instead of one divide per row.
-template <int64_t F>
+
+template <int64_t F, bool Phys>
 inline void fk_ts_rescale_down(const DrakenVector* v, int64_t* out) {
     const int64_t* const src = static_cast<const int64_t*>(v->data);
     const uint32_t* const sel = v->selection;
-    const uint32_t n = v->length;
+    const uint32_t n = fk_ts_count(v, Phys);
     for (uint32_t j = 0u; j < n; ++j)
-        out[j] = ta_floor_div(src[sel[j]], F);
+        out[j] = ta_floor_div(fk_ts_at<Phys>(src, sel, j), F);
 }
 
-// out[j] = src[selection[j]] rescaled from src_ticks to dst_ticks per second. The
+// out[j] = the j-th value rescaled from src_ticks to dst_ticks per second. The
 // ratio is resolved ONCE per batch; returns false for a ratio that is not a power
 // of 1000 (unreachable for the four units).
+template <bool Phys>
 inline bool fk_ts_rescale(const DrakenVector* v, int64_t src_ticks, int64_t dst_ticks,
                           int64_t* out) {
     const int64_t* const src = static_cast<const int64_t*>(v->data);
     const uint32_t* const sel = v->selection;
-    const uint32_t n = v->length;
+    const uint32_t n = fk_ts_count(v, Phys);
     if (src_ticks < dst_ticks) {
         const int64_t mul = dst_ticks / src_ticks;
-        for (uint32_t j = 0u; j < n; ++j) out[j] = src[sel[j]] * mul;
+        for (uint32_t j = 0u; j < n; ++j) out[j] = fk_ts_at<Phys>(src, sel, j) * mul;
         return true;
     }
     switch (src_ticks / dst_ticks) {
         case 1:
-            for (uint32_t j = 0u; j < n; ++j) out[j] = src[sel[j]];
+            for (uint32_t j = 0u; j < n; ++j) out[j] = fk_ts_at<Phys>(src, sel, j);
             return true;
-        case 1000LL:       fk_ts_rescale_down<1000LL>(v, out);       return true;
-        case 1000000LL:    fk_ts_rescale_down<1000000LL>(v, out);    return true;
-        case 1000000000LL: fk_ts_rescale_down<1000000000LL>(v, out); return true;
+        case 1000LL:       fk_ts_rescale_down<1000LL, Phys>(v, out);       return true;
+        case 1000000LL:    fk_ts_rescale_down<1000000LL, Phys>(v, out);    return true;
+        case 1000000000LL: fk_ts_rescale_down<1000000000LL, Phys>(v, out); return true;
         default: return false;
     }
 }
 
 // TIMESTAMP64 ticks → DATE32 days, ticks-per-day a compile-time constant per unit.
+template <bool Phys>
 inline void fk_ts_to_date32(const DrakenVector* v, int unit_code, int32_t* out) {
     const int64_t* const src = static_cast<const int64_t*>(v->data);
     const uint32_t* const sel = v->selection;
-    const uint32_t n = v->length;
+    const uint32_t n = fk_ts_count(v, Phys);
     ta_with_ticks_per_second(unit_code, [src, sel, n, out](auto k) {
         constexpr int64_t tpd = decltype(k)::value * 86400LL;
         for (uint32_t j = 0u; j < n; ++j)
-            out[j] = static_cast<int32_t>(ta_floor_div(src[sel[j]], tpd));
+            out[j] = static_cast<int32_t>(ta_floor_div(fk_ts_at<Phys>(src, sel, j), tpd));
     });
 }
+
 }  // namespace
 }  // extern "C++"
 
@@ -792,9 +821,8 @@ inline void fk_ts_to_date32(const DrakenVector* v, int unit_code, int32_t* out) 
 // use, NOT cast_timestamp_ctx's older 1=ns..5=days numbering). Narrowing
 // (source finer than target, e.g. us->s) floors toward -inf for correctness on
 // pre-epoch timestamps; widening (source coarser, e.g. s->us) is an exact
-// multiply. Identity (src==dst) degrades to a copy. DENSE emit (gather through
-// selection) per the date32-cast lesson: shape-preserving output caused a
-// silent wrong-answer bug there.
+// multiply. Identity (src==dst) degrades to a copy. A compressed operand is
+// rescaled once per value and keeps its encoding.
 VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
@@ -809,22 +837,17 @@ VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* v) {
         const int64_t dst_ticks = fk_ts_ticks_per_sec(c->right_unit);
         const TimestampUnit dst_unit = static_cast<TimestampUnit>(c->right_unit & 3);
 
-        const uint32_t n = v->length;
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = fk_ts_count(v, phys);
         int64_t* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
-        if (!fk_ts_rescale(v, src_ticks, dst_ticks, out)) {
+        const bool ok = phys ? fk_ts_rescale<true>(v, src_ticks, dst_ticks, out)
+                             : fk_ts_rescale<false>(v, src_ticks, dst_ticks, out);
+        if (!ok) {
             draken_free(out);
             return draken_error_sentinel("cast timestamp rescale: unit ratio is not a power of 1000");
         }
-        VecResult r;
-        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
-        r.ts_unit = static_cast<uint8_t>(dst_unit);
-        r.length = n; r.data_length = n;
-        r.selection = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.validity = kernel_copy_validity(v);
-        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-        return r;
+        return fk_ts_emit(out, DRAKEN_TIMESTAMP64, static_cast<uint8_t>(dst_unit), v, phys);
     });
 }
 
@@ -836,8 +859,7 @@ VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* v) {
 // toward -inf via ta_floor_div for correctness on pre-epoch timestamps. No
 // range check: the widest unit (ns) still floors to well under INT32_MAX
 // days, so unlike the integer->DATE32 narrowings this cast cannot overflow.
-// DENSE emit (gather through selection, identity-selection output) — the same
-// dict-shape lesson as draken_cast_date32_to_timestamp above.
+// A compressed operand is converted once per value and keeps its encoding.
 VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
@@ -846,18 +868,13 @@ VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* v) {
         int unit_code = 2;  // default microseconds
         if (ctx) unit_code = static_cast<const binary_op_ctx*>(ctx)->left_unit;
 
-        const uint32_t n = v->length;
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = fk_ts_count(v, phys);
         int32_t* out = static_cast<int32_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int32_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
-        fk_ts_to_date32(v, unit_code, out);
-        VecResult r;
-        r.data = out; r.type = DRAKEN_DATE32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
-        r.length = n; r.data_length = n;
-        r.selection = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.validity = kernel_copy_validity(v);
-        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-        return r;
+        if (phys) fk_ts_to_date32<true>(v, unit_code, out);
+        else      fk_ts_to_date32<false>(v, unit_code, out);
+        return fk_ts_emit(out, DRAKEN_DATE32, 0xFFu, v, phys);
     });
 }
 

@@ -104,9 +104,9 @@ cpdef BoolVector vector_like(
 ):
     """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs."""
     cdef DrakenVector* puv = pattern.unified()
-    if puv.data_length != 1:
+    if not draken_is_constant(puv):
         raise ValueError(
-            "vector_like: pattern must be a single value (data_length == 1)"
+            "vector_like: pattern must be a single value (a constant)"
         )
     cdef DrakenStringArena* parena = <DrakenStringArena*>puv.data
     cdef uint32_t* psel = <uint32_t*>puv.selection

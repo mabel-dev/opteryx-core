@@ -780,10 +780,8 @@ extensions = [
     # when the extension is named with `.__init__`.
     #
     # Built as C++ because evaluation.pyx cimports CompiledExpression from the
-    # opteryx/compiled/expression/ C++ arena header.
-    # opteryx.expression.evaluator._impl has been merged into _operators.
-    # All evaluator leaf .pyx files are now textually included by _operators.pyx
-    # so operators can call bytecode VM functions directly at C level.
+    # opteryx/compiled/expression/ C++ arena header. (The Extension itself is
+    # declared further down, next to the other evaluator modules.)
     *[
         Extension(
             _name,

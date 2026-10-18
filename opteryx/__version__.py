@@ -5,7 +5,7 @@ __build__ = 3704
 __author__ = "@joocer"
 __version__ = "0.9.172"
 __lib__ = "opteryx-core"
-__build_date__ = "2026-10-18T20:17:24.415168+00:00Z"
+__build_date__ = "2026-10-18T20:22:47.238805+00:00Z"
 
 # Store the version here so:
 # 1) we don't load dependencies by storing it in __init__.py

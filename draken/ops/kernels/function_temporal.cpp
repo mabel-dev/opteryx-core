@@ -258,6 +258,21 @@ VecResult ft_dense_result(const DrakenVector* validity_of, T* out, uint32_t n, D
     return r;
 }
 
+// Result for `out` holding one value per PHYSICAL slot of a compressed operand `v`
+// (the compressed path): the operand's encoding is kept. Throws std::bad_alloc
+// (every caller runs inside a try).
+inline VecResult ft_shaped_result(const DrakenVector* v, void* out, DrakenType t, uint8_t ts_unit) {
+    VecResult r{};
+    r.data = out; r.type = t; r.validity_embedded = 0u; r.ts_unit = ts_unit;
+    try {
+        kernel_preserve_shape(r, v);
+    } catch (...) {
+        draken_free(out);
+        throw;
+    }
+    return r;
+}
+
 // Row `i` is null in the two-operand result if either operand is null at row i.
 // Returns nullptr (all-valid) only when NEITHER operand carries a validity bitmap.
 uint8_t* ft_merge_validity(const DrakenVector* a, const DrakenVector* b, uint32_t n) {
@@ -291,6 +306,26 @@ void ft_gather_diff_operand(const DrakenVector* v, uint32_t n, int ctx_unit,
         const int64_t* d = static_cast<const int64_t*>(v->data);
         for (uint32_t i = 0u; i < n; ++i)
             out_flat[i] = ft_row_valid(v, i) ? d[v->selection[i]] : 0;
+        *out_unit_code = ctx_unit;
+    } else {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "%s: operand must be DATE32 or TIMESTAMP64", who);
+        throw std::invalid_argument(msg);
+    }
+}
+
+// ft_gather_diff_operand over the first `count` PHYSICAL values (the compressed
+// path; no null test — validity is carried by the result's shape).
+void ft_gather_diff_values(const DrakenVector* v, uint32_t count, int ctx_unit,
+                           int64_t* out_flat, int* out_unit_code, const char* who) {
+    static constexpr int64_t US_PER_DAY = 86400000000LL;
+    if (v->type == DRAKEN_DATE32) {
+        const int32_t* d = static_cast<const int32_t*>(v->data);
+        for (uint32_t j = 0u; j < count; ++j) out_flat[j] = static_cast<int64_t>(d[j]) * US_PER_DAY;
+        *out_unit_code = 2;
+    } else if (v->type == DRAKEN_TIMESTAMP64) {
+        const int64_t* d = static_cast<const int64_t*>(v->data);
+        for (uint32_t j = 0u; j < count; ++j) out_flat[j] = d[j];
         *out_unit_code = ctx_unit;
     } else {
         char msg[128];
@@ -335,6 +370,34 @@ VecResult ft_date_diff_impl(void* ctx, const DrakenVector* const* args, uint32_t
     if (start->length != end->length)
         return draken_error_sentinel_fmt(
             "%s: start length %u != end length %u", who, start->length, end->length);
+
+    // One side a non-null constant, the other compressed: diff each value of the
+    // compressed side once (against the constant, repeated); the result keeps the
+    // compressed side's encoding.
+    const bool start_const = draken_is_constant(start) && start->validity == nullptr;
+    const bool end_const   = draken_is_constant(end) && end->validity == nullptr;
+    const DrakenVector* xv = nullptr;
+    if (end_const && draken_is_compressed(start)) xv = start;
+    else if (start_const && draken_is_compressed(end)) xv = end;
+    if (xv != nullptr) {
+        const uint32_t k = xv->data_length;
+        const size_t ksz = (k > 0u ? k : 1u) * sizeof(int64_t);
+        auto* s_flat = static_cast<int64_t*>(draken_malloc(ksz));
+        auto* e_flat = static_cast<int64_t*>(draken_malloc(ksz));
+        auto* out    = static_cast<int64_t*>(draken_malloc(ksz));
+        struct KGuard { int64_t* s; int64_t* e; int64_t* o;
+            ~KGuard() { if (s) draken_free(s); if (e) draken_free(e); if (o) draken_free(o); } } kg{s_flat, e_flat, out};
+        if (!s_flat || !e_flat || !out)
+            return draken_error_sentinel_fmt("%s: allocation failed", who);
+        int ucs = 2, uce = 2;
+        ft_gather_diff_values(start, xv == start ? k : 1u, c->left_unit, s_flat, &ucs, who);
+        ft_gather_diff_values(end, xv == end ? k : 1u, c->right_unit, e_flat, &uce, who);
+        if (xv == start) { for (uint32_t j = 1u; j < k; ++j) e_flat[j] = e_flat[0]; }
+        else             { for (uint32_t j = 1u; j < k; ++j) s_flat[j] = s_flat[0]; }
+        date_diff_batch(s_flat, e_flat, k, ucs, uce, c->op_code, out);
+        kg.o = nullptr;
+        return ft_shaped_result(xv, out, DRAKEN_INT64, 0xFFu);
+    }
 
     const uint32_t n = start->length;
     const size_t flat_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
@@ -399,11 +462,28 @@ VecResult draken_unixtime(void* ctx, const DrakenVector* const* args, uint32_t n
   try {
         if (nargs != 1) return draken_error_sentinel("draken_unixtime: expected 1 argument");
         const DrakenVector* v = args[0];
-        const uint32_t n = v->length;
+        // Compressed: convert each of the data_length values once (`phys`), and the
+        // result keeps the operand's encoding.
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = phys ? v->data_length : v->length;
         auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("draken_unixtime: allocation failed");
 
-        if (v->type == DRAKEN_TIMESTAMP64) {
+        if (v->type == DRAKEN_TIMESTAMP64 && phys) {
+            if (ctx == nullptr) { draken_free(out); return draken_error_sentinel("draken_unixtime: missing ctx (unit)"); }
+            const auto* c = static_cast<const binary_op_ctx*>(ctx);
+            const int64_t* src = static_cast<const int64_t*>(v->data);
+            ta_with_ticks_per_second(c->left_unit, [&](auto k) {
+                constexpr int64_t tps = decltype(k)::value;
+                int64_t* const o = out;
+                const int64_t* const s = src;
+                const uint32_t cnt = n;
+                for (uint32_t j = 0u; j < cnt; ++j) o[j] = ta_floor_div(s[j], tps);
+            });
+        } else if (v->type == DRAKEN_DATE32 && phys) {
+            const int32_t* src = static_cast<const int32_t*>(v->data);
+            for (uint32_t j = 0u; j < n; ++j) out[j] = static_cast<int64_t>(src[j]) * 86400LL;
+        } else if (v->type == DRAKEN_TIMESTAMP64) {
             if (ctx == nullptr) { draken_free(out); return draken_error_sentinel("draken_unixtime: missing ctx (unit)"); }
             const auto* c = static_cast<const binary_op_ctx*>(ctx);
             const int64_t* src = static_cast<const int64_t*>(v->data);
@@ -427,6 +507,7 @@ VecResult draken_unixtime(void* ctx, const DrakenVector* const* args, uint32_t n
                 "draken_unixtime: expected TIMESTAMP64 or DATE32, got DrakenType %d",
                 static_cast<int>(v->type));
         }
+        if (phys) return ft_shaped_result(v, out, DRAKEN_INT64, 0xFFu);
         return ft_dense_result(v, out, n, DRAKEN_INT64);
     } catch (const std::exception& e) {
         return draken_error_sentinel(e.what());
@@ -476,7 +557,10 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
         // DATE32 has no logical unit; work in microseconds and emit TIMESTAMP64(us).
         const int     out_unit = is_date32 ? 2 : static_cast<int>(c->ts_unit);
 
-        const uint32_t n = v->length;
+        // Compressed: bucket each of the data_length values once (`phys`); the
+        // result keeps the operand's encoding.
+        const bool phys = draken_is_compressed(v);
+        const uint32_t n = phys ? v->data_length : v->length;
         auto* out = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("draken_time_bucket: allocation failed");
 
@@ -512,7 +596,13 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
             // Gather to flat int64 ticks in `out_unit`, promoting DATE32 days→ticks via
             // the uniform data[selection[i]] access; null rows produce 0 (validity is
             // carried by ft_dense_result, so the placeholder value is never read).
-            if (is_date32) {
+            if (phys && is_date32) {
+                const int32_t* src = static_cast<const int32_t*>(vec->data);
+                for (uint32_t i = 0u; i < rows; ++i) o[i] = static_cast<int64_t>(src[i]) * tpd;
+            } else if (phys) {
+                const int64_t* src = static_cast<const int64_t*>(vec->data);
+                for (uint32_t i = 0u; i < rows; ++i) o[i] = src[i];
+            } else if (is_date32) {
                 const int32_t* src = static_cast<const int32_t*>(vec->data);
                 for (uint32_t i = 0u; i < rows; ++i)
                     o[i] = ft_row_valid(vec, i) ? static_cast<int64_t>(src[sel[i]]) * tpd : 0;
@@ -579,6 +669,7 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
             }
         });
 
+        if (phys) return ft_shaped_result(v, out, DRAKEN_TIMESTAMP64, static_cast<uint8_t>(out_unit));
         VecResult r = ft_dense_result(v, out, n, DRAKEN_TIMESTAMP64);
         if (r.data != nullptr) r.ts_unit = static_cast<uint8_t>(out_unit);
         return r;
@@ -617,7 +708,10 @@ VecResult draken_date_format(void* ctx, const DrakenVector* const* args, uint32_
         const bool is_date32 = (v->type == DRAKEN_DATE32);
         const int  unit_code = is_date32 ? 2 : c->ts_unit;
         const int64_t tps    = ta_ticks_per_second(unit_code);
-        const uint32_t n     = v->length;
+        // Compressed: format each of the data_length values once (`phys`) into a
+        // value block; the result keeps the operand's encoding.
+        const bool phys      = draken_is_compressed(v);
+        const uint32_t n     = phys ? v->data_length : v->length;
 
         size_t max_row_len = 0;
         const std::vector<TfToken> prog = tf_compile(fmt.c_str(), &max_row_len);
@@ -638,20 +732,25 @@ VecResult draken_date_format(void* ctx, const DrakenVector* const* args, uint32_
             ~Guard() { if (s) draken_free(s); if (a) draken_free(a); if (v) draken_free(v); }
         } g{slots, arena, nullptr};
 
-        g.v = kernel_copy_validity(v);
+        g.v = phys ? nullptr : kernel_copy_validity(v);   // compressed: carried per row by the shape
         size_t arena_used = 0u;
+        // Compressed: a slot no valid row reads is not formatted (its value may be a
+        // NULL row's placeholder).
+        std::vector<uint8_t> live;
+        const uint8_t* lv = phys ? kernel_live_slots(v, live) : nullptr;
 
         for (uint32_t i = 0u; i < n; ++i) {
-            if (!ft_row_valid(v, i)) { str_init_null(&slots[i]); continue; }
+            if (phys ? (lv != nullptr && !lv[i]) : !ft_row_valid(v, i)) { str_init_null(&slots[i]); continue; }
+            const uint32_t at = phys ? i : v->selection[i];
 
             int64_t days, secs_in_day;
             if (is_date32) {
                 const int32_t* src = static_cast<const int32_t*>(v->data);
-                days        = static_cast<int64_t>(src[v->selection[i]]);
+                days        = static_cast<int64_t>(src[at]);
                 secs_in_day = 0;
             } else {
                 const int64_t* src = static_cast<const int64_t*>(v->data);
-                const int64_t  sec = ta_floor_div(src[v->selection[i]], tps);
+                const int64_t  sec = ta_floor_div(src[at], tps);
                 days        = ta_floor_div(sec, 86400LL);
                 secs_in_day = sec - days * 86400LL;
             }
@@ -693,7 +792,17 @@ VecResult draken_date_format(void* ctx, const DrakenVector* const* args, uint32_
         uint8_t*          out_arena = g.a;
         g.s = nullptr; g.a = nullptr; g.v = nullptr;
 
-        return vecresult_from_string_buffers(out_slots, out_arena, arena_used, validity, n, DRAKEN_VARCHAR);
+        VecResult r = vecresult_from_string_buffers(out_slots, out_arena, arena_used, validity, n, DRAKEN_VARCHAR);
+        if (phys && r.data != nullptr) {
+            try {
+                kernel_preserve_shape(r, v);   // per-row validity: a SEPARATE buffer
+            } catch (...) {
+                draken_free(r.data);
+                throw;
+            }
+            r.validity_embedded = 0u;
+        }
+        return r;
     } catch (const std::exception& e) {
         return draken_error_sentinel(e.what());
     } catch (...) {

@@ -1123,10 +1123,12 @@ private:
     // for an ARRAY's child) and ARRAY elements per row. Zero before the first batch.
     std::vector<double> arena_per_unit_;
     std::vector<double> elems_per_row_;
-    std::string json_;               // the JSON column value being rendered (one at a time)
-    std::string* out_ = &json_;      // where J_* ops write: json_, or a J_SLOT's slot
-    std::vector<std::vector<std::string>> frames_;  // J_REC_BEGIN .. J_REC_END, nested
+    // Where J_* ops write: the JSON column's own string arena (R_JSON renders a value
+    // in place, no intermediate copy), or a J_SLOT's slot.
+    draken::AppendBuffer<uint8_t>* out_ = nullptr;
+    std::vector<std::vector<draken::AppendBuffer<uint8_t>>> frames_;  // J_REC_BEGIN .. J_REC_END, nested
     size_t depth_ = 0;
+    std::string tmp_;                // J_DEC_*: the one piece still formatted through std::string
 
     static constexpr double kHeadroom = 1.1;
 
@@ -1195,14 +1197,45 @@ private:
         draken_build_string_slot(&s.slots[r], b, static_cast<uint32_t>(n), static_cast<uint32_t>(off));
     }
 
+    // ── JSON text, written straight into out_ ──
+    // A piece of known size is copied inline (rugo_text::copy_short: no libc call
+    // for short pieces). A piece of bounded size claims its worst case, writes, and
+    // gives back what it did not use.
+    void put(const char* s, size_t n) {
+        rugo_text::copy_short(reinterpret_cast<char*>(out_->extend(n)), s, n);
+    }
+    void put(const std::string& s) { put(s.data(), s.size()); }
+    void put(char ch) { out_->push_back(static_cast<uint8_t>(ch)); }
+    template <typename W>
+    void put_bounded(size_t worst, W&& write) {
+        char* d = reinterpret_cast<char*>(out_->extend(worst));
+        char* e = write(d);
+        out_->resize_uninit(out_->size() - worst + static_cast<size_t>(e - d));
+    }
+    void put_json_string(const uint8_t* p, uint64_t n) {
+        const char* s = reinterpret_cast<const char*>(p);
+        const size_t clean = rugo_text::json_scan_clean(s, 0, n);
+        put_bounded(rugo_text::json_string_worst(n, clean),
+                    [&](char* d) { return rugo_text::wr_json_string(d, s, n, clean); });
+    }
+    void put_uuid_quoted(const uint8_t* u) {
+        put_bounded(38, [&](char* d) {
+            d[0] = '"';
+            draken::ops::uuid_format(u, d + 1);
+            d[37] = '"';
+            return d + 38;
+        });
+    }
+
     void b64(const uint8_t* p, uint64_t n) {
-        std::string& o = *out_;
-        o.push_back('"');
-        const size_t at = o.size();
-        o.resize(at + b64_encoded_size(n));  // includes bintob64's trailing NUL
-        bintob64(&o[at], p, n);
-        o.resize(at + b64_encoded_size(n) - 1);
-        o.push_back('"');
+        // b64_encoded_size counts bintob64's trailing NUL, which the closing quote overwrites.
+        const size_t sz = b64_encoded_size(n);
+        put_bounded(sz + 1, [&](char* d) {
+            d[0] = '"';
+            bintob64(d + 1, p, n);
+            d[sz] = '"';
+            return d + sz + 1;
+        });
     }
 
     // Skip an array's or map's blocks whose items are one simple value (`one` skips
@@ -1331,10 +1364,21 @@ private:
                     break;
                 }
                 case R_JSON: {
-                    json_.clear();
-                    out_ = &json_;
+                    // Rendered at the end of the column's arena; a short value moves
+                    // into its inline slot and the arena gives the bytes back.
+                    Sink& s = sinks_[op->col];
+                    const size_t at = s.arena.size();
+                    out_ = &s.arena;
                     run(op + 1, op + 1 + op->sub, c, r);
-                    put_bytes(sinks_[op->col], r, reinterpret_cast<const uint8_t*>(json_.data()), json_.size());
+                    const size_t n = s.arena.size() - at;
+                    if (n <= STR_INLINE_MAX) {
+                        str_init_inline(&s.slots[r], s.arena.data() + at, static_cast<uint32_t>(n));
+                        s.arena.resize_uninit(at);
+                    } else {
+                        if (s.arena.size() > UINT32_MAX) fail("a batch's string bytes exceed 4 GiB");
+                        draken_build_string_slot(&s.slots[r], s.arena.data() + at, static_cast<uint32_t>(n),
+                                                 static_cast<uint32_t>(at));
+                    }
                     op += op->sub;
                     break;
                 }
@@ -1399,25 +1443,36 @@ private:
                     break;
                 }
                 // ── JSON ──
-                case J_LIT: *out_ += p_.lits[op->arg]; break;
-                case J_BOOL: *out_ += read_bool(c) ? "true" : "false"; break;
-                case J_INT: rugo_text::fmt_int64(*out_, read_int(c)); break;
-                case J_LONG: rugo_text::fmt_int64(*out_, read_long(c)); break;
+                case J_LIT: put(p_.lits[op->arg]); break;
+                case J_BOOL:
+                    if (read_bool(c)) put("true", 4);
+                    else put("false", 5);
+                    break;
+                case J_INT: {
+                    const int64_t v = read_int(c);
+                    put_bounded(20, [&](char* d) { return rugo_text::wr_int64(d, v); });
+                    break;
+                }
+                case J_LONG: {
+                    const int64_t v = read_long(c);
+                    put_bounded(20, [&](char* d) { return rugo_text::wr_int64(d, v); });
+                    break;
+                }
                 case J_FLOAT: {
                     const float v = draken::ops::fp_canon(read_float(c));
-                    if (rugo_text::double_is_nan_or_inf(static_cast<double>(v))) *out_ += "null";
-                    else rugo_text::fmt_float(*out_, v);
+                    if (rugo_text::double_is_nan_or_inf(static_cast<double>(v))) put("null", 4);
+                    else put_bounded(64, [&](char* d) { return rugo_text::wr_float(d, v); });
                     break;
                 }
                 case J_DOUBLE: {
                     const double v = draken::ops::fp_canon(read_double(c));
-                    if (rugo_text::double_is_nan_or_inf(v)) *out_ += "null";
-                    else rugo_text::fmt_double(*out_, v);
+                    if (rugo_text::double_is_nan_or_inf(v)) put("null", 4);
+                    else put_bounded(64, [&](char* d) { return rugo_text::wr_double(d, v); });
                     break;
                 }
                 case J_STR: {
                     const uint64_t n = read_length(c);
-                    rugo_text::json_string(*out_, reinterpret_cast<const char*>(c.p), n);
+                    put_json_string(c.p, n);
                     c.p += n;
                     break;
                 }
@@ -1431,17 +1486,48 @@ private:
                 case J_ENUM: {
                     const int32_t i = read_int(c);
                     if (i < 0 || static_cast<uint32_t>(i) >= op->col) fail("an enum index is out of range");
-                    *out_ += p_.lits[op->arg + static_cast<uint32_t>(i)];
+                    put(p_.lits[op->arg + static_cast<uint32_t>(i)]);
                     break;
                 }
-                case J_DATE: rugo_text::fmt_date_quoted(*out_, read_int(c)); break;
-                case J_TIME_MS: rugo_text::fmt_time_quoted(*out_, read_int(c), rugo_text::U_MS); break;
-                case J_TIME_US: rugo_text::fmt_time_quoted(*out_, read_long(c), rugo_text::U_US); break;
-                case J_TS_MS: rugo_text::fmt_timestamp_quoted(*out_, read_long(c), rugo_text::U_MS); break;
-                case J_TS_US: rugo_text::fmt_timestamp_quoted(*out_, read_long(c), rugo_text::U_US); break;
+                case J_DATE: {
+                    const int32_t v = read_int(c);
+                    put_bounded(rugo_text::kDateText + 2, [&](char* d) {
+                        d[0] = '"';
+                        char* e = rugo_text::wr_date(d + 1, v);
+                        *e++ = '"';
+                        return e;
+                    });
+                    break;
+                }
+                case J_TIME_MS:
+                case J_TIME_US: {
+                    const int64_t v = op->code == J_TIME_MS ? read_int(c) : read_long(c);
+                    const int unit = op->code == J_TIME_MS ? rugo_text::U_MS : rugo_text::U_US;
+                    put_bounded(rugo_text::kTimeText + 2, [&](char* d) {
+                        d[0] = '"';
+                        char* e = rugo_text::wr_time(d + 1, v, unit);
+                        *e++ = '"';
+                        return e;
+                    });
+                    break;
+                }
+                case J_TS_MS:
+                case J_TS_US: {
+                    const int64_t v = read_long(c);
+                    const int unit = op->code == J_TS_MS ? rugo_text::U_MS : rugo_text::U_US;
+                    put_bounded(rugo_text::kTimestampText + 2, [&](char* d) {
+                        d[0] = '"';
+                        char* e = rugo_text::wr_timestamp(d + 1, v, unit);
+                        *e++ = '"';
+                        return e;
+                    });
+                    break;
+                }
                 case J_DEC_BYTES: {
                     const uint64_t n = read_length(c);
-                    rugo_text::fmt_decimal(*out_, checked_decimal(c.p, n, op->col), static_cast<int>(op->sub));
+                    tmp_.clear();
+                    rugo_text::fmt_decimal(tmp_, checked_decimal(c.p, n, op->col), static_cast<int>(op->sub));
+                    put(tmp_);
                     c.p += n;
                     break;
                 }
@@ -1452,18 +1538,20 @@ private:
                     if (!draken::ops::uuid_parse(reinterpret_cast<const char*>(c.p), n, u))
                         fail("a uuid value is not 8-4-4-4-12 hex digits: '" +
                              std::string(reinterpret_cast<const char*>(c.p), n < 48 ? n : 48) + "'");
-                    rugo_text::fmt_uuid_quoted(*out_, u);
+                    put_uuid_quoted(u);
                     c.p += n;
                     break;
                 }
                 case J_UUID_FIXED:
                     need(c, 16);
-                    rugo_text::fmt_uuid_quoted(*out_, c.p);
+                    put_uuid_quoted(c.p);
                     c.p += 16;
                     break;
                 case J_DEC_FIXED:
                     need(c, op->arg);
-                    rugo_text::fmt_decimal(*out_, checked_decimal(c.p, op->arg, op->col), static_cast<int>(op->sub));
+                    tmp_.clear();
+                    rugo_text::fmt_decimal(tmp_, checked_decimal(c.p, op->arg, op->col), static_cast<int>(op->sub));
+                    put(tmp_);
                     c.p += op->arg;
                     break;
                 case J_ARRAY:
@@ -1471,32 +1559,32 @@ private:
                     const bool is_map = op->code == J_MAP;
                     const Op* item = op + 1;
                     const Op* item_end = item + op->sub;
-                    out_->push_back(is_map ? '{' : '[');
+                    put(is_map ? '{' : '[');
                     bool first = true;
                     for (;;) {
                         int64_t n = read_long(c);
                         if (n == 0) break;
                         if (n < 0) { n = -n; read_long(c); }  // the byte size; items are rendered anyway
                         for (int64_t i = 0; i < n; ++i) {
-                            if (!first) out_->push_back(',');
+                            if (!first) put(',');
                             first = false;
                             if (is_map) {
                                 const uint64_t kn = read_length(c);
-                                rugo_text::json_string(*out_, reinterpret_cast<const char*>(c.p), kn);
+                                put_json_string(c.p, kn);
                                 c.p += kn;
-                                out_->push_back(':');
+                                put(':');
                             }
                             run(item, item_end, c, r);
                         }
                     }
-                    out_->push_back(is_map ? '}' : ']');
+                    put(is_map ? '}' : ']');
                     op += op->sub;
                     break;
                 }
                 case J_OPT: {
                     const int64_t b = read_long(c);
                     if (b == op->null_branch) {
-                        *out_ += "null";
+                        put("null", 4);
                         op += op->sub;
                     } else if (b != 1 - op->null_branch) {
                         fail("a union branch index is out of range");
@@ -1505,13 +1593,13 @@ private:
                 }
                 case J_REC_BEGIN: {
                     if (frames_.size() <= depth_) frames_.emplace_back();
-                    std::vector<std::string>& f = frames_[depth_++];
+                    std::vector<draken::AppendBuffer<uint8_t>>& f = frames_[depth_++];
                     f.resize(op->arg);
-                    for (std::string& s : f) s.clear();
+                    for (draken::AppendBuffer<uint8_t>& s : f) s.clear();
                     break;
                 }
                 case J_SLOT: {
-                    std::string* saved = out_;
+                    draken::AppendBuffer<uint8_t>* saved = out_;
                     out_ = &frames_[depth_ - 1][op->arg];
                     run(op + 1, op + 1 + op->sub, c, r);
                     out_ = saved;
@@ -1519,14 +1607,19 @@ private:
                     break;
                 }
                 case J_REC_END: {
-                    const std::vector<std::string>& f = frames_[depth_ - 1];
+                    const std::vector<draken::AppendBuffer<uint8_t>>& f = frames_[depth_ - 1];
                     const int64_t* t = p_.rec_table.data() + op->arg;
                     for (uint32_t i = 0; i < op->col; ++i) {
-                        *out_ += p_.lits[static_cast<size_t>(t[2 * i])];
+                        put(p_.lits[static_cast<size_t>(t[2 * i])]);
                         const int64_t src = t[2 * i + 1];
-                        *out_ += src >= 0 ? f[static_cast<size_t>(src)] : p_.lits[static_cast<size_t>(~src)];
+                        if (src >= 0) {
+                            const draken::AppendBuffer<uint8_t>& slot = f[static_cast<size_t>(src)];
+                            put(reinterpret_cast<const char*>(slot.data()), slot.size());
+                        } else {
+                            put(p_.lits[static_cast<size_t>(~src)]);
+                        }
                     }
-                    *out_ += '}';
+                    put('}');
                     --depth_;
                     break;
                 }

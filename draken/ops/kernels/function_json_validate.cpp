@@ -29,6 +29,7 @@
 #include "ops/json_validate.h"
 #include "ops/vec_result.h"
 #include "ops/kernels/error_handling.h"
+#include "ops/int64_compare.h"               // draken::ops::cmp_dict_scatter
 
 namespace {
 
@@ -73,6 +74,22 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
 
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
 
+    if (draken_is_compressed(v)) {
+        // Compressed: parse each value once, scatter the verdicts to the valid rows.
+        // A NULL row has no document — not well-formed — so it answers `!want`.
+        const uint32_t k = v->data_length;
+        std::vector<uint8_t> db(k > 0u ? k : 1u, 0u);
+        for (uint32_t j = 0u; j < k; ++j) {
+            const DrakenStringSlot* slot = &sa->slots[j];
+            db[j] = draken::ops::json_is_wellformed(str_data(slot, sa->arena), str_length(slot),
+                                                    shape, pool) == want ? 1u : 0u;
+        }
+        draken::ops::cmp_dict_scatter(db.data(), v->selection, v->validity, out, n);
+        if (v->validity != nullptr && !want) {
+            for (size_t b = 0u; b < nb; ++b) out[b] |= static_cast<uint8_t>(~v->validity[b]);
+            if ((n & 7u) != 0u) out[nb - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        }
+    } else {
     for (uint32_t i = 0u; i < n; ++i) {
         // A NULL row has no document, so it is not well-formed — `matched` stays
         // false and the polarity below turns that into the definite answer.
@@ -83,6 +100,7 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
                                                       str_length(slot), shape, pool);
         }
         if (matched == want) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+    }
     }
 
     VecResult r{};

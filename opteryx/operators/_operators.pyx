@@ -4408,10 +4408,10 @@ def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
 
 
 # -----------------------------------------------------------------------------
-# Expression evaluator — included here so all operator modules can call
-# evaluation functions directly at C level (no .so boundary, no Python dispatch).
-# Previously compiled as opteryx.expression.evaluator._impl; now part of this
-# unit. opteryx/expression/evaluator/__init__.py re-exports from here.
+# Operator-code constants for this unit. The expression evaluator itself (the
+# bytecode VM) is compiled as opteryx.expression.evaluator._impl (evaluation.pyx is
+# included by _impl.pyx), and opteryx/expression/evaluator/__init__.py re-exports
+# from there; this unit cimports the VM entry points it calls.
 # -----------------------------------------------------------------------------
 
 # Operator codes — integer identifiers for operator strings stamped on Nodes.

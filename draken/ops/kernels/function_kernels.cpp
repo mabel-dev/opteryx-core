@@ -7,8 +7,10 @@
 // C-native arm) — no Python, no nanobind, no GIL. Every kernel:
 //   - reads inputs uniformly via data[selection[i]] (buffers.h contract; string
 //     inputs resolve through the canonical DrakenStringArena header in `data`),
-//   - returns an owned, dense VecResult (fixed buffers via draken_malloc, string
-//     results via the consolidated-block helpers in result_helpers.h),
+//   - returns an owned VecResult (fixed buffers via draken_malloc, string results
+//     via the consolidated-block helpers in result_helpers.h); a COMPRESSED operand
+//     is processed over its value array and keeps its encoding where the result is
+//     a pure function of one value (compressed_helpers.h),
 //   - fails LOUD with an error sentinel for anything outside its contract — never
 //     a silent wrong answer.
 //
@@ -20,7 +22,7 @@
 // str.upper() semantics.
 
 #include <algorithm>   // std::binary_search — draken_in_list
-#include <vector>      // dict-shape per-unique staging (draken_length)
+#include <vector>      // per-value staging
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -30,7 +32,9 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"     // draken_identity_sel
 #include "ops/vec_result.h"
+#include "ops/int64_compare.h"        // draken::ops::cmp_dict_scatter — draken_in_list key scatter
 #include "ops/kernels/result_helpers.h"
+#include "ops/kernels/compressed_helpers.h"   // kernel_map_compressed / kernel_map_compressed_live / kernel_pred_compressed
 #include "ops/kernels/kernel_context.h"  // binary_op_ctx — carries the DECIMAL operand scale
 #include "ops/kernels/error_handling.h"
 #include "ops/temporal_arith.h"       // ta_with_ticks_per_second — compile-time unit divisor
@@ -147,6 +151,23 @@ VecResult draken_length(void* /*ctx*/, const DrakenVector* const* args, uint32_t
                                      "(ARRAY length is a separate kernel)");
     }
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
+    const bool utf8 = v->type == DRAKEN_NVARCHAR;
+    // One value's length: bytes, or codepoints for NVARCHAR.
+    auto len_of = [sa, utf8](uint32_t phys) -> int64_t {
+        const DrakenStringSlot* slot = &sa->slots[phys];
+        const uint32_t blen = str_length(slot);
+        if (!utf8) return blen;
+        const uint8_t* p = str_data(slot, sa->arena);
+        int64_t cp = 0;
+        for (uint32_t b = 0; b < blen; ++b) {
+            if ((p[b] & 0xC0u) != 0x80u) ++cp;
+        }
+        return cp;
+    };
+    // Compressed: one length per value — the NVARCHAR codepoint scan in particular
+    // must not repeat per row — and the result keeps the operand's encoding.
+    if (draken_is_compressed(v))
+        return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, len_of);
     uint32_t n = v->length;
     auto* out = static_cast<int64_t*>(
         draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
@@ -161,47 +182,8 @@ VecResult draken_length(void* /*ctx*/, const DrakenVector* const* args, uint32_t
         }
         std::memcpy(validity, v->validity, vb > 0 ? vb : 1);
     }
-    if (v->data_length < v->length) {
-        // dict/constant shape: compute each UNIQUE value's length once, then
-        // gather — the NVARCHAR codepoint scan in particular is per-slot work
-        // that must not repeat per row. Output stays DENSE (the VM's fixed-
-        // result fold contract); values are identical to the per-row path.
-        const uint32_t k = v->data_length;
-        std::vector<int64_t> ulen(k > 0 ? k : 1, 0);
-        for (uint32_t j = 0; j < k; ++j) {
-            const DrakenStringSlot* slot = &sa->slots[j];
-            uint32_t blen = str_length(slot);
-            if (v->type == DRAKEN_NVARCHAR) {
-                const uint8_t* p = str_data(slot, sa->arena);
-                int64_t cp = 0;
-                for (uint32_t b = 0; b < blen; ++b) {
-                    if ((p[b] & 0xC0u) != 0x80u) ++cp;
-                }
-                ulen[j] = cp;
-            } else {
-                ulen[j] = blen;
-            }
-        }
-        for (uint32_t i = 0; i < n; ++i) {
-            out[i] = fk_row_valid(v, i) ? ulen[v->selection[i]] : 0;
-        }
-    } else {
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
-            const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
-            uint32_t blen = str_length(slot);
-            if (v->type == DRAKEN_NVARCHAR) {
-                const uint8_t* p = str_data(slot, sa->arena);
-                int64_t cp = 0;
-                for (uint32_t b = 0; b < blen; ++b) {
-                    if ((p[b] & 0xC0u) != 0x80u) ++cp;
-                }
-                out[i] = cp;
-            } else {
-                out[i] = blen;
-            }
-        }
-    }
+    for (uint32_t i = 0; i < n; ++i)
+        out[i] = fk_row_valid(v, i) ? len_of(v->selection[i]) : 0;
     VecResult r{};
     r.data = out;
     r.validity = validity;
@@ -274,8 +256,9 @@ inline bool fk_is_numeric(DrakenType t) {
 // pattern as an IEEE double for anything the entry guard admitted, which is a silent
 // wrong answer rather than a crash. Callers gate on the fk_is_* predicates above.
 
-inline double fk_read_double(const DrakenVector* v, uint32_t row) {
-    uint32_t phys = v->selection[row];
+// `_at` readers take a PHYSICAL index (compressed paths walk the value array);
+// the row readers map a logical row through the selection onto them.
+inline double fk_read_double_at(const DrakenVector* v, uint32_t phys) {
     switch (v->type) {
         case DRAKEN_INT8:    return static_cast<const int8_t*>(v->data)[phys];
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[phys];
@@ -293,8 +276,7 @@ inline double fk_read_double(const DrakenVector* v, uint32_t row) {
 
 // DECIMAL yields its raw int64 unscaled value. UINT64 is absent by design — it does
 // not fit int64; unsigned callers use fk_read_uint64.
-inline int64_t fk_read_int64(const DrakenVector* v, uint32_t row) {
-    uint32_t phys = v->selection[row];
+inline int64_t fk_read_int64_at(const DrakenVector* v, uint32_t phys) {
     switch (v->type) {
         case DRAKEN_INT8:    return static_cast<const int8_t*>(v->data)[phys];
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[phys];
@@ -308,8 +290,7 @@ inline int64_t fk_read_int64(const DrakenVector* v, uint32_t row) {
     }
 }
 
-inline uint64_t fk_read_uint64(const DrakenVector* v, uint32_t row) {
-    uint32_t phys = v->selection[row];
+inline uint64_t fk_read_uint64_at(const DrakenVector* v, uint32_t phys) {
     switch (v->type) {
         case DRAKEN_UINT8:   return static_cast<const uint8_t*>(v->data)[phys];
         case DRAKEN_UINT16:  return static_cast<const uint16_t*>(v->data)[phys];
@@ -317,6 +298,16 @@ inline uint64_t fk_read_uint64(const DrakenVector* v, uint32_t row) {
         case DRAKEN_UINT64:  return static_cast<const uint64_t*>(v->data)[phys];
         default:             return 0;     // unreachable: fk_is_unsigned_int gates it
     }
+}
+
+inline double fk_read_double(const DrakenVector* v, uint32_t row) {
+    return fk_read_double_at(v, v->selection[row]);
+}
+inline int64_t fk_read_int64(const DrakenVector* v, uint32_t row) {
+    return fk_read_int64_at(v, v->selection[row]);
+}
+inline uint64_t fk_read_uint64(const DrakenVector* v, uint32_t row) {
+    return fk_read_uint64_at(v, v->selection[row]);
 }
 
 // Rejection for an operand fk_is_numeric does not admit. DECIMAL128 IS numeric, it
@@ -361,6 +352,10 @@ VecResult fk_numeric_result(const DrakenVector* src_validity_of, T* out, uint32_
 // exactly (widening UINT64 to INT64 would corrupt values above INT64_MAX).
 template <typename T>
 VecResult fk_gather_dense(const DrakenVector* v, uint32_t n, DrakenType t) {
+    if (draken_is_compressed(v)) {
+        const T* vals = static_cast<const T*>(v->data);
+        return kernel_map_compressed<T>(v, t, [vals](uint32_t j) { return vals[j]; });
+    }
     auto* out = static_cast<T*>(draken_malloc((n > 0 ? n : 1) * sizeof(T)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
     const T* src = static_cast<const T*>(v->data);
@@ -384,6 +379,19 @@ VecResult fk_unary_numeric(const DrakenVector* const* args, uint32_t nargs,
     const DrakenVector* v = args[0];
     if (!fk_is_numeric(v->type))
         return fk_reject_operand(v, who);
+    if (draken_is_compressed(v)) {
+        if (fk_is_float(v->type) && !force_int)
+            return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+                return static_cast<double>(ffn(fk_read_double_at(v, j)));
+            });
+        if (fk_is_float(v->type))
+            return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, [&](uint32_t j) {
+                return static_cast<int64_t>(ffn(fk_read_double_at(v, j)));
+            });
+        return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, [&](uint32_t j) {
+            return static_cast<int64_t>(ifn(fk_read_int64_at(v, j)));
+        });
+    }
     uint32_t n = v->length;
     if (fk_is_float(v->type) && !force_int) {
         auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
@@ -420,6 +428,46 @@ inline bool fk_read_digits(const DrakenVector* v, uint32_t row, int64_t& out) {
     }
 }
 
+// One DECIMAL value rounded to `d` digits from scale `s` (requires d >= s, or
+// s - d <= 18 — the caller owns the out-of-domain error). Exact in the int64 domain.
+inline double fk_round_dec_value(int64_t raw, int64_t s, int64_t d, int op) {
+    if (d >= s) {
+        // no fractional information beyond scale s — the value is exact
+        return static_cast<double>(raw) / std::pow(10.0, static_cast<double>(s));
+    }
+    const int64_t steps = s - d;
+    int64_t p = 1;
+    for (int64_t k = 0; k < steps; ++k) p *= 10;
+    int64_t q = raw / p;
+    int64_t r = raw % p;
+    if (op == 0) {                       // half away from zero, exact
+        int64_t ar = r < 0 ? -r : r;
+        if (ar * 2 >= p) q += (raw > 0) - (raw < 0);
+    } else if (op == 1) {                // floor
+        if (r != 0 && raw < 0) q -= 1;
+    } else {                             // ceil
+        if (r != 0 && raw > 0) q += 1;
+    }
+    return static_cast<double>(q) * std::pow(10.0, -static_cast<double>(d));
+}
+
+// One floating value rounded at `scale` (= 10^digits).
+inline double fk_round_dbl_value(double x, double scale, int op) {
+    double scaled = x * scale;
+    double r = (op == 0) ? std::round(scaled)
+             : (op == 1) ? std::floor(scaled)
+                         : std::ceil(scaled);
+    return r / scale;
+}
+
+// Digits for the compressed path: absent, or ONE non-null integer constant. Any
+// other digits operand (a column, a NULL) keeps the row loop, which owns its errors.
+inline bool fk_round_const_digits(const DrakenVector* dg, int64_t& d) {
+    d = 0;
+    if (dg == nullptr) return true;
+    return draken_is_constant(dg) && dg->validity == nullptr && fk_read_digits(dg, 0, d);
+}
+
 // ROUND/FLOOR/CEILING(x[, digits]) -> FLOAT64 (catalog contract). `op`: 0=round
 // (half-away-from-zero, the SQL convention), 1=floor, 2=ceil.
 //
@@ -441,6 +489,13 @@ VecResult fk_round_family(void* ctx, const DrakenVector* const* args, uint32_t n
                 "%s: DECIMAL operand needs its bind-time scale context", who);
         }
         int s = static_cast<const binary_op_ctx*>(ctx)->left_scale;
+        int64_t cd = 0;
+        if (draken_is_compressed(v) && fk_round_const_digits(dg, cd)
+                && (cd >= s || s - cd <= 18)) {
+            return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+                return fk_round_dec_value(fk_read_int64_at(v, j), s, cd, op);
+            });
+        }
         auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
         if (out == nullptr) return draken_error_sentinel("allocation failed");
         for (uint32_t i = 0; i < n; ++i) {
@@ -453,36 +508,25 @@ VecResult fk_round_family(void* ctx, const DrakenVector* const* args, uint32_t n
                     return draken_error_sentinel_fmt("%s: integer digits required", who);
                 }
             }
-            if (d >= s) {
-                // no fractional information beyond scale s — the value is exact
-                out[i] = static_cast<double>(raw) / std::pow(10.0, static_cast<double>(s));
-                continue;
-            }
-            int64_t steps = s - d;
-            if (steps > 18) {
+            if (d < s && s - d > 18) {
                 draken_free(out);
                 return draken_error_sentinel_fmt(
                     "%s: rounding step exceeds the int64 decimal domain", who);
             }
-            int64_t p = 1;
-            for (int64_t k = 0; k < steps; ++k) p *= 10;
-            int64_t q = raw / p;
-            int64_t r = raw % p;
-            if (op == 0) {                       // half away from zero, exact
-                int64_t ar = r < 0 ? -r : r;
-                if (ar * 2 >= p) q += (raw > 0) - (raw < 0);
-            } else if (op == 1) {                // floor
-                if (r != 0 && raw < 0) q -= 1;
-            } else {                             // ceil
-                if (r != 0 && raw > 0) q += 1;
-            }
-            out[i] = static_cast<double>(q) * std::pow(10.0, -static_cast<double>(d));
+            out[i] = fk_round_dec_value(raw, s, d, op);
         }
         return fk_numeric_result(v, out, n, DRAKEN_FLOAT64);
     }
 
     if (!fk_is_numeric(v->type))
         return fk_reject_operand(v, who);
+    int64_t cd = 0;
+    if (draken_is_compressed(v) && fk_round_const_digits(dg, cd)) {
+        const double cscale = (dg != nullptr) ? std::pow(10.0, static_cast<double>(cd)) : 1.0;
+        return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+            return fk_round_dbl_value(fk_read_double_at(v, j), cscale, op);
+        });
+    }
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
     for (uint32_t i = 0; i < n; ++i) {
@@ -497,11 +541,7 @@ VecResult fk_round_family(void* ctx, const DrakenVector* const* args, uint32_t n
             }
             scale = std::pow(10.0, static_cast<double>(d));
         }
-        double scaled = x * scale;
-        double r = (op == 0) ? std::round(scaled)
-                 : (op == 1) ? std::floor(scaled)
-                             : std::ceil(scaled);
-        out[i] = r / scale;
+        out[i] = fk_round_dbl_value(x, scale, op);
     }
     return fk_numeric_result(v, out, n, DRAKEN_FLOAT64);
 }
@@ -536,14 +576,22 @@ VecResult draken_abs(void* ctx, const DrakenVector* const* args, uint32_t nargs)
                 "draken_abs: DECIMAL operand needs its bind-time scale context");
         }
         const auto* c = static_cast<const binary_op_ctx*>(ctx);
-        auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
-        if (out == nullptr) return draken_error_sentinel("allocation failed");
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
-            int64_t raw = fk_read_int64(v, i);
-            out[i] = raw < 0 ? -raw : raw;
+        VecResult r;
+        if (draken_is_compressed(v)) {
+            const int64_t* vals = static_cast<const int64_t*>(v->data);
+            r = kernel_map_compressed<int64_t>(v, DRAKEN_DECIMAL, [vals](uint32_t j) {
+                return vals[j] < 0 ? -vals[j] : vals[j];
+            });
+        } else {
+            auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+            if (out == nullptr) return draken_error_sentinel("allocation failed");
+            for (uint32_t i = 0; i < n; ++i) {
+                if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
+                int64_t raw = fk_read_int64(v, i);
+                out[i] = raw < 0 ? -raw : raw;
+            }
+            r = fk_numeric_result(v, out, n, DRAKEN_DECIMAL);
         }
-        VecResult r = fk_numeric_result(v, out, n, DRAKEN_DECIMAL);
         if (r.data == nullptr) return r;
         r.dec_precision = c->result_precision;
         r.dec_scale = c->result_scale;
@@ -556,6 +604,17 @@ VecResult draken_abs(void* ctx, const DrakenVector* const* args, uint32_t nargs)
         // NULL slots (arbitrary data) are skipped, and iterating logical rows
         // through the selection never touches a dead dict entry. INT8/16/32
         // widen to INT64 below and cannot overflow.
+        if (draken_is_compressed(v)) {
+            const int64_t* vals = static_cast<const int64_t*>(v->data);
+            return kernel_map_compressed_live<int64_t>(v, DRAKEN_INT64,
+                [vals](uint32_t j, int64_t* o) -> const char* {
+                    if (vals[j] == INT64_MIN)
+                        return "INT64 absolute value overflow: exact integer result exceeds INT64 "
+                               "— fail loud, never a wrapped answer";
+                    *o = vals[j] < 0 ? -vals[j] : vals[j];
+                    return nullptr;
+                });
+        }
         auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
         if (out == nullptr) return draken_error_sentinel("allocation failed");
         for (uint32_t i = 0; i < n; ++i) {
@@ -586,6 +645,10 @@ VecResult draken_sign(void* /*ctx*/, const DrakenVector* const* args, uint32_t n
     const DrakenVector* v = args[0];
 
     if (fk_is_unsigned_int(v->type)) {
+        if (draken_is_compressed(v))
+            return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, [v](uint32_t j) -> int64_t {
+                return fk_read_uint64_at(v, j) != 0u ? 1 : 0;
+            });
         uint32_t n = v->length;
         auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
         if (out == nullptr) return draken_error_sentinel("allocation failed");
@@ -619,6 +682,16 @@ VecResult draken_sqrt(void* ctx, const DrakenVector* const* args, uint32_t nargs
         }
         dec_unscale = std::pow(
             10.0, -static_cast<double>(static_cast<const binary_op_ctx*>(ctx)->left_scale));
+    }
+
+    if (draken_is_compressed(v)) {
+        if (v->type == DRAKEN_DECIMAL)
+            return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [v, dec_unscale](uint32_t j) {
+                return std::sqrt(static_cast<double>(fk_read_int64_at(v, j)) * dec_unscale);
+            });
+        return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [v](uint32_t j) {
+            return std::sqrt(fk_read_double_at(v, j));
+        });
     }
 
     auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
@@ -721,12 +794,10 @@ VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t 
     static const int64_t unit_div[4] = {1, 1000, 1000000, 1000000000};
     const int64_t div = unit_div[c->left_unit & 3];
 
-    uint32_t n = v->length;
-    auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
-    if (out == nullptr) return draken_error_sentinel("allocation failed");
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
-        uint32_t phys = v->selection[i];
+    if (part < FK_PART_YEAR || part > FK_PART_SECOND)
+        return draken_error_sentinel("draken_date_part: unsupported part id");
+    // One value's part — shared by the compressed (per value) and row loops.
+    auto part_of = [v, div, part](uint32_t phys) -> int64_t {
         int64_t days, sod = 0;   // sod = seconds-of-day
         if (v->type == DRAKEN_DATE32) {
             days = static_cast<const int32_t*>(v->data)[phys];
@@ -736,18 +807,22 @@ VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t 
             sod = secs - days * 86400;
         }
         switch (part) {
-            case FK_PART_YEAR:    out[i] = fk_civil_from_days(days).y; break;
-            case FK_PART_MONTH:   out[i] = fk_civil_from_days(days).m; break;
-            case FK_PART_DAY:     out[i] = fk_civil_from_days(days).d; break;
-            case FK_PART_QUARTER: out[i] = (fk_civil_from_days(days).m - 1) / 3 + 1; break;
-            case FK_PART_HOUR:    out[i] = sod / 3600; break;
-            case FK_PART_MINUTE:  out[i] = (sod / 60) % 60; break;
-            case FK_PART_SECOND:  out[i] = sod % 60; break;
-            default:
-                draken_free(out);
-                return draken_error_sentinel("draken_date_part: unsupported part id");
+            case FK_PART_YEAR:    return fk_civil_from_days(days).y;
+            case FK_PART_MONTH:   return fk_civil_from_days(days).m;
+            case FK_PART_DAY:     return fk_civil_from_days(days).d;
+            case FK_PART_QUARTER: return (fk_civil_from_days(days).m - 1) / 3 + 1;
+            case FK_PART_HOUR:    return sod / 3600;
+            case FK_PART_MINUTE:  return (sod / 60) % 60;
+            default:              return sod % 60;   // FK_PART_SECOND (range checked above)
         }
-    }
+    };
+    if (draken_is_compressed(v))
+        return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, part_of);
+    uint32_t n = v->length;
+    auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+    if (out == nullptr) return draken_error_sentinel("allocation failed");
+    for (uint32_t i = 0; i < n; ++i)
+        out[i] = fk_row_valid(v, i) ? part_of(v->selection[i]) : 0;
     return fk_numeric_result(v, out, n, DRAKEN_INT64);
 }
 
@@ -764,19 +839,23 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
     if (v->type != DRAKEN_TIMESTAMP64)
         return draken_error_sentinel("draken_date_trunc: TIMESTAMP input required");
 
-    uint32_t n = v->length;
-    auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+    // A compressed operand truncates each of its data_length values once and the
+    // result keeps the operand's encoding; a dense operand truncates per row.
+    const bool comp = draken_is_compressed(v);
+    const uint32_t n = v->length;
+    const uint32_t cnt = comp ? v->data_length : n;
+    auto* out = static_cast<int64_t*>(draken_malloc((cnt > 0 ? cnt : 1) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
     // Sub-second ticks per second is a compile-time constant per unit, so the
     // floor divisions below are multiply-high + shift, not a divide per row.
     const int64_t* const src = static_cast<const int64_t*>(v->data);
     const uint32_t* const sel = v->selection;
     const bool ok = ta_with_ticks_per_second(static_cast<int>(c->left_unit & 3),
-                                             [v, src, sel, out, n, part](auto k) {
+                                             [v, src, sel, out, cnt, comp, part](auto k) {
       constexpr int64_t sub = decltype(k)::value;
-      for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
-        int64_t raw = src[sel[i]];
+      for (uint32_t i = 0; i < cnt; ++i) {
+        if (!comp && !fk_row_valid(v, i)) { out[i] = 0; continue; }
+        int64_t raw = comp ? src[i] : src[sel[i]];
         int64_t secs = fk_floor_div(raw, sub);          // whole seconds since epoch
         int64_t sub_ticks = raw - secs * sub;            // preserved-then-dropped
         int64_t days = fk_floor_div(secs, 86400);
@@ -816,7 +895,18 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
         draken_free(out);
         return draken_error_sentinel("draken_date_trunc: unsupported unit");
     }
-    VecResult r = fk_numeric_result(v, out, n, DRAKEN_TIMESTAMP64);
+    VecResult r{};
+    if (comp) {
+        r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
+        try {
+            kernel_preserve_shape(r, v);
+        } catch (...) {
+            draken_free(out);
+            return draken_error_sentinel("allocation failed");
+        }
+    } else {
+        r = fk_numeric_result(v, out, n, DRAKEN_TIMESTAMP64);
+    }
     // fk_numeric_result leaves ts_unit at its VecResult default (0xFF = unset),
     // which vecresult_to_owner() (draken_native.cpp) reads as "no LogicalType" —
     // the result would silently lose its logical_type_unit descriptor (a hard
@@ -1180,7 +1270,7 @@ VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
         return true;
     };
 
-    if (v->data_length < v->length && p->data_length == 1 && fk_row_valid(p, 0)) {
+    if (draken_is_compressed(v) && draken_is_constant(p) && fk_row_valid(p, 0)) {
         // Dict/constant haystack, constant affix: one verdict per DISTINCT slot,
         // then scatter — data_length probes instead of length. Same gate and
         // structure as draken_contains, which already had this; without it an
@@ -1274,7 +1364,7 @@ VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t n
         if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
         std::memset(validity, 0xFF, nb > 0 ? nb : 1);
     }
-    if (v->data_length < v->length && p->data_length == 1 && fk_row_valid(p, 0)) {
+    if (draken_is_compressed(v) && draken_is_constant(p) && fk_row_valid(p, 0)) {
         // dict/constant haystack, constant needle: one verdict per DISTINCT slot.
         const DrakenStringSlot* ps = &psa->slots[p->selection[0]];
         const uint8_t* ndl = str_data(ps, psa->arena);
@@ -1355,7 +1445,7 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
         if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
         std::memset(validity, 0xFF, nb > 0 ? nb : 1);
     }
-    if (draken_is_compressed(v) && p->data_length == 1 && fk_row_valid(p, 0)) {
+    if (draken_is_compressed(v) && draken_is_constant(p) && fk_row_valid(p, 0)) {
         // §11 fast path: compressed (dict/constant) haystack + constant pattern —
         // run the wildcard matcher once per DISTINCT slot, scatter the verdicts
         // (bit-identical to the per-row loop). draken_is_compressed is the
@@ -1755,6 +1845,33 @@ VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_
     // Exact int128 path whenever NO float is involved (ints are scale-0 decimals);
     // double promotion only when a float operand forces it (SQL numeric semantics).
     const bool any_float = fk_is_float_t(L->type) || fk_is_float_t(R->type);
+    const int maxs = ls > rs ? ls : rs;
+    const __int128 lmul = fk_pow10_i128(maxs - ls);
+    const __int128 rmul = fk_pow10_i128(maxs - rs);
+
+    // One side a non-null constant, the other compressed: convert the constant
+    // once and compare each value of the compressed side once (operand order kept).
+    const bool l_const = draken_is_constant(L) && L->validity == nullptr;
+    const bool r_const = draken_is_constant(R) && R->validity == nullptr;
+    if ((r_const && draken_is_compressed(L)) || (l_const && draken_is_compressed(R))) {
+        const bool x_left = r_const && draken_is_compressed(L);
+        const DrakenVector* xv = x_left ? L : R;
+        const DrakenVector* cv = x_left ? R : L;
+        const int xs = x_left ? ls : rs, cs = x_left ? rs : ls;
+        if (!any_float) {
+            const __int128 xmul = x_left ? lmul : rmul;
+            const __int128 cval = fk_read_dec(cv, cv->selection[0]) * (x_left ? rmul : lmul);
+            return kernel_pred_compressed(xv, [&](uint32_t j) {
+                const __int128 xval = fk_read_dec(xv, j) * xmul;
+                return x_left ? fk_cmp_i128(op, xval, cval) : fk_cmp_i128(op, cval, xval);
+            });
+        }
+        const double cval = fk_read_num_double(cv, cv->selection[0], cs);
+        return kernel_pred_compressed(xv, [&](uint32_t j) {
+            const double xval = fk_read_num_double(xv, j, xs);
+            return x_left ? fk_cmp_dbl(op, xval, cval) : fk_cmp_dbl(op, cval, xval);
+        });
+    }
 
     uint32_t n = L->length;
     size_t nb = (static_cast<size_t>(n) + 7) / 8;
@@ -1775,9 +1892,6 @@ VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_
     }
 
     if (!any_float) {
-        const int maxs = ls > rs ? ls : rs;
-        const __int128 lmul = fk_pow10_i128(maxs - ls);
-        const __int128 rmul = fk_pow10_i128(maxs - rs);
         for (uint32_t i = 0; i < n; ++i) {
             if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) {
                 validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
@@ -1854,6 +1968,22 @@ VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32
         (R->type != DRAKEN_DATE32 && R->type != DRAKEN_TIMESTAMP64))
         return draken_error_sentinel("draken_temporal_cmp: DATE/TIMESTAMP operands required");
 
+    // One side a non-null constant, the other compressed: promote the constant
+    // once and compare each value of the compressed side once (operand order kept).
+    const bool l_const = draken_is_constant(L) && L->validity == nullptr;
+    const bool r_const = draken_is_constant(R) && R->validity == nullptr;
+    if ((r_const && draken_is_compressed(L)) || (l_const && draken_is_compressed(R))) {
+        const bool x_left = r_const && draken_is_compressed(L);
+        const DrakenVector* xv = x_left ? L : R;
+        const DrakenVector* cv = x_left ? R : L;
+        const unsigned char xu = x_left ? c->left_unit : c->right_unit;
+        const __int128 cval = fk_temporal_to_ns(cv, cv->selection[0], x_left ? c->right_unit : c->left_unit);
+        return kernel_pred_compressed(xv, [&](uint32_t j) {
+            const __int128 xval = fk_temporal_to_ns(xv, j, xu);
+            return x_left ? fk_cmp_i128(op, xval, cval) : fk_cmp_i128(op, cval, xval);
+        });
+    }
+
     uint32_t n = L->length;
     size_t nb = (static_cast<size_t>(n) + 7) / 8;
     const size_t nb_alloc = nb > 0 ? nb : 1;
@@ -1907,6 +2037,10 @@ VecResult draken_string_empty(void* ctx, const DrakenVector* const* args, uint32
     if (!fk_is_string(v->type))
         return draken_error_sentinel("draken_string_empty: string operand required");
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
+    if (draken_is_compressed(v))
+        return kernel_pred_compressed(v, [sa, want_empty](uint32_t j) {
+            return (str_length(&sa->slots[j]) == 0) == want_empty;
+        });
     uint32_t n = v->length;
     size_t nb = (static_cast<size_t>(n) + 7) / 8;
     const size_t nb_alloc = nb > 0 ? nb : 1;
@@ -1951,6 +2085,10 @@ VecResult draken_bitwise_not(void* /*ctx*/, const DrakenVector* const* args, uin
         default:
             return draken_error_sentinel("draken_bitwise_not: integer operand required");
     }
+    if (draken_is_compressed(v))
+        return kernel_map_compressed<int64_t>(v, DRAKEN_INT64, [v](uint32_t j) {
+            return ~fk_read_int64_at(v, j);
+        });
     uint32_t n = v->length;
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
@@ -2236,6 +2374,42 @@ VecResult draken_right_dynamic(void* /*ctx*/, const DrakenVector* const* args, u
     return fk_substring_dynamic_impl(FK_SUBSTR_DYN_RIGHT, args, nargs);
 }
 
+}  // extern "C"
+
+namespace {
+
+// draken_in_list's shape split (§11, ratified 2026-10-18). A compressed operand
+// (dict or constant — draken_is_compressed) tests membership once per KEY and
+// scatters the key bits to rows with cmp_dict_scatter; a dense operand tests per
+// row. `hit(phys)` is the one membership predicate for both, so the answer is the
+// same either way. A null row ends 0 in `out` on both paths: the scatter ANDs the
+// validity, the row loop skips it. `out` must be zeroed. Returns false only when
+// the per-key buffer cannot be allocated.
+template <typename Hit>
+bool fk_in_list_emit(const DrakenVector* v, bool negate, uint8_t* out, Hit hit) {
+    const uint32_t n = v->length;
+    if (draken_is_compressed(v)) {
+        const uint32_t dl = v->data_length;
+        auto* key_bits = static_cast<uint8_t*>(draken_malloc(dl > 0 ? dl : 1));
+        if (key_bits == nullptr) return false;
+        for (uint32_t k = 0; k < dl; ++k)
+            key_bits[k] = (hit(k) != negate) ? 1u : 0u;
+        draken::ops::cmp_dict_scatter(key_bits, v->selection, v->validity, out, n);
+        draken_free(key_bits);
+        return true;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fk_row_valid(v, i)) continue;
+        if (hit(v->selection[i]) != negate)
+            out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+    return true;
+}
+
+}  // namespace
+
+extern "C" {
+
 VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 1)
         return draken_error_sentinel("draken_in_list: expected 1 argument");
@@ -2257,61 +2431,56 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
         if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
         std::memcpy(validity, v->validity, nb > 0 ? nb : 1);
     }
+    auto fail = [&](const char* msg) {
+        draken_free(out);
+        if (validity != nullptr) draken_free(validity);
+        return draken_error_sentinel(msg);
+    };
 
-    if (c->kind == 0) {   // int64 raw, sorted ascending — binary search per row
+    bool ok;
+    if (c->kind == 0) {   // int64 raw, sorted ascending — binary search per value
         const auto* items = reinterpret_cast<const int64_t*>(payload);
-        int64_t val;
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) continue;
-            uint32_t phys = v->selection[i];
-            switch (v->type) {
-                case DRAKEN_INT8:   val = static_cast<const int8_t*>(v->data)[phys]; break;
-                case DRAKEN_INT16:  val = static_cast<const int16_t*>(v->data)[phys]; break;
-                case DRAKEN_INT32:
-                case DRAKEN_DATE32: val = static_cast<const int32_t*>(v->data)[phys]; break;
-                case DRAKEN_INT64:
-                case DRAKEN_DECIMAL:
-                case DRAKEN_TIMESTAMP64:
-                    val = static_cast<const int64_t*>(v->data)[phys]; break;
-                default:
-                    draken_free(out);
-                    if (validity != nullptr) draken_free(validity);
-                    return draken_error_sentinel(
-                        "draken_in_list: integer-family operand required for kind-0 set");
-            }
-            bool hit = std::binary_search(items, items + c->count, val);
-            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        const auto* items_end = items + c->count;
+        // Operand width resolved once, outside the value loop.
+        auto run = [&](const auto* data) {
+            return fk_in_list_emit(v, negate, out, [&](uint32_t phys) {
+                return std::binary_search(items, items_end, static_cast<int64_t>(data[phys]));
+            });
+        };
+        switch (v->type) {
+            case DRAKEN_INT8:   ok = run(static_cast<const int8_t*>(v->data)); break;
+            case DRAKEN_INT16:  ok = run(static_cast<const int16_t*>(v->data)); break;
+            case DRAKEN_INT32:
+            case DRAKEN_DATE32: ok = run(static_cast<const int32_t*>(v->data)); break;
+            case DRAKEN_INT64:
+            case DRAKEN_DECIMAL:
+            case DRAKEN_TIMESTAMP64:
+                ok = run(static_cast<const int64_t*>(v->data)); break;
+            default:
+                return fail("draken_in_list: integer-family operand required for kind-0 set");
         }
-    } else if (c->kind == 3) {   // uint64 raw, sorted ascending — binary search per row
+    } else if (c->kind == 3) {   // uint64 raw, sorted ascending — binary search per value
         const auto* items = reinterpret_cast<const uint64_t*>(payload);
-        uint64_t val;
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) continue;
-            uint32_t phys = v->selection[i];
-            switch (v->type) {
-                case DRAKEN_UINT8:  val = static_cast<const uint8_t*>(v->data)[phys]; break;
-                case DRAKEN_UINT16: val = static_cast<const uint16_t*>(v->data)[phys]; break;
-                case DRAKEN_UINT32: val = static_cast<const uint32_t*>(v->data)[phys]; break;
-                case DRAKEN_UINT64: val = static_cast<const uint64_t*>(v->data)[phys]; break;
-                default:
-                    draken_free(out);
-                    if (validity != nullptr) draken_free(validity);
-                    return draken_error_sentinel(
-                        "draken_in_list: unsigned-integer operand required for kind-3 set");
-            }
-            bool hit = std::binary_search(items, items + c->count, val);
-            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        const auto* items_end = items + c->count;
+        auto run = [&](const auto* data) {
+            return fk_in_list_emit(v, negate, out, [&](uint32_t phys) {
+                return std::binary_search(items, items_end, static_cast<uint64_t>(data[phys]));
+            });
+        };
+        switch (v->type) {
+            case DRAKEN_UINT8:  ok = run(static_cast<const uint8_t*>(v->data)); break;
+            case DRAKEN_UINT16: ok = run(static_cast<const uint16_t*>(v->data)); break;
+            case DRAKEN_UINT32: ok = run(static_cast<const uint32_t*>(v->data)); break;
+            case DRAKEN_UINT64: ok = run(static_cast<const uint64_t*>(v->data)); break;
+            default:
+                return fail("draken_in_list: unsigned-integer operand required for kind-3 set");
         }
     } else if (c->kind == 4) {   // 16-byte raw (DECIMAL128 / UUID), sorted ascending
         // UUID rides this arm too: membership is byte EQUALITY, and two 16-byte
         // values are byte-equal exactly when their int128 readings are equal. The
         // sort order is only the binary search's own (the blob is packed in it).
-        if (v->type != DRAKEN_DECIMAL128 && v->type != DRAKEN_UUID) {
-            draken_free(out);
-            if (validity != nullptr) draken_free(validity);
-            return draken_error_sentinel(
-                "draken_in_list: DECIMAL128 or UUID operand required for kind-4 set");
-        }
+        if (v->type != DRAKEN_DECIMAL128 && v->type != DRAKEN_UUID)
+            return fail("draken_in_list: DECIMAL128 or UUID operand required for kind-4 set");
         // The payload follows an 8-byte header, so it is NOT 16-byte aligned and
         // an __int128 load straight from it would be misaligned. Copy the (small,
         // bind-time) set once into aligned storage and binary-search that.
@@ -2319,18 +2488,12 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
         if (c->count > 0)
             std::memcpy(items.data(), payload, static_cast<size_t>(c->count) * sizeof(__int128));
         const auto* data = static_cast<const __int128*>(v->data);
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) continue;
-            bool hit = std::binary_search(items.begin(), items.end(), data[v->selection[i]]);
-            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
+        ok = fk_in_list_emit(v, negate, out, [&](uint32_t phys) {
+            return std::binary_search(items.begin(), items.end(), data[phys]);
+        });
     } else if (c->kind == 2) {   // float64, FLOAT64 operand — total-order equality
-        if (v->type != DRAKEN_FLOAT64) {
-            draken_free(out);
-            if (validity != nullptr) draken_free(validity);
-            return draken_error_sentinel(
-                "draken_in_list: FLOAT64 operand required for kind-2 set");
-        }
+        if (v->type != DRAKEN_FLOAT64)
+            return fail("draken_in_list: FLOAT64 operand required for kind-2 set");
         // The engine's float equality is total-order: NaN = NaN, -0.0 = 0.0. NaN has
         // no place in a `<` order, so it is split out into one flag; the rest are
         // copied (the payload follows the 8-byte header, unaligned for a double load)
@@ -2347,44 +2510,35 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
         }
         std::sort(items.begin(), items.end());
         const auto* data = static_cast<const double*>(v->data);
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) continue;
-            const double d = data[v->selection[i]];
-            const bool hit = std::isnan(d) ? set_has_nan
-                                           : std::binary_search(items.begin(), items.end(), d);
-            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
+        ok = fk_in_list_emit(v, negate, out, [&](uint32_t phys) {
+            const double d = data[phys];
+            return std::isnan(d) ? set_has_nan
+                                 : std::binary_search(items.begin(), items.end(), d);
+        });
     } else if (c->kind == 1) {   // string entries: (u32 len + bytes), linear scan
-        if (!fk_is_string(v->type)) {
-            draken_free(out);
-            if (validity != nullptr) draken_free(validity);
-            return draken_error_sentinel(
-                "draken_in_list: string operand required for kind-1 set");
-        }
+        if (!fk_is_string(v->type))
+            return fail("draken_in_list: string operand required for kind-1 set");
         const auto* sa = static_cast<const DrakenStringArena*>(v->data);
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) continue;
-            const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
+        ok = fk_in_list_emit(v, negate, out, [&](uint32_t phys) {
+            const DrakenStringSlot* slot = &sa->slots[phys];
             uint32_t vlen = str_length(slot);
             const uint8_t* vdat = reinterpret_cast<const uint8_t*>(str_data(slot, sa->arena));
-            bool hit = false;
             const uint8_t* p = payload;
             for (uint32_t e = 0; e < c->count; ++e) {
                 uint32_t elen;
                 std::memcpy(&elen, p, 4);
                 p += 4;
-                if (elen == vlen && std::memcmp(p, vdat, elen) == 0) { hit = true; break; }
+                if (elen == vlen && std::memcmp(p, vdat, elen) == 0) return true;
                 p += elen;
             }
-            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
+            return false;
+        });
     } else {
         // Every kind is dispatched explicitly: this used to be a bare `else` that
         // read ANY unrecognised kind as string entries.
-        draken_free(out);
-        if (validity != nullptr) draken_free(validity);
-        return draken_error_sentinel("draken_in_list: unsupported membership-set kind");
+        return fail("draken_in_list: unsupported membership-set kind");
     }
+    if (!ok) return fail("allocation failed");
     VecResult r{};
     r.data = out;
     r.validity = validity;

@@ -273,7 +273,7 @@ bool trim_set_from(const DrakenVector* sv, const char* who, TrimSetArg* out, Vec
     // A constant is ONE physical value shared by every row. data_length == 1 is
     // exactly that, whatever encoding shape carries it (CLAUDE.md §11 — this is
     // reading the layout, not dispatching on it).
-    if (sv->data_length != 1u) {
+    if (!draken_is_constant(sv)) {
         *err = draken_error_sentinel_fmt(
             "%s: the trim character set must be a constant, not a column", who);
         return false;

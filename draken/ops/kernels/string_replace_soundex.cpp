@@ -254,7 +254,7 @@ VecResult draken_replace(void* /*ctx*/, const DrakenVector* const* args, uint32_
     const DrakenVector* rep = args[2];
     if (!rs_is_string(hay->type) || !rs_is_string(ndl->type) || !rs_is_string(rep->type))
         return draken_error_sentinel("draken_replace: string operands required");
-    if (ndl->data_length != 1u || rep->data_length != 1u)
+    if (!draken_is_constant(ndl) || !draken_is_constant(rep))
         return draken_error_sentinel(
             "draken_replace: search and replace must be scalar literals "
             "(per-row search/replace not supported natively)");

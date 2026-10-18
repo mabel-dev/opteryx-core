@@ -201,6 +201,7 @@ cdef extern from "vectors/_vector_bridge.h":
 
 cdef extern from "core/buffers.h" nogil:
     int draken_is_compressed(const DrakenVector* v)
+    int draken_is_constant(const DrakenVector* v)
 
 # c-native BC_FUNCTION kernel plumbing (Phase 9a-fn shape) — lets _DFA_EXTRACT
 # dispatch straight from the nogil DV VM, same ABI as draken/ops/kernels/*.

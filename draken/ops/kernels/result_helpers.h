@@ -126,7 +126,7 @@ static inline const uint8_t* kernel_live_slots(const DrakenVector* v, std::vecto
         (v->flags & DRAKEN_DICT_CODES_DENSE) != 0u ||
         (v->validity == nullptr &&
          (v->flags & (DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION)) != 0u &&
-         v->data_length == v->length);
+         draken_is_dense(v));
     if (proven_all_live) return nullptr;
     live.assign(v->data_length > 0u ? v->data_length : 1u, 0u);
     for (uint32_t i = 0u; i < v->length; ++i)
@@ -201,16 +201,29 @@ static inline bool kernel_cast_is_safe(const void* ctx) noexcept {
 // this sets length / data_length / flags / selection / owns_selection / validity.
 // ONLY valid for non-null-introducing casts (validity preserved 1:1). Throws
 // std::bad_alloc on failure (caught by DRAKEN_KERNEL_TRY).
+// The hints a VALUE transform may keep: the selection-shape bits and
+// DICT_CODES_DENSE describe the CODES, which every shape-preserving kernel carries
+// through untouched. The value-ORDER bits (DICT_KEYS_SORTED, ROW_SORTED[_DESC])
+// must NOT survive — HASH, UPPER, ABS, a cast to string all reorder values, and a
+// consumer may collapse a predicate to a code interval on the strength of
+// KEYS_SORTED, so a stale order hint changes the ANSWER. Same rule, same bits, as
+// kValueTransformFlags (ops/int64_arithmetic.h).
+#define KERNEL_VALUE_TRANSFORM_FLAGS \
+    (DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION | DRAKEN_DICT_CODES_DENSE)
+
 static inline void kernel_preserve_shape(VecResult& r, const DrakenVector* in) {
     r.length      = in->length;
     r.data_length = in->data_length;
-    r.flags       = in->flags;
+    r.flags       = static_cast<uint8_t>(in->flags & KERNEL_VALUE_TRANSFORM_FLAGS);
     r.validity    = kernel_copy_validity(in);
-    if (in->flags & DRAKEN_SEL_IDENTITY) {
-        r.selection      = draken_identity_sel(in->length);   // dense: global identity
-        r.owns_selection = false;
-    } else if (in->data_length == 1u) {
+    // Shape first, hint second: an IDENTITY hint is only honoured on a dense vector
+    // (a constant restamped to a longer length can carry a stale one).
+    if (draken_is_constant(in) && in->length != 1u) {
         r.selection      = draken_zero_sel(in->length);       // constant: global zero
+        r.owns_selection = false;
+        r.flags          = 0u;
+    } else if (draken_is_dense(in) && (in->flags & DRAKEN_SEL_IDENTITY)) {
+        r.selection      = draken_identity_sel(in->length);   // dense: global identity
         r.owns_selection = false;
     } else {
         const size_t cn = (size_t)(in->length > 0u ? in->length : 1u);
