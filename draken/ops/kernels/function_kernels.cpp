@@ -973,8 +973,7 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
         // to borrow (SQL narrows an all-NULL expression's declared type at bind
         // time; this kernel never sees that type). `VecResult.data == nullptr`
         // is the ABI's ERROR sentinel (see _dv_function_kernel_c) — a genuine
-        // all-NULL SUCCESS must never use it. Mirror the established idiom
-        // (binary_op_arithmetic.cpp's DRAKEN_NULL-operand handling): allocate a
+        // all-NULL SUCCESS must never use it: allocate a
         // real dummy buffer of a concrete placeholder type (content is never
         // read — every row is marked invalid) instead of the DRAKEN_NULL tag.
         uint32_t n = m->length;

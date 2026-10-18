@@ -71,7 +71,7 @@ def test_binary_op_add():
     sql = "SELECT id + 1 FROM $planets LIMIT 1"
     results = list(session.execute_to_morsels(sql))
     assert len(results) > 0, "Binary op query should return results"
-    print("✓ BINARY_OP (+) → executes (should use draken_add)")
+    print("✓ BINARY_OP (+) → executes (should use draken_binop)")
 
 
 def test_binary_op_multiply():
@@ -80,7 +80,7 @@ def test_binary_op_multiply():
     sql = "SELECT id * 2 FROM $planets LIMIT 1"
     results = list(session.execute_to_morsels(sql))
     assert len(results) > 0, "Binary op query should return results"
-    print("✓ BINARY_OP (*) → executes (should use draken_multiply)")
+    print("✓ BINARY_OP (*) → executes (should use draken_binop)")
 
 
 def test_binary_op_bitwise_or():

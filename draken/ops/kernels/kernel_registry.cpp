@@ -33,7 +33,7 @@ static_assert(JSON_PTR_NOT_INDEX == draken::ops::kJsonPtrNotIndex,
 //
 // Phase 9a implements:
 // - Cast kernels (cast_numeric, cast_string, cast_temporal, cast_dispatch)
-// - Binary operation kernels (binary_op_arithmetic, binary_op_other, binary_op_temporal)
+// - Binary operation kernels (binary_op_other, binary_op_temporal)
 // - Extraction kernels (placeholder)
 //
 // Function kernels (Phase 8a-8i) are deferred to Phase 9a-fn; they require
@@ -190,7 +190,7 @@ VecResult draken_time_bucket(void* ctx, const DrakenVector* const* args, uint32_
 //
 // Key naming scheme:
 // - Cast kernels: Directly use function name (e.g., "draken_cast_int64_to_float64")
-// - Binary op kernels: Use function name (e.g., "draken_add", "draken_bitwise_or", "draken_binary_arith")
+// - Binary op kernels: Use function name (e.g., "draken_binop")
 // - Extraction kernels: Use function name (e.g., "draken_map_access_string")
 //
 // At bind time (Phase 9b), resolvers will construct these keys from operation types
@@ -508,13 +508,6 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // op_code (+ decimal scales) in binary_op_ctx. The per-op 9a kernels below are
     // superseded and will be retired once the flip is proven.
     {"draken_binop", (kernel_fn_t)&draken_binop},
-
-    // Arithmetic dispatch and individual operations (binary_op_arithmetic.cpp — real).
-    {"draken_binary_arith", (kernel_fn_t)&draken_binary_arith},
-    {"draken_add", (kernel_fn_t)&draken_add},
-    {"draken_subtract", (kernel_fn_t)&draken_subtract},
-    {"draken_multiply", (kernel_fn_t)&draken_multiply},
-    {"draken_divide", (kernel_fn_t)&draken_divide},
 
     // P9.0: bitwise (×5), string_concat, IP (binary_op_other.cpp) and temporal
     // (binary_op_temporal.cpp) binary kernels removed — ALL STUBS ("not yet

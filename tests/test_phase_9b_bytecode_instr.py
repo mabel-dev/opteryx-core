@@ -29,7 +29,7 @@ class TestByteCodeInstrPhase9b(unittest.TestCase):
     def test_resolve_kernel_binary_op(self):
         """Test kernel resolution for binary operations."""
         # Test resolving a binary op kernel
-        fn_ptr, ctx_wrapper = _resolve_kernel_and_context("draken_add", None, None)
+        fn_ptr, ctx_wrapper = _resolve_kernel_and_context("draken_binop", None, None)
         self.assertIsNotNone(fn_ptr)
         self.assertIsNone(ctx_wrapper)
         self.assertIsInstance(fn_ptr, int)

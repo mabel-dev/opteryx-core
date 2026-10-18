@@ -1181,12 +1181,23 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 else:
                     query_columns = None
 
-                # If the predicate only references columns from the relation feeding the UNNEST,
-                # move the filter before the UNNEST so we reduce the number of rows expanded.
+                # If the predicate only references columns the stream FEEDING the UNNEST
+                # carries (and not the target this node mints), move the filter before
+                # the UNNEST so we reduce the number of rows expanded.
+                #
+                # This is decided on column IDENTITY, not on the unnested column's
+                # `.source`: `unnest_column` is whatever expression is being unnested,
+                # and only an IDENTIFIER has a source. `UNNEST(SPLIT(e.cve_ids, ','))`
+                # is a Function with none, so the relation test raised AttributeError
+                # on every `CROSS JOIN UNNEST(<function>) ... WHERE <input column>`.
+                # The identity test is also the actual safety condition — the columns
+                # exist below the unnest — where the relation name was a proxy for it.
+                # The guard above has already established `known_columns` is a subset
+                # of the subtree's emitted set plus the target (the empty case passes
+                # it, so non-emptiness is tested explicitly); excluding the target
+                # leaves exactly "input columns only".
                 if (
-                    predicate.relations
-                    and node.unnest_column is not None
-                    and predicate.relations.issubset({node.unnest_column.source})
+                    known_columns
                     and node.unnest_target.schema_column.identity not in known_columns
                 ):
                     self.telemetry.optimization_predicate_pushdown += 1

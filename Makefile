@@ -485,7 +485,6 @@ DRAKEN_KERNEL_SRCS := \
 	$(CURDIR)/draken/ops/kernels/cast_temporal.cpp \
 	$(CURDIR)/draken/ops/kernels/cast_dispatch.cpp \
 	$(CURDIR)/draken/ops/kernels/extraction.cpp \
-	$(CURDIR)/draken/ops/kernels/binary_op_arithmetic.cpp \
 	$(CURDIR)/draken/ops/kernels/binary_op_other.cpp \
 	$(CURDIR)/draken/ops/kernels/binary_op_temporal.cpp \
 	$(CURDIR)/draken/ops/kernels/binop_dispatch.cpp \

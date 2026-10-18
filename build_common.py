@@ -700,7 +700,6 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/cast_temporal.cpp",
                 "draken/ops/kernels/cast_dispatch.cpp",
                 "draken/ops/kernels/extraction.cpp",
-                "draken/ops/kernels/binary_op_arithmetic.cpp",
                 "draken/ops/kernels/binary_op_other.cpp",
                 "draken/ops/kernels/binary_op_temporal.cpp",
                 "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)

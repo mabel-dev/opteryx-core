@@ -7,7 +7,6 @@
  *   VecResult (*)(void* ctx, const DrakenVector* left, const DrakenVector* right)
  *
  * Context is used for:
- * - Arithmetic: ctx → binary_op_ctx{op_code} to dispatch to add/sub/mul/div/mod.
  * - Bitwise: ctx is NULL (operation determined at bind time, not exec time).
  * - Temporal: ctx → binary_op_ctx{BOP_PLUS or BOP_MINUS} for ± interval.
  * - Other: ctx is NULL.
@@ -22,37 +21,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ============================================================================
- * Arithmetic Operators (vector op vector) — op_code in ctx
- *
- * Note: These call into draken's existing arithmetic fast path
- * (draken_arithmetic). Fallback path for mixed types, DECIMAL, etc.
- * ========================================================================== */
-
-/**
- * Binary arithmetic dispatch: add, sub, mul, div.
- * ctx → binary_op_ctx{op_code} where op_code is one of:
- *   OP_PLUS (1), OP_MINUS (2), OP_MULTIPLY (3), OP_DIVIDE (4)
- * Integer MODULO is draken_binop's (fixed_int_ops.h fi_int_arith / fi_uint_arith).
- * Dispatches internally to the right operation.
- *
- * Replaces the _build_arithmetic_closure that currently does
- * getattr(left, method_name)(right).
- *
- * Returns result vector or error sentinel.
- */
-VecResult draken_binary_arith(void* ctx, const DrakenVector* left, const DrakenVector* right);
-
-/* ============================================================================
- * Individual Arithmetic Operations — exposed separately for clarity
- * (optional, can be called directly if preferred over dispatcher)
- * ========================================================================== */
-
-VecResult draken_add(void* ctx, const DrakenVector* left, const DrakenVector* right);
-VecResult draken_subtract(void* ctx, const DrakenVector* left, const DrakenVector* right);
-VecResult draken_multiply(void* ctx, const DrakenVector* left, const DrakenVector* right);
-VecResult draken_divide(void* ctx, const DrakenVector* left, const DrakenVector* right);
 
 /* ============================================================================
  * Bitwise Operators — ctx is NULL
