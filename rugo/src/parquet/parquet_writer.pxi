@@ -794,12 +794,18 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                     "descriptor (scale/precision)" % (names[i],))
             dec_w = 8 if t == DRAKEN_DECIMAL else 16
             tmpdec = vector[uint8_t]()
-            tmpdec.resize(<size_t>nrows * dec_w)
             srcb = <const uint8_t*>dv.data
             with nogil:
-                for j in range(nrows):
-                    memcpy(tmpdec.data() + <size_t>j * dec_w,
-                           srcb + <size_t>sel[j] * dec_w, dec_w)
+                if dict_shape:
+                    tmpdec.resize(<size_t>dict_n * dec_w)
+                    memcpy(tmpdec.data(), srcb, <size_t>dict_n * dec_w)
+                    did_preserve = True
+                else:
+                    tmpdec.resize(<size_t>nrows * dec_w)
+                    for j in range(nrows):
+                        memcpy(tmpdec.data() + <size_t>j * dec_w,
+                               srcb + <size_t>sel[j] * dec_w, dec_w)
+                    ci.dict_enabled = use_dict
             dec_store.push_back(tmpdec)
             ci.type = PT_FLBA
             ci.logical = LK_DECIMAL

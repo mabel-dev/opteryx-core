@@ -219,6 +219,96 @@ def test_sorted_dictionary_int_extremes():
         assert [x for mm in r for x in mm.column(b"i").to_pylist()] == values
 
 
+# ── DECIMAL (FIXED_LEN_BYTE_ARRAY) ─────────────────────────────────────────
+#
+# DECIMAL auto-dictionaries like the integer types: 8-byte DECIMAL and 16-byte
+# DECIMAL128 values are priced at their width by the byte gate, keyed on their
+# bytes, and the dictionary is sorted by signed unscaled value. First-seen order
+# below deliberately differs from that order, so values only round-trip if the
+# code remap onto the sorted dictionary is right.
+
+
+def _decimal_sql(values, spec="DECIMAL(15,2)"):
+    rows = ",".join("(%s)" % ("NULL" if v is None else repr(v)) for v in values)
+    return f"SELECT CAST(v AS {spec}) AS v FROM (VALUES {rows}) AS t(v)"
+
+
+@pytest.mark.parametrize("compression", ["zstd", "none"])
+@pytest.mark.parametrize("spec", ["DECIMAL(15,2)", "DECIMAL(38,2)"])
+def test_lowcard_decimal_auto_dictionary(compression, spec):
+    import decimal
+
+    values = ["30.00", "-10.50", "20.25"] * 8
+    buf = write_parquet(_morsel(_decimal_sql(values, spec)), compression=compression)
+    used, encs, vals = _meta(buf)
+    assert used, f"expected dictionary encoding for {spec}, got {encs}"
+    assert vals == [decimal.Decimal(v) for v in values]
+
+
+def test_high_cardinality_decimal_falls_back_to_plain():
+    import decimal
+
+    values = ["%d.%02d" % (i, i % 100) for i in range(64)]
+    used, encs, vals = _meta(write_parquet(_morsel(_decimal_sql(values))))
+    assert not used, f"expected PLAIN fallback, got {encs}"
+    assert vals == [decimal.Decimal(v) for v in values]
+
+
+@pytest.mark.parametrize("spec", ["DECIMAL(15,2)", "DECIMAL(38,2)"])
+def test_decimal_dictionary_nulls_and_stats(spec):
+    """Unsorted first-seen order, interior nulls, values either side of zero:
+    values round-trip and min/max are the numeric bounds (codes-aware stats)."""
+    import decimal
+
+    import pyarrow.parquet as pq
+
+    values = ["30.00", None, "-10.50", "20.25", "30.00", None, "-10.50",
+              "20.25", "30.00", "-10.50", "20.25", None] * 2
+    buf = write_parquet(_morsel(_decimal_sql(values, spec)))
+    used, encs, vals = _meta(buf)
+    assert used, f"expected dictionary encoding, got {encs}"
+    assert vals == [None if v is None else decimal.Decimal(v) for v in values]
+    st = pq.ParquetFile(io.BytesIO(buf)).metadata.row_group(0).column(0).statistics
+    assert st.min == decimal.Decimal("-10.50")
+    assert st.max == decimal.Decimal("30.00")
+    assert st.null_count == 6
+
+
+def test_preserve_decimal_dict_shape_roundtrip(tmp_path):
+    """A dict-shaped DECIMAL vector (the engine's scan of a dictionary-encoded
+    file) is written with its dictionary kept (PRESERVE) and values intact."""
+    import decimal
+
+    values = ["30.00", "-10.50", "20.25"] * 8
+    first = tmp_path / "first.parquet"
+    first.write_bytes(write_parquet(_morsel(_decimal_sql(values))))
+    morsel = _morsel(f"SELECT v FROM READ_PARQUET('{first}')")
+    assert not morsel.column(b"v").is_dense, "scan should yield a dict-shaped vector"
+    used, encs, vals = _meta(write_parquet(morsel))
+    assert used, f"PRESERVE path should keep the dictionary, got {encs}"
+    assert vals == [decimal.Decimal(v) for v in values]
+
+
+def test_decimal_dictionary_engine_filter_and_sum(tmp_path):
+    """Predicates and aggregates over a dictionary-encoded DECIMAL file give the
+    same answers as the values they were written from."""
+    import decimal
+
+    values = ["30.00", "-10.50", "20.25", "0.05", None] * 40
+    path = tmp_path / "dec.parquet"
+    path.write_bytes(write_parquet(_morsel(_decimal_sql(values))))
+    used, encs, _ = _meta(path.read_bytes())
+    assert used, f"expected dictionary encoding, got {encs}"
+    present = [decimal.Decimal(v) for v in values if v is not None]
+    m = _morsel(
+        f"SELECT COUNT(*) AS c, SUM(v) AS s FROM READ_PARQUET('{path}') "
+        "WHERE v BETWEEN -10.50 AND 20.25"
+    )
+    expected = [v for v in present if decimal.Decimal("-10.50") <= v <= decimal.Decimal("20.25")]
+    assert m.column(b"c").to_pylist() == [len(expected)]
+    assert m.column(b"s").to_pylist() == [sum(expected)]
+
+
 if __name__ == "__main__":
     test_sorted_dictionary_string_roundtrip("zstd")
     test_sorted_dictionary_string_roundtrip("none")

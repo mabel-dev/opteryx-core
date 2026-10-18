@@ -659,13 +659,16 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
       }
       break;
     }
+    // lo_i / hi_i index the VALUE buffer (a dictionary slot in PRESERVE /
+    // auto-dict mode), not the logical row.
     bool any = false;
     __int128 lo = 0, hi = 0;
     size_t lo_i = 0, hi_i = 0;
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
-      const uint8_t *p = col.dec_raw + i * col.dec_width;
+      const size_t vi = codes ? codes[i] : i;
+      const uint8_t *p = col.dec_raw + vi * col.dec_width;
       __int128 v = 0;
       if (col.dec_width == 8) {
         int64_t t;
@@ -674,10 +677,10 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
       } else {
         std::memcpy(&v, p, 16); // dec_width == 16
       }
-      if (!any) { lo = hi = v; lo_i = hi_i = i; any = true; }
+      if (!any) { lo = hi = v; lo_i = hi_i = vi; any = true; }
       else {
-        if (v < lo) { lo = v; lo_i = i; }
-        if (v > hi) { hi = v; hi_i = i; }
+        if (v < lo) { lo = v; lo_i = vi; }
+        if (v > hi) { hi = v; hi_i = vi; }
       }
     }
     if (any) {
@@ -857,7 +860,7 @@ inline bool hash_column_rows(const ColumnInput &col, size_t num_rows,
     case PT_FLBA: {
       // Hash the fixed-width bytes as written to the page: big-endian for
       // DECIMAL, verbatim for UUID.
-      const uint8_t *le = col.dec_raw + (size_t)i * col.dec_width;
+      const uint8_t *le = col.dec_raw + vi * col.dec_width;
       if (col.logical == LK_UUID) {
         row_hashes[i] = bloom_hash(le, col.dec_width);
         break;
@@ -1360,16 +1363,20 @@ static const double DICT_MAX_PAGE_FRACTION = 0.75;  // of the chunk's PLAIN byte
 static const size_t DICT_MAX_BUDGET_BYTES = (size_t)0xFFFFFFFFull * 4ull;
 
 // PLAIN-encoded width of one value, or 0 for the variable-width types. Only the
-// types the auto-build switch below actually handles return non-zero; BOOLEAN
-// and FLBA never reach the gate.
-inline size_t dict_fixed_value_bytes(int type) {
-  switch (type) {
+// types the auto-build switch below actually handles return non-zero. BOOLEAN
+// never reaches the gate; of the FLBA kinds only DECIMAL does (its width is the
+// edge's dec_width, 8 or 16 — the bytes encode_values writes per value).
+// INTERVAL and UUID FLBA columns never set dict_enabled.
+inline size_t dict_fixed_value_bytes(const ColumnInput &col) {
+  switch (col.type) {
   case PT_INT32:
   case PT_FLOAT:
     return 4;
   case PT_INT64:
   case PT_DOUBLE:
     return 8;
+  case PT_FLBA:
+    return col.logical == LK_DECIMAL ? (size_t)col.dec_width : 0;
   default:
     return 0;
   }
@@ -1383,6 +1390,7 @@ struct BuiltDict {
   std::vector<float> f32;
   std::vector<double> f64;
   std::vector<StrSlice> strs;
+  std::vector<uint8_t> dec;    // DECIMAL FLBA: dict_count * dec_width LE bytes
   std::vector<uint32_t> codes; // one code per logical row (null rows => 0)
 };
 
@@ -1573,7 +1581,7 @@ static const double DICT_ESTIMATE_SKIP_MARGIN = 1.25;
 // BYTE_ARRAY this walks the lengths only — the payload bytes are never touched.
 inline size_t dict_plain_bytes(const ColumnInput &col, size_t num_rows,
                                size_t present) {
-  const size_t w = dict_fixed_value_bytes(col.type);
+  const size_t w = dict_fixed_value_bytes(col);
   if (w != 0)
     return present * w;
   if (col.type != PT_BYTE_ARRAY)
@@ -1629,7 +1637,7 @@ inline DictBudget dict_byte_budget(const ColumnInput &col, size_t num_rows,
   // until they are seen, so this prices them at the mean present-value length
   // and leans generous by the same margin — the running budget inside
   // build_string_dict is what actually enforces the gate, per value.
-  const size_t w = dict_fixed_value_bytes(col.type);
+  const size_t w = dict_fixed_value_bytes(col);
   double predicted;
   double ceiling = (double)out.byte_budget;
   if (w != 0) {
@@ -1758,6 +1766,41 @@ inline bool build_numeric_dict(const T *vals, const uint8_t *validity,
   return true;
 }
 
+// DECIMAL (FLBA) variant of build_numeric_dict: the values are `width`-byte
+// little-endian unscaled integers (8 or 16 — the edge's dec_width), keyed on
+// their bytes exactly as build_numeric_dict keys on its bit pattern.
+inline bool build_decimal_dict(const uint8_t *vals, size_t width,
+                               const uint8_t *validity, size_t num_rows,
+                               size_t byte_budget,
+                               const std::vector<uint64_t> &row_hashes,
+                               size_t expected_distinct,
+                               std::vector<uint8_t> &dict,
+                               std::vector<uint32_t> &codes) {
+  const size_t cap = byte_budget / width; // entries the budget affords
+  HashedDictIndex index(std::min(expected_distinct, cap));
+  auto eq = [vals, width](size_t a, size_t b) {
+    return std::memcmp(vals + a * width, vals + b * width, width) == 0;
+  };
+  codes.assign(num_rows, 0);
+  uint32_t count = 0;
+  for (size_t i = 0; i < num_rows; i++) {
+    if (!is_valid(validity, i))
+      continue;
+    size_t at = 0;
+    const uint32_t found = index.find(row_hashes[i], i, eq, at);
+    if (found != HashedDictIndex::kAbsent) {
+      codes[i] = found;
+    } else {
+      if (count >= cap)
+        return false;
+      index.insert(at, row_hashes[i], i, count);
+      dict.insert(dict.end(), vals + i * width, vals + (i + 1) * width);
+      codes[i] = count++;
+    }
+  }
+  return true;
+}
+
 inline bool build_string_dict(const StrSlice *vals, const uint8_t *validity,
                               size_t num_rows, size_t byte_budget,
                               const std::vector<uint64_t> &row_hashes,
@@ -1828,19 +1871,22 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
   // A sorted dictionary lets a reader turn a range/equality predicate into a
   // contiguous CODE interval (two binary searches + an integer range compare),
   // advertised via DictionaryPageHeader.is_sorted. Sortable types: INT32/INT64
-  // (incl. DATE32/TIMESTAMP64) numerically, BYTE_ARRAY by unsigned-byte
+  // (incl. DATE32/TIMESTAMP64) numerically, DECIMAL FLBA by its signed unscaled
+  // value (the order compute_stats bounds it by), BYTE_ARRAY by unsigned-byte
   // lexicographic order (matches compute_stats / Parquet BYTE_ARRAY ordering).
   // Floats are deliberately excluded — NaN / -0.0 break monotonic code ranges.
   // We emit the dictionary-page values in sorted order and remap each row's
   // code through the inverse permutation; column stats and bloom were computed
   // from the original codes upstream, so they are unaffected.
   const uint32_t D = col.dict_count;
+  const bool is_decimal = col.type == PT_FLBA && col.logical == LK_DECIMAL;
   bool sorted = (col.type == PT_INT32 || col.type == PT_INT64 ||
-                 col.type == PT_BYTE_ARRAY);
+                 col.type == PT_BYTE_ARRAY || is_decimal);
   std::vector<uint32_t> inv;     // inv[old_code] = new_code (sorted only)
   std::vector<int32_t> s_i32;    // dict values reordered for the dict page
   std::vector<int64_t> s_i64;
   std::vector<StrSlice> s_str;
+  std::vector<uint8_t> s_dec;
   if (sorted && D > 0) {
     std::vector<uint32_t> perm(D); // perm[new_code] = old_code
     for (uint32_t k = 0; k < D; k++)
@@ -1859,14 +1905,36 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
         return col.is_unsigned ? (uint32_t)col.i32[a] < (uint32_t)col.i32[b]
                                : col.i32[a] < col.i32[b];
       });
-    else // PT_BYTE_ARRAY
+    else if (is_decimal) {
+      const size_t w = (size_t)col.dec_width;
+      std::vector<__int128> key(D);
+      for (uint32_t k = 0; k < D; k++) {
+        const uint8_t *p = col.dec_raw + (size_t)k * w;
+        if (w == 8) {
+          int64_t t;
+          std::memcpy(&t, p, 8);
+          key[k] = t;
+        } else {
+          std::memcpy(&key[k], p, 16); // dec_width == 16
+        }
+      }
+      std::sort(perm.begin(), perm.end(),
+                [&](uint32_t a, uint32_t b) { return key[a] < key[b]; });
+    } else // PT_BYTE_ARRAY
       std::sort(perm.begin(), perm.end(), [&](uint32_t a, uint32_t b) {
         return str_lt(col.strs[a], col.strs[b]);
       });
     inv.assign(D, 0);
     for (uint32_t k = 0; k < D; k++)
       inv[perm[k]] = k;
-    if (col.type == PT_INT64) {
+    if (is_decimal) {
+      const size_t w = (size_t)col.dec_width;
+      s_dec.resize((size_t)D * w);
+      for (uint32_t k = 0; k < D; k++)
+        std::memcpy(s_dec.data() + (size_t)k * w,
+                    col.dec_raw + (size_t)perm[k] * w, w);
+      dv.dec_raw = s_dec.data();
+    } else if (col.type == PT_INT64) {
       s_i64.resize(D);
       for (uint32_t k = 0; k < D; k++)
         s_i64[k] = col.i64[perm[k]];
@@ -2570,6 +2638,16 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
                                       bd.strs, bd.codes);
             if (built) { dcol.strs = bd.strs.data(); dcol.dict_count = (uint32_t)bd.strs.size(); }
             break;
+          case PT_FLBA: {
+            // Only DECIMAL sets dict_enabled among the FLBA kinds; the byte
+            // budget above already declined anything else (width 0).
+            const size_t w = (size_t)rg_cols[i].dec_width;
+            built = build_decimal_dict(rg_cols[i].dec_raw, w, rg_cols[i].validity,
+                                       rg_rows, byte_budget, row_hashes, expected,
+                                       bd.dec, bd.codes);
+            if (built) { dcol.dec_raw = bd.dec.data(); dcol.dict_count = (uint32_t)(bd.dec.size() / w); }
+            break;
+          }
           default:
             break;
           }
