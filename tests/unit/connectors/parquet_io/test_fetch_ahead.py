@@ -33,6 +33,9 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+from opteryx import config
+from opteryx.compiled.platform import cgroup_memory_limit_bytes, physical_memory_total_bytes
+from opteryx.compiled.structures.memory_pool import configure_chunk_cache
 from opteryx.exceptions import DatasetReadError
 
 SERVER = os.path.abspath(
@@ -43,6 +46,22 @@ ROW_GROUP_SIZE = 500
 N_ROW_GROUPS = 24
 N = ROW_GROUP_SIZE * N_ROW_GROUPS
 COLUMNS = ["x", "s"]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def chunk_cache_off():
+    """These tests compare bytes fetched and requests made between two scans of the
+    same file. Since the C7 chunk cache skips the GET on a hit
+    (docs/C7_GET_SKIP_AND_DECODED_CACHE_DESIGN.md), the second scan of a URL was
+    served from the cache and fetched nothing — on a host whose memory gives the
+    cache a budget (it switches itself off under 2 GiB). Off for this module,
+    restored exactly as `opteryx/__init__.py` configures it."""
+    container = cgroup_memory_limit_bytes() or physical_memory_total_bytes()
+    configure_chunk_cache(container, 0, 0)   # budget 0 = off; flushes every entry
+    yield
+    configure_chunk_cache(
+        container, config.CHUNK_CACHE_MEMORY_PERCENT, config.CHUNK_CACHE_RESERVE_BYTES
+    )
 
 
 def _write(tmp):

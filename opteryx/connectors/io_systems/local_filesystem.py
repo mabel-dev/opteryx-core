@@ -26,11 +26,20 @@ class MemoryMappedFile:
         """Initialize memory-mapped file."""
         from opteryx.compiled.nanobind.vectors import read_file_mmap
 
+        # Valid state FIRST: Python runs __del__ (-> close) even when __init__
+        # raises, and the mapping below can fail (a missing path). With no
+        # mapping yet the object is closed and close() has nothing to release;
+        # it used to read a `closed` that was never set and raise a second,
+        # unrelated AttributeError on top of the real FileNotFoundError.
         self.path = path
-        self.mmap_obj = read_file_mmap(path)
-        self.memoryview = memoryview(self.mmap_obj)
+        self.closed = True
+        self.mmap_obj = None
         self.pos = 0
+        self.mmap_obj = read_file_mmap(path)
+        # A mapping now exists, so close() must release it from here on —
+        # including if building the view below were to fail.
         self.closed = False
+        self.memoryview = memoryview(self.mmap_obj)
 
     def read(self, size: int = -1) -> bytes:
         """Read bytes from the file."""

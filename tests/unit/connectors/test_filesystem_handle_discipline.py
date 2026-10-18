@@ -26,6 +26,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.connectors import filesystem_connector
 from opteryx.connectors.filesystem_connector import FileSystemTable
+from opteryx.connectors.io_systems.local_filesystem import MemoryMappedFile
 from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 from opteryx.models.query_telemetry import QueryTelemetry
 
@@ -146,3 +147,38 @@ def test_get_dataset_metadata_closes_stream():
     assert fs.opened, "no file was opened, so nothing about closing was proven"
     for opened in fs.opened:
         assert opened.handle.closed is True, f"{opened.path} was left open"
+
+
+def test_failed_open_raises_once_and_destructor_is_silent(tmp_path):
+    # A path that cannot be mapped must raise the mapping's own error and nothing
+    # else: the half-built object is still finalised, and its destructor used to
+    # raise AttributeError ('closed' was never set), reported by the interpreter
+    # as "Exception ignored" — once per failed open.
+    import gc
+
+    unraisable = []
+    previous = sys.unraisablehook
+    sys.unraisablehook = unraisable.append
+    try:
+        with pytest.raises(FileNotFoundError):
+            MemoryMappedFile(str(tmp_path / "missing.parquet"))
+        gc.collect()
+    finally:
+        sys.unraisablehook = previous
+    assert unraisable == []
+
+
+def test_mapped_file_reads_and_closes(tmp_path):
+    # The ordinary path is unchanged: open, read, close, and close again is a no-op.
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"opteryx")
+    handle = MemoryMappedFile(str(path))
+    assert handle.closed is False
+    assert handle.read(3) == b"opt"
+    assert handle.read() == b"eryx"
+    handle.close()
+    assert handle.closed is True
+    handle.close()
+    with pytest.raises(ValueError):
+        handle.read()
+

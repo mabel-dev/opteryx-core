@@ -31,6 +31,9 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
+from opteryx import config
+from opteryx.compiled.platform import cgroup_memory_limit_bytes, physical_memory_total_bytes
+from opteryx.compiled.structures.memory_pool import configure_chunk_cache
 from rugo import parquet as rp
 
 SERVER = os.path.abspath(
@@ -126,6 +129,23 @@ def _run(sql):
     assert sources == {"NativeParquetScanSource"}, sources
     session.close()
     return rows, gets, ops
+
+
+@pytest.fixture(scope="module", autouse=True)
+def chunk_cache_off():
+    """Every assertion here counts range GETs on the cache-MISS path. Since the C7
+    chunk cache skips the GET on a hit (docs/C7_GET_SKIP_AND_DECODED_CACHE_DESIGN.md),
+    a repeat of a query, or a later query over chunks an earlier test fetched,
+    issues no GET at all, so the counts depended on test order and on the host's
+    memory (the cache switches itself off under a 2 GiB budget). Off for this
+    module, restored exactly as `opteryx/__init__.py` configures it. The cache's
+    own GET skipping is pinned in test_chunk_cache_get_skip.py."""
+    container = cgroup_memory_limit_bytes() or physical_memory_total_bytes()
+    configure_chunk_cache(container, 0, 0)   # budget 0 = off; flushes every entry
+    yield
+    configure_chunk_cache(
+        container, config.CHUNK_CACHE_MEMORY_PERCENT, config.CHUNK_CACHE_RESERVE_BYTES
+    )
 
 
 @pytest.fixture(scope="module")
