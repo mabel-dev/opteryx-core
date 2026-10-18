@@ -61,25 +61,28 @@ def _query_sort_key(path: Path):
 
 
 def _dataset_prefix(variant: str, size: str) -> str:
-    """`testdata.h2o_skene.`, `testdata.h2o.<size>.` or `aistor.h2o_<size>.` —
-    never a silent fallback.
+    """`testdata.h2o_rugo.`, `testdata.h2o_skene.`, `testdata.h2o.<size>.` or
+    `aistor.h2o_<size>.` — never a silent fallback.
 
-    The skene mirror is built at one size (medium), so it carries no size level:
-    `testdata.h2o_skene.<table>`. The parquet tree keeps its per-size layout, and
-    `aistor` is that parquet tree registered as Iceberg tables on AIStor.
-    An unknown variant is a hard failure rather than a fallback to the other
-    corpus.
+    The rugo and skene mirrors are built at one size (medium), so they carry no
+    size level: `testdata.h2o_rugo.<table>` is the parquet tree rewritten by
+    rugo's writer, `testdata.h2o_skene.<table>` the skene mirror. The parquet
+    tree keeps its per-size layout, and `aistor` is that parquet tree registered
+    as Iceberg tables on AIStor. An unknown variant is a hard failure rather than
+    a fallback to the other corpus.
     """
+    if variant == "rugo":
+        return "testdata.h2o_rugo."
     if variant == "skene":
         return "testdata.h2o_skene."
     if variant == "parquet":
         return f"testdata.h2o.{size}."
     if variant == AISTOR_WORKSPACE:
         return f"{AISTOR_WORKSPACE}.h2o_{size}."
-    raise ValueError(f"unknown variant {variant!r}; expected 'skene', 'parquet' or 'aistor'")
+    raise ValueError(f"unknown variant {variant!r}; expected 'rugo', 'skene', 'parquet' or 'aistor'")
 
 
-def _rewrite_query(sql: str, size: str, workload: str, variant: str = "skene") -> str:
+def _rewrite_query(sql: str, size: str, workload: str, variant: str = "rugo") -> str:
     """Replace bare table names with the dataset-qualified form.
 
     Group-by queries use `x_groupby` (string ids first); join queries use
@@ -159,10 +162,11 @@ def main() -> int:
     parser.add_argument(
         "--variant",
         type=str,
-        default="skene",
-        choices=("skene", "parquet", AISTOR_WORKSPACE),
-        help="dataset format: runs against testdata/h2o_skene, testdata/h2o/<size>, "
-             "or the parquet tree on AIStor (aistor.h2o_<size>) (default: skene)",
+        default="rugo",
+        choices=("rugo", "skene", "parquet", AISTOR_WORKSPACE),
+        help="dataset format: runs against testdata/h2o_rugo, testdata/h2o_skene, "
+             "testdata/h2o/<size>, or the parquet tree on AIStor (aistor.h2o_<size>) "
+             "(default: rugo)",
     )
     parser.add_argument(
         "--timeout",

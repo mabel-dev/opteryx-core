@@ -72,28 +72,32 @@ TABLES = [
     "name",
 ]
 
-# Dataset prefix, resolved from --variant. Skene is the default: JOB does not
-# stipulate a storage format (upstream ships the IMDB CSVs, not files), so the
-# choice was always ours, and it is made the same way here as in the weekly
-# suite so a laptop number and a CI number are the same measurement.
-DATASET_PREFIX = "testdata.job_skene."
+# Dataset prefix, resolved from --variant. rugo-written parquet is the default:
+# JOB does not stipulate a storage format (upstream ships the IMDB CSVs, not
+# files), so the choice was always ours. `make job` builds testdata/job_rugo
+# from testdata/job through rugo's own writer (see the Makefile).
+DATASET_PREFIX = "testdata.job_rugo."
 
 
 def _dataset_prefix(variant: str) -> str:
-    """`testdata.job_skene.`, `testdata.job.` or `aistor.job.` — never a silent
-    fallback. `aistor` is the parquet corpus registered as Iceberg on AIStor.
+    """`testdata.job_rugo.`, `testdata.job_skene.`, `testdata.job.` or
+    `aistor.job.` — never a silent fallback. `parquet` is the source corpus as
+    generated; `rugo` is that corpus rewritten by rugo's writer; `aistor` is the
+    parquet corpus registered as Iceberg on AIStor.
 
     An unknown variant is a hard failure: a run that quietly benchmarks a
     different corpus than the one it names is exactly the defect this argument
     exists to prevent.
     """
+    if variant == "rugo":
+        return "testdata.job_rugo."
     if variant == "skene":
         return "testdata.job_skene."
     if variant == "parquet":
         return "testdata.job."
     if variant == AISTOR_WORKSPACE:
         return f"{AISTOR_WORKSPACE}.job."
-    raise ValueError(f"unknown variant {variant!r}; expected 'skene', 'parquet' or 'aistor'")
+    raise ValueError(f"unknown variant {variant!r}; expected 'rugo', 'skene', 'parquet' or 'aistor'")
 QUERY_RE = re.compile(r"^([0-9]+)([a-z])\.sql$")
 _TABLE_ALT = "|".join(re.escape(t) for t in TABLES)
 # Rewrite is scoped to the FROM clause: only tokens immediately following
@@ -168,10 +172,10 @@ def main() -> int:
     parser.add_argument(
         "--variant",
         type=str,
-        default="skene",
-        choices=("skene", "parquet", AISTOR_WORKSPACE),
-        help="dataset format: runs against testdata/job_skene, testdata/job, or the "
-        "parquet corpus on AIStor (aistor.job) (default: skene)",
+        default="rugo",
+        choices=("rugo", "skene", "parquet", AISTOR_WORKSPACE),
+        help="dataset format: runs against testdata/job_rugo, testdata/job_skene, "
+        "testdata/job, or the parquet corpus on AIStor (aistor.job) (default: rugo)",
     )
     parser.add_argument(
         "--timeout",
