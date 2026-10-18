@@ -20,6 +20,7 @@ No Python in the hot path. All IO, decode, and IPC-serialize run in C++:
 
 from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
+from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.pair cimport pair
@@ -1389,10 +1390,26 @@ cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path
     which parses the header to find its extent."""
     cdef size_t rg_i, ci, n_rg = fs.row_groups.size()
     cdef list keep = []
+    # Predicates prepared once per call (name bytes, operator code, value), on the
+    # first row group that holds rows — where the per-row-group loop first read them.
+    cdef vector[string] pcols
+    cdef vector[int] pops
+    cdef list pvals = []
+    cdef bint prepared = False
     for rg_i in range(n_rg):
         if fs.row_groups[rg_i].num_rows == 0:
             continue
-        if not predicates or _rg_passes_predicates_native(fs.row_groups[rg_i], predicates):
+        if not predicates:
+            keep.append(rg_i)
+            continue
+        if not prepared:
+            for pred in predicates:
+                col_name, op, value = pred
+                pcols.push_back(col_name.encode('utf-8'))   # str names from the binder
+                pops.push_back(_pred_op_code(op))
+                pvals.append(value)
+            prepared = True
+        if _rg_passes_predicates_native(fs.row_groups[rg_i], pcols, pops, pvals):
             keep.append(rg_i)
     if bloom_path is None or not keep or not predicates:
         return keep
@@ -1541,11 +1558,159 @@ cdef list _pread_runs(str path, list runs):
     return out
 
 
-cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, list predicates):
+# ---- row-group pruning: statistic decode without the Python decoder -------------------
+# `_rg_passes_predicates_native` runs once per row group per pushed predicate on EVERY
+# query, over cached immutable footers. It used to hand each min and max to rugo's
+# `decode_value`, which converts three std::strings to Python strings and runs
+# struct.unpack — the larger part of ~1 µs per row group (ClickBench Q01: 1,091 row
+# groups, 1.4 ms of plan time, 2026-10-18). For the fixed-width physical types below
+# the statistic is decoded here instead, into the SAME Python object decode_value
+# returns (int / float / bool), so every comparison that follows is unchanged. Every
+# other column — a DECIMAL annotation, byte arrays, int96, a statistic whose byte
+# length is not the type's width, a non-ASCII annotation — goes to decode_value
+# exactly as before.
+cdef string _PT_INT32 = b"int32"
+cdef string _PT_INT64 = b"int64"
+cdef string _PT_FLOAT32 = b"float32"
+cdef string _PT_FLOAT64 = b"float64"
+cdef string _PT_BOOLEAN = b"boolean"
+cdef string _LT_DECIMAL = b"decimal("
+cdef string _LT_UINT = b"uint"
+
+cdef enum:
+    _SK_DECODE_VALUE = 0    # rugo's decode_value decides
+    _SK_I32 = 1
+    _SK_U32 = 2
+    _SK_I64 = 3
+    _SK_U64 = 4
+    _SK_F32 = 5
+    _SK_F64 = 6
+    _SK_BOOL = 7
+
+
+cdef int _stat_kind(const ColumnStats& c) noexcept:
+    """Which decode `decode_value` would perform for this column's statistics, for
+    the fixed-width physical types; _SK_DECODE_VALUE for everything else. Mirrors its
+    dispatch: a "decimal(" annotation wins over the physical type, and an int column
+    is unsigned when the INNERMOST "uint" in the annotation is followed by a digit
+    (decode_value's rfind rule, E33)."""
+    cdef const string* lt = &c.logical_type
+    cdef size_t i, pos
+    cdef size_t n = lt.size()
+    cdef bint unsigned_int
+    for i in range(n):
+        if <unsigned char>deref(lt)[i] >= 128:
+            return _SK_DECODE_VALUE     # decode_value indexes the DECODED str; keep it
+    if lt.rfind(_LT_DECIMAL, 0) == 0:          # starts with "decimal("
+        return _SK_DECODE_VALUE
+    pos = lt.rfind(_LT_UINT)
+    unsigned_int = (
+        pos != <size_t>-1
+        and pos + 4 < n
+        and <unsigned char>deref(lt)[pos + 4] >= 48       # '0'
+        and <unsigned char>deref(lt)[pos + 4] <= 57       # '9'
+    )
+    if c.physical_type == _PT_INT32:
+        return _SK_U32 if unsigned_int else _SK_I32
+    if c.physical_type == _PT_INT64:
+        return _SK_U64 if unsigned_int else _SK_I64
+    if c.physical_type == _PT_FLOAT32:
+        return _SK_F32
+    if c.physical_type == _PT_FLOAT64:
+        return _SK_F64
+    if c.physical_type == _PT_BOOLEAN:
+        return _SK_BOOL
+    return _SK_DECODE_VALUE
+
+
+cdef inline uint32_t _le32(const string& raw) noexcept:
+    cdef const unsigned char* p = <const unsigned char*>raw.data()
+    return ((<uint32_t>p[0]) | ((<uint32_t>p[1]) << 8) |
+            ((<uint32_t>p[2]) << 16) | ((<uint32_t>p[3]) << 24))
+
+
+cdef inline uint64_t _le64(const string& raw) noexcept:
+    cdef const unsigned char* p = <const unsigned char*>raw.data()
+    cdef uint64_t v = 0
+    cdef int k
+    for k in range(7, -1, -1):
+        v = (v << 8) | (<uint64_t>p[k])
+    return v
+
+
+cdef object _stat_value(int kind, const ColumnStats& c, const string& raw):
+    """`decode_value(c.physical_type, c.logical_type, raw, False)`, decoded here for
+    the fixed-width kinds (little-endian, as struct "<i"/"<I"/"<q"/"<Q"/"<f"/"<d"
+    read it) when `raw` has exactly the type's width; otherwise decode_value itself."""
+    cdef size_t n = raw.size()
+    cdef uint32_t u32
+    cdef uint64_t u64
+    cdef float f32
+    cdef double f64
+    if kind == _SK_I32 and n == 4:
+        return <int32_t>_le32(raw)
+    if kind == _SK_U32 and n == 4:
+        return _le32(raw)
+    if kind == _SK_I64 and n == 8:
+        return <int64_t>_le64(raw)
+    if kind == _SK_U64 and n == 8:
+        return _le64(raw)
+    if kind == _SK_F32 and n == 4:
+        u32 = _le32(raw)
+        memcpy(&f32, &u32, 4)
+        return <double>f32
+    if kind == _SK_F64 and n == 8:
+        u64 = _le64(raw)
+        memcpy(&f64, &u64, 8)
+        return f64
+    if kind == _SK_BOOL and n >= 1:
+        return True if raw[0] != 0 else False
+    return _decode_value_c(c.physical_type, c.logical_type, raw, False)
+
+
+# Predicate operator codes for `_rg_passes_predicates_native`, resolved once per
+# `_prune_row_groups` call with the same `==` tests the per-row-group chain used.
+cdef enum:
+    _OP_OTHER = 0
+    _OP_EQ = 1
+    _OP_NOT_EQ = 2
+    _OP_GT = 3
+    _OP_GT_EQ = 4
+    _OP_LT = 5
+    _OP_LT_EQ = 6
+    _OP_IN_LIST = 7
+    _OP_NOT_IN_LIST = 8
+
+
+cdef int _pred_op_code(object op):
+    if op == "Eq":
+        return _OP_EQ
+    if op == "NotEq":
+        return _OP_NOT_EQ
+    if op == "Gt":
+        return _OP_GT
+    if op == "GtEq":
+        return _OP_GT_EQ
+    if op == "Lt":
+        return _OP_LT
+    if op == "LtEq":
+        return _OP_LT_EQ
+    if op == "InList":
+        return _OP_IN_LIST
+    if op == "NotInList":
+        return _OP_NOT_IN_LIST
+    return _OP_OTHER
+
+
+cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, const vector[string]& pcols,
+                                       const vector[int]& pops, list pvals):
     """Evaluate AND-combined predicates against RowGroupStats min/max without
     materialising a Python dict. Bloom membership is NOT tested here — it needs
     the file's bloom bytes, which `_prune_row_groups` reads once per file for
     every row group this test keeps.
+
+    The predicates arrive PREPARED by `_prune_row_groups` (column name as UTF-8
+    bytes, operator code, value), once per call rather than once per row group.
 
     Every test below assumes the row group's values lie in [min_val, max_val].
     That is FALSE for a float column holding a NaN — Parquet keeps NaN out of
@@ -1554,52 +1719,49 @@ cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, list predicates)
     and never appear in `predicates`. Do not "restore" the missing pruning here:
     the rule lives at extraction precisely so this function and its Python twin
     (`predicates._can_prune_rowgroup`) cannot drift apart."""
-    cdef size_t i
-    cdef string col_str
-    cdef object min_val, max_val, value, col_name, op
+    cdef size_t i, pi
+    cdef int op, kind
+    cdef object min_val, max_val, value
 
-    for pred in predicates:
-        col_name, op, value = pred
-        col_str = col_name.encode('utf-8')   # predicates always carry str names from the binder
+    for pi in range(pcols.size()):
+        op = pops[pi]
+        value = pvals[pi]
         for i in range(rg.columns.size()):
-            if rg.columns[i].name != col_str:
+            if rg.columns[i].name != pcols[pi]:
                 continue
-            min_val = _decode_value_c(
-                rg.columns[i].physical_type, rg.columns[i].logical_type,
-                rg.columns[i].min, False,
-            ) if rg.columns[i].has_min else None
-            max_val = _decode_value_c(
-                rg.columns[i].physical_type, rg.columns[i].logical_type,
-                rg.columns[i].max, False,
-            ) if rg.columns[i].has_max else None
+            kind = _stat_kind(rg.columns[i])
+            min_val = _stat_value(kind, rg.columns[i], rg.columns[i].min) \
+                if rg.columns[i].has_min else None
+            max_val = _stat_value(kind, rg.columns[i], rg.columns[i].max) \
+                if rg.columns[i].has_max else None
             if min_val is None or max_val is None:
                 break
             try:
-                if op == "Eq":
+                if op == _OP_EQ:
                     if value < min_val or value > max_val:
                         return False
-                elif op == "NotEq":
+                elif op == _OP_NOT_EQ:
                     if min_val == max_val == value:
                         return False
-                elif op == "Gt":
+                elif op == _OP_GT:
                     if max_val <= value:
                         return False
-                elif op == "GtEq":
+                elif op == _OP_GT_EQ:
                     if max_val < value:
                         return False
-                elif op == "Lt":
+                elif op == _OP_LT:
                     if min_val >= value:
                         return False
-                elif op == "LtEq":
+                elif op == _OP_LT_EQ:
                     if min_val > value:
                         return False
-                elif op == "InList":
+                elif op == _OP_IN_LIST:
                     # Prune only when no candidate value falls in [min, max].
                     # Mirrors predicates._can_prune_rowgroup; an empty list
                     # matches nothing so any() is False -> prune.
                     if not any(min_val <= v <= max_val for v in value):
                         return False
-                elif op == "NotInList":
+                elif op == _OP_NOT_IN_LIST:
                     # Prune only when the whole group is a single excluded value.
                     if min_val == max_val and min_val in value:
                         return False

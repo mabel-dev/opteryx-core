@@ -19,7 +19,6 @@ Key design:
 
 from __future__ import annotations
 
-import copy as copy_module
 import dataclasses
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -311,9 +310,20 @@ class RelationDescriptor:
     def copy(self) -> "RelationDescriptor":
         """An independent copy: its own column list of its own descriptors, so a
         holder that adjusts what it was handed (a relation-level metric, a column
-        list) cannot reach back into a cached original."""
-        clone = copy_module.copy(self)
-        clone.columns = [copy_module.copy(column) for column in self.columns]
+        list) cannot reach back into a cached original.
+
+        Shallow copies made straight from the instance dict — what `copy.copy`
+        produces for these plain dataclasses (no __slots__, no copy hooks), without
+        its generic __reduce_ex__ protocol, which cost ~2 µs per column on every
+        query that read a cached dataset schema (2026-10-18)."""
+        clone = object.__new__(RelationDescriptor)
+        clone.__dict__.update(self.__dict__)
+        columns = []
+        for column in self.columns:
+            column_copy = object.__new__(type(column))
+            column_copy.__dict__.update(column.__dict__)
+            columns.append(column_copy)
+        clone.columns = columns
         clone.aliases = list(self.aliases)
         return clone
 
