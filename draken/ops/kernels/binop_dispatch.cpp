@@ -14,6 +14,7 @@
 #include "ops/int_bitwise.h"              // draken::ops::bitwise_and/or/xor/shl/shr
 #include "ops/int64_compare.h"            // draken::ops::cmp_alloc_bool_buf (IP-in-CIDR result)
 #include "ops/kernels/result_helpers.h"   // vecresult_from_string_buffers
+#include "ops/kernels/compressed_helpers.h"   // kernel_live_slots / kernel_preserve_shape
 #include "core/buffers.h"
 #include "core/string_slot.h"             // DrakenStringSlot, draken_build_string_slot, str_data/length
 #include "core/alloc.h"                   // draken_malloc
@@ -343,7 +344,87 @@ static inline void free_widen_temp(VecResult& r) {
 }
 
 
+static VecResult binop_rows(void* ctx, const DrakenVector* left, const DrakenVector* right);
+
+// The compressed path pays a liveness pass and a code copy; it only wins when the
+// value array is much shorter than the row count (architect, 2026-10-19: "compressed
+// path only when the dictionary is much smaller than the row count"). Round 1 ran it
+// on any compressed operand and LOST on a near-unique dictionary (ClientIP - 1: 1.023).
+// It is STRING-only (architect, 2026-10-19): concat gains 0.584, while a compressed
+// NUMERIC result feeding a non-constant binop costs a per-row gather downstream
+// (TPC-H Q01 1.006 with numeric included; numeric targets gained only 0.97-0.98).
+static constexpr uint32_t kBinopCompressedRatio = 8u;   // data_length * 8 <= length
+
+// Compression-aware entry. One operand a non-null CONSTANT and the other a STRING
+// operand, COMPRESSED (draken_is_compressed) with a value array at most
+// 1/kBinopCompressedRatio of its rows: run the same kernel over the compressed operand's VALUE ARRAY — a
+// values-only view (identity selection over its data_length values; validity marks
+// the LIVE values, kernel_live_slots, so an overflow or zero divisor in a value no
+// valid row reads cannot raise) against the constant broadcast to that length —
+// then give the data_length-value result the compressed operand's encoding. Operand
+// order is kept. Every binop is a pure function of its two values, so this is the
+// row loop's answer, once per value.
+static inline bool binop_compressed_worth(const DrakenVector* v) noexcept {
+    return draken_type_is_string_storage(v->type)
+        && draken_is_compressed(v)
+        && static_cast<uint64_t>(v->data_length) * kBinopCompressedRatio <= v->length;
+}
+
 VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* right) {
+    DRAKEN_KERNEL_TRY({
+        if (!left || !right) return draken_error_sentinel("draken_binop: null input vector");
+        if (left->length != right->length || left->type == DRAKEN_NULL || right->type == DRAKEN_NULL)
+            return binop_rows(ctx, left, right);
+        const bool l_const = draken_is_constant(left) && left->validity == nullptr;
+        const bool r_const = draken_is_constant(right) && right->validity == nullptr;
+        const DrakenVector* xv = nullptr;   // the compressed operand
+        if (r_const && binop_compressed_worth(left))       xv = left;
+        else if (l_const && binop_compressed_worth(right)) xv = right;
+        if (xv == nullptr) return binop_rows(ctx, left, right);
+
+        const DrakenVector* cv = (xv == left) ? right : left;
+        const uint32_t k = xv->data_length;
+        std::vector<uint8_t> live;
+        std::vector<uint8_t> live_bits;
+        const uint8_t* lv = kernel_live_slots(xv, live);
+        DrakenVector xview = *xv;
+        xview.selection   = draken_identity_sel(k);
+        xview.length      = k;
+        xview.data_length = k;
+        xview.flags       = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        xview.validity    = nullptr;
+        if (lv != nullptr) {
+            live_bits.assign((((k + 7u) >> 3) + 7u) & ~7u, 0u);
+            for (uint32_t j = 0u; j < k; ++j)
+                if (lv[j]) live_bits[j >> 3] |= static_cast<uint8_t>(1u << (j & 7u));
+            xview.validity = live_bits.data();
+        }
+        DrakenVector cview = *cv;
+        cview.selection = draken_zero_sel(k);
+        cview.length    = k;
+        cview.flags     = 0u;
+
+        VecResult r = (xv == left) ? binop_rows(ctx, &xview, &cview)
+                                   : binop_rows(ctx, &cview, &xview);
+        if (r.data == nullptr) return r;   // the row loop's own error, verbatim
+        // The view's (liveness) validity is not the answer's: per-row validity
+        // comes from the compressed operand's shape.
+        if (r.validity != nullptr && !r.validity_embedded) draken_free(r.validity);
+        if (r.owns_selection) draken_free(const_cast<uint32_t*>(r.selection));
+        r.validity = nullptr;
+        r.owns_selection = false;
+        try {
+            kernel_preserve_shape(r, xv);
+        } catch (...) {
+            draken_free(r.data);
+            throw;
+        }
+        r.validity_embedded = 0u;
+        return r;
+    });
+}
+
+static VecResult binop_rows(void* ctx, const DrakenVector* left, const DrakenVector* right) {
     DRAKEN_KERNEL_TRY({
         if (!left || !right) return draken_error_sentinel("draken_binop: null input vector");
         if (!ctx)            return draken_error_sentinel("draken_binop: null context");
