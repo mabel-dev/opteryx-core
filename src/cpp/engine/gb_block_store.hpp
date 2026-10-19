@@ -140,6 +140,7 @@ class GBBlockPool {
         if (c > kMaxClass) {
             gb_pool_tel::freed_bytes.fetch_add(static_cast<long long>(bytes),
                                                std::memory_order_relaxed);
+            charge_small(p, false);
             draken_free(p);
             return;
         }
@@ -147,6 +148,7 @@ class GBBlockPool {
         if (retained_.fetch_add(sz, std::memory_order_relaxed) + sz > kRetainBytes) {
             retained_.fetch_sub(sz, std::memory_order_relaxed);
             gb_pool_tel::freed_bytes.fetch_add(sz, std::memory_order_relaxed);
+            charge_small(p, false);
             draken_free(p);
             return;
         }
@@ -206,9 +208,23 @@ class GBBlockPool {
         k.count.store(k.free.size(), std::memory_order_relaxed);
     }
 
+    // draken_malloc charges a block only from DRAKEN_MEM_ACCOUNT_MIN usable bytes,
+    // and this pool's blocks are mostly smaller: H2O g10 (~100M groups over many
+    // small partitions) held ~6 GiB of group state the cache's give-way could not
+    // see. So the pool charges exactly the complement - usable size below the
+    // threshold - on the way in from and out to the system. A block the pool
+    // retains stays charged, as a large one already does.
+    static void charge_small(void* p, bool charge) noexcept {
+        const int64_t n = static_cast<int64_t>(DRAKEN_USABLE_SIZE(p));
+        if (n <= 0 || n >= DRAKEN_MEM_ACCOUNT_MIN) return;
+        if (charge) draken_mem_charge(n);
+        else draken_mem_uncharge(n);
+    }
+
     static void* from_system(size_t bytes) {
         void* p = draken_malloc(bytes);
         if (p == nullptr) throw std::bad_alloc();
+        charge_small(p, true);
         gb_pool_tel::misses.fetch_add(1, std::memory_order_relaxed);
         gb_pool_tel::os_bytes.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
         return p;

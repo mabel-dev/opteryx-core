@@ -10,9 +10,17 @@
 // made through draken_malloc / draken_calloc / draken_realloc /
 // draken_aligned_malloc (charged by the allocator's usable size, so the free
 // side can uncharge without knowing the request), and every allocation of a
-// draken::TrackedAllocator container (charged by the exact request). Smaller
-// allocations, Python, and third-party libraries are not charged; the measured
-// gap between charged bytes and RSS is what the container reserve covers.
+// draken::TrackedAllocator container (charged by the exact request), and
+// whatever a draken::MemCharge (below) holds. Smaller allocations, Python, and
+// third-party libraries are not charged; the measured gap between charged bytes
+// and RSS is what the container reserve covers.
+//
+// MemCharge exists because the threshold left the largest query state
+// unaccounted: H2O g10's group-by pool blocks are nearly all below 64 KiB and
+// the join build holds std::vector / new[] arrays, so on the 15 GB x86 box the
+// charged peak was 7.2 GiB against a 14.4 GiB RSS and the chunk cache never
+// gave way (measured 2026-10-19). With them charged, g10 reads 13.6 GiB charged
+// against 14.6 GiB RSS and the cache gives way as the query grows.
 //
 // The account is a measurement in this phase: charging never refuses and never
 // blocks. Peak query memory (docs/C7_PAGE_CACHE_DESIGN.md §21) sits in
@@ -61,6 +69,53 @@ void    draken_mem_set_shrinker(draken_mem_shrink_fn fn);
 
 #ifdef __cplusplus
 }
+
+namespace draken {
+
+// A charge on the process account for memory no draken allocator charges -
+// std::vector / new[] buffers, or blocks below DRAKEN_MEM_ACCOUNT_MIN that a
+// pool holds in bulk. Move-only: set() moves the charge to a byte count, adopt()
+// takes over another holder's charge with the memory it describes, and the
+// destructor releases whatever is held, so the account balances on every path
+// (including a query that fails part-way).
+class MemCharge {
+  public:
+    MemCharge() = default;
+    MemCharge(const MemCharge&) = delete;
+    MemCharge& operator=(const MemCharge&) = delete;
+    MemCharge(MemCharge&& o) noexcept : bytes_(o.bytes_) { o.bytes_ = 0; }
+    MemCharge& operator=(MemCharge&& o) noexcept {
+        if (this != &o) {
+            release();
+            bytes_ = o.bytes_;
+            o.bytes_ = 0;
+        }
+        return *this;
+    }
+    ~MemCharge() { release(); }
+
+    void set(int64_t bytes) {
+        if (bytes > bytes_) draken_mem_charge(bytes - bytes_);
+        else if (bytes < bytes_) draken_mem_uncharge(bytes_ - bytes);
+        bytes_ = bytes;
+    }
+    void adopt(MemCharge& o) noexcept {
+        bytes_ += o.bytes_;
+        o.bytes_ = 0;
+    }
+    void release() noexcept {
+        if (bytes_ != 0) {
+            draken_mem_uncharge(bytes_);
+            bytes_ = 0;
+        }
+    }
+    int64_t bytes() const noexcept { return bytes_; }
+
+  private:
+    int64_t bytes_ = 0;
+};
+
+}  // namespace draken
 #endif
 
 #endif  // DRAKEN_CORE_MEM_ACCOUNT_H

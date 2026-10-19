@@ -45,6 +45,7 @@
 #include "morsels/cxx_ordinal.h"     // cxx_ordinal_bounds_c — draken owns the ordinal
 #include "runtime_bound.hpp"         // RuntimeKeyBound — runtime min/max join filter
 #include "carchar_join_index.hpp"   // opteryx::carchar::CarcharJoinIndex
+#include "core/mem_account.h"       // draken::MemCharge — build memory no allocator charges
 
 namespace opteryx::engine {
 
@@ -120,6 +121,10 @@ struct Join2BuildLocal : LocalSinkState {
     std::vector<uint32_t> row_m;       // build row id -> index into `morsels`
     std::vector<uint32_t> row_r;       // build row id -> row within that morsel
     std::vector<uint64_t> row_hashes;  // parallel to build rows: the 64-bit key hash
+    // row_m/row_r and row_hashes are std::vectors, which the account never sees;
+    // these charge their capacity so the chunk cache's give-way does (see
+    // draken::MemCharge). Handed to the global state with the vectors in combine().
+    draken::MemCharge rows_charge, hashes_charge;
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
     // ASOF with a STRING match column: parallel to asof_keys, pointing into the
     // retained morsel's arena (see AsofKey). Empty for a numeric/temporal key.
@@ -311,6 +316,7 @@ struct RadixJoinTable {
     std::vector<size_t> poff;          // per partition: base of its segment in `off`
     std::unique_ptr<uint32_t[]> off;   // bucket offsets, (nbuckets+1) per partition
     bool built = false;
+    draken::MemCharge charge;          // hashes + rows + off (new[], uncharged otherwise)
 
     uint32_t part_of(uint64_t h) const {
         return static_cast<uint32_t>(h >> shift);
@@ -351,6 +357,9 @@ struct Join2BuildGlobal : GlobalSinkState {
     // `chunk_morsel_off[c]` is the value to add to chunk c's morsel indices, captured
     // at queue time because it depends on how many morsels were already present.
     std::vector<std::vector<uint32_t>> row_m_chunks, row_r_chunks;
+    // Charges for the queued per-worker chunks (adopted in combine(), released when
+    // finalize frees them) and for row_m/row_r once merged. See draken::MemCharge.
+    draken::MemCharge row_chunks_charge, hash_chunks_charge, rows_charge;
     std::vector<uint32_t> chunk_morsel_off;
     // Zero-row, plan-typed payload columns. Used ONLY when no build morsel was ever
     // retained (a build side that streamed zero rows): gather_rows takes its column
@@ -520,6 +529,7 @@ inline void merge_build_rows(Join2BuildGlobal& g) {
     }
     g.row_m.resize(running);
     g.row_r.resize(running);
+    g.rows_charge.set(static_cast<int64_t>((g.row_m.capacity() + g.row_r.capacity()) * sizeof(uint32_t)));
 
     // The query's authorised width — see join_finalize_width above. The CSR build
     // below carried the same defect.
@@ -548,6 +558,7 @@ inline void merge_build_rows(Join2BuildGlobal& g) {
     g.row_m_chunks.shrink_to_fit();
     g.row_r_chunks.clear();
     g.row_r_chunks.shrink_to_fit();
+    g.row_chunks_charge.release();
     g.chunk_morsel_off.clear();
     g.chunk_morsel_off.shrink_to_fit();
 }
@@ -692,6 +703,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     c.built = true;
     g.hash_chunks.clear();
     g.hash_chunks.shrink_to_fit();
+    g.hash_chunks_charge.release();
 }
 
 // Radix-partitioned build of RadixJoinTable — taken instead of build_join_csr() for
@@ -774,6 +786,10 @@ inline void build_radix_table(Join2BuildGlobal& g) {
     }
     std::unique_ptr<uint64_t[]> stage_h(new uint64_t[total]);
     std::unique_ptr<uint32_t[]> stage_r(new uint32_t[total]);
+    // The histogram and staging arrays, for as long as this function holds them.
+    draken::MemCharge stage_charge;
+    stage_charge.set(static_cast<int64_t>(nblk * P * sizeof(uint32_t) +
+                                          total * (sizeof(uint64_t) + sizeof(uint32_t))));
     {   // Pass 2: scatter into partition order.
         std::atomic<size_t> next{0};
         fork_join(nt, [&](unsigned) {
@@ -794,6 +810,7 @@ inline void build_radix_table(Join2BuildGlobal& g) {
     hist.reset();
     g.hash_chunks.clear();
     g.hash_chunks.shrink_to_fit();
+    g.hash_chunks_charge.release();
 
     // Per-partition bucket counts are known now, so every partition's segment of
     // `off` can be placed before the parallel build.
@@ -811,6 +828,8 @@ inline void build_radix_table(Join2BuildGlobal& g) {
     t.off.reset(new uint32_t[off_total]);
     t.hashes.reset(new uint64_t[total]);
     t.rows.reset(new uint32_t[total]);
+    t.charge.set(static_cast<int64_t>(off_total * sizeof(uint32_t) +
+                                      total * (sizeof(uint64_t) + sizeof(uint32_t))));
 
     std::atomic<uint32_t> next_p{0};
     fork_join(nt, [&](unsigned) {
@@ -1140,6 +1159,8 @@ struct Join2BuildSink : Sink {
         // lifetime of the build table.
         if (l.next_row == rows_before && l.null_row_m.size() == nulls_before)
             l.morsels.pop_back();
+        l.rows_charge.set(static_cast<int64_t>((l.row_m.capacity() + l.row_r.capacity()) * sizeof(uint32_t)));
+        l.hashes_charge.set(static_cast<int64_t>(l.row_hashes.capacity() * sizeof(uint64_t)));
         return SinkResult::CONTINUE;
     }
 
@@ -1187,6 +1208,7 @@ struct Join2BuildSink : Sink {
         // meaning the same thing to both the CSR and the row addresses.
         g.row_m_chunks.push_back(std::move(l.row_m));
         g.row_r_chunks.push_back(std::move(l.row_r));
+        g.row_chunks_charge.adopt(l.rows_charge);
         g.chunk_morsel_off.push_back(morsel_off);
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
         g.asof_str_ptr.insert(g.asof_str_ptr.end(),
@@ -1213,6 +1235,7 @@ struct Join2BuildSink : Sink {
         if (asof_idx < 0) {
             g.csr_active = true;
             g.hash_chunks.push_back(std::move(l.row_hashes));
+            g.hash_chunks_charge.adopt(l.hashes_charge);
         } else {
             g.index.reserve(g.total_rows + l.next_row);
             for (uint32_t r = 0; r < l.next_row; ++r)

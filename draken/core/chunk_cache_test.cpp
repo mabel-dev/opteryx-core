@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 #include "chunk_cache.h"
 #include "mem_account.h"
@@ -116,11 +117,44 @@ static void flush_forgets_everything() {
     CHECK(s.remembered_hits == b.remembered_hits, "flush kept remembered evictions");
 }
 
+// draken::MemCharge (mem_account.h): a held charge makes a full cache give way
+// exactly as an allocator charge does, and set / move / adopt / destruction
+// leave the account where it started - a leak here would starve the cache.
+static void mem_charge_gives_way_and_balances() {
+    draken_mem_configure(20 * kChunk, 0, 10 * kChunk);   // room for 10 chunks
+    draken_cc_flush();
+    const int64_t before = draken_mem_charged();
+    for (int i = 0; i < 10; ++i) insert(path_for("held", i), kCheapNs);
+    CHECK(draken_mem_cache_bytes() == 10 * kChunk, "cache did not fill: %lld bytes",
+          (long long)draken_mem_cache_bytes());
+    {
+        draken::MemCharge a;
+        a.set(15 * kChunk);   // leaves the cache room for 5 chunks
+        CHECK(draken_mem_charged() == before + 15 * kChunk, "set charged %lld",
+              (long long)(draken_mem_charged() - before));
+        CHECK(draken_mem_cache_bytes() <= 5 * kChunk, "cache did not give way: %lld bytes",
+              (long long)draken_mem_cache_bytes());
+        draken::MemCharge b = std::move(a);
+        CHECK(a.bytes() == 0 && b.bytes() == 15 * kChunk, "move did not transfer the charge");
+        CHECK(draken_mem_charged() == before + 15 * kChunk, "move changed the account");
+        draken::MemCharge c;
+        c.set(kChunk);
+        b.adopt(c);
+        CHECK(c.bytes() == 0 && b.bytes() == 16 * kChunk, "adopt did not transfer the charge");
+        CHECK(draken_mem_charged() == before + 16 * kChunk, "adopt changed the account");
+        b.set(2 * kChunk);
+        CHECK(draken_mem_charged() == before + 2 * kChunk, "set down did not uncharge");
+    }
+    CHECK(draken_mem_charged() == before, "charges leaked: %lld bytes",
+          (long long)(draken_mem_charged() - before));
+}
+
 int main() {
     empty_cache_fills_completely();
     one_hit_chunks_leave_first_and_are_remembered();
     expensive_chunks_outlive_cheap_ones();
     flush_forgets_everything();
+    mem_charge_gives_way_and_balances();
     draken_cc_flush();
     if (g_failures != 0) {
         std::fprintf(stderr, "%d chunk cache policy check(s) failed\n", g_failures);
