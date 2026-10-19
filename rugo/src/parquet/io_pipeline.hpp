@@ -782,6 +782,19 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     return DK_POOL;
 }
 
+// Does any value need the arena? A value of at most STR_INLINE_MAX bytes lives
+// whole in its slot, so a chunk with no longer value addresses no arena byte and
+// the builders below keep none. Without this a short-string column (H2O's
+// id3/id6, every value 12 bytes or less) carried its whole decoded page as a dead
+// arena — 4-byte PLAIN length prefixes plus bytes already inline — doubling its
+// footprint, which a retaining operator (join build) then held for the query.
+// A max reduction rather than an early-exit scan, so it vectorizes.
+static inline bool str_any_long(const int32_t* lens, size_t count) {
+    int32_t longest = 0;
+    for (size_t i = 0; i < count; ++i) longest = lens[i] > longest ? lens[i] : longest;
+    return longest > STR_INLINE_MAX;
+}
+
 // Build a positional DrakenStringSlot array (+ long-string arena + validity) for a
 // plain byte_array column, mirroring the Cython _build_string_plain EXACTLY: one
 // slot per row; strings > STR_INLINE_MAX live in the arena (hash from the bytes),
@@ -809,8 +822,10 @@ static inline bool build_direct_string_plain(DecodedColumn& d,
     // the decoder's own offsets — no per-value copy (measured 2026-09-28:
     // JOB 4.0%, ClickBench 2.9%). The arena may carry bytes no slot reads (PLAIN
     // length prefixes, inline values); offsets + lens are authoritative. Under
-    // length_only no payload is ever read, so nothing is copied at all.
-    const size_t arena_len = length_only ? 0u : d.string_arena.size();
+    // length_only no payload is ever read, and with no long value no slot
+    // addresses the arena, so in both cases nothing is copied or adopted at all.
+    const size_t arena_len = (length_only || !str_any_long(vlens, vcount))
+        ? 0u : d.string_arena.size();
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         alloc((n ? n : 1u) * sizeof(DrakenStringSlot)));
     if (!slots) return false;
@@ -964,7 +979,9 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     const uint32_t dict_size = static_cast<uint32_t>(d.string_dict_lens.size());
     const bool nullable = !d.valid_bits.empty();
     const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
-    const size_t arena_len = d.string_dict_arena.size();
+    // A dictionary of inline-only values addresses no arena byte (str_any_long).
+    const size_t arena_len = str_any_long(d.string_dict_lens.data(), dict_size)
+        ? d.string_dict_arena.size() : 0u;
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         alloc((dict_size ? dict_size : 1u) * sizeof(DrakenStringSlot)));
