@@ -7,6 +7,8 @@
 Local file-based storage connector implementing Writable interface.
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -23,6 +25,7 @@ from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Writable
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import ColumnNotFoundError, ConcurrentModificationError, DatasetNotFoundError
+from opteryx.exceptions import ExecutionError, InvalidInternalStateError
 from opteryx.models.dataset_descriptor import DatasetDescriptor
 from opteryx.models.manifest import Manifest
 from opteryx.types.schema import ColumnDescriptor
@@ -145,6 +148,81 @@ def _read_current_rows(relation_dir: str, descriptor: DatasetDescriptor):
     )
 
 
+# Per-relation advisory locks, both in the relation's directory. A flock belongs to
+# the open file description, so it conflicts with every other description of the
+# file - another process's, and another connector's in this one - and the kernel
+# drops it when the descriptor closes or the process dies: a crash cannot leave
+# either stale. POSIX only; unreliable on network filesystems.
+#
+#   .commit.lock      held by every commit and by the vacuum, so a vacuum can never
+#                     interleave with a commit's check-then-publish. The vacuum
+#                     reads the live set AFTER taking it.
+#   .compaction.lock  held for a whole OPTIMIZE pass, so two passes cannot run on
+#                     one relation. Non-blocking: the second is refused.
+COMMIT_LOCK = ".commit.lock"
+COMPACTION_LOCK = ".compaction.lock"
+
+
+def _flock(path: str, blocking: bool) -> int:
+    """Take an exclusive flock on `path` (created if absent) and return the
+    descriptor that holds it. Closing the descriptor releases the lock.
+    A non-blocking claim on a held lock raises BlockingIOError."""
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextlib.contextmanager
+def _commit_lock(relation_dir: str):
+    fd = _flock(os.path.join(relation_dir, COMMIT_LOCK), blocking=True)
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+class _CompactionLease:
+    """The handle `claim_compaction_lease` returns: an OPTIMIZE pass's hold on
+    its relation. A flock does not expire, so `renew` has nothing to extend and
+    `release` always reports the claim was still held."""
+
+    def __init__(self, relation_dir: str, relation_name: str, holder: str):
+        try:
+            self._fd = _flock(os.path.join(relation_dir, COMPACTION_LOCK), blocking=False)
+        except BlockingIOError as exc:
+            raise ExecutionError(
+                f"{relation_name} is already being compacted; {holder} was refused"
+            ) from exc
+
+    def renew(self) -> None:
+        return None
+
+    def release(self) -> bool:
+        os.close(self._fd)
+        return True
+
+
+def _vacuum_kind(name: str) -> Optional[str]:
+    """Which kind of store-owned file `name` is, or None for anything the vacuum
+    must never touch (dataset.json, the locks, every record that is not a data
+    file, manifest, snapshot pointer or the temporary of one)."""
+    if name.endswith(".tmp"):
+        if name.startswith(("data-", "manifest-", "snapshot-")) or name == "dataset.json.tmp":
+            return "tmp"
+        return None
+    if name.startswith("data-") and name.endswith(".parquet"):
+        return "data"
+    if name.startswith("manifest-") and name.endswith(".parquet"):
+        return "manifests"
+    if name.startswith("snapshot-") and name.endswith(".json"):
+        return "snapshots"
+    return None
+
+
 class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     """Local file-based storage connector.
 
@@ -159,6 +237,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         {store_root}/{schema}/{table}/snapshot-{ts}.json      (small pointer: see below)
         {store_root}/{schema}/{table}/manifest-{ts}.parquet   (the file list + stats)
         {store_root}/{schema}/{table}/data-{uuid}.parquet
+        {store_root}/{schema}/{table}/.commit.lock            (see COMMIT_LOCK)
+        {store_root}/{schema}/{table}/.compaction.lock        (see COMPACTION_LOCK)
         {store_root}/{schema}/{view}/view.json
 
     The manifest (file list + per-file stats/sketches) is a Parquet file in the
@@ -176,6 +256,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     # No Iceberg-style field-id lineage to preserve, unlike the catalog
     # connector - REPLACE can freely change schema here.
     supports_schema_evolution_on_replace = True
+    # OPTIMIZE here compacts AND removes every file the current snapshot does not
+    # reference: nothing else on this store ever deletes one (see vacuum_relation).
+    vacuums_on_optimize = True
 
     def __init__(self, store_root: Optional[str] = None, **kwargs):
         """Initialize LocalStoreConnector.
@@ -1249,6 +1332,159 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         self._commit(relation_name, _assemble(schema, rows=rows), schema=schema)
 
+    def compaction_commit(
+        self,
+        relation_name: str,
+        rows,
+        retired_files,
+        author: Optional[str] = None,
+        baseline_snapshot_id: Optional[int] = None,
+        commit_message: Optional[str] = None,
+        index_files: Optional[dict] = None,
+    ) -> None:
+        """Retire whole data files and add their replacements as ONE snapshot.
+
+        The commit half of OPTIMIZE. This store has no snapshot identity (its
+        table engine reports `snapshot_id` None), so `baseline_snapshot_id` is
+        ignored and the conflict check is the real invariant instead: under the
+        commit lock the current manifest is re-read and EVERY retired file must
+        still be in it. Data files are immutable and uuid-named, so that is
+        exactly "nothing the pass read has been replaced". A file a concurrent
+        INSERT added is carried through; a concurrent TRUNCATE, REPLACE or
+        rewrite of a retired file refuses the commit.
+
+        `retired_files` arrive as the scan manifest names them: joined onto the
+        relation's directory (see LocalStoreTable.get_dataset_metadata).
+
+        Args:
+            relation_name: Fully-qualified relation name
+            rows: native file rows for the files just written
+            retired_files: the scan manifest's paths for the files they replace
+            author: unused by this store (see create_relation)
+            baseline_snapshot_id: ignored, see above
+            commit_message: unused by this store (see `_commit`)
+            index_files: this store has no vector indexes; supplying any is a bug
+
+        Raises:
+            ConcurrentModificationError: a retired file is no longer current
+        """
+        self._validate_relation_name(relation_name)
+        if index_files:
+            raise InvalidInternalStateError(
+                f"{relation_name}: this store carries no vector index files, but "
+                f"{len(index_files)} were supplied to compaction_commit"
+            )
+        relation_dir = self._relation_dir(relation_name)
+
+        # Before the lock: its file lives in the relation's directory
+        if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
+        with _commit_lock(relation_dir):
+            base_descriptor = self._read_dataset_json(relation_dir)
+            if base_descriptor is None:
+                raise DatasetNotFoundError(
+                    dataset=relation_name, connector=self.__class__.__name__
+                )
+            current = _read_current_rows(relation_dir, base_descriptor)
+            current_paths = [] if current is None else current.file_paths()
+            position_of = {os.path.join(relation_dir, p): row for row, p in enumerate(current_paths)}
+            stale = [p for p in retired_files if p not in position_of]
+            if stale:
+                raise ConcurrentModificationError(
+                    relation_name,
+                    message=(
+                        f"{len(stale)} file(s) this compaction retires are no longer current "
+                        f"({stale[:3]}). The relation changed under the pass; nothing was "
+                        "written, and OPTIMIZE must be re-run."
+                    ),
+                )
+            retired = set(retired_files)
+            surviving = [
+                row for row, p in enumerate(current_paths) if os.path.join(relation_dir, p) not in retired
+            ]
+            schema = base_descriptor.schema
+            self._commit_locked(
+                relation_name,
+                _assemble(
+                    schema,
+                    carried=None if current is None else current.subset(surviving),
+                    carried_positions=list(range(len(schema.columns))),
+                    rows=rows,
+                ),
+            )
+
+    def claim_compaction_lease(self, relation_name: str, holder: str):
+        """Claim the relation's OPTIMIZE lease: a non-blocking flock held for the
+        whole pass, refused loudly while another pass holds it."""
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
+        return _CompactionLease(relation_dir, relation_name, holder)
+
+    def vacuum_relation(self, relation_name: str) -> Dict[str, int]:
+        """Remove every store-owned file the current snapshot does not reference.
+
+        Nothing else on this store deletes a data file, manifest or snapshot
+        pointer, so a TRUNCATE, a CREATE OR REPLACE, a column rewrite or a failed
+        write leaves them behind for good. There is no grace period: a file is
+        removed because it is unreferenced, whatever its age. What keeps that
+        safe is the commit lock - a commit takes it and, holding it, checks that
+        every file it is about to publish exists (see `_commit_locked`) - and the
+        live set being read after the vacuum has taken it. A write still in
+        flight therefore does not corrupt the relation: its commit is refused,
+        loudly, and its writer fails at close if its `.tmp` was removed.
+
+        Live: `dataset.json`, the current snapshot pointer, the manifest it names
+        and the data files in that manifest. Never touched: the locks, and any
+        file that is not a data file, manifest, snapshot pointer or the
+        temporary of one.
+
+        Returns:
+            files removed, by kind: data, manifests, snapshots, tmp
+
+        Raises:
+            DatasetNotFoundError: if the relation doesn't exist
+        """
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        removed = {"data": 0, "manifests": 0, "snapshots": 0, "tmp": 0}
+
+        # Before the lock: its file lives in the relation's directory
+        if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
+        with _commit_lock(relation_dir):
+            descriptor = self._read_dataset_json(relation_dir)
+            if descriptor is None:
+                raise DatasetNotFoundError(
+                    dataset=relation_name, connector=self.__class__.__name__
+                )
+            live = set()
+            if descriptor.current_snapshot is not None:
+                live.add(descriptor.current_snapshot)
+                manifest_file = _read_snapshot(relation_dir, descriptor.current_snapshot).get(
+                    "manifest_file"
+                )
+                if manifest_file:
+                    live.add(manifest_file)
+                current = _read_current_rows(relation_dir, descriptor)
+                if current is not None:
+                    live.update(current.file_paths())
+
+            for name in os.listdir(relation_dir):
+                kind = _vacuum_kind(name)
+                if kind is None or name in live:
+                    continue
+                os.remove(os.path.join(relation_dir, name))
+                removed[kind] += 1
+        return removed
+
     def relation_column_names(self, relation_name: str) -> List[str]:
         """Return the relation's current column names only (not full type fidelity)."""
         relation_dir = self._relation_dir(relation_name)
@@ -1277,10 +1513,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         stored.
 
         Patched files are written to NEW paths and only the new snapshot points
-        at them. The originals stay where they are, still referenced by earlier
-        snapshots, so time travel keeps answering with the shape those snapshots
-        were written under. That leaves the superseded files to be reclaimed
-        later, exactly as DROP TABLE already does (see drop_relation).
+        at them. The originals stay where they are until the next OPTIMIZE,
+        whose vacuum (see vacuum_relation) removes every file the current
+        snapshot does not reference. This store reads only its current snapshot.
 
         `add` is a donor file per column being appended (see
         `build_column_donor`); the patcher synthesises each one's chunks as a
@@ -1599,10 +1834,31 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         manifest,
         schema: Optional[RelationDescriptor] = None,
     ) -> None:
-        """Optimistic concurrency control commit protocol.
+        """Publish a new snapshot, holding the relation's commit lock throughout.
+
+        See `_commit_locked` for the protocol; this is the entry point for every
+        caller that does not already hold the lock.
+        """
+        with _commit_lock(self._relation_dir(relation_name)):
+            self._commit_locked(relation_name, manifest, schema)
+
+    def _commit_locked(
+        self,
+        relation_name: str,
+        manifest,
+        schema: Optional[RelationDescriptor] = None,
+    ) -> None:
+        """Optimistic concurrency control commit protocol. The caller holds the
+        relation's commit lock.
 
         Atomically updates the relation's current snapshot, guarding against concurrent
         modifications via re-check before the final dataset.json write.
+
+        Refuses to publish a manifest that names a file which is not on disk. A
+        write streams its data files into the relation's directory long before it
+        commits, and the vacuum removes unreferenced files, so a file can be gone by
+        the time its commit arrives; publishing it would leave a relation that fails
+        at the next read.
 
         Args:
             relation_name: Fully-qualified relation name
@@ -1612,9 +1868,26 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 schema (pass explicitly only when the schema is changing, e.g. REPLACE)
 
         Raises:
-            ConcurrentModificationError: If relation was modified concurrently
+            ConcurrentModificationError: If relation was modified concurrently, or a
+                data file the manifest names is missing
         """
         relation_dir = self._relation_dir(relation_name)
+
+        # Step 0: every file this snapshot will name must exist
+        missing = [
+            path
+            for path in manifest.file_paths()
+            if not os.path.isfile(os.path.join(relation_dir, path))
+        ]
+        if missing:
+            raise ConcurrentModificationError(
+                relation_name,
+                message=(
+                    f"{len(missing)} data file(s) this commit publishes are missing "
+                    f"({missing[:3]}). An OPTIMIZE removes files no snapshot references; "
+                    "nothing was written, and the statement must be re-run."
+                ),
+            )
 
         # Step 1: Read base descriptor and capture current snapshot
         base_descriptor = self._read_dataset_json(relation_dir)
@@ -1827,6 +2100,11 @@ class LocalStoreTable(BaseTable):
     supports_predicate_pushdown = False
     supports_limit_pushdown = False
     supports_async = False
+
+    # This engine has no snapshot identity: snapshots here are named by file, not
+    # numbered. OPTIMIZE's planner records this as the compaction's baseline, and
+    # `compaction_commit` here checks that its retired files are still current instead.
+    snapshot_id = None
 
     def __init__(self, dataset, store_root, telemetry=None, **kwargs):
         BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)

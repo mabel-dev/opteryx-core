@@ -46,14 +46,12 @@ python dev/vendor_boost_math.py
 
 | Script | Purpose |
 |--------|---------|
-| `generate_*.py` | Generate test, fuzz, and benchmark datasets and fixtures: arrays, Avro, band-join, IPv4, row-group layouts, security findings, signals, unnest |
-| `data_generators.py` | Shared test-data generator helpers |
+| `generate_*.py` | Generate test, fuzz, and benchmark datasets and fixtures: arrays, Avro, band-join, IPv4, row-group layouts, signals, unnest |
 | `ssb_generate.py`, `tpcds/`, `tpch/` | Star Schema Benchmark, TPC-DS and TPC-H data and query generators; `tpch/generate_slt_golden.py` writes the TPC-H sqllogictest goldens |
-| `rewrite_parquet_corpus.py`, `rewrite_parquet_layout.py` | Rewrite a Parquet corpus through the current rugo writer policy or at a chosen layout |
+| `rewrite_parquet_layout.py` | Rewrite a directory of Parquet files with rugo's writer at a chosen layout |
 | `parquet_to_skene.py` | Convert a Parquet dataset tree to its `.skene` mirror |
-| `shrink_tweets_fixtures.py` | Cut the tweet fixtures down to their first 10,000 rows |
 | `vector_fixture.py` | Build the real-embedding fixture used for vector-index measurements |
-| `bench_data/` | Small committed inputs for the remote-IO benchmarks |
+| `bench_data/` | Generated (git-ignored) inputs for the remote-IO benchmarks |
 
 ## Benchmarks and profiling
 
@@ -62,14 +60,13 @@ python dev/vendor_boost_math.py
 | `ab_bench.py`, `arch_compare.py` | Interleaved A/B benchmark harness, and a side-by-side view of its results from several machines |
 | `arch_tree.sh`, `build_so_variant.sh` | Copy the sources into an isolated benchmark tree (locally or on a remote box), and build one extension of it with extra `-D` defines as an A/B arm. Never benchmark in the shared working tree |
 | `groupby_baseline.py`, `grouped_layout_*_bench.py`, `grouped_layout_get_count.py` | GROUP BY baseline and Parquet-layout comparison benchmarks |
-| `worker_count_sweep.py`, `suite_time_split.py`, `tpch_profile.py` | ClickBench worker-count sweep, per-query time split from the native trace, and a per-operator TPC-H profiler |
-| `bench_*.py` | Targeted micro-benchmarks: Avro readers and writers, CSV, JSONL, `IS NULL`, remote IO, UNNEST |
-| `*_bench*.cpp`, `codec_*.cpp` | Standalone C++ benchmarks: hash mixing, bit-unpacking, and compression codecs |
+| `suite_time_split.py`, `tpch_profile.py` | Per-query time split from the native trace, and a per-operator TPC-H profiler |
+| `bench_*.py` | Targeted micro-benchmarks: Avro readers and writers, `IS NULL`, remote IO, UNNEST |
+| `*_bench*.cpp`, `codec_*.cpp` | Standalone C++ benchmarks: hash mixing and compression codecs |
 | `throttle_server.py` | Throttling HTTP file server for remote-storage IO benchmarks |
 | `estimate_function_costs.py`, `sweep_function_costs.py`, `compare_function_costs.py`, `analyze_function_costs.py`, `import_function_costs.py`, `function_costs.json` | Measure, compare and import per-row function kernel costs |
-| `io_waterfall/`, `parse_draken_trace.py`, `instrument_engine.py` | I/O waterfall and native-trace tooling |
+| `io_waterfall/`, `instrument_engine.py` | I/O waterfall and native-trace tooling |
 | `c1_skew_probe.py`, `native_residual_census.py` | Probes referenced from the design documents in `docs/` |
-| `bench_results/` | Recorded A/B benchmark output |
 
 ## Other tools
 
@@ -77,10 +74,8 @@ python dev/vendor_boost_math.py
 |------|---------|
 | `worker_executor.py` | Local stand-in for the deployed worker: run one statement the way it does |
 | `temporal_arith_duckdb_harness.py` | DuckDB-comparison harness for native temporal arithmetic |
-| `refresh_catalog_manifest.py`, `backfill_task_writes.py` | Catalog maintenance helpers |
 | `vector_index_recall.py` | Recall of the IVF vector index against exact search |
 | `kafka_avro/` | Docker-compose Kafka and Avro fixtures |
-| `odata_benchmark/`, `parity/`, `take_ab/` | OData snapshot fetcher, native parity checks, and the `take` A/B harness |
-| `clickbench/` | ClickBench submission and PR material |
-| `rugo_example.py`, `rugo_cli_demo.*` | rugo usage example and the recorded CLI demo |
-| `demo_column_ddl.py` | Demo of `ALTER TABLE` column DDL |
+| `odata_benchmark/`, `parity/` | OData snapshot fetcher and native parity checks |
+| `clickbench/` | ClickBench submission entry, golden-result and data-conversion helpers |
+| `rugo_example.py` | rugo reading and writing examples |

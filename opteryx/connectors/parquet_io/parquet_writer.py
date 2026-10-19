@@ -89,7 +89,17 @@ class LocalDataFileWriter:
         self._done = True
         self._writer.close()
         self._fh.close()
-        os.replace(self._tmp_path, self._full_path)
+        try:
+            os.replace(self._tmp_path, self._full_path)
+        except FileNotFoundError as exc:
+            # The store removed the temporary while this file was still being written:
+            # an OPTIMIZE's vacuum removes every file no snapshot references, and this
+            # one is referenced by nothing until its commit lands.
+            raise FileNotFoundError(
+                f"'{self.file_name}' was removed before it could be finished; a "
+                "concurrent OPTIMIZE removes files no snapshot references, and the "
+                "write must be retried"
+            ) from exc
         return self._stats.file_row(
             self.file_name,
             "PARQUET",

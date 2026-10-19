@@ -83,6 +83,9 @@ class _RecordingWriter:
 class _RecordingConnector:
     """Stands in for the store: records what the sink asked to write."""
 
+    # A store with its own retention (the catalog's): OPTIMIZE deletes nothing.
+    vacuums_on_optimize = False
+
     def __init__(self):
         self.opened = []
         self.closed = []
@@ -319,6 +322,54 @@ def test_a_pass_with_nothing_to_compact_takes_no_lease():
     node = _sink(MORSEL_MAX_ARENA_BYTES, retired=())
     _eos(node)
     assert node.connector.leases == []
+
+
+class _VacuumingConnector(_RecordingConnector):
+    """A store whose OPTIMIZE also removes what no snapshot references."""
+
+    vacuums_on_optimize = True
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def compaction_commit(self, relation_name, rows, retired_files, **kwargs):
+        self.events.append("commit")
+        super().compaction_commit(relation_name, rows, retired_files, **kwargs)
+
+    def vacuum_relation(self, relation_name):
+        self.events.append("vacuum")
+        return {"data": 4, "manifests": 3, "snapshots": 2, "tmp": 1}
+
+
+def _vacuuming_sink(retired):
+    node = _sink(MORSEL_MAX_ARENA_BYTES, target=_wide_morsel(0).nbytes, rows=ROWS_PER_MORSEL, retired=retired)
+    node.connector = _VacuumingConnector()
+    node._stream.connector = node.connector
+    return node
+
+
+def test_a_vacuuming_store_is_vacuumed_after_the_commit_and_the_result_says_so():
+    node = _vacuuming_sink(("old_1.parquet",))
+    node._push_impl(_wide_morsel(0))
+    _eos(node)
+    assert node.connector.events == ["commit", "vacuum"]
+    assert "retired; removed 4 data, 3 manifest, 2 snapshot and 1 temporary file(s)" in node.result.message
+
+
+def test_a_vacuuming_store_is_vacuumed_even_when_there_is_nothing_to_compact():
+    node = _vacuuming_sink(())
+    _eos(node)
+    assert node.connector.events == ["vacuum"]
+    assert node.connector.commits == []
+    assert node.result.message.startswith("nothing to compact in ")
+    assert "removed 4 data" in node.result.message
+
+
+def test_a_store_that_does_not_vacuum_on_optimize_is_never_asked_to():
+    node = _sink(MORSEL_MAX_ARENA_BYTES, retired=())
+    _eos(node)
+    assert "removed" not in node.result.message
 
 
 def test_stream_defaults_to_the_fixed_arena_ceiling_and_the_selection_target():

@@ -1815,12 +1815,11 @@ cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
                                    int* err_op, const char** err_msg,
                                    VecResult** out_child) noexcept nogil:
     """Shape-PRESERVING ExprEvalFn twin of _expr_eval_tramp — keeps a compressed
-    result's encoding (dict/constant) instead of force-densifying. Selected by
-    add_expr_project(preserve_shape=True) for computed GROUP BY / DISTINCT keys, whose
-    only consumer (the group/distinct sink) is compression-aware. A distinct fn
-    pointer also keeps these columns from fusing with dense ExprProject columns in the
-    engine's ExprMultiProjectOperator (fusion requires an identical fn). ARRAY results
-    are NOT supported on this path (_dv_copy_result_preserve_shape rejects DRAKEN_ARRAY,
+    result's encoding (dict/constant) instead of force-densifying. The DEFAULT for
+    every computed column (add_expr_project(preserve_shape=True)); only a declared
+    ARRAY result takes the dense twin. A distinct fn pointer keeps the two kinds from
+    fusing in the engine's ExprMultiProjectOperator (fusion requires an identical
+    fn). ARRAY results are NOT supported on this path (_dv_copy_result_preserve_shape rejects DRAKEN_ARRAY,
     matching today's behaviour) — *out_child always comes back NULL here. *out_arena
     carries the string result's separately-owned byte arena, exactly as on the dense
     twin: a compressed string key still has an arena behind its K physical slots."""
@@ -3823,10 +3822,10 @@ cdef class NativePlan:
         (DECIMAL/TIMESTAMP/VECTOR) — re-attached to the output column's owner natively.
 
         ``preserve_shape`` keeps a compressed result's encoding (dict/constant) at the
-        projection boundary instead of force-densifying. The compiler sets it ONLY for
-        computed columns whose sole consumer is compression-aware (a GROUP BY / DISTINCT
-        key); it selects a distinct trampoline, which also prevents fusion with dense
-        ExprProject columns in the engine's ExprMultiProjectOperator."""
+        projection boundary instead of force-densifying. The compiler sets it for every
+        computed column except a declared ARRAY result (no shape-preserving ARRAY copy);
+        it selects a distinct trampoline, which also prevents fusion between the two
+        kinds in the engine's ExprMultiProjectOperator."""
         if not bytecode_ops_all_c_native(bc):
             raise ValueError("add_expr_project requires a c-native "
                              "program — the compiler must reject this shape earlier")

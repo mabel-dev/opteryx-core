@@ -203,9 +203,18 @@ def _rows(*files):
     return builder.build({})
 
 
+def _on_disk(connector, relation, *names):
+    """Placeholder data files in the relation's directory: a commit refuses to
+    publish a manifest naming a file that is not there."""
+    for name in names:
+        with open(os.path.join(connector._relation_dir(relation), name), "wb"):
+            pass
+
+
 def test_insert_appends_to_snapshot_chain(connector, simple_schema):
     """Test insert creates snapshot chain with parent references."""
     connector.create_relation("test_table", simple_schema)
+    _on_disk(connector, "test_table", "data-001.parquet", "data-002.parquet")
 
     # Create first file entry
     # Insert first file
@@ -243,6 +252,7 @@ def test_insert_appends_to_snapshot_chain(connector, simple_schema):
 def test_concurrent_commit_aborts(connector, simple_schema):
     """Test that concurrent modifications are detected and aborted."""
     connector.create_relation("test_table", simple_schema)
+    _on_disk(connector, "test_table", "data-001.parquet")
 
     # Setup hook to simulate concurrent modification
     def simulate_concurrent_mod():

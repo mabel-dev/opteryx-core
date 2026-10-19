@@ -90,6 +90,18 @@ class CompactionCommitNode(BasePlanNode):
             return lease.release()
         return True
 
+    def _vacuum(self):
+        """Remove the files the relation's current snapshot no longer references,
+        on a connector that does that as part of OPTIMIZE; the statement-message
+        suffix saying what was removed, or "" on one that does not."""
+        if not self.connector.vacuums_on_optimize:
+            return ""
+        removed = self.connector.vacuum_relation(self.relation_name)
+        return (
+            f"; removed {removed['data']:,} data, {removed['manifests']:,} manifest, "
+            f"{removed['snapshots']:,} snapshot and {removed['tmp']:,} temporary file(s)"
+        )
+
     def _push_impl(self, morsel):
         if self._lease is None and self.retired_files:
             # Claimed with the first rows, before any output is written: an index build
@@ -127,10 +139,15 @@ class CompactionCommitNode(BasePlanNode):
             # Selection found nothing worth rewriting. A pass that did no
             # work is a success, and committing a snapshot describing
             # nothing would be a lie about what happened.
+            #
+            # The vacuum still runs: it is not a consequence of compacting, it is
+            # what OPTIMIZE does on a connector that sets `vacuums_on_optimize`, and
+            # the files a TRUNCATE or a REPLACE orphaned are exactly the ones a
+            # pass with nothing to compact would otherwise never reclaim.
             self.result = NonTabularResult(
                 record_count=0,
                 status=QueryStatus.SQL_SUCCESS,
-                message=f"nothing to compact in {md_code(self.relation_name)}",
+                message=f"nothing to compact in {md_code(self.relation_name)}{self._vacuum()}",
             )
             return
 
@@ -169,6 +186,11 @@ class CompactionCommitNode(BasePlanNode):
                 "expired and been claimed again before it finished."
             )
 
+        # Run after the commit, so the files this pass just retired are among the
+        # ones removed. A failure here raises: the compaction is committed, the
+        # statement is not reported as a success.
+        vacuumed = self._vacuum()
+
         # Files, not rows. The count this statement is measured by is how many
         # objects the relation is now made of - that is what OPTIMIZE was run to
         # change - and calling them rows would report the one number a
@@ -178,6 +200,6 @@ class CompactionCommitNode(BasePlanNode):
             status=QueryStatus.SQL_SUCCESS,
             message=(
                 f"{len(rows):,} file(s) written to {md_code(self.relation_name)}, "
-                f"{len(self.retired_files):,} retired"
+                f"{len(self.retired_files):,} retired{vacuumed}"
             ),
         )

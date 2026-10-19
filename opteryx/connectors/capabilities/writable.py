@@ -44,6 +44,13 @@ class Writable:
     # rejected at bind time rather than failing partway through a write.
     supports_schema_evolution_on_replace: bool = False
 
+    # Whether OPTIMIZE on this connector also removes the files the current
+    # snapshot no longer references (`vacuum_relation`). False by default: a
+    # connector with its own retention (the catalog's expiry and orphan
+    # quarantine) does not have OPTIMIZE delete files. A store that never
+    # deletes anything else sets it True and implements `vacuum_relation`.
+    vacuums_on_optimize: bool = False
+
     def create_relation(
         self, relation_name: str, schema: "RelationDescriptor", author: Optional[str] = None
     ) -> None:
@@ -747,13 +754,30 @@ class Writable:
             rows: native file rows for the files just written
             retired_files: manifest paths the new files replace
             author: session user this compaction is attributed to
-            baseline_snapshot_id: snapshot the pass was planned against; the
-                store refuses the commit if the relation has moved since
+            baseline_snapshot_id: snapshot the pass was planned against; a store
+                that tracks snapshot identity refuses the commit if the relation
+                has moved since. A store whose table engine reports no snapshot
+                identity (`snapshot_id` is None) MAY ignore it, provided it
+                enforces its own conflict check: every file in `retired_files`
+                must still be live at commit, or the commit is refused
             commit_message: overrides the store's default message
         """
         # Reachable for the same reason as set_cluster_by: a connector with no
         # catalog has no file layout to compact.
         raise NotImplementedError(f"{self.__class__.__name__} does not support OPTIMIZE")
+
+    def vacuum_relation(self, relation_name: str) -> dict:
+        """Remove every file the relation's current snapshot does not reference.
+
+        The vacuum half of OPTIMIZE, run by the compaction sink on every pass
+        (including one that found nothing to compact) when the connector sets
+        `vacuums_on_optimize`. Returns the number of files removed, by kind.
+        Errors raise.
+
+        Args:
+            relation_name: Fully-qualified relation name
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support vacuum")
 
     def claim_compaction_lease(self, relation_name: str, holder: str):
         """Claim the relation's maintenance lease for a compaction, refusing loudly while

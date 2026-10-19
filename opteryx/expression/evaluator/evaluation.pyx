@@ -3377,7 +3377,7 @@ cdef int _dv_copy_result_preserve_shape(
     out_vec.length = n
     out_vec.validity = validity
     out_vec.type = src.type
-    out_vec.flags = src.flags if k == n else 0
+    out_vec.flags = src.flags if draken_is_dense(src) else 0
     out_data[0] = data
     out_validity[0] = validity
     out_sel[0] = sel
@@ -3562,11 +3562,10 @@ cdef int _dv_eval_span_cxx(
     loud upstream); 99 → arena OOM; other → the c_execute rc. No PyObject
     anywhere — callable from the engine's worker threads.
 
-    ``preserve_shape`` selects the boundary materialization: the default (0) force-
-    densifies to an identity-selection dense column (every downstream consumer sees a
-    plain dense column); 1 keeps the result's compressed encoding (dict/constant
-    stays compressed) and is set ONLY by the plan compiler for computed columns that
-    feed a compression-aware consumer (GROUP BY / DISTINCT key).
+    ``preserve_shape`` selects the boundary materialization: 1 keeps the result's
+    compressed encoding (dict/constant stays compressed) — the plan compiler's
+    choice for every computed column except a declared ARRAY result; 0 force-
+    densifies to an identity-selection dense column (the ARRAY path).
 
     ``*out_arena`` is the string result's byte ARENA when the boundary copy keeps it
     as a SECOND owned allocation (see _dv_copy_result_string) — the ExprEvalFn twin of
@@ -3608,8 +3607,8 @@ cdef int _dv_eval_span_cxx(
         err_msg[0] = NULL
         return 99
     _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
-    # preserve_shape (computed GROUP BY / DISTINCT key): tiled only when every
-    # loaded column is identity-dense, i.e. when the untiled result is dense anyway.
+    # preserve_shape: tiled only when every loaded column is identity-dense, i.e.
+    # when the untiled result is dense anyway.
     rc = _dv_try_tiled(instrs, count, dv_cache, <uint32_t>num_rows, arena,
                        preserve_shape, &tiled, err_op, err_msg)
     if rc == 0:

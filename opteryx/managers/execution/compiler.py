@@ -1848,16 +1848,18 @@ class _Compiler:
 
         return layout
 
-    def _add_computed(self, p, eval_nodes, layout, preserve_shape=False):
+    def _add_computed(self, p, eval_nodes, layout):
         """Append one ExprProject per computed expression (bind order preserved —
         later programs may reference earlier outputs). DECIMAL/TIMESTAMP results
         get their plan-declared logical descriptor re-attached natively at the
         operator boundary. Returns the grown layout.
 
-        ``preserve_shape`` keeps a compressed computed result's encoding at the
-        projection boundary (no force-densify). Set ONLY when every column added by
-        this call feeds a compression-aware consumer — currently just computed
-        GROUP BY / DISTINCT keys, whose sole consumer is the group/distinct sink."""
+        Every computed column KEEPS its result's encoding at the projection boundary
+        (architect, 2026-10-19: "keep compressed as long as possible"): a dict/constant
+        result stays compressed for every downstream operator, all of which must read
+        it through the uniform data[selection[i]] contract (§11). The one exception is
+        an ARRAY result — the shape-preserving copy has no ARRAY path — which is
+        force-densified, decided here at plan time from the declared type."""
         from opteryx.expression import should_evaluate
         from opteryx.expression.evaluator import compile_eval_nodes
         from opteryx.expression.formatter import format_expression
@@ -1975,8 +1977,9 @@ class _Compiler:
                            int(getattr(lg, "dimension", 0) or 0))
             if ct is not None:
                 self._types[identity] = ct.physical
-            self.nplan.add_expr_project(p, bc, layout, identity, logical,
-                                        preserve_shape=preserve_shape)
+            self.nplan.add_expr_project(
+                p, bc, layout, identity, logical,
+                preserve_shape=(ct is None or ct.physical != DrakenType.ARRAY))
             layout.append(identity)
         return layout
 
@@ -2568,12 +2571,10 @@ class _Compiler:
                 if sc is not None and sc.identity is not None and sc.identity not in layout:
                     computed_keys.append(grp)
             if computed_keys:
-                # Computed GROUP BY keys feed ONLY the group/distinct sink, which is
-                # compression-aware (native_group_sinks.hpp keys each physical unique
-                # once) — keep the key column's compressed shape end-to-end instead of
-                # force-densifying at the projection boundary.
-                layout = self._add_computed(p, computed_keys, layout,
-                                            preserve_shape=True)
+                # Computed GROUP BY keys keep their compressed shape (as every
+                # computed column does) — the group/distinct sink keys each physical
+                # unique once (native_group_sinks.hpp).
+                layout = self._add_computed(p, computed_keys, layout)
             key_idx = []
             for key_identity in group_cols:
                 if key_identity not in layout:
@@ -2765,8 +2766,7 @@ class _Compiler:
                     if sc is not None and sc.identity is not None and sc.identity not in layout:
                         computed_keys.append(expr)
                 if computed_keys:
-                    layout = self._add_computed(p, computed_keys, layout,
-                                                preserve_shape=True)
+                    layout = self._add_computed(p, computed_keys, layout)
             on_idx = []
             if on:
                 for identity in on:
