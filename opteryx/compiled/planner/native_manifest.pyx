@@ -130,6 +130,7 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
         Bounds bounds
         int64_t null_count
         int64_t distinct_count
+        int64_t distinct_estimate
         int64_t uncompressed_size
 
     cdef cppclass ManifestCell:
@@ -1085,6 +1086,7 @@ cdef class NativeManifest:
                 "bounds": _bounds_view(&c.footer.bounds),
                 "null_count": _optional(c.footer.null_count),
                 "distinct_count": _optional(c.footer.distinct_count),
+                "distinct_estimate": _optional(c.footer.distinct_estimate),
                 "uncompressed_size": _optional(c.footer.uncompressed_size),
                 "sum": ((<object>footer_sum_hi(c[0])) << 64) + (<object>footer_sum_lo(c[0])) if footer_has_sum(c[0]) else None,
             },

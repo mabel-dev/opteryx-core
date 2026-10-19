@@ -2,7 +2,9 @@
 #include "thrift.hpp"
 #include "chunk_sum.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <fstream>
 #include <iostream>
 #include <functional>
@@ -1507,6 +1509,28 @@ static int CompareStatBytes(const std::string &a, const std::string &b,
   return a.compare(b);
 }
 
+// The value domain D a row group's distinct count implies: the D for which
+// n rows drawn uniformly from D values are expected to hold d distinct ones,
+// d = D(1 - e^(-n/D)). Strictly increasing in D towards n, so for 0 < d < n
+// there is exactly one D >= d; d >= n (every row distinct) bounds nothing and
+// returns +inf. Bisection on the bracket [d, hi], hi doubled until it holds d.
+static double DistinctDomainEstimate(double d, double n) {
+  if (d <= 0.0) return 0.0;
+  if (d >= n) return std::numeric_limits<double>::infinity();
+  auto expected = [n](double domain) { return -domain * std::expm1(-n / domain); };
+  double lo = d, hi = 2.0 * d;
+  while (expected(hi) < d) {
+    lo = hi;
+    hi *= 2.0;
+    if (hi > 1e18) return std::numeric_limits<double>::infinity();
+  }
+  for (int i = 0; i < 64 && hi - lo > 0.5; ++i) {
+    const double mid = 0.5 * (lo + hi);
+    if (expected(mid) < d) lo = mid; else hi = mid;
+  }
+  return hi;
+}
+
 std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
   // Build display-name → index map from schema_columns (top-level only).
   ankerl::unordered_dense::map<std::string, size_t> col_index;
@@ -1525,6 +1549,13 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
   // without the statistic, or a nested leaf (leaf-level NDVs say nothing about
   // the display column). Parallel to `result`.
   std::vector<uint8_t> distinct_poisoned(result.size(), 0);
+  // distinct_estimate's inputs, parallel to `result` and poisoned with it: the
+  // sum of the row groups' counts (also a hard ceiling), the non-null rows they
+  // cover, and how many row groups contributed. See
+  // AggColumnStat::distinct_estimate.
+  std::vector<int64_t> distinct_ceiling(result.size(), 0);
+  std::vector<int64_t> distinct_rows(result.size(), 0);
+  std::vector<int64_t> distinct_groups(result.size(), 0);
   // Same idea for the sum: poisoned by any chunk without one (or a nested leaf,
   // or an overflowing fold). `sum_seen` starts every column unknown until its
   // first chunk contributes.
@@ -1556,21 +1587,42 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
         if (dot != std::string::npos || col.distinct_count < 0) {
           distinct_poisoned[it->second] = 1;
           agg.distinct_count = -1;
-        } else if (agg.distinct_count < 0) {
-          agg.distinct_count = col.distinct_count;
         } else {
-          bool disjoint = false;
-          if (col.has_min && col.has_max && agg.has_min && agg.has_max) {
-            disjoint =
-                CompareStatBytes(col.min, agg.max_bytes, agg.physical_type,
-                                 agg.logical_type) > 0 ||
-                CompareStatBytes(col.max, agg.min_bytes, agg.physical_type,
-                                 agg.logical_type) < 0;
-          }
-          if (disjoint) {
-            agg.distinct_count += col.distinct_count;
-          } else if (col.distinct_count > agg.distinct_count) {
+          // distinct_estimate's inputs. The row group's non-null rows: an
+          // unknown null count makes them all rows, which only lowers the
+          // implied domain (the safe direction).
+          const int64_t present =
+              rg.num_rows - (col.null_count > 0 ? col.null_count : 0);
+          distinct_ceiling[it->second] += col.distinct_count;
+          distinct_rows[it->second] += present;
+          distinct_groups[it->second] += 1;
+
+          if (agg.distinct_count < 0) {
             agg.distinct_count = col.distinct_count;
+          } else {
+            // disjoint: no value in common. touching: the ranges meet at one
+            // end, so at most that one boundary value is shared - the sum
+            // less one is still a floor. A sorted key whose runs straddle row
+            // groups (TPC-H l_orderkey: an order's lines split across a
+            // boundary) is touching at most boundaries; taking the max there
+            // floored it at a quarter of its count.
+            bool disjoint = false;
+            bool touching = false;
+            if (col.has_min && col.has_max && agg.has_min && agg.has_max) {
+              const int above = CompareStatBytes(col.min, agg.max_bytes,
+                                                 agg.physical_type, agg.logical_type);
+              const int below = CompareStatBytes(col.max, agg.min_bytes,
+                                                 agg.physical_type, agg.logical_type);
+              disjoint = above > 0 || below < 0;
+              touching = !disjoint && (above == 0 || below == 0);
+            }
+            if (disjoint) {
+              agg.distinct_count += col.distinct_count;
+            } else if (touching) {
+              agg.distinct_count += std::max<int64_t>(0, col.distinct_count - 1);
+            } else if (col.distinct_count > agg.distinct_count) {
+              agg.distinct_count = col.distinct_count;
+            }
           }
         }
       }
@@ -1624,6 +1676,28 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
         }
       }
     }
+  }
+
+  for (size_t i = 0; i < result.size(); ++i) {
+    AggColumnStat &agg = result[i];
+    if (distinct_poisoned[i] || agg.distinct_count < 0) continue;
+    // The domain D the row groups imply, POOLED: the mean count of a row
+    // group against its mean row count. Near saturation the inversion is very
+    // sensitive to a group's sampling noise, so a per-group maximum is biased
+    // high (measured +28% at d/n = 0.97); the mean is not. Then the file's own
+    // expected count over its N non-null rows: D(1 - e^(-N/D)), N when D is
+    // unbounded.
+    const double rows = static_cast<double>(distinct_rows[i]);
+    const double groups = static_cast<double>(distinct_groups[i]);
+    if (groups == 0.0) continue;
+    const double domain = DistinctDomainEstimate(
+        static_cast<double>(distinct_ceiling[i]) / groups, rows / groups);
+    const double expected =
+        std::isinf(domain) ? rows : -domain * std::expm1(-rows / domain);
+    const double estimate =
+        std::min(expected, static_cast<double>(distinct_ceiling[i]));
+    agg.distinct_estimate = std::max(agg.distinct_count,
+                                     static_cast<int64_t>(std::llround(estimate)));
   }
 
   return result;

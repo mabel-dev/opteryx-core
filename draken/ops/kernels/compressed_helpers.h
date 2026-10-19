@@ -141,3 +141,125 @@ static inline VecResult kernel_pred_compressed_live(const DrakenVector* v, F&& f
         return draken_error_sentinel("allocation failed");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Code-space blend — CASE / IIF / COALESCE family, STRING results (architect,
+// 2026-10-19: "try it, see if there's a win for strings, and fixed width").
+// Measured: strings KEEP (IIF-as-GROUP-BY-key 0.388, COALESCE 0.789, ClickBench
+// Q39 0.973); fixed width DELETED (no win; SUM(CASE ... THEN 1 ELSE 0) 1.014 — a
+// dense fixed-width blend is already a cheap copy and its consumers prefer dense).
+//
+// A blend row takes branch k's PHYSICAL value br[k]->selection[row]. When every
+// branch is compressed (draken_is_compressed) or a typed NULL (DRAKEN_NULL: no
+// values, never chosen as valid), the result is a dictionary over the branch value
+// arrays laid end to end:  code[row] = base[k] + br[k]->selection[row].  Values are
+// produced once per physical value instead of once per row, and the result stays
+// compressed. Duplicate values across branches are legal (buffers.h: dict data is
+// not distinct). Applies only when the concatenation is SHORTER than the row count —
+// otherwise the result would not be a compressed vector. The chooser is the row
+// blend's own, so the answer is the row blend's by construction (§11).
+//
+// `pick(row)` returns the chosen branch index in [0, nb), or -1 for a null row (no
+// branch chosen, or the chosen branch is null at that row).
+// ---------------------------------------------------------------------------
+
+// Fills base[0..nb); returns the total value count, or 0 when the blend does not apply.
+static inline uint32_t kernel_blend_bases(const DrakenVector* const* br, uint32_t nb,
+                                          uint32_t n, uint32_t* base) noexcept {
+    uint64_t total = 0;
+    for (uint32_t k = 0; k < nb; ++k) {
+        base[k] = static_cast<uint32_t>(total);
+        if (br[k]->type == DRAKEN_NULL) continue;
+        if (!draken_is_compressed(br[k])) return 0u;
+        total += br[k]->data_length;
+    }
+    return (total > 0u && total < n) ? static_cast<uint32_t>(total) : 0u;
+}
+
+// Per-row codes + per-row validity (nullptr when every row is valid). A null row
+// gets code 0 — any in-range code; its validity bit is 0. False on OOM.
+template <typename Pick>
+static inline bool kernel_blend_codes(const DrakenVector* const* br, uint32_t n,
+                                      const uint32_t* base, Pick&& pick,
+                                      uint32_t** out_codes, uint8_t** out_validity) noexcept {
+    auto* codes = static_cast<uint32_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(uint32_t)));
+    if (codes == nullptr) return false;
+    const uint32_t bm = (n + 7u) >> 3;
+    const size_t vbytes = ((bm + 7u) & ~7u) > 0u ? ((bm + 7u) & ~7u) : 8u;
+    auto* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+    if (validity == nullptr) { draken_free(codes); return false; }
+    std::memset(validity, 0, vbytes);
+    bool any_null = false;
+    for (uint32_t row = 0; row < n; ++row) {
+        const int k = pick(row);
+        if (k < 0) { codes[row] = 0u; any_null = true; continue; }
+        codes[row] = base[k] + br[k]->selection[row];
+        validity[row >> 3] |= static_cast<uint8_t>(1u << (row & 7u));
+    }
+    if (!any_null) { draken_free(validity); validity = nullptr; }
+    *out_codes = codes;
+    *out_validity = validity;
+    return true;
+}
+
+static inline void kernel_blend_dict_shape(VecResult& r, uint32_t* codes, uint8_t* validity,
+                                           uint32_t total, uint32_t n) noexcept {
+    r.validity          = validity;
+    r.validity_embedded = 0u;
+    r.selection         = codes;
+    r.owns_selection    = true;
+    r.data_length       = total;
+    r.length            = n;
+    r.flags             = 0u;   // no order / density hint survives a blend
+}
+
+// String values: every non-NULL branch is a string-family vector; the value block
+// is `total` slots with its own arena and NO embedded validity (validity is per
+// logical row).
+template <typename Pick>
+static inline VecResult kernel_blend_string(const DrakenVector* const* br, uint32_t nb, uint32_t n,
+                                            const uint32_t* base, uint32_t total,
+                                            DrakenType out_type, Pick&& pick,
+                                            const char* who) noexcept {
+    size_t arena_len = 0;
+    for (uint32_t k = 0; k < nb; ++k) {
+        if (br[k]->type == DRAKEN_NULL) continue;
+        const auto* sa = static_cast<const DrakenStringArena*>(br[k]->data);
+        for (uint32_t j = 0; j < br[k]->data_length; ++j) {
+            const uint32_t len = str_length(&sa->slots[j]);
+            if (len > STR_INLINE_MAX) arena_len += len;
+        }
+    }
+    DrakenStringSlot* slots;
+    uint8_t* arena;
+    uint8_t* validity_unused;
+    uint8_t* block = vecresult_string_block_alloc(total, arena_len, /*want_validity=*/0,
+                                                  &slots, &arena, &validity_unused);
+    if (block == nullptr) return draken_error_sentinel_fmt("%s: allocation failed", who);
+    size_t arena_pos = 0;
+    for (uint32_t k = 0; k < nb; ++k) {
+        if (br[k]->type == DRAKEN_NULL) continue;
+        const auto* sa = static_cast<const DrakenStringArena*>(br[k]->data);
+        for (uint32_t j = 0; j < br[k]->data_length; ++j) {
+            const DrakenStringSlot* src = &sa->slots[j];
+            const uint32_t len = str_length(src);
+            DrakenStringSlot* dst = &slots[base[k] + j];
+            if (len <= STR_INLINE_MAX) {
+                str_init_inline(dst, str_data(src, sa->arena), len);
+            } else {
+                std::memcpy(arena + arena_pos, str_data(src, sa->arena), len);
+                str_init_extern(dst, arena + arena_pos, len, static_cast<uint32_t>(arena_pos));
+                arena_pos += len;
+            }
+        }
+    }
+    uint32_t* codes;
+    uint8_t* validity;
+    if (!kernel_blend_codes(br, n, base, pick, &codes, &validity)) {
+        draken_free(block);
+        return draken_error_sentinel_fmt("%s: allocation failed", who);
+    }
+    VecResult r = vecresult_from_string_block(block, total, arena_len, /*has_validity=*/0, out_type);
+    kernel_blend_dict_shape(r, codes, validity, total, n);
+    return r;
+}

@@ -238,20 +238,90 @@ static inline VecResult cmp_constant_bool_result(
 // cmp_dict_scatter — architect-approved dict fast-path scatter step.
 //
 // Maps each logical row i to dict_bytes[selection[i]] and packs into dst.
-// dict_bytes has data_length entries: 1 = comparison true, 0 = false.
-// dst must be pre-zeroed (cmp_alloc_bool_buf guarantees this).
-// Used by cmp_dict_bool_result and str_dict_bool_result.
+// dict_bytes has `dl` (the vector's data_length) entries: 1 = comparison true,
+// 0 = false. dst must be pre-zeroed (cmp_alloc_bool_buf guarantees this).
+// Used by cmp_dict_bool_result, draken_in_list and the IS JSON kernels.
+//
+// Small dictionaries take a table lookup instead of a per-row gather: the key
+// bits become a byte table and 16 codes are looked up per instruction (NEON TBL
+// for dl <= 64 on AArch64, SSSE3 PSHUFB for dl <= 32 under AVX2). Same bits as
+// the scalar loop, which also finishes the < 16-row tail. Returns the number of
+// rows written (a multiple of 16 — whole output bytes), 0 when not applicable.
 // ---------------------------------------------------------------------------
-static inline void cmp_dict_scatter(
+static inline uint32_t cmp_dict_scatter_table(
     const uint8_t*  dict_bytes,
+    uint32_t        dl,
     const uint32_t* selection,
     const uint8_t*  src_null,
     uint8_t*        dst,
     uint32_t        n)
 {
+#if defined(__aarch64__)
+    if (dl > 64u) return 0u;
+    uint8_t table[64] = {0};
+    for (uint32_t k = 0; k < dl; ++k) table[k] = dict_bytes[k] ? 0xFFu : 0x00u;
+    const uint8x16x4_t t = vld1q_u8_x4(table);
+    static const uint8_t kw[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+    const uint8x16_t weights = vld1q_u8(kw);
+    const uint32_t blocks = n >> 4;
+    for (uint32_t b = 0; b < blocks; ++b) {
+        const uint32_t* s = selection + (static_cast<size_t>(b) << 4);
+        const uint16x8_t h0 = vcombine_u16(vmovn_u32(vld1q_u32(s)), vmovn_u32(vld1q_u32(s + 4)));
+        const uint16x8_t h1 = vcombine_u16(vmovn_u32(vld1q_u32(s + 8)), vmovn_u32(vld1q_u32(s + 12)));
+        const uint8x16_t codes = vcombine_u8(vmovn_u16(h0), vmovn_u16(h1));
+        const uint8x16_t hit = vandq_u8(vqtbl4q_u8(t, codes), weights);
+        uint8_t lo = vaddv_u8(vget_low_u8(hit)), hi = vaddv_u8(vget_high_u8(hit));
+        if (src_null != nullptr) { lo &= src_null[2u * b]; hi &= src_null[2u * b + 1u]; }
+        dst[2u * b] = lo;
+        dst[2u * b + 1u] = hi;
+    }
+    return blocks << 4;
+#elif defined(__AVX2__)
+    if (dl > 32u) return 0u;
+    alignas(16) uint8_t table[32] = {0};
+    for (uint32_t k = 0; k < dl; ++k) table[k] = dict_bytes[k] ? 0xFFu : 0x00u;
+    const __m128i t_lo = _mm_load_si128(reinterpret_cast<const __m128i*>(table));
+    const __m128i t_hi = _mm_load_si128(reinterpret_cast<const __m128i*>(table + 16));
+    const uint32_t blocks = n >> 4;
+    for (uint32_t b = 0; b < blocks; ++b) {
+        const uint32_t* s = selection + (static_cast<size_t>(b) << 4);
+        const __m128i c0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
+        const __m128i c1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 4));
+        const __m128i c2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 8));
+        const __m128i c3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 12));
+        // codes < 32, so the saturating packs are exact.
+        const __m128i codes = _mm_packus_epi16(_mm_packus_epi32(c0, c1), _mm_packus_epi32(c2, c3));
+        // PSHUFB reads the low 4 bits of each code; bit 4 picks the table half.
+        const __m128i lo = _mm_shuffle_epi8(t_lo, codes);
+        const __m128i hi = _mm_shuffle_epi8(t_hi, codes);
+        const __m128i pick_hi = _mm_slli_epi16(codes, 3);   // bit 4 -> bit 7 of each byte
+        const uint32_t bits = static_cast<uint32_t>(_mm_movemask_epi8(_mm_blendv_epi8(lo, hi, pick_hi)));
+        uint8_t b0 = static_cast<uint8_t>(bits), b1 = static_cast<uint8_t>(bits >> 8);
+        if (src_null != nullptr) { b0 &= src_null[2u * b]; b1 &= src_null[2u * b + 1u]; }
+        dst[2u * b] = b0;
+        dst[2u * b + 1u] = b1;
+    }
+    return blocks << 4;
+#else
+    (void)dict_bytes; (void)dl; (void)selection; (void)src_null; (void)dst; (void)n;
+    return 0u;
+#endif
+}
+
+static inline void cmp_dict_scatter(
+    const uint8_t*  dict_bytes,
+    uint32_t        dl,
+    const uint32_t* selection,
+    const uint8_t*  src_null,
+    uint8_t*        dst,
+    uint32_t        n)
+{
+    // Rows [0, done) were written by the table path (whole 16-row blocks); the
+    // scalar loops below finish the rest.
+    const uint32_t done = cmp_dict_scatter_table(dict_bytes, dl, selection, src_null, dst, n);
     const uint32_t whole_bytes = n >> 3;
     if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        for (uint32_t b = done >> 3; b < whole_bytes; ++b) {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
                 (dict_bytes[selection[base+0]] << 0) |
@@ -267,7 +337,7 @@ static inline void cmp_dict_scatter(
             if (dict_bytes[selection[i]])
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        for (uint32_t b = done >> 3; b < whole_bytes; ++b) {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
                 (dict_bytes[selection[base+0]] << 0) |
@@ -352,7 +422,7 @@ static inline VecResult cmp_dict_bool_result(
         try { out_null = cmp_copy_validity(src_null, n); }
         catch (...) { draken_free(dst); throw; }
     }
-    cmp_dict_scatter(dict_bytes, v.selection, src_null, dst, n);
+    cmp_dict_scatter(dict_bytes, v.data_length, v.selection, src_null, dst, n);
 
     VecResult r;
     r.data = dst; r.validity = out_null;

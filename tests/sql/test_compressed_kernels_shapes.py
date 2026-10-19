@@ -212,6 +212,16 @@ PROJECTIONS = [
     "i + 1", "10 - i", "j * 3", "j - 7", "j % 3", "u + 1", "u64 + 5", "f * 2.5", "f / 2", "2 / f",
     "m * 2", "m + 1.5", "m38 * 2", "m38 - m38", "i & 3", "s || '!'", "'>' || s",
     "t + INTERVAL '1' DAY", "d + INTERVAL '1' DAY", "t - '2024-01-01'::TIMESTAMP",
+    # null / conditional blends (code-space blend when every value branch is compressed)
+    "COALESCE(s, 'none')", "IFNULL(s, 'x')", "COALESCE(i, 0)", "COALESCE(i, j)", "COALESCE(f, 0.5)",
+    "COALESCE(i, f)", "COALESCE(d, '2020-01-01'::DATE)", "COALESCE(t, '2020-01-01'::TIMESTAMP)",
+    "COALESCE(m, 0)", "COALESCE(u, u)", "COALESCE(s, 'a', 'b')",
+    "IIF(b, s, 'other')", "IIF(i > 0, 'pos', 'neg')", "IIF(b, i, j)", "IIF(i > 0, f, 0.0)",
+    "IIF(b, d, '2020-01-01'::DATE)", "IIF(i > 0, s, NULL)",
+    "CASE WHEN i > 2 THEN 'big' WHEN i < -2 THEN 'small' ELSE s END",
+    "CASE WHEN b THEN i ELSE 100 END",
+    "NULLIF(s, 'MAIL')", "NULLIF(i, 7)", "IFNOTNULL(i, j)", "IFNOTNULL(s, s || '!')",
+    "LENGTH(COALESCE(s, 'none'))", "COALESCE(s, rid::VARCHAR)",
 ]
 
 
@@ -232,12 +242,43 @@ PREDICATES = [
     "d < '2024-06-01 12:00:00'::TIMESTAMP", "'2024-06-01 12:00:00'::TIMESTAMP > d",
     "t >= '2024-03-01'::DATE",
     "id = '2a2a2a2a-2a2a-2a2a-2a2a-2a2a2a2a2a2a'::UUID", "id <> '01010101-0101-0101-0101-010101010101'::UUID",
+    # a compressed blend result consumed by a compare
+    "COALESCE(s, 'none') = 'none'", "IIF(i > 0, 'pos', 'neg') = 'pos'", "COALESCE(i, 0) > 2",
 ]
 
 
 @pytest.mark.parametrize("where", PREDICATES)
 def test_predicate_compressed_matches_dense(workspaces, where):
     _assert_same(where, _rows("cmk_dict", "rid", where), _rows("cmk_plain", "rid", where))
+
+
+# Literal-only branches are CONSTANT on both files, and a lazily evaluated CASE
+# branch comes back compressed from the plain file too (it is evaluated over the
+# narrowed rows only) — so for these the plain file is no dense oracle (both runs
+# take the code-space blend): check against values computed here. A NULL
+# condition row takes the ELSE branch.
+def _gt(x, k):
+    return x is not None and x > k
+
+
+ORACLE_BRANCHES = [
+    ("IIF(i > 0, 'pos', 'neg')", lambda c, r: "pos" if _gt(c["i"][r], 0) else "neg"),
+    ("IIF(b, 1.5, 2.5)", lambda c, r: 1.5 if c["b"][r] else 2.5),
+    ("CASE WHEN i > 2 THEN 'big' WHEN i < -2 THEN 'small' ELSE 'mid' END",
+     lambda c, r: "big" if _gt(c["i"][r], 2) else ("small" if c["i"][r] is not None and c["i"][r] < -2 else "mid")),
+    ("CASE WHEN b THEN 1 ELSE 2 END", lambda c, r: 1 if c["b"][r] else 2),
+    ("CASE WHEN s = 'MAIL' THEN 'm' END", lambda c, r: "m" if c["s"][r] == "MAIL" else None),
+    ("CASE WHEN i > 2 THEN 'big' WHEN i < -2 THEN 'small' ELSE s END",
+     lambda c, r: "big" if _gt(c["i"][r], 2) else ("small" if c["i"][r] is not None and c["i"][r] < -2 else c["s"][r])),
+    ("CASE WHEN b THEN i ELSE 100 END", lambda c, r: c["i"][r] if c["b"][r] else 100),
+]
+
+
+@pytest.mark.parametrize("expr,expect", ORACLE_BRANCHES, ids=[e for e, _ in ORACLE_BRANCHES])
+def test_branch_blend_against_oracle(workspaces, expr, expect):
+    want = {r: expect(workspaces, r) for r in range(N)}
+    for ws in ("cmk_dict", "cmk_plain"):
+        _assert_same(f"{ws}: {expr}", _rows(ws, expr), want)
 
 
 # A value that cannot convert raises on BOTH shapes (and is NULL under TRY_CAST,

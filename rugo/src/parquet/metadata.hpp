@@ -241,10 +241,23 @@ struct AggColumnStat {
   // ANY row group lacks the statistic, or the column is a nested leaf — a
   // partial merge would under-count, and unknown is not zero. Merge rule:
   // disjoint row-group value ranges sum their counts (each range holds its own
-  // values); overlapping ranges take the max (the safe floor — the true NDV
+  // values); ranges that only touch at one end sum less one (at most the
+  // boundary value is shared); overlapping ranges take the max (the safe floor — the true NDV
   // lies between max and sum, and under-counting only makes downstream
   // equality-selectivity LESS aggressive). See AggregateColumnStats.
   int64_t distinct_count = -1;
+  // File-level NDV ESTIMATE, for costing: `distinct_count` is a floor, and for
+  // a key spread over every row group it is pinned at about one row group's
+  // row count (each group nearly all-distinct, every range overlapping) — 65,536
+  // for a 1e8-distinct join key, which flips build sides. The row groups' mean
+  // count d over their mean n non-null rows is inverted under uniform sampling,
+  // d = D(1 - e^(-n/D)), for the domain D it implies (unbounded when d >= n),
+  // and the file reports the count its own N non-null
+  // rows are expected to hold, D(1 - e^(-N/D)) (N when D is unbounded), capped
+  // by the sum of the row groups' counts and floored at `distinct_count` (so a
+  // file of disjoint row groups keeps its exact sum). -1 exactly when
+  // `distinct_count` is.
+  int64_t distinct_estimate = -1;
   bool has_min = false;
   bool has_max = false;
   bool null_count_complete = true;

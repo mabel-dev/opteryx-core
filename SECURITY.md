@@ -1,16 +1,17 @@
 # Security Policy
 
-We take security seriously and appreciate your efforts to make Opteryx more secure.
+We take security seriously and appreciate your efforts to make Opteryx Core more secure.
+
+This policy covers every wheel built from this repository: `opteryx-core`, `rugo` and `libskene`.
 
 ## Supported Versions
 
-We support the current and previous minor versions for functional and security fixes. New features are only added to the latest version, while patch versions are created as needed for critical fixes. 
+Only the current minor version series receives functional and security fixes. New features are only added to the latest version, while patch versions are created as needed for critical fixes. 
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.18    | ✅                 |
-| 0.17    | ✅                 |
-| <= 0.16 | ❌                 |
+| 0.9.x   | ✅                 |
+| < 0.9   | ❌                 |
 
 ### Key Notes
 
@@ -20,9 +21,9 @@ We support the current and previous minor versions for functional and security f
 
 ## Reporting a Vulnerability
 
-Thank you for helping to keep Opteryx secure! If you’ve discovered a potential vulnerability, please follow these steps:
+Thank you for helping to keep Opteryx Core secure! If you’ve discovered a potential vulnerability, please follow these steps:
 
-1. **Submit a Report**: Vulnerabilities should be reported through [GitHub Security Advisories](https://github.com/mabel-dev/opteryx/security/advisories).
+1. **Submit a Report**: Vulnerabilities should be reported through [GitHub Security Advisories](https://github.com/mabel-dev/opteryx-core/security/advisories). Please do not open a public issue for a suspected vulnerability.
 1. **Include Details**: To help us assess the issue quickly, please include:
    - A description of the vulnerability
    - Steps to reproduce it
@@ -41,4 +42,4 @@ This policy covers vulnerabilities that may compromise:
 - System functionality or integrity
 - Compliance with security standards
 
-We appreciate your cooperation in helping us maintain a secure and reliable system for the Opteryx community.
+We appreciate your cooperation in helping us maintain a secure and reliable system for the Opteryx Core community.

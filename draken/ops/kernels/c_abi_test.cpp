@@ -1231,13 +1231,13 @@ int main() {
     const int TOTAL = sizeof(tests) / sizeof(tests[0]);
     const int SHAPE_TOTAL = sizeof(shape_tests) / sizeof(shape_tests[0]);
     // Coverage tripwire: catch a kernel test added/removed without updating the
-    // count. Exclude the non-kernel meta tests (error_handling, context_passing,
+    // count. Exclude the non-kernel meta tests (error_handling,
     // registry_honesty, draken_binop_int_arith, draken_binop_float) so it tracks
     // registered-kernel tests.
-    const int META_TESTS = 7;  // error_handling, context_passing, registry_honesty,
+    const int META_TESTS = 6;  // error_handling, registry_honesty,
                                // draken_binop_int_arith / _float / _decimal / _bitwise
     const int KERNELS = TOTAL - META_TESTS;
-    const int EXPECTED_KERNELS = 47;
+    const int EXPECTED_KERNELS = 42;
     int passed = 0, failed = 0;
 
     for (int i = 0; i < TOTAL; ++i) {

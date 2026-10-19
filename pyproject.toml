@@ -1,7 +1,7 @@
 [project]
 name = "opteryx_core"
 version = "0.9.172"
-description = "Opteryx Query Engine"
+description = "Embeddable analytical SQL engine: Python planning, native execution, zero install dependencies"
 requires-python = '>=3.11'
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
@@ -14,8 +14,9 @@ opteryx = "opteryx.command:main"
 
 [project.urls]
 Homepage = "https://opteryx.dev/"
-Documentation = "https://opteryx.dev/"
-Repository = "https://github.com/mabel-dev/opteryx.git"
+Documentation = "https://docs.opteryx.app/"
+Repository = "https://github.com/mabel-dev/opteryx-core"
+Issues = "https://github.com/mabel-dev/opteryx-core/issues"
 
 [tool.black]
 line-length = 100

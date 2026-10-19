@@ -244,6 +244,7 @@ inline void apply_footer_stat(const AggColumnStat& stat, ManifestCell& cell) {
     if (stat.has_max) footer_detail::decode_bound(stat.physical_type, stat.logical_type, stat.max_bytes, footer.bounds, false);
     footer.null_count = stat.null_count_complete ? stat.null_count : kUnknown;
     footer.distinct_count = stat.distinct_count >= 0 ? stat.distinct_count : kUnknown;
+    footer.distinct_estimate = stat.distinct_estimate >= 0 ? stat.distinct_estimate : kUnknown;
     footer.uncompressed_size = stat.total_uncompressed_size > 0 ? stat.total_uncompressed_size : kUnknown;
     footer.has_sum = stat.has_sum;
     footer.sum = stat.has_sum ? stat.sum : 0;

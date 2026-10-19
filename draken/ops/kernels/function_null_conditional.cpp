@@ -20,11 +20,12 @@
 // engine. This is their sole implementation; the semantics below are carried over
 // from those (now deleted) bindings.
 //
-// SHAPE: reads are uniform data[selection[i]] over every input (CLAUDE.md §11) —
-// no shape discrimination. Output is dense: which branch supplies a row is a
-// per-LOGICAL-ROW decision, so a shared input dictionary carries no meaning into
-// the result (unlike the shape-preserving string transforms, where the output is a
-// pure function of one physical value).
+// SHAPE: reads are uniform data[selection[i]] over every input (CLAUDE.md §11).
+// Which branch supplies a row is a per-LOGICAL-ROW decision, so the row blend's
+// output is dense. The one shape split is the STRING code-space blend
+// (compressed_helpers.h, nc_code_blend): when every value branch is compressed, the
+// result is a dictionary over the branches' value arrays and the per-row work is a
+// code write instead of a string copy. Fixed-width blends stay dense (measured).
 //
 // NULL SEMANTICS (the whole game here — see the family-specific notes):
 //   - A DRAKEN_NULL-typed branch is a typed NULL literal: "no data, no validity",
@@ -52,6 +53,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <new>
+#include <vector>
 
 #include "core/buffers.h"
 #include "core/string_slot.h"
@@ -59,6 +62,7 @@
 #include "core/vector_alloc.h"     // draken_identity_sel
 #include "ops/vec_result.h"
 #include "ops/kernels/result_helpers.h"
+#include "ops/kernels/compressed_helpers.h"   // kernel_blend_* — code-space blend
 #include "ops/kernels/error_handling.h"
 #include "xxhash.h"                // XXH3_64bits — long-slot hash32, as every builder
 
@@ -262,6 +266,7 @@ inline NcStrView nc_read_string(const DrakenVector* v, uint32_t row) {
 // COALESCE / IFNULL: first branch valid at this row. (IFNULL(v, d) is exactly
 // COALESCE(v, d); it gets its own registry entry, not its own loop.)
 struct CoalesceChooser {
+    static constexpr uint32_t kFirstValue = 0;   // every arg can supply the value
     static inline int pick(const DrakenVector* const* v, uint32_t nargs, uint32_t row) {
         for (uint32_t k = 0; k < nargs; ++k)
             if (nc_row_valid(v[k], row)) return static_cast<int>(k);
@@ -272,6 +277,7 @@ struct CoalesceChooser {
 // IIF(cond, t, f): args are [cond, t, f]. A null cond row selects f (SQL CASE
 // WHEN NULL ... = the ELSE branch). The chosen branch's own validity then decides.
 struct IifChooser {
+    static constexpr uint32_t kFirstValue = 1;   // [0] is the condition
     static inline int pick(const DrakenVector* const* v, uint32_t /*nargs*/, uint32_t row) {
         const int k = (nc_row_valid(v[0], row) && nc_read_bool(v[0], row)) ? 1 : 2;
         return nc_row_valid(v[k], row) ? k : -1;
@@ -281,6 +287,7 @@ struct IifChooser {
 // IFNOTNULL(v, result): args are [v, result]. Null v → null; else result (which
 // may itself be null at this row).
 struct IfNotNullChooser {
+    static constexpr uint32_t kFirstValue = 1;   // [0] only gates; [1] is the value
     static inline int pick(const DrakenVector* const* v, uint32_t /*nargs*/, uint32_t row) {
         if (!nc_row_valid(v[0], row)) return -1;
         return nc_row_valid(v[1], row) ? 1 : -1;
@@ -406,6 +413,31 @@ VecResult nc_blend_string(const DrakenVector* const* srcs, uint32_t nargs, uint3
     return vecresult_from_string_block(block, n, arena_len, /*has_validity=*/1, out_type);
 }
 
+// Code-space blend (compressed_helpers.h) over the value branches
+// srcs[kFirstValue, nargs): taken when every value branch is compressed or a typed
+// NULL. `run(br, nb, base, total, pick)` emits the family's result. Returns false
+// (leaving *out untouched) when the blend does not apply.
+template <typename Chooser, typename Run>
+bool nc_code_blend(const DrakenVector* const* srcs, uint32_t nargs, uint32_t n,
+                   const char* who, VecResult* out, Run&& run) {
+    const DrakenVector* const* br = srcs + Chooser::kFirstValue;
+    const uint32_t nb = nargs - Chooser::kFirstValue;
+    std::vector<uint32_t> base;
+    try { base.resize(nb); }
+    catch (const std::bad_alloc&) {
+        *out = draken_error_sentinel_fmt("%s: allocation failed", who);
+        return true;
+    }
+    const uint32_t total = kernel_blend_bases(br, nb, n, base.data());
+    if (total == 0u) return false;
+    auto pick = [&](uint32_t row) {
+        const int k = Chooser::pick(srcs, nargs, row);
+        return k < 0 ? -1 : k - static_cast<int>(Chooser::kFirstValue);
+    };
+    *out = run(br, nb, base.data(), total, pick);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Family dispatch — shared by all four entry points.
 //
@@ -447,6 +479,13 @@ VecResult nc_dispatch(const DrakenVector* const* srcs, uint32_t nargs,
                     "%s: branch %u type %d is not string-family", who, i, (int)ti);
             out_type = nc_promote_string(out_type, ti);
         }
+        VecResult cr;
+        if (nc_code_blend<Chooser>(srcs, nargs, n, who, &cr,
+                [&](const DrakenVector* const* br, uint32_t nb, const uint32_t* base,
+                    uint32_t total, auto& pick) {
+                    return kernel_blend_string(br, nb, n, base, total, out_type, pick, who);
+                }))
+            return cr;
         return nc_blend_string<Chooser>(srcs, nargs, n, out_type, who);
     }
 

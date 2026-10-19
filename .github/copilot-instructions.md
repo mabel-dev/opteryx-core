@@ -11,7 +11,8 @@ We are writing:
 
 ## 1. Core Principles (Non-negotiable)
 
-- Opteryx is not a Python application, it is a Cython/C++ application with Python orchestration.
+- Opteryx is not a Python application. The line is by PHASE, not by component: query **planning** (parse, bind, optimize, build the physical plan) is Python; query **execution** is native (Cython/C++). Python decides the work; native does the work. "Orchestration" means PLANNING — it is never a licence to run execution, scheduling, the operator pipeline, or the per-morsel drive loop from Python.
+- Rugo and Draken must be able to execute without Python, they are C++ applications.
 - Correctness is non-negotiable; Always engineer for performance.
 - Fail fast, fail clean. Never silently degrade behaviour.
 - Broken but honest always beats green but fake.
@@ -20,7 +21,6 @@ We are writing:
 - The user is the architect. All design-impacting decisions must be surfaced, not assumed.
 - Be clear about what you are doing, and do not be afraid to ask for direction.
 - If you cannot do as asked, stop, explain why and offer solutions.
-- DO NOT commit changes to git.
 - You are not trusted to use git commands; git stash, git pull, git push are forbidden.
 - Dead code rots the system from the inside - cut it out as soon as it's found.
 
@@ -28,13 +28,16 @@ We are writing:
 
 ## 2. Execution Model Constraints
 
-- The execution engine is Cython/C++ with Python orchestration.
+- The execution engine is native (Cython/C++) end to end — scan, operators, scheduling, dispatch, and the per-morsel drive loop. The Python/native boundary is crossed ONCE: planning hands a compiled physical plan to the engine, and the engine runs it. Python does not drive execution.
+- Any Python on the execution path (a scheduler, dispatcher, or per-morsel loop written in `.py`) is INTERIM DEBT to be moved into native code — not the design, and never the destination. Call it out when found; do not extend it.
 - Release the GIL as early as possible in execution paths.
 - NEVER generate Python fallback implementations for Cython code.
 - NEVER duplicate logic between Python and Cython unless explicitly requested.
 - No dynamic dispatch in hot paths — use static dispatch and explicit specialization.
 - Avoid unpredictable branching in tight loops; hoist or precompute where possible.
 - The code is mature and extensive. If a pattern is unclear → ask before implementing.
+- Rugo must be able to execute without Python, it is a C++ application.
+- Draken must be able to execute without Python, it is a C++ application.
 
 ---
 
@@ -58,7 +61,7 @@ We are writing:
 ## 4. Dependency Policy
 
 Rules:
-- The system has zero installed dependencies (`pip install` is forbidden).
+- The engine has zero install dependencies — everything it needs is vendored or optional.
 - We vendor third party capability only after agreement with user.
 - PyArrow and NumPy are aggressively banned from the engine (`opteryx/`, `rugo/`, `draken/`)- although they can be used for testing (`tests/`) and development (`dev/`), for example, to generate test data.
 
@@ -76,34 +79,50 @@ The application is a SQL Query engine, it has all of the core components of an q
 
 Ownership:
 - Opteryx
-- Mabel (Draken, Rugo, Carchar, Parvi)
+- Mabel (Draken, Rugo, Carchar, Parvi, Perfect Hash)
+- Soundex, Distogram, mbleven
+- The Opteryx Dialect
 
 Naming:
 - When colocating `.pyx` and C/C++:
   - Prefix native files with `_` to avoid symbol/name clashes
 
 **Repository Structure:**
-Single repo, single wheel. `draken/` and `rugo/` are internal sub-packages — not separately published, no monorepo split.
+Single repo, **three wheels from one tree**, no monorepo split:
+- `opteryx_core` — the full SQL engine (primary distribution). Bundles draken + rugo + skene intrinsically.
+- `rugo` — a standalone, **PyArrow/NumPy-free file-engine wheel** (Parquet/CSV/JSONL read+write) that bundles draken, for users who want the file engine without the SQL engine. Published separately on PyPI.
+- `libskene` (imports as `skene`) — a standalone wheel for the `.skene` columnar file format (reader, writer, specification) that bundles draken. Published separately on PyPI. `rugo` and `skene` are parallel: neither depends on the other, and neither wheel carries the other.
+
+`draken` is **not** separately published — it ships *inside* all three wheels. The shared build machinery and the **single-source** draken/rugo/skene extension definitions live in `build_common.py`, imported by `setup.py`, `rugo/setup.py` and `skene/setup.py`, so the wheels cannot drift. `opteryx` never depends on the published `rugo` or `libskene` wheels — both are intrinsic to opteryx; the standalone wheels are separate packagings of the same sources. `rugo/` and `skene/` source is opteryx-free.
 
 ```
 opteryx-core/
-├── draken/               # Columnar vector library (0 external deps)
-├── rugo/                 # Parquet/JSONL reader (depends on draken)
-├── opteryx/              # SQL query engine (depends on draken, rugo). Flat layout.
+├── draken/               # Columnar vector library (0 external deps); ships in all three wheels
+├── rugo/                 # Parquet/CSV/JSONL file engine (also published standalone; depends on draken)
+│   ├── setup.py          #   → standalone `rugo` wheel (draken + rugo only, no Rust)
+│   └── pyproject.toml
+├── skene/                # `.skene` columnar file format (also published standalone as `libskene`; depends on draken)
+│   ├── setup.py          #   → standalone `libskene` wheel (draken + skene only, no Rust)
+│   └── pyproject.toml
+├── opteryx/              # SQL query engine (depends on draken, rugo, skene). Flat layout.
 ├── src/                  # Opteryx compute extension sources (Rust + C++)
 ├── third_party/          # Vendored dependencies
 ├── dev/                  # Developer tooling (see above)
 ├── reference/            # Generated catalogs (see above)
 ├── tests/
 ├── docs/
-├── setup.py              # Build script (Cython + setuptools-rust)
-└── pyproject.toml        # Single distribution
+├── build_common.py       # Shared build machinery + single-source draken/rugo/skene ext defs (all three wheels)
+├── setup.py              # opteryx_core wheel (Cython + setuptools-rust)
+└── pyproject.toml        # opteryx_core distribution metadata
 ```
 
 **Build system:** setuptools + Cython + setuptools-rust. One system, used identically for local dev and PyPI wheel builds.
 - `make compile` — local dev compile-in-place. The only sanctioned local path.
-- Wheels — `python setup.py bdist_wheel` in CI manylinux containers. Never run locally.
-- `pip install -e .` and `pip install .` are forbidden. End users get pre-built wheels from PyPI.
+- Wheels — in CI manylinux containers, never run locally:
+  - `opteryx_core`: `python setup.py bdist_wheel`
+  - `rugo`: `python rugo/setup.py bdist_wheel` (runs from the repo root; it neutralises the root `pyproject.toml` so opteryx_core's metadata can't hijack it, and isolates its own build dir so opteryx `.so` aren't swept in — root `setup.py`/`pyproject.toml` stay untouched).
+  - `libskene`: `python skene/setup.py bdist_wheel` (same re-rooting and isolation as rugo; the `opteryx_core` wheel is unaffected).
+- `pip install -e .` and `pip install .` are forbidden for local dev. End users get pre-built wheels from PyPI.
 
 ---
 
@@ -130,7 +149,8 @@ Do not assume architecture-specific behaviour unless guarded and intentional.
 - `make compile` → full rebuild (clean + `setup.py build_ext --inplace`)
 - `make c` → incremental rebuild (`setup.py build_ext --inplace`)
 - `make test` → full test suite
-- `make q` → minimum regression suite (**required**)
+- `make q` → minimum regression suite (**required**, the fast check while working)
+- `make slt` → sqllogictest suite (**required for sign-off**; runs every group and fails if any group failed)
 - `make t` → quick tests
 - `make b` → run current query (brace.py)
 - `make clickbench` → performance benchmark
@@ -143,6 +163,7 @@ Build options:
 
 Rule:
 - A change is not complete until `make q` passes.
+- A change is not signed off until `make slt` also passes. Use `make q` while iterating, `make slt` before saying the work is done.
 
 ---
 
@@ -164,6 +185,8 @@ Rule:
   - Ask before making architectural changes
 
 If there is a bug or a failure, do not waste effort trying to attribute it - we fix forward, always.
+
+You may be working alongside other agents and developers on the same working tree - if you enounter unrelated issues, report them and ask for direction. The `having the conch` is sometimes used to signify if you have the floor.
 
 ---
 
@@ -212,8 +235,21 @@ typedef struct {
     uint32_t          length;      // logical row count
     uint8_t*          validity;    // 1-bit-per-logical-row null mask; NULL = all valid
     DrakenType        type;
+    uint8_t           flags;      // Category-A layout hints; 0 = "don't know"
 } DrakenVector;
 ```
+
+The layout is **frozen**: 40 bytes on LP64, pinned by `static_assert`s, with ~95
+compiled `cimport draken.core.buffers` sites binding it at compile time. ABI
+drift (a field reorder, a widened `selection`, an enum renumber) segfaults
+consumers instead of failing the build. Treat any change here as an engine-wide
+ABI break, not an edit.
+
+`flags` carries the layout hints the shape predicates alone cannot express —
+notably `DRAKEN_SEL_IDENTITY` (dense may still carry a NON-identity permutation,
+so `is_dense` is *not* sufficient to justify a contiguous-load/gather-elimination
+path) and `DRAKEN_DICT_KEYS_SORTED`. A hint that is absent means "don't know",
+never "false".
 
 **Access pattern is uniform:** `data[selection[i]]` for `i in [0, length)`.
 Codes in `selection` are always `uint32_t`.
@@ -230,6 +266,12 @@ dispatch signal:
 
 These shape labels are layout hints, not dispatch signals.
 
+⛔ **Never open-code the shape test** (`data_length == length`, `< length`, etc.)
+at a call site — that is the trap §11 exists to stop. Use the canonical
+predicates in [`draken/core/buffers.h`](../draken/core/buffers.h):
+`draken_is_dense` / `draken_is_compressed` / `draken_is_constant` /
+`draken_is_dict`, plus `draken_dict_is_sorted` for the sorted-keys hint.
+
 **Shape-based dispatch is the exception, not the default.** The uniform
 access pattern (`data[selection[i]]`) is the correctness contract: every
 kernel and operator must produce the right answer for any of the three
@@ -242,6 +284,13 @@ assumed, default, or generally acceptable pattern; cases where it is
 permissible are the exception. The default posture is: write the uniform
 path. If you believe a shape-specialized variant is justified, **stop and
 surface it before implementing**.
+
+**Already ratified (2026-08-06):** the identity/compressed fast paths in the
+low-level optimisation programme — `mask_indices`/`count_true` dense paths, the
+uint64 Identity axis, `compare_vector` Identity, arithmetic Identity,
+`compute_row_hashes` identity memcpy, and the COALESCE/IIF dense blends. These
+extend the blessed `int64_compare.h` pattern and need no fresh approval; they
+remain bound by the two rules above (canonical predicates, uniform fallback).
 
 What remains absolute, even under an agreed specialization: a shape
 discriminant must not change the *answer* or silently skip rows (the old

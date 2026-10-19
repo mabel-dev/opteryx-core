@@ -394,7 +394,13 @@ inline int64_t estimate_range_cardinality(const NativeManifest& m, size_t positi
         const int64_t rows = m.file(f).record_count;
         if (rows == kUnknown || rows <= 0) return kUnknown;
         const ManifestCell& cell = m.cell(f, position);
-        const int64_t footer_ndv = m.file(f).has_footer ? cell.footer.distinct_count : cell.distinct_count;
+        // A parquet footer's distinct_count is a floor (row groups whose ranges
+        // overlap take the max), pinned near one row group's row count for a key
+        // spread across them all; its distinct_estimate is the costing figure.
+        // A manifest's own count is per-file, so it is taken as it is.
+        const int64_t footer_ndv = !m.file(f).has_footer ? cell.distinct_count
+                                   : cell.footer.distinct_estimate != kUnknown ? cell.footer.distinct_estimate
+                                                                               : cell.footer.distinct_count;
         PerFile p;
         if (bounds_usable) estimate_detail::file_ends(m, f, position, p.lo, p.hi);
         p.numeric = p.lo.numeric() && p.hi.numeric() && !estimate_detail::less(p.hi, p.lo);

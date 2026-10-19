@@ -84,7 +84,7 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
             db[j] = draken::ops::json_is_wellformed(str_data(slot, sa->arena), str_length(slot),
                                                     shape, pool) == want ? 1u : 0u;
         }
-        draken::ops::cmp_dict_scatter(db.data(), v->selection, v->validity, out, n);
+        draken::ops::cmp_dict_scatter(db.data(), v->data_length, v->selection, v->validity, out, n);
         if (v->validity != nullptr && !want) {
             for (size_t b = 0u; b < nb; ++b) out[b] |= static_cast<uint8_t>(~v->validity[b]);
             if ((n & 7u) != 0u) out[nb - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);

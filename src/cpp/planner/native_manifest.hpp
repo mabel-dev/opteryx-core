@@ -88,7 +88,8 @@ struct Bounds {
 struct FooterStats {
     Bounds bounds;
     int64_t null_count = kUnknown;
-    int64_t distinct_count = kUnknown;
+    int64_t distinct_count = kUnknown;    // a FLOOR (AggColumnStat::distinct_count)
+    int64_t distinct_estimate = kUnknown; // for costing (AggColumnStat::distinct_estimate)
     int64_t uncompressed_size = kUnknown;
     // rugo's `rugo.sum`, summed over the file's row groups (AggColumnStat).
     bool has_sum = false;

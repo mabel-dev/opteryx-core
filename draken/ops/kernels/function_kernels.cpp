@@ -1001,6 +1001,23 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
     const DrakenType b_eff = b_isnull ? a->type : b->type;
     const bool force_validity = a_isnull || b_isnull;
 
+    // String code-space blend (compressed_helpers.h): when both branches are
+    // compressed (or a typed NULL), a string result is a dictionary over [then
+    // values, else values] with code = base[k] + branch.selection[row]. Same
+    // chooser as the row loops. Fixed-width and BOOL results stay dense (measured).
+    const DrakenVector* ite_br[2] = {a, b};
+    const auto* ite_mbits = static_cast<const uint8_t*>(m->data);
+    auto ite_pick = [&](uint32_t i) -> int {
+        bool cond = false;
+        if (fk_row_valid(m, i)) {
+            uint32_t mp = m->selection[i];
+            cond = (ite_mbits[mp >> 3] >> (mp & 7)) & 1u;
+        }
+        const int k = cond ? 0 : 1;
+        return fk_ite_branch_valid(ite_br[k], k == 0 ? a_isnull : b_isnull, i) ? k : -1;
+    };
+    uint32_t ite_base[2];
+
     // STRING branches: blend into one canonical consolidated block. A mixed
     // {VARCHAR, NVARCHAR} pair widens to NVARCHAR (ASCII is valid UTF-8 —
     // exact); VARBINARY only pairs with VARBINARY (fail loud otherwise).
@@ -1015,6 +1032,9 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
             return draken_error_sentinel(
                 "draken_if_then_else: VARBINARY branch paired with a text branch");
         }
+        if (const uint32_t total = kernel_blend_bases(ite_br, 2u, m->length, ite_base))
+            return kernel_blend_string(ite_br, 2u, m->length, ite_base, total, s_t, ite_pick,
+                                       "draken_if_then_else");
         const auto* asa = a_isnull ? nullptr : static_cast<const DrakenStringArena*>(a->data);
         const auto* bsa = b_isnull ? nullptr : static_cast<const DrakenStringArena*>(b->data);
         const auto* smbits = static_cast<const uint8_t*>(m->data);
@@ -2393,7 +2413,7 @@ bool fk_in_list_emit(const DrakenVector* v, bool negate, uint8_t* out, Hit hit) 
         if (key_bits == nullptr) return false;
         for (uint32_t k = 0; k < dl; ++k)
             key_bits[k] = (hit(k) != negate) ? 1u : 0u;
-        draken::ops::cmp_dict_scatter(key_bits, v->selection, v->validity, out, n);
+        draken::ops::cmp_dict_scatter(key_bits, dl, v->selection, v->validity, out, n);
         draken_free(key_bits);
         return true;
     }

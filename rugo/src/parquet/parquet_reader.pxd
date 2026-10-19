@@ -140,6 +140,7 @@ cdef extern from "metadata.hpp":
         int64_t null_count
         int64_t total_uncompressed_size
         int64_t distinct_count
+        int64_t distinct_estimate
         bint has_min
         bint has_max
         bint null_count_complete
