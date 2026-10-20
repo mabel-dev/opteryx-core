@@ -59,8 +59,16 @@ void    draken_mem_configure(int64_t container_bytes, int64_t reserve_bytes, int
 int64_t draken_mem_container(void);
 int64_t draken_mem_reserve(void);
 int64_t draken_mem_cache_budget(void);
-// Current cache limit: min(B, C - R - charged), floored at 0.
+// Current cache limit: min(B, C - R - charged), floored at 0, further clamped
+// while the OS memory compressor is busy (macOS; mem_account.cpp): a sample above
+// the compression-rate threshold clamps the limit to what the cache holds less
+// what was just compressed, never below a floor share of B, and the clamp lifts
+// a hold period after the last pressured sample.
 int64_t draken_mem_cache_limit(void);
+// Compressor pressure since draken_mem_reset_peak: the highest sampled
+// compression rate (pages/s) and the number of samples over the threshold.
+int64_t draken_mem_compress_rate_max(void);
+int64_t draken_mem_pressure_samples(void);
 void    draken_mem_cache_add(int64_t bytes);
 void    draken_mem_cache_sub(int64_t bytes);
 int64_t draken_mem_cache_bytes(void);

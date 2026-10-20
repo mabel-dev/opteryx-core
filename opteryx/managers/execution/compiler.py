@@ -7678,7 +7678,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                 _cc = chunk_cache_stats()
                 for _k in ("bytes", "entries", "hits", "misses", "inserts", "refused",
                            "evictions", "give_way_bytes", "probation_bytes", "promotions",
-                           "remembered_hits", "limit"):
+                           "remembered_hits", "limit", "compress_rate_max", "pressure_samples"):
                     telemetry._reading[f"chunk_cache_{_k}"] = _cc[_k]
                 # This query's admission decision: scans kept from filling because
                 # their fill would not fit the cache's headroom, and what they held back.

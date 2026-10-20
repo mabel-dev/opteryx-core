@@ -254,6 +254,8 @@ cdef extern from "core/mem_account.h" nogil:
     int64_t draken_mem_cache_budget()
     int64_t draken_mem_cache_limit()
     int64_t draken_mem_cache_bytes()
+    int64_t draken_mem_compress_rate_max()
+    int64_t draken_mem_pressure_samples()
 
 
 cdef extern from "core/chunk_cache.h" nogil:
@@ -319,6 +321,10 @@ def chunk_cache_stats() -> dict:
         "remembered_hits": s.remembered_hits,
         "budget": draken_mem_cache_budget(),
         "limit": draken_mem_cache_limit(),
+        # Compressor pressure since the last peak reset (query start): highest
+        # compression rate sampled (pages/s) and samples over the give-way threshold.
+        "compress_rate_max": draken_mem_compress_rate_max(),
+        "pressure_samples": draken_mem_pressure_samples(),
         "container": draken_mem_container(),
         "reserve": draken_mem_reserve(),
     }
