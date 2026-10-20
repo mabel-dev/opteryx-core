@@ -253,6 +253,7 @@ cdef extern from "core/mem_account.h" nogil:
     int64_t draken_mem_reserve()
     int64_t draken_mem_cache_budget()
     int64_t draken_mem_cache_limit()
+    int64_t draken_mem_cache_bytes()
 
 
 cdef extern from "core/chunk_cache.h" nogil:
@@ -321,6 +322,14 @@ def chunk_cache_stats() -> dict:
         "container": draken_mem_container(),
         "reserve": draken_mem_reserve(),
     }
+
+
+def chunk_cache_headroom() -> int:
+    """Bytes the chunk cache can still take before it must evict: its current
+    limit, min(budget, container - reserve - charged query memory), less the
+    bytes it already holds. 0 when the cache is off or full."""
+    cdef int64_t room = draken_mem_cache_limit() - draken_mem_cache_bytes()
+    return room if room > 0 else 0
 
 
 def flush_chunk_cache() -> None:

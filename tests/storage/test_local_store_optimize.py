@@ -13,6 +13,10 @@ file it publishes exists: the write is refused, loudly, never published broken.
 """
 
 import os
+import pathlib
+import signal
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -28,8 +32,10 @@ from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.connectors.local_store_connector import _commit_lock
 from opteryx.connectors.local_store_connector import _read_current_rows
 from opteryx.exceptions import ConcurrentModificationError
+from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import ExecutionError
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.types.logical_type import INT64, VARCHAR
 from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
@@ -157,8 +163,6 @@ def test_vacuum_never_touches_files_it_does_not_own(connector):
 
 
 def test_vacuum_on_a_relation_that_does_not_exist_raises(connector):
-    from opteryx.exceptions import DatasetNotFoundError
-
     with pytest.raises(DatasetNotFoundError):
         connector.vacuum_relation("nope")
 
@@ -274,3 +278,135 @@ def test_only_the_local_store_vacuums_on_optimize():
     assert LocalStoreConnector.vacuums_on_optimize is True
     assert OpteryxConnector.vacuums_on_optimize is False
     assert LocalStoreConnector(store_root="unused").table_engine("a.b").snapshot_id is None
+
+
+# --- another process, and a crash ---------------------------------------------------
+
+_REPO = str(pathlib.Path(__file__).resolve().parents[2])
+
+# A separate process that takes a lock and holds it until its stdin closes or it dies.
+_HOLD = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from opteryx.connectors.local_store_connector import _flock
+fd = _flock(sys.argv[2], blocking=(sys.argv[3] == "blocking"))
+print("held", flush=True)
+sys.stdin.read()
+"""
+
+
+def _holder(lock_path, blocking=True):
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD, _REPO, lock_path, "blocking" if blocking else "nonblocking"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout.readline().strip() == "held"
+    return child
+
+
+def _in_thread(fn):
+    """Run `fn` on a thread; returns (thread, finished event, result holder)."""
+    finished = threading.Event()
+    box = {}
+
+    def run():
+        box["value"] = fn()
+        finished.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, finished, box
+
+
+def test_a_commit_waits_for_a_lock_held_by_another_process(connector):
+    connector.create_relation("t", _schema())
+    _on_disk(connector, "t", "data-a.parquet")
+    child = _holder(os.path.join(connector._relation_dir("t"), COMMIT_LOCK))
+
+    thread, finished, _ = _in_thread(lambda: connector.insert("t", _rows(("data-a.parquet", 1, 1))))
+    assert not finished.wait(0.5), "a commit went through while another process held the lock"
+
+    child.stdin.close()
+    child.wait(timeout=10)
+    thread.join(timeout=10)
+    assert finished.is_set()
+    assert _live_paths(connector, "t") == ["data-a.parquet"]
+
+
+def test_a_killed_process_cannot_leave_the_commit_lock_held(connector):
+    connector.create_relation("t", _schema())
+    child = _holder(os.path.join(connector._relation_dir("t"), COMMIT_LOCK))
+    child.send_signal(signal.SIGKILL)
+    child.wait(timeout=10)
+
+    thread, finished, box = _in_thread(lambda: connector.vacuum_relation("t"))
+    thread.join(timeout=10)
+    assert finished.is_set(), "the vacuum is still waiting on a dead process's lock"
+    assert box["value"] == {"data": 0, "manifests": 0, "snapshots": 0, "tmp": 0}
+
+
+def test_a_compaction_in_another_process_holds_the_lease(connector):
+    connector.create_relation("t", _schema())
+    child = _holder(os.path.join(connector._relation_dir("t"), COMPACTION_LOCK), blocking=False)
+    try:
+        with pytest.raises(ExecutionError, match="already being compacted"):
+            connector.claim_compaction_lease("t", "OPTIMIZE TABLE by tests")
+    finally:
+        child.stdin.close()
+        child.wait(timeout=10)
+    connector.claim_compaction_lease("t", "OPTIMIZE TABLE by tests").release()
+
+
+def test_a_commit_that_dies_after_writing_its_manifest_leaves_the_old_state_and_the_vacuum_reclaims_it(
+    connector,
+):
+    connector.create_relation("t", _schema())
+    directory = connector._relation_dir("t")
+    _on_disk(connector, "t", "data-kept.parquet", "data-lost.parquet")
+    connector.insert("t", _rows(("data-kept.parquet", 1, 1)))
+    before = connector._read_dataset_json(directory).current_snapshot
+
+    def crash():
+        raise RuntimeError("process died here")
+
+    connector._pre_commit_recheck_hook = crash
+    with pytest.raises(RuntimeError, match="process died here"):
+        connector.insert("t", _rows(("data-lost.parquet", 1, 1)))
+    connector._pre_commit_recheck_hook = None
+
+    # the relation never moved ...
+    assert connector._read_dataset_json(directory).current_snapshot == before
+    assert _live_paths(connector, "t") == ["data-kept.parquet"]
+    # ... but the dead commit's manifest and pointer, and its data file, are on disk
+    assert len(_by_prefix(directory)["manifests"]) == 2
+    assert len(_by_prefix(directory)["snapshots"]) == 2
+    assert "data-lost.parquet" in _by_prefix(directory)["data"]
+
+    assert connector.vacuum_relation("t") == {"data": 1, "manifests": 1, "snapshots": 1, "tmp": 0}
+    assert _live_paths(connector, "t") == ["data-kept.parquet"]
+    assert _by_prefix(directory)["data"] == ["data-kept.parquet"]
+
+
+def test_vacuum_is_idempotent(connector):
+    connector.create_relation("t", _schema())
+    _on_disk(connector, "t", "data-orphan.parquet")
+    assert connector.vacuum_relation("t")["data"] == 1
+    assert connector.vacuum_relation("t") == {"data": 0, "manifests": 0, "snapshots": 0, "tmp": 0}
+
+
+# --- refusals ---------------------------------------------------------------------
+
+
+def test_optimize_without_the_table_keyword_is_refused(tmp_path):
+    session = _session(tmp_path)
+    _run(session, "CREATE TABLE ws.t (a BIGINT)")
+    with pytest.raises(UnsupportedSyntaxError, match="TABLE"):
+        _run(session, "OPTIMIZE ws.t")
+
+
+def test_optimize_of_a_table_that_does_not_exist_is_refused(tmp_path):
+    session = _session(tmp_path)
+    with pytest.raises(DatasetNotFoundError):
+        _run(session, "OPTIMIZE TABLE ws.nope")

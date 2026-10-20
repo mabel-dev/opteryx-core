@@ -3098,6 +3098,7 @@ cdef class NativeScanPlan:
         self.pruned_items = 0
         # -1 = no runtime bound wired (see the pxd). Only the Source overwrites it.
         self.row_groups_pruned_runtime = -1
+        self.cache_fill_bytes = 0
         self.scan_identity = None
         self._closed = False
         self._pool = None
@@ -3120,6 +3121,12 @@ cdef class NativeScanPlan:
         time (WP-02). 0 when no predicates are pushed. `row_group_count +
         pruned_row_group_count` == every row group in the projected files."""
         return self.pruned_items
+
+    @property
+    def cache_fill_bytes(self):
+        """C7: chunk-cache bytes this scan would add by filling every chunk it can
+        fill (see the pxd). Admission compares it with the cache's headroom."""
+        return self.cache_fill_bytes
 
     @property
     def runtime_pruned_row_groups(self):
@@ -3562,6 +3569,13 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef dict proj_idx_by_path = {}
     cdef list proj_idx
     cdef size_t pk
+    # The same walk also sums what a full chunk-cache fill of this scan would hold
+    # (NativeScanPlan.cache_fill_bytes): the decoder fills a chunk only when it is
+    # compressed or remote (decode_column.cpp DecodeColumnFromChunk), and an image
+    # is the chunk's total_uncompressed_size (ChunkPageSource).
+    cdef dict remote_by_path = {}
+    cdef bint path_remote
+    cdef int64_t fill_bytes = 0
     for name in column_names:
         proj_names.push_back(name.encode('utf-8'))
     max_rg_bytes = 0
@@ -3577,12 +3591,17 @@ cpdef NativeScanPlan open_native_scan_plan(
                         proj_idx.append(ci)
                         break
             proj_idx_by_path[path] = proj_idx
+            remote_by_path[path] = not _is_local_path(path)
+        path_remote = remote_by_path[path]
         rg_bytes = 0
         for ci in proj_idx:
             if rgp.columns[ci].total_uncompressed_size > 0:
                 rg_bytes += rgp.columns[ci].total_uncompressed_size
+                if rgp.columns[ci].codec != 0 or path_remote:
+                    fill_bytes += rgp.columns[ci].total_uncompressed_size
         if rg_bytes > max_rg_bytes:
             max_rg_bytes = rg_bytes
+    plan.cache_fill_bytes = fill_bytes
 
     # No in-flight override reaches this path (see the parameter list); the
     # window is auto = workers + 2, widened to cover the fetch pool when

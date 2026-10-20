@@ -1,0 +1,100 @@
+# OPTIMIZE TABLE on the local store (`ws`). It compacts the table's files and removes
+# every file the current snapshot no longer references, so the result of a query
+# must be the same before and after, and the table must stay writable.
+
+statement ok
+CREATE TABLE ws.opt_small_files (a BIGINT, b VARCHAR)
+
+statement ok
+INSERT INTO ws.opt_small_files VALUES (1, 'a')
+
+statement ok
+INSERT INTO ws.opt_small_files VALUES (2, 'b')
+
+statement ok
+INSERT INTO ws.opt_small_files VALUES (3, 'c')
+
+statement ok
+INSERT INTO ws.opt_small_files VALUES (4, 'd')
+
+query II
+SELECT count(*), sum(a) FROM ws.opt_small_files
+----
+4 10
+
+statement ok
+OPTIMIZE TABLE ws.opt_small_files
+
+query II
+SELECT count(*), sum(a) FROM ws.opt_small_files
+----
+4 10
+
+query IT
+SELECT a, b FROM ws.opt_small_files ORDER BY a
+----
+1 a
+2 b
+3 c
+4 d
+
+# a second pass finds nothing to compact and must still succeed
+statement ok
+OPTIMIZE TABLE ws.opt_small_files
+
+statement ok
+INSERT INTO ws.opt_small_files VALUES (5, 'e')
+
+query II
+SELECT count(*), sum(a) FROM ws.opt_small_files
+----
+5 15
+
+# TRUNCATE leaves every data file orphaned; OPTIMIZE reclaims them and the table
+# is still a working table afterwards
+statement ok
+CREATE TABLE ws.opt_after_truncate (a BIGINT)
+
+statement ok
+INSERT INTO ws.opt_after_truncate VALUES (1)
+
+statement ok
+INSERT INTO ws.opt_after_truncate VALUES (2)
+
+statement ok
+TRUNCATE TABLE ws.opt_after_truncate
+
+statement ok
+OPTIMIZE TABLE ws.opt_after_truncate
+
+query I
+SELECT count(*) FROM ws.opt_after_truncate
+----
+0
+
+statement ok
+INSERT INTO ws.opt_after_truncate VALUES (9)
+
+query I
+SELECT a FROM ws.opt_after_truncate
+----
+9
+
+# an empty table with nothing ever written
+statement ok
+CREATE TABLE ws.opt_never_written (a BIGINT)
+
+statement ok
+OPTIMIZE TABLE ws.opt_never_written
+
+query I
+SELECT count(*) FROM ws.opt_never_written
+----
+0
+
+# refusals
+statement error
+OPTIMIZE TABLE ws.opt_does_not_exist
+
+statement error
+OPTIMIZE ws.opt_small_files

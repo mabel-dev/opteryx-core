@@ -7315,6 +7315,20 @@ def compile_to_native(plan, pool=None):
             compiler.footer_fetch_ns, compiler.runtime_bounds_wired)
 
 
+def _chunk_cache_admission(fill_bytes, headroom):
+    """Which scans may fill the chunk cache (C7), in scan order: a scan is admitted
+    when its full fill (NativeScanPlan.cache_fill_bytes) fits in the headroom left
+    by the scans admitted before it. A declined scan still uses hits; it takes no
+    headroom, so a later smaller scan can still be admitted."""
+    admit = []
+    for size in fill_bytes:
+        fits = size <= headroom
+        if fits:
+            headroom -= size
+        admit.append(fits)
+    return admit
+
+
 def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=True):
     """THE data executor: compile to the native pipeline graph and run it. Returns the
     ``(generator, ResultType)`` contract the cursor consumes. The generator drains the
@@ -7339,6 +7353,8 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     from opteryx.compiled.structures.memory_pool import reset_process_memory_peak
     from opteryx.compiled.structures.memory_pool import flush_chunk_cache
     from opteryx.compiled.structures.memory_pool import chunk_cache_stats
+    from opteryx.compiled.structures.memory_pool import chunk_cache_budget_bytes
+    from opteryx.compiled.structures.memory_pool import chunk_cache_headroom
     from opteryx.operators._operators import native_trace_drain
     from opteryx.operators._operators import native_trace_drain_file_symbols
     from opteryx.operators._operators import native_trace_host_info
@@ -7464,8 +7480,22 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
         )
         if not _chunk_cache_admit:
             flush_chunk_cache()
-        for _sp in nplan.scan_plans:
-            _sp.set_chunk_cache_admit(_chunk_cache_admit)
+        # Scan-resistant admission: a scan whose full fill would not fit in the
+        # cache's remaining headroom uses hits but does not fill — one pass over a
+        # table bigger than the cache would decompress every chunk into an image it
+        # can never reuse (SF100 Q18). Skipped when the cache is off: nothing fills.
+        _cc_scan_admit = [_chunk_cache_admit] * len(nplan.scan_plans)
+        if _chunk_cache_admit and chunk_cache_budget_bytes() > 0:
+            _cc_scan_admit = _chunk_cache_admission(
+                [_sp.cache_fill_bytes for _sp in nplan.scan_plans], chunk_cache_headroom()
+            )
+        _cc_scans_declined = 0
+        _cc_declined_bytes = 0
+        for _sp, _admit in zip(nplan.scan_plans, _cc_scan_admit):
+            if _chunk_cache_admit and not _admit:
+                _cc_scans_declined += 1
+                _cc_declined_bytes += _sp.cache_fill_bytes
+            _sp.set_chunk_cache_admit(_admit)
         # Process memory account: the peak is per query from here.
         reset_process_memory_peak()
         _t0 = _t.perf_counter_ns()
@@ -7650,6 +7680,10 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                            "evictions", "give_way_bytes", "probation_bytes", "promotions",
                            "remembered_hits", "limit"):
                     telemetry._reading[f"chunk_cache_{_k}"] = _cc[_k]
+                # This query's admission decision: scans kept from filling because
+                # their fill would not fit the cache's headroom, and what they held back.
+                telemetry._reading["chunk_cache_scans_declined"] = _cc_scans_declined
+                telemetry._reading["chunk_cache_declined_bytes"] = _cc_declined_bytes
                 # Per-join build-side consolidation decisions. Same harvest point and
                 # the same reason as the scan diagnostics below: a native decision made
                 # once at finalize, which nothing in the plan can show. Consolidation

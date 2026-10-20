@@ -240,6 +240,12 @@ cdef class NativeScanPlan:
     # pruned nothing". Written once by the Source in make_global, on the driver
     # thread, and read by Python only after the driver has finished.
     cdef int64_t row_groups_pruned_runtime
+    # C7 scan-resistant admission: the bytes this scan would add to the chunk
+    # cache if it filled every chunk it can fill — the projected chunks' footer
+    # total_uncompressed_size (the size of a cached chunk image), counting only
+    # chunks the decoder fills (compressed, or remote). Summed at plan time over
+    # the surviving work items; read before submit to decide admission.
+    cdef int64_t cache_fill_bytes
     # Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): the
     # row groups answered from their footer statistics at plan time - dropped
     # from work_items, their partials folded into `coverage_seed` (see

@@ -1,8 +1,0 @@
-{
-  "codec": "lz4",
-  "generator": "opteryx-core dev/parquet_to_skene.py lz4, skene v3 (first release after 0.9.139), 2026-09-25",
-  "listing_sha256": "117909e1324d00a6d5c9772d485fde9245b93446bf85011b052cc169cec9a8be",
-  "name": "h2o_skene",
-  "object_count": 5,
-  "total_bytes": 8922299602
-}

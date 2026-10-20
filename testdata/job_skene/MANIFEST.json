@@ -1,8 +1,0 @@
-{
-  "codec": "lz4",
-  "generator": "opteryx-core dev/parquet_to_skene.py lz4, skene v3 (first release after 0.9.139), 2026-09-25",
-  "listing_sha256": "65531968f23e110087cf328162ce1fef65ac79f45dcd64e62b72f48d7403da66",
-  "name": "job_skene",
-  "object_count": 21,
-  "total_bytes": 1978200757
-}

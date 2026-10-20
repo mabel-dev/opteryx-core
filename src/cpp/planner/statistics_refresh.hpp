@@ -908,9 +908,37 @@ private:
 
     // ---- Scan --------------------------------------------------------------
 
+    // A decorrelated EXISTS / NOT EXISTS / IN / NOT IN: "left semi", "left anti" and
+    // their null-aware / not-distinct spellings.
+    bool is_semi_or_anti(const StepRow& p) const {
+        return p.kind == sk().join && p.has_join_type &&
+               (p.join_type.rfind("left semi", 0) == 0 || p.join_type.rfind("left anti", 0) == 0);
+    }
+
     // Walk up from the scan through transparent steps (Filter, Project, Order,
-    // HeapSort, cross joins) collecting the Filter conjuncts whose every
-    // identifier binds to one of `names`.
+    // HeapSort, cross joins, and a semi/anti join reached from its LEFT leg)
+    // collecting the Filter conjuncts whose every identifier binds to one of
+    // `names`.
+    //
+    // A semi/anti join emits only rows of its left input, each kept or dropped on
+    // its own, so a filter on left-only columns above it commutes with it exactly:
+    // claiming that filter at the left leg's scan changes no result. Without this a
+    // WHERE with an EXISTS / NOT EXISTS (TPC-H Q16, Q21) put the decorrelated
+    // semi/anti joins between the cross-join chain and its filters, the walk stopped
+    // there, and join planning costed every relation at its unfiltered size (Q21's
+    // `nation` at 25 rows, not 1). The right leg is NOT transparent: a conjunct above
+    // the join cannot name its columns, and its rows do not flow up.
+    //
+    // INNER joins are deliberately still NOT transparent, although the same argument
+    // holds (a one-sided filter commutes with an inner join from either leg) and a
+    // decorrelated scalar subquery (TPC-H Q17; TPC-DS Q32, Q92) hides its filters
+    // behind one. Tried 2026-10-20 and reverted: it changed 8 TPC-DS plans and, on
+    // SF10, made Q32 -19% / Q91 -11% / Q98 -8% but Q53 and Q63 about +70%
+    // (85 -> 145 ms). Those two filter `item` with an OR of three correlated IN lists
+    // (category, class, brand); the selectivity model multiplies them as independent
+    // and costs `item` at 4 rows (55 before the change) where 5,279 match, so claiming
+    // the filter at the scan only made join ordering trust a worse number. Revisit
+    // once a conjunction of correlated IN lists is no longer costed as independent.
     std::vector<ExprId> leaf_local_conjuncts(NodeId scan, const std::vector<std::string>& names) const {
         std::vector<ExprId> out;
         std::unordered_set<NodeId> seen;
@@ -924,7 +952,8 @@ private:
                 const StepRow& p = row(parent);
                 const bool transparent = p.kind == sk().filter || p.kind == sk().project || p.kind == sk().order ||
                                          p.kind == sk().heap_sort ||
-                                         (p.kind == sk().join && p.has_join_type && p.join_type == "cross join");
+                                         (p.kind == sk().join && p.has_join_type && p.join_type == "cross join") ||
+                                         (is_semi_or_anti(p) && edge.role == EDGE_LEFT);
                 if (!transparent) continue;
                 if (p.kind == sk().filter && p.condition != kNoExpr) {
                     std::vector<ExprId> conjuncts;

@@ -1294,10 +1294,16 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         (<_StreamingParquetWriter>stream_writer)._add_batch(cols, nrows)
         return None, None
 
+    # Whole-file column statistics are computed only for the caller that reads
+    # them (write_parquet_with_bounds); write_parquet discards them, so it asks
+    # for none. They are a full pass over every column.
     cdef vector[ColumnStats] stats
+    cdef vector[ColumnStats]* stats_out = NULL
+    if want_bounds:
+        stats_out = &stats
     cdef vector[uint8_t] out
     with nogil:
-        out = WriteParquet(cols, <size_t>nrows, codec, profile_id, &stats,
+        out = WriteParquet(cols, <size_t>nrows, codec, profile_id, stats_out,
                            <size_t>max_rows_per_row_group, <size_t>max_page_bytes,
                            page_index, <size_t>row_groups_per_block)
     cdef bytes data = PyBytes_FromStringAndSize(<const char*>out.data(), out.size())

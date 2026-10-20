@@ -3125,8 +3125,9 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
 //
 // out_stats, when given, receives whole-file per-column statistics (min/max/
 // null_count over EVERY row group, computed over the full columns by the same
-// compute_stats the chunks use) — so a bounds caller is not limited to
-// single-row-group files.
+// compute_stats the chunks use, minus the sum) — so a bounds caller is not
+// limited to single-row-group files. A pass over every column, one pool task
+// per column: pass nullptr unless the result is read.
 inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t num_rows,
                                          int codec = CODEC_UNCOMPRESSED,
@@ -3199,10 +3200,29 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols);
 
   if (out_stats) {
+    // One pool task per column: each is an independent pass over its whole
+    // column, and run serially on the caller's thread it measured as ~25% of that
+    // thread's time in a 105-column write while every pool worker sat idle
+    // (samply, 2026-10-20). No sum: nothing reads a whole-file sum, and it is an
+    // extra __int128 accumulation per integer column.
     out_stats->assign(cols.size(), ColumnStats{});
-    for (size_t i = 0; i < cols.size(); i++)
+    auto stat_one = [&](size_t i) {
       if (!cols[i].is_array)
-        (*out_stats)[i] = compute_stats(cols[i], num_rows);
+        (*out_stats)[i] = compute_stats(cols[i], num_rows, /*with_sum=*/false);
+    };
+    if (cols.size() <= 1 || rugo_writer::pool_width() <= 1) {
+      for (size_t i = 0; i < cols.size(); i++) stat_one(i);
+    } else {
+      BS::thread_pool<> &pool = rugo_writer::pool();
+      std::vector<std::future<void>> futs;
+      futs.reserve(cols.size());
+      for (size_t i = 0; i < cols.size(); i++)
+        futs.push_back(pool.submit_task([&stat_one, i]() { stat_one(i); }));
+      // Every task reads `cols` and writes `out_stats`: wait for ALL of them
+      // before either can go out of scope, then surface the first failure.
+      for (std::future<void> &f : futs) f.wait();
+      for (std::future<void> &f : futs) f.get();
+    }
   }
   return file;
 }
