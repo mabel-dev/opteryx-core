@@ -42,6 +42,7 @@ from _common import (  # noqa: E402
     print_header,
     print_row,
     print_skip_row,
+    print_total_row_no_baseline,
 )
 
 import opteryx  # noqa: E402
@@ -159,6 +160,8 @@ def main() -> int:
     )
 
     counts = {"ok": 0, "timeout": 0, "error": 0}
+    total_min_ms = 0.0
+    queries_timed = 0
     suite_start = time.monotonic()
 
     try:
@@ -195,17 +198,20 @@ def main() -> int:
             if had_failure or not run_times:
                 continue
             print_row(stem, run_times, args.iterations, None)
+            total_min_ms += min(run_times)
+            queries_timed += 1
     finally:
         csv_handle.close()
 
-    suite_elapsed = time.monotonic() - suite_start
+    suite_elapsed_ms = (time.monotonic() - suite_start) * 1000
     print("─" * 100)
+    print_total_row_no_baseline(total_min_ms, queries_timed, args.iterations)
     print()
     print(
         f"\033[38;2;26;185;67m{counts['ok']} passed\033[0m, "
         f"\033[38;2;255;121;198m{counts['error']} failed\033[0m, "
         f"\033[38;2;255;165;0m{counts['timeout']} timeout\033[0m   "
-        f"({suite_elapsed:.1f}s)"
+        f"({suite_elapsed_ms:.1f}ms)"
     )
     print(f"  results: {os.path.relpath(csv_path, _REPO_ROOT)}")
     return 1 if counts["error"] else 0

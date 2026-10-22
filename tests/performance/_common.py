@@ -207,6 +207,15 @@ def print_total_row(
     print("".join(parts))
 
 
+def print_total_row_no_baseline(opteryx_total_ms: float, n_queries: int, n_iterations: int) -> None:
+    """`print_total_row` for a suite with no DuckDB baseline: the sum of per-query mins, in ms."""
+    parts: list[str] = [f"{'TOTAL':<{_NAME_W}}"]
+    parts.append(f"{'':>{_MS_W * n_iterations + 2}}")
+    parts.append(f"{f'{opteryx_total_ms:.1f}ms':>{_MS_W}}")
+    parts.append(f"  ({n_queries} queries)")
+    print("".join(parts))
+
+
 # ---------------------------------------------------------------------------
 # CSV writer
 # ---------------------------------------------------------------------------

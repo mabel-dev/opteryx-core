@@ -758,6 +758,9 @@ class Features:
     disable_join_key_materialization = get_bool(
         "FEATURE_DISABLE_JOIN_KEY_MATERIALIZATION", False
     )
+    disable_explicit_join_chain_lowering = get_bool(
+        "FEATURE_DISABLE_EXPLICIT_JOIN_CHAIN_LOWERING", False
+    )
     disable_join_planning = get_bool("FEATURE_DISABLE_JOIN_PLANNING", False)
     disable_join_rewrite = get_bool("FEATURE_DISABLE_JOIN_REWRITE", False)
     disable_jsonl_nested_extraction = get_bool("FEATURE_DISABLE_JSONL_NESTED_EXTRACTION", False)

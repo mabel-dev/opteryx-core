@@ -16,6 +16,7 @@ from .join_condition_hoist import JoinConditionHoistStrategy
 from .join_elimination import JoinEliminationStrategy
 from .join_key_materialization import JoinKeyMaterializationStrategy
 from .join_algorithm import JoinAlgorithmStrategy
+from .explicit_join_chain_lowering import ExplicitJoinChainLoweringStrategy
 from .join_planning import JoinPlanningStrategy
 from .join_rewriter import JoinRewriteStrategy
 from .limit_elimination import LimitEliminationStrategy
@@ -65,6 +66,7 @@ __all__ = [
     "JoinConditionHoistStrategy",
     "JoinEliminationStrategy",
     "JoinAlgorithmStrategy",
+    "ExplicitJoinChainLoweringStrategy",
     "JoinPlanningStrategy",
     "JoinRewriteStrategy",
     "LimitEliminationStrategy",

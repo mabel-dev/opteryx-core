@@ -61,6 +61,7 @@ from opteryx.planner.optimizer.strategies import (
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
     JoinAlgorithmStrategy,
+    ExplicitJoinChainLoweringStrategy,
     JoinPlanningStrategy,
     JoinRewriteStrategy,
     LengthOnlyColumnStrategy,
@@ -125,6 +126,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "JoinEliminationStrategy": lambda: config.features.disable_join_elimination,
     "JoinKeyMaterializationStrategy": lambda: config.features.disable_join_key_materialization,
     "JoinAlgorithmStrategy": lambda: config.features.disable_join_algorithm,
+    "ExplicitJoinChainLoweringStrategy": lambda: config.features.disable_explicit_join_chain_lowering,
     "JoinPlanningStrategy": lambda: config.features.disable_join_planning,
     "JoinRewriteStrategy": lambda: config.features.disable_join_rewrite,
     "LengthOnlyColumnStrategy": lambda: config.features.disable_length_only_column,
@@ -279,6 +281,10 @@ class OptimizerVisitor:
             # after the expression simplifiers, so a cast or arithmetic that folds
             # away is never materialised as a column in the first place.
             JoinKeyMaterializationStrategy(telemetry),
+            # Explicit INNER JOIN ... ON chains of 3+ relations become cross joins plus Filters,
+            # the shape JoinPlanning orders. Before it, so the statistics refresh it triggers
+            # sees the WHERE filters through the cross joins (inner joins are opaque to it).
+            ExplicitJoinChainLoweringStrategy(telemetry),
             JoinPlanningStrategy(telemetry),  # Cost-based DPccp; no-op when flag off
             # `GROUP BY k LIMIT n` with no ORDER BY: derive `k <= T` from manifest min/max so
             # the pushdown below turns it into file/row-group pruning. Before pushdown, and
