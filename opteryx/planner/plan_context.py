@@ -34,6 +34,7 @@ class PlanContext:
         "shared_ctes",
         "physical_shared_ctes",
         "recursive_ctes",
+        "pending_shared_ctes",
         "variables",
         "statistics_estimated_by_optimizer",
     )
@@ -69,6 +70,11 @@ class PlanContext:
         # Recursive CTE metadata: rcte_key -> its anchor/term leg keys (the legs
         # are shared_ctes entries). See docs/RECURSIVE_CTE_DESIGN.md.
         self.recursive_ctes: dict = {}
+        # Shared bodies a Plan Rewriter strategy has carved out of the plan it is
+        # rewriting (window_to_join shares a window's input relation), as
+        # (cte_key, LogicalPlan) in the order made. do_plan_rewrite drains this after
+        # each plan it rewrites and places them in `shared_ctes` dependencies-first.
+        self.pending_shared_ctes: list = []
         # Whether the optimizer refreshed statistics - see
         # OptimizerVisitor.refreshed_statistics.
         self.statistics_estimated_by_optimizer: bool = False

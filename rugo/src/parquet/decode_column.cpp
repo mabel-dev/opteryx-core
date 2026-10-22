@@ -1145,6 +1145,37 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // -----------------------------------------------------------------
     int32_t dict_size = 0;
 
+    // ── Page search arming (docs/PARQUET_PAGE_SEARCH_DESIGN.md) ──────────────
+    // The caller arms it on one column by passing `search`; it applies to a
+    // scalar byte_array column under a kind 4 (contains) / 5 (not-contains)
+    // conjunct with no empty pattern. Anything else is declined and the column
+    // decodes exactly as it would without it (search->applied stays false).
+    // Decided HERE, before the dictionary page loads, because the load below
+    // behaves differently with the search armed (see dict_bytes).
+    const bool contains_kind =
+        skip_pred != nullptr && (skip_pred->kind == 4 || skip_pred->kind == 5) &&
+        skip_pred->str_vals != nullptr && !skip_pred->str_vals->empty();
+    bool patterns_nonempty = contains_kind;
+    if (contains_kind)
+      for (const std::string& pat : *skip_pred->str_vals)
+        if (pat.empty()) { patterns_nonempty = false; break; }
+    const bool search_on =
+        search != nullptr && patterns_nonempty &&
+        result.type == "byte_array" && target_col->max_repetition_level == 0;
+    const bool search_negate = contains_kind && skip_pred->kind == 5;
+    // The decompressed byte_array dictionary page, wherever it lies. Without the
+    // search it is copied into string_dict_arena up front (the arena IS the
+    // page). With the search armed the copy is deferred: the page is searched
+    // where it already is — file bytes, a chunk-cache image or a fill slot, all
+    // alive for this decode — and settle_dictionary_bytes() then copies in ONLY
+    // the entries that pass (the compacted dictionary), or the whole page when
+    // every entry passes. Measured 2026-10-22 (ClickBench Q20, URL dictionaries
+    // of 22M entries / 3 GB per query): the up-front copy was 12-18% of CPU and
+    // the full dictionary then rode out to the engine a second time.
+    const uint8_t* dict_bytes = nullptr;
+    size_t dict_bytes_len = 0;
+    bool dict_in_arena = true;
+
     // Keep decompressed buffers alive across dictionary and data page decoding.
     draken::AppendBuffer<uint8_t> dict_decompressed_data;
     draken::AppendBuffer<uint8_t> page_decompressed_data;
@@ -1181,7 +1212,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         // this costs ClickBench 5.0%, JOB 2.1%).
         const bool zc_byte_array = result.type == "byte_array";
 
-        if (zc_byte_array && target_col->codec == 0) {
+        if (zc_byte_array && target_col->codec == 0 && search_on) {
+          // Search armed: no copy — the page is read in place (file bytes or a
+          // chunk-cache image) and settled after the entry verdicts are known.
+          dict_data_ptr  = dict_compressed_data;
+          dict_data_size = dict_compressed_size;
+          dict_in_arena  = false;
+        } else if (zc_byte_array && target_col->codec == 0) {
           RUGO_TEL_START(_zc_t0);
           result.string_dict_arena.assign(dict_compressed_data,
                                           dict_compressed_data + dict_compressed_size);
@@ -1205,8 +1242,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // result owns: a page served from the chunk cache (or filled into it)
               // is copied in rather than aliased.
               if (zc_byte_array && got_ptr != dict_dst.data()) {
-                dict_dst.assign(got_ptr, got_ptr + got);
-                got_ptr = dict_dst.data();
+                if (search_on) {
+                  // Search armed: read the served page in place (the cache
+                  // entry / fill slot outlives this decode); settle later.
+                  dict_in_arena = false;
+                } else {
+                  dict_dst.assign(got_ptr, got_ptr + got);
+                  got_ptr = dict_dst.data();
+                }
               }
               RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _dc_t0);
               dict_data_ptr  = got_ptr;
@@ -1301,9 +1344,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             dict_data_ptr += flba_byte_width;
           }
         } else if (zc_byte_array) {
-          // The arena already holds the page: record each entry's payload
-          // offset (past its 4-byte length prefix) and length. No bytes move.
+          // The arena (or, search armed, the page in place) already holds the
+          // values: record each entry's payload offset (past its 4-byte length
+          // prefix) and length relative to that base. No bytes move.
           const uint8_t* arena_base = dict_data_ptr;
+          dict_bytes = dict_data_ptr;
+          dict_bytes_len = dict_data_size;
           result.string_dict_offsets.reserve(dict_size);
           result.string_dict_lens.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
@@ -1481,28 +1527,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
     bool int128_dict_mode = (result.type == "int128" && dict_size > 0);
 
-    // ── Page search arming (docs/PARQUET_PAGE_SEARCH_DESIGN.md) ──────────────
-    // The caller arms it on one column by passing `search`; it applies to a
-    // scalar byte_array column under a kind 4 (contains) / 5 (not-contains)
-    // conjunct with no empty pattern. Anything else is declined and the column
-    // decodes exactly as it would without it (search->applied stays false).
-    //
-    const bool contains_kind =
-        skip_pred != nullptr && (skip_pred->kind == 4 || skip_pred->kind == 5) &&
-        skip_pred->str_vals != nullptr && !skip_pred->str_vals->empty();
-    bool patterns_nonempty = contains_kind;
-    if (contains_kind)
-      for (const std::string& pat : *skip_pred->str_vals)
-        if (pat.empty()) { patterns_nonempty = false; break; }
-    const bool search_on =
-        search != nullptr && patterns_nonempty &&
-        result.type == "byte_array" && target_col->max_repetition_level == 0;
-    const bool search_negate = contains_kind && skip_pred->kind == 5;
+    // (search_on / search_negate are decided above the dictionary load.)
 
     // Per-dictionary-entry verdict of a kind 4/5 conjunct: one SIMD search over
-    // the dictionary page itself (string_dict_arena IS the decompressed page,
-    // length prefixes intact) instead of a per-entry match. An empty pattern is
-    // contained by every value. Computed at most once per chunk.
+    // the dictionary page itself (dict_bytes: the decompressed page, length
+    // prefixes intact, in the arena or in place) instead of a per-entry match.
+    // An empty pattern is contained by every value. Computed at most once per
+    // chunk.
     std::vector<uint8_t> entry_pass;
     uint32_t entry_pass_count = 0;
     bool entry_pass_ready = false;
@@ -1519,7 +1550,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       } else {
         for (const std::string& pat : *skip_pred->str_vals)
           rugo::page_search::mark_values_containing(
-              result.string_dict_arena.data(), result.string_dict_arena.size(), n,
+              dict_bytes, dict_bytes_len, n,
               reinterpret_cast<const uint8_t*>(pat.data()), pat.size(), entry_pass.data());
       }
       if (search_negate)
@@ -1527,6 +1558,76 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       for (uint32_t k = 0; k < n; ++k) entry_pass_count += entry_pass[k];
       rugo_tel::ps_dict_entries.fetch_add(n, std::memory_order_relaxed);
       rugo_tel::ps_dict_entries_pass.fetch_add(entry_pass_count, std::memory_order_relaxed);
+    };
+
+    // ── Compacted dictionary (search armed) ───────────────────────────────────
+    // Once the entry verdicts are known, the arena receives only the entries
+    // that pass: the data pages' surviving codes all reference passing entries
+    // (a row whose entry fails is dropped by the search), so the rest of the
+    // dictionary is dead weight — it would be copied into the arena, copied
+    // again into the output vector, and given a slot each, for nothing.
+    // dict_remap maps a page's code (dictionary order) to its compacted index;
+    // UINT32_MAX marks a non-passing entry, which no surviving code may carry.
+    // Empty when nothing was compacted (search off, no dictionary, every entry
+    // passes, or none does).
+    std::vector<uint32_t> dict_remap;
+    bool dict_settled = false;
+    auto settle_dictionary_bytes = [&]() {
+      if (dict_settled) return;
+      dict_settled = true;
+      const uint32_t n = static_cast<uint32_t>(result.string_dict_lens.size());
+      // Compaction pays only when it leaves most of the dictionary behind: it
+      // copies the passing entries one by one, rebuilds their offsets and
+      // remaps every surviving code, against the one memcpy it replaces. With
+      // nearly every entry passing (`LIKE '%http%'`, `NOT LIKE '%.google.%'`)
+      // that is pure overhead — measured 2026-10-22: +15% / +7% on those
+      // canaries ungated, flat with the gate — so at most half may pass.
+      const bool compactable = search_on && entry_pass_ready && n > 0 &&
+                               entry_pass_count > 0 && entry_pass_count * 2u <= n;
+      if (!compactable) {
+        if (dict_in_arena) return;   // the arena already is the page
+        dict_in_arena = true;
+        if (entry_pass_ready && n > 0 && entry_pass_count == 0) {
+          // Every row of the chunk is dropped (the caller stops on
+          // dict_all_filtered); leave no dictionary that points at bytes the
+          // result does not own.
+          result.string_dict_arena.clear();
+          result.string_dict_offsets.clear();
+          result.string_dict_lens.clear();
+          return;
+        }
+        // No verdict to compact by: the arena becomes the page, as without the
+        // search. Offsets were recorded relative to the page base, so they
+        // hold in the copy.
+        RUGO_TEL_START(_st_t0);
+        result.string_dict_arena.assign(dict_bytes, dict_bytes + dict_bytes_len);
+        RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _st_t0);
+        return;
+      }
+      // dict_bytes may alias the arena itself (page decompressed straight into
+      // it): the compacted copy is built aside and assigned afterwards.
+      RUGO_TEL_START(_st_t0);
+      size_t bytes = 0;
+      for (uint32_t k = 0; k < n; ++k)
+        if (entry_pass[k]) bytes += static_cast<size_t>(result.string_dict_lens[k]);
+      std::vector<uint8_t>  arena; arena.reserve(bytes);
+      std::vector<uint32_t> offs;  offs.reserve(entry_pass_count);
+      std::vector<int32_t>  lens;  lens.reserve(entry_pass_count);
+      dict_remap.assign(n, UINT32_MAX);
+      for (uint32_t k = 0; k < n; ++k) {
+        if (!entry_pass[k]) continue;
+        const int32_t len = result.string_dict_lens[k];
+        dict_remap[k] = static_cast<uint32_t>(offs.size());
+        offs.push_back(static_cast<uint32_t>(arena.size()));
+        lens.push_back(len);
+        const uint8_t* src = dict_bytes + result.string_dict_offsets[k];
+        arena.insert(arena.end(), src, src + static_cast<size_t>(len));
+      }
+      result.string_dict_arena.assign(arena.data(), arena.data() + arena.size());
+      result.string_dict_offsets.assign(offs.data(), offs.data() + offs.size());
+      result.string_dict_lens.assign(lens.data(), lens.data() + lens.size());
+      dict_in_arena = true;
+      RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _st_t0);
     };
 
     // ── Phase 2: dictionary-membership / per-value decode-skip ────────────────
@@ -1668,6 +1769,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         } else {
           result.num_rows = target_col->num_values;
         }
+        settle_dictionary_bytes();
         result.success = true;
         return;
       }
@@ -1791,6 +1893,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       search->applied = true;
       if (byte_array_dict_mode) compute_entry_pass();
     }
+    // With the search armed the dictionary page was read in place; it must be
+    // owned (whole or compacted) before any data page references it.
+    settle_dictionary_bytes();
     // Rows [base, base + n) of the chunk: copy the page's selection (or mark
     // every row) into the search row mask.
     auto search_mark_rows = [&](int32_t base, int32_t n, const uint8_t* sel) {
@@ -2714,6 +2819,23 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                         data_ptr, data_size, present_count, bit_width, indices);
               RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
               if (decoded != present_count) { return; } }
+
+            // Compacted dictionary: the page's codes are in dictionary order;
+            // every surviving code must land on a passing entry.
+            if (!dict_remap.empty()) {
+              const uint32_t nmap = static_cast<uint32_t>(dict_remap.size());
+              for (size_t q = 0; q < indices.size(); ++q) {
+                const int32_t c = indices[q];
+                if (c < 0 || static_cast<uint32_t>(c) >= nmap ||
+                    dict_remap[static_cast<uint32_t>(c)] == UINT32_MAX) {
+                  result.error_message = "column '" + target_col->name +
+                      "': dictionary code " + std::to_string(c) +
+                      " survived the page search but its entry did not pass";
+                  return;
+                }
+                indices[q] = static_cast<int32_t>(dict_remap[static_cast<uint32_t>(c)]);
+              }
+            }
 
             // ── Scatter packed codes for nullable dict columns ──
             if (!result.dict_codes_array.empty() && page_uses_dictionary) {

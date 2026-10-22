@@ -223,6 +223,34 @@ def _translate_condition(condition, mapping: Dict[bytes, bytes], body_columns_by
     return _translate(condition)
 
 
+def _remove_hoisted_filter(plan: LogicalPlan, filter_nid) -> None:
+    """Remove a filter whose copy now lives in the body, keeping the annotations that
+    name it valid.
+
+    GroupJoinStrategy annotates a join with the node ids of its outer leg and its
+    stream, and runs BEFORE this coordination. A leg that is a Filter over a reference
+    (a partition-key predicate pushed down both legs of a window join, TPC-DS Q47/Q57
+    shaped) is such an id, and removing that Filter left the compiler holding a node
+    that was not in the plan. `heal=True` joins the filter's producer to its consumers,
+    so the annotation moves to that producer: the same rows once the body carries the
+    predicate.
+    """
+    (producer,) = [source for source, _target, _role in plan.ingoing_edges(filter_nid)]
+    for nid, node in plan.nodes(True):
+        if node.node_type != LogicalPlanStepType.Join or node.groupjoin is None:
+            continue
+        annotation = dict(node.groupjoin)
+        moved = False
+        for key in ("outer_leg", "stream"):
+            if annotation.get(key) == filter_nid:
+                annotation[key] = producer
+                moved = True
+        if moved:
+            node.groupjoin = annotation
+            plan[nid] = node
+    plan.remove_node(filter_nid, heal=True)
+
+
 def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> None:
     """Move filters shared by EVERY reference into the body (and off the refs)."""
     from opteryx.utils import random_string
@@ -268,7 +296,7 @@ def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> 
         # every reference carried an equivalent copy — remove each one
         for candidates in per_ref:
             ref_plan, ref_filter_nid, _node, _mapping = candidates[key]
-            ref_plan.remove_node(ref_filter_nid, heal=True)
+            _remove_hoisted_filter(ref_plan, ref_filter_nid)
         telemetry.optimization_shared_cte_predicate_pushed += 1
 
 

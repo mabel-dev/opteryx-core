@@ -916,13 +916,22 @@ def _find_base_scan(plan: LogicalPlan) -> "PlanStep":
     the window's real input, WHERE included.
 
     This runs at LOGICAL PLANNING time, before the Relation Resolver expands CTEs and
-    views, so it counts a CTE reference as the one Scan it is at this point. The
-    post-resolution rule is `window_to_join._source_relation`, and it is the narrower
-    one in one direction and the wider one in the other: a derived table whose body joins
-    two tables is already inlined here and so is refused, while the same body written as
-    a CTE reaches the rewriter as a single Subquery relation and is allowed.
+    views, so it counts a CTE reference as the one Scan it is at this point. A derived
+    table is one relation too, however many tables its body joins: the walk from the
+    plan's head stops at the first Scan or Subquery on every path and never looks inside
+    a Subquery, which is the same boundary `window_to_join._source_relation` draws after
+    resolution. Counting every Scan in the plan refused a derived table the identical
+    body written as a CTE was allowed.
     """
-    scans = [node for _, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan]
+    scans = []
+    pending = [plan.exit_point()]
+    while pending:
+        nid = pending.pop()
+        node = plan[nid]
+        if node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.Subquery):
+            scans.append(node)
+            continue
+        pending.extend(producer for producer, _, _ in plan.ingoing_edges(nid))
     if not scans:
         raise UnsupportedSyntaxError(
             "Window functions require a base table — cannot be used without a **FROM** clause. Add a **FROM** clause naming the relation the window should run over."
@@ -1245,19 +1254,30 @@ def _substitute_named_windows(branch, definitions: dict) -> None:
     against the outer statement's definitions. Its own call to `inner_query_planner`
     resolves it.
     """
-    if isinstance(branch, list):
+    # The parsed AST is plain dicts and lists around scalars; most of its nodes are
+    # scalars, so only a container is stepped into (no call per scalar).
+    if type(branch) is list:
         for item in branch:
-            _substitute_named_windows(item, definitions)
+            kind = type(item)
+            if kind is dict or kind is list:
+                _substitute_named_windows(item, definitions)
         return
-    if not isinstance(branch, dict):
+    if type(branch) is not dict:
         return
-    for key, value in list(branch.items()):
-        if key in ("Select", "Query"):
-            continue
-        if key == "over" and isinstance(value, dict):
-            branch[key] = _resolved_over(value, definitions)
-            continue
-        _substitute_named_windows(value, definitions)
+    # Only existing keys are re-assigned, which a dict allows while it is iterated.
+    for key, value in branch.items():
+        kind = type(value)
+        if kind is dict:
+            if key == "Select" or key == "Query":
+                continue
+            if key == "over":
+                branch[key] = _resolved_over(value, definitions)
+                continue
+            _substitute_named_windows(value, definitions)
+        elif kind is list:
+            if key == "Select" or key == "Query":
+                continue
+            _substitute_named_windows(value, definitions)
 
 
 def _resolve_named_windows(ast_branch: dict) -> None:

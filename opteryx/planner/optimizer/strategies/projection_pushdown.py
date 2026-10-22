@@ -54,6 +54,39 @@ from .optimization_strategy import OptimizerContext
 from opteryx.compiled.structures.plan_steps import steps_with
 
 
+# Nodes that may sit between a bare `SELECT *` leg's relation and its Union without
+# fixing the leg's width: a WHERE, an ORDER BY, a LIMIT.
+_WIDTH_PRESERVING = (
+    LogicalPlanStepType.Filter,
+    LogicalPlanStepType.Order,
+    LogicalPlanStepType.HeapSort,
+    LogicalPlanStepType.Limit,
+)
+
+
+def _union_fed_by_leg_root(tree, nid):
+    """The Union node whose leg is rooted at relation node `nid` with NO width-fixing
+    node between them (no Project, Aggregate, Join, Window...), else None.
+
+    Such a leg is a bare `SELECT * FROM t` (its Project pruned away), whose identities
+    are independent of the union's, so the identity intersection under-matches and the
+    leg must supply its first N columns, N being that union's width. A scan reached
+    through its leg's Project, or buried under a join or an aggregate, gets its
+    demand from the identities collected on the way down, and must not be widened.
+    """
+    while True:
+        outgoing = tree.outgoing_edges(nid)
+        if len(outgoing) != 1:
+            return None
+        consumer = outgoing[0][1]
+        step = tree[consumer]
+        if step.node_type == LogicalPlanStepType.Union:
+            return step
+        if step.node_type not in _WIDTH_PRESERVING:
+            return None
+        nid = consumer
+
+
 class ProjectionPushdownStrategy(OptimizationStrategy):
     rebuilds_plan = True  # rebuilds the whole plan into an empty working plan
     provides = ("projection-pushed",)
@@ -262,7 +295,14 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 )
                 or is_pushable_function_dataset
             ) and context.seen_unions > 0 and node.schema.columns:
-                width = context.bag.get("_union_leg_width", len(node.schema.columns))
+                # ONLY for a leg ROOT: the width is that of the Union this leg feeds. Every
+                # Scan beneath a union used to get here with a "width" that defaulted to its
+                # own full schema (nothing ever recorded the union's: the record sat in a
+                # block Union is not eligible for), so `len(node_columns) < width` was always
+                # true and every scan under a union, however deep in a leg, was reset to ALL
+                # its columns: catalog_sales 34 for the 6 a leg uses, 3.5x the bytes.
+                union = _union_fed_by_leg_root(context.pre_optimized_tree, context.node_id)
+                width = len(union.columns or []) if union is not None else 0
                 if len(node_columns) < width:
                     node_columns = [
                         LogicalColumn(
@@ -277,9 +317,6 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
 
             # Update the node with the pushed columns
             node.columns = node_columns
-
-            if node.node_type == LogicalPlanStepType.Union:
-                context.bag["_union_leg_width"] = len(node_columns)
 
         if node.node_type == LogicalPlanStepType.Join:
             node_columns = []

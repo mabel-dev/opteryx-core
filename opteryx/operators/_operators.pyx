@@ -635,6 +635,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     cppvector[int] out_from_p2,
                                     cppvector[string] out_names)
         void set_buffer_source(size_t p, size_t buf)
+        void set_concat_buffer_source(size_t p, const cppvector[size_t]& bufs) except +
+        void add_concurrent_span(const cppvector[size_t]& firsts,
+                                 const cppvector[size_t]& lasts) except +
         void set_scalar_guard_source(size_t p, size_t buf,
                                      cppvector[string] names,
                                      cppvector[DrakenType] types,
@@ -3195,6 +3198,26 @@ cdef class NativePlan:
 
     def set_buffer_source(self, size_t p, size_t buf):
         self._e.set_buffer_source(p, buf)
+
+    def set_concat_buffer_source(self, size_t p, list bufs):
+        """Pipeline `p` reads several buffers, in order: a UNION whose legs run
+        concurrently gives each leg a buffer of its own so the union's row order across
+        legs stays the leg order."""
+        cdef cppvector[size_t] bs
+        for b in bufs:
+            bs.push_back(<size_t>b)
+        self._e.set_concat_buffer_source(p, bs)
+
+    def add_concurrent_span(self, list legs):
+        """Declare a UNION's legs as independent pipeline ranges, [(first, last), ...]
+        inclusive, ascending and disjoint: the engine runs them at the same time. Checked
+        here at plan build - a malformed span raises now rather than racing at run time."""
+        cdef cppvector[size_t] firsts
+        cdef cppvector[size_t] lasts
+        for first, last in legs:
+            firsts.push_back(<size_t>first)
+            lasts.push_back(<size_t>last)
+        self._e.add_concurrent_span(firsts, lasts)
 
     def set_scalar_guard_source(self, size_t p, size_t buf, list names,
                                 list types, list logical=None, list element=None):

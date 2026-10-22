@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-TPC-DS smoke runner.
+TPC-DS runner.
 
-Not a performance benchmark (yet) — see `make tpch` / `make clickbench` for
-that shape. This runs each of the 99 TPC-DS queries against Opteryx and reports
-pass/fail, so the suite's *coverage* (how much of TPC-DS the engine currently
-accepts and executes) is visible. Each query runs --iterations times (default 3);
-its reported time is the min, and the suite total is the sum of those mins — the
-same min-of-N the TPC-H and SSB runners report.
+Runs each of the 99 TPC-DS queries against Opteryx, reports pass/fail/timeout
+(the suite's *coverage*) and compares each query's time to the DuckDB baseline
+in `duckdb/results.sf<scale>.json` (`make tpcds-sf<scale>-duckdb` regenerates
+it). Each query runs --iterations times (default 3); its reported time is the
+min, and the suite total is the sum of those mins — the same min-of-N the
+TPC-H and SSB runners report. With no baseline file the comparison column is
+omitted.
 
 Queries run in a worker subprocess (`_query_worker.py`) with a hard wall-clock
 timeout (default 30s, --timeout to change): a query that never yields control
@@ -55,9 +56,15 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 from _common import (  # noqa: E402
     AISTOR_WORKSPACE,
+    load_duckdb_baseline,
     open_results_csv,
     print_banner,
     print_error_row,
+    print_header,
+    print_row,
+    print_skip_row,
+    print_total_row,
+    print_total_row_no_baseline,
 )
 
 import opteryx  # noqa: E402 — only for opteryx.__version__ in the banner; queries run in _query_worker.py
@@ -162,7 +169,7 @@ class _Worker:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="TPC-DS smoke runner")
+    parser = argparse.ArgumentParser(description="TPC-DS runner")
     parser.add_argument(
         "--scale", type=str, default="1", help="Scale factor suffix matching testdata/tpcds_<scale> (default: 1)"
     )
@@ -202,8 +209,12 @@ def main() -> int:
         print(f"ERROR: no matching .sql files found in {_QUERY_DIR}")
         return 1
 
+    duckdb_min, duckdb_machine = load_duckdb_baseline(
+        os.path.join(os.path.dirname(__file__), "duckdb", f"results.sf{args.scale}.json")
+    )
+
     print_banner(
-        title="TPC-DS SMOKE RUN",
+        title="TPC-DS",
         opteryx_version=opteryx.__version__,
         metadata=[
             ("Scale factor", f"{args.scale}  (testdata.{suffix})"),
@@ -213,17 +224,26 @@ def main() -> int:
             ("Worker", "one process reused across queries (in-process caches stay warm); "
                        "replaced after a timeout or crash"),
         ],
+        duckdb_machine=duckdb_machine if duckdb_min else None,
+        duckdb_query_count=len(duckdb_min) if duckdb_min else None,
     )
 
     csv_writer, csv_path, csv_handle = open_results_csv(
         _RESULTS_DIR,
-        fieldnames=["scale", "variant", "query", "status", "elapsed_ms", "runs_ms", "row_count", "error"],
+        fieldnames=[
+            "scale", "variant", "query", "status", "elapsed_ms", "runs_ms", "row_count", "duckdb_min_ms", "error",
+        ],
     )
+
+    print_header("Query", args.iterations, has_baseline=bool(duckdb_min))
 
     worker = _Worker(args.variant)
     passed = 0
     failed = 0
     total_min_ms = 0.0
+    duckdb_total_ms = 0.0
+    compared_opteryx_ms = 0.0
+    compared = 0
     timed_out = 0
     failures: list[tuple[str, str]] = []
     suite_start = time.monotonic_ns()
@@ -232,15 +252,19 @@ def main() -> int:
         for name, sql in queries:
             status, runs_ms, rows, err = worker.run(sql, args.iterations, args.timeout)
             elapsed_ms = min(runs_ms) if runs_ms else 0.0
+            d_ms = duckdb_min.get(name)
             if status == "ok":
                 passed += 1
                 total_min_ms += elapsed_ms
-                print(f"{name:<8} \033[38;2;26;185;67mOK\033[0m     {elapsed_ms:>10.1f}ms   {rows:>12,} rows"
-                      f"   runs {' '.join(f'{r:.1f}' for r in runs_ms)}")
+                print_row(name, runs_ms, args.iterations, d_ms)
+                if d_ms is not None:
+                    compared_opteryx_ms += elapsed_ms
+                    duckdb_total_ms += d_ms
+                    compared += 1
             elif status == "timeout":
                 timed_out += 1
                 failures.append((name, f"TIMEOUT: {err}"))
-                print(f"{name:<8} \033[38;2;255;184;108mTIMEOUT\033[0m  {err}")
+                print_skip_row(name, f"timeout: {err}")
             else:
                 failed += 1
                 failures.append((name, err))
@@ -254,6 +278,7 @@ def main() -> int:
                     "elapsed_ms": f"{elapsed_ms:.3f}" if status == "ok" else "",
                     "runs_ms": ";".join(f"{r:.3f}" for r in runs_ms),
                     "row_count": rows,
+                    "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
                     "error": err,
                 }
             )
@@ -264,6 +289,11 @@ def main() -> int:
 
     elapsed_s = (time.monotonic_ns() - suite_start) / 1e9
     print("─" * 100)
+    if compared:
+        # Both totals sum only the queries that have a baseline, so the ratio compares like with like.
+        print_total_row(compared_opteryx_ms, duckdb_total_ms, compared, args.iterations)
+    else:
+        print_total_row_no_baseline(total_min_ms, passed, args.iterations)
     print(
         f"\033[38;2;26;185;67m{passed} passed\033[0m, "
         f"\033[38;2;255;121;198m{failed} failed\033[0m, "

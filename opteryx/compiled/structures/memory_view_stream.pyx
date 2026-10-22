@@ -35,23 +35,26 @@ cdef class MemoryViewStream:
         # Check if we can use the underlying bytes object directly
         self._underlying_bytes = mv.obj if isinstance(mv.obj, bytes) else None
 
-    cpdef read(self, Py_ssize_t n=-1):
-        """Read and return up to n bytes."""
+    cpdef read(self, n=None):
+        """Read and return up to n bytes; `None` (or a negative n) reads everything left,
+        as io.RawIOBase.read does. `n` is taken as an object only so None is accepted -
+        anything else must be an integer and is converted once, below."""
         if self._closed:
             raise ValueError("I/O operation on closed file.")
 
         cdef:
             Py_ssize_t offset = self.offset
             Py_ssize_t length = self._len
+            Py_ssize_t count = -1 if n is None else n
             Py_ssize_t bytes_to_read
 
         if offset >= length:
             return b""
 
-        if n < 0 or offset + n > length:
+        if count < 0 or offset + count > length:
             bytes_to_read = length - offset
         else:
-            bytes_to_read = n
+            bytes_to_read = count
 
         # Fast path: if backed by bytes, slice directly (no copy)
         if self._underlying_bytes is not None:
@@ -89,7 +92,7 @@ cdef class MemoryViewStream:
         self.offset += bytes_to_read
         return bytes_to_read
 
-    cpdef read1(self, Py_ssize_t n=-1):
+    cpdef read1(self, n=None):
         """Read and return up to n bytes (same as read for this implementation)."""
         return self.read(n)
 
@@ -214,9 +217,10 @@ cdef class MemoryViewStreamOptimized(MemoryViewStream):
     Further optimized version with additional performance enhancements.
     """
 
-    cpdef const unsigned char[:] read_memoryview(self, Py_ssize_t n=-1):
+    cpdef const unsigned char[:] read_memoryview(self, n=None):
         """
-        Read as memoryview instead of bytes (zero-copy).
+        Read as memoryview instead of bytes (zero-copy); `None` (or a negative n) reads
+        everything left, as `read` does.
 
         This avoids the copy in read() but the returned memoryview
         becomes invalid if the underlying buffer changes.
@@ -227,15 +231,16 @@ cdef class MemoryViewStreamOptimized(MemoryViewStream):
         cdef:
             Py_ssize_t offset = self.offset
             Py_ssize_t length = self._len
+            Py_ssize_t count = -1 if n is None else n
             Py_ssize_t bytes_to_read
 
         if offset >= length:
             return self.mv[0:0]  # Empty memoryview
 
-        if n < 0 or offset + n > length:
+        if count < 0 or offset + count > length:
             bytes_to_read = length - offset
         else:
-            bytes_to_read = n
+            bytes_to_read = count
 
         result = self.mv[offset : offset + bytes_to_read]
         self.offset = offset + bytes_to_read

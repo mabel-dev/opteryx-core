@@ -348,7 +348,17 @@ def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path
     rather than turned into a malformed plan.
 
     Returns False when no node on the path survives.
+
+    An EMPTY path means the Filter was the plan's HEAD - nothing sat above it. That is
+    a shared CTE body whose Subquery boundary was stripped: a grouped relation keeps its
+    HAVING filter inside the boundary, above the Project, so the stripped body is headed
+    by that Filter. The predicate goes back on top of whatever heads the plan now. The
+    loop below had nothing to iterate, returned False, and the caller dropped the
+    predicate: the HAVING silently stopped applying.
     """
+    if not plan_path:
+        plan.insert_node_after(predicate, plan.exit_point(), nid=predicate_nid)
+        return True
     for nid in plan_path:
         if nid not in plan:
             continue
@@ -1521,19 +1531,74 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         if p not in on_clause_build_filters
                     ]
 
-                    problematic = any(
-                        i.source in node.right_relation_names
-                        or i.source not in node.all_relations
-                        for predicate in other_predicates
-                        for i in get_all_nodes_of_type(predicate.condition, (NodeType.IDENTIFIER,))
-                    )
-                    # 1887 - if anything can't be pushed past this (outer) join, keep the
-                    # pushable-here ones above it and let the rest fall through to be
-                    # restored to their valid origins.
-                    if problematic:
-                        other_predicates = [
-                            p for p in other_predicates if not _dump_above(p)
-                        ]
+                    def _needs_to_stay_above(predicate):
+                        """A WHERE predicate that names the null-supplying side, or
+                        anything outside this join, cannot move below it."""
+                        return any(
+                            i.source in node.right_relation_names
+                            or i.source not in node.all_relations
+                            for i in get_all_nodes_of_type(predicate.condition, (NodeType.IDENTIFIER,))
+                        )
+
+                    # 1887 - a predicate that can't be pushed past this (outer) join stays
+                    # above it if the join emits its columns, otherwise it falls through
+                    # to be restored to its valid origin. Decided PER PREDICATE: a
+                    # preserved-side-only conjunct keeps flowing down to the left leg
+                    # even when a sibling conjunct (`a.k = 1 AND coalesce(b.v, 0) > 0`)
+                    # names the right side. One shared verdict pinned the whole WHERE
+                    # above the join (TPC-DS Q78).
+                    other_predicates = [
+                        p
+                        for p in other_predicates
+                        if not (_needs_to_stay_above(p) and _dump_above(p))
+                    ]
+
+                    # Derive a right-leg pre-filter from each flowing preserved-side
+                    # predicate through the ON equality, as the INNER arm does below
+                    # for both legs: `ON a.k = b.k` with `a.k = 2000` collected means
+                    # no b row with another k can match a surviving a row, and an
+                    # unmatched a row is null-filled whether or not b was filtered. One
+                    # direction only (left -> right), and `from_join_on` so it applies
+                    # as a pre-filter on the right leg and never above the join, where
+                    # `NULL op literal` would turn LEFT OUTER into INNER.
+                    if node.on:
+                        equi_pairs = _get_equi_join_pairs(node.on)
+                        if equi_pairs:
+                            existing_keys = set()
+                            for p in on_clause_build_filters + other_predicates:
+                                ident, op, lit = _normalize_col_op_lit(p.condition)
+                                if ident is not None and ident.schema_column is not None:
+                                    existing_keys.add((ident.schema_column.identity, op, str(lit.value)))
+                            derived = []
+                            for predicate in other_predicates:
+                                ident, op, lit = _normalize_col_op_lit(predicate.condition)
+                                if ident is None or ident.schema_column is None:
+                                    continue
+                                for key_a, key_b in equi_pairs:
+                                    asc = key_a.schema_column
+                                    bsc = key_b.schema_column
+                                    if asc is None or bsc is None:
+                                        continue
+                                    # The pair is in the ON clause's textual order, not
+                                    # leg order: take whichever side the predicate names.
+                                    if asc.identity == ident.schema_column.identity:
+                                        target_col = key_b
+                                    elif bsc.identity == ident.schema_column.identity:
+                                        target_col = key_a
+                                    else:
+                                        continue
+                                    if target_col.source not in node.right_relation_names:
+                                        continue
+                                    dedup_key = (target_col.schema_column.identity, op, str(lit.value))
+                                    if dedup_key in existing_keys:
+                                        continue
+                                    existing_keys.add(dedup_key)
+                                    implied = _make_implied_filter(op, target_col, lit)
+                                    implied.from_join_on = True
+                                    context.collected_nids[id(implied)] = context.plan_context.node_ids.mint()
+                                    derived.append(implied)
+                                    self.telemetry.optimization_predicate_pullup_implied += 1
+                            on_clause_build_filters = on_clause_build_filters + derived
                     context.collected_predicates = on_clause_build_filters + other_predicates
                 elif node.type not in ("cross join", "inner"):
                     # dump all the predicates
@@ -1833,12 +1898,19 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if _revert_inlined_predicate(predicate):
                 self.telemetry.optimization_predicate_pushdown_inline_reverted += 1
 
-            if id(predicate) in context.predicate_paths and _restore_at_original_position(
-                context.optimized_plan,
-                predicate,
-                context.collected_nids[id(predicate)],
-                context.predicate_paths[id(predicate)],
-            ):
+            if id(predicate) in context.predicate_paths:
+                if not _restore_at_original_position(
+                    context.optimized_plan,
+                    predicate,
+                    context.collected_nids[id(predicate)],
+                    context.predicate_paths[id(predicate)],
+                ):
+                    # A user's predicate that is neither placed nor restored is a
+                    # dropped WHERE/HAVING: a wrong answer, never a skipped optimization.
+                    raise InvalidInternalStateError(
+                        "a collected predicate could not be placed or restored to its "
+                        "original position: none of the nodes it sat below are still in the plan."
+                    )
                 self.telemetry.optimization_predicate_pushdown_unplaced += 1
         return context.optimized_plan
 

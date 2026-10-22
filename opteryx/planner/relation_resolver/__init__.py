@@ -56,7 +56,10 @@ from typing import Tuple
 from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
+from opteryx.models import LogicalColumn
 from opteryx.models import is_expression
+from opteryx.utils import random_string
 from opteryx.planner.logical_planner import LogicalPlan
 
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -168,10 +171,6 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan
     When we include VIEWs and CTEs in a plan, we randomize the name of the
     relations to avoid conflicts.
     """
-    from opteryx.expression import NodeType
-    from opteryx.models import LogicalColumn
-    from opteryx.utils import random_string
-
     relations = {}  # old_alias.lower() -> new_alias
     uuid_remap = {}  # old_uuid -> new_uuid for updating join readers
 
@@ -525,9 +524,6 @@ def _expression_subqueries(node) -> list:
     is what later splices it in. So the graph walk cannot see the Scans inside it and the
     sub-plan needs resolving in its own right.
     """
-    from opteryx.expression import NodeType
-    from opteryx.expression import get_all_nodes_of_type
-
     # A step held as a field (INSERT's `values_feeder`) is a vertex of the graph,
     # resolved by the graph walk in its own right — not an expression.
     return get_all_nodes_of_type(list(node.expressions()), (NodeType.SUBQUERY,))
@@ -629,8 +625,6 @@ def _resolve(
                     if body_key is None:
                         if relation in path:
                             raise _cycle_error(relation, path)
-                        from opteryx.utils import random_string
-
                         body_key = f"$rcte-{random_string(8)}"
                         cte_body_keys[(id(scope), relation)] = body_key
                         cte_names[body_key] = relation
@@ -670,8 +664,6 @@ def _resolve(
                 # name identifies the definition across all its references.
                 body_key = cte_body_keys.get((id(scope), relation))
                 if body_key is None:
-                    from opteryx.utils import random_string
-
                     body_key = f"$cte-{random_string(8)}"
                     cte_body_keys[(id(scope), relation)] = body_key
                     cte_names[body_key] = relation

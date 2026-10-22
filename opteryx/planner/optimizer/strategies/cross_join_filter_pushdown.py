@@ -7,13 +7,21 @@
 Optimization Rule - Cross Join Filter Pushdown
 
 Type: Heuristic
-Goal: Convert a CROSS JOIN with a join-like WHERE equality into an INNER JOIN
+Goal: Convert a CROSS JOIN with a join-like WHERE equality into an INNER JOIN, and key
+      an already-INNER join with the expression equalities its WHERE still holds
 
 For every Filter, walk the subtree beneath it for unconverted cross joins and move
 each equality conjunct that spans a join's two legs out of the Filter into that
 join's ON condition, retyping it "inner". An equality whose operand is an
 expression (`a.x = b.y - 53`) is first materialised as a real column on its leg,
 through the primitives `join_key_materialization` owns.
+
+The same hoist then runs for keyed INNER joins beneath a Filter (not window joins).
+PredicatePushdown types a cross join "inner" as soon as one plain equality spans it
+and DECLINES an expression equality (it cannot key one), leaving it in the Filter; the
+walk above no longer sees a cross join, so `FROM a, b WHERE a.k = b.k AND a.rn = b.rn + 1`
+was keyed on `k` alone and the Filter cut the product afterwards (TPC-DS Q47/Q57:
+415,641 rows to 29,532). The equality joins the ON, the expression a column on its leg.
 
 Order:
     After:  PredicatePushdown (requires predicates-pushed: the equalities still in
@@ -487,17 +495,112 @@ def _collect_cross_joins(
         _collect_cross_joins(plan, child_id, result, visited)
 
 
+def _is_keyed_inner_join(node: PlanStep) -> bool:
+    # A window join is excluded for the reason `_is_unconverted_cross_join` gives: its
+    # relation-name lists do not describe the legs the hoist reasons about.
+    return (
+        node.node_type == LogicalPlanStepType.Join
+        and node.type == "inner"
+        and node.on is not None
+        and not node.is_window_join
+    )
+
+
+def _collect_inner_joins(
+    plan: LogicalPlan,
+    node_id: str,
+    result: List[Tuple[str, PlanStep]],
+    visited: Optional[Set[str]] = None,
+) -> None:
+    """Descend the input subtree of `node_id` collecting keyed inner joins, the same
+    walk `_collect_cross_joins` makes (a Subquery is an opaque relation at this scope)."""
+    if visited is None:
+        visited = set()
+    if node_id in visited:
+        return
+    visited.add(node_id)
+
+    for child_id, _, _ in plan.ingoing_edges(node_id):
+        child_node = plan[child_id]
+        if child_node.node_type == LogicalPlanStepType.Subquery:
+            continue
+        if _is_keyed_inner_join(child_node):
+            result.append((child_id, child_node))
+        _collect_inner_joins(plan, child_id, result, visited)
+
+
+def _hoist_expression_keys_into_inner_joins(plan: LogicalPlan, filter_id: str) -> None:
+    """Move `a.x = b.y + 1`-shaped equalities out of a Filter and into the ON of the
+    inner join whose two legs they span, hoisting the expression to a real column.
+
+    The cross-join conversion keys such an equality only while the join is still a cross
+    join. A plain key in the same WHERE (`a.k = b.k AND a.rn = b.rn + 1`) makes
+    PredicatePushdown type the join "inner" first, and its fold declines the expression
+    side, so the equality stayed a Filter over a join keyed on `k` alone: TPC-DS Q47/Q57
+    emitted 415,641 rows for the Filter to cut to 29,532. Same primitives, same shapes
+    (`_hoist_arithmetic_join_key`), a different join type.
+    """
+    filter_node = plan[filter_id]
+    condition = filter_node.condition
+    if condition is None:
+        return
+    inner_joins: List[Tuple[str, PlanStep]] = []
+    _collect_inner_joins(plan, filter_id, inner_joins)
+
+    changed = False
+    for join_id, join_node in inner_joins:
+        conjuncts = _split_and_conditions(condition)
+        hoisted = [
+            _hoist_arithmetic_join_key(plan, join_id, join_node, conjunct)
+            for conjunct in conjuncts
+        ]
+        new_keys = [new for new in hoisted if new is not None]
+        if not new_keys:
+            continue
+        on_condition = _build_and_condition_tree([join_node.on] + new_keys)
+        join_node.on = on_condition
+        join_node.left_columns, join_node.right_columns, _unkeyed = extract_join_fields(
+            on_condition,
+            join_node.left_relation_names or [],
+            join_node.right_relation_names or [],
+        )
+        join_node.columns = get_all_nodes_of_type(on_condition, (NodeType.IDENTIFIER,))
+        plan[join_id] = join_node
+        condition = _build_and_condition_tree(
+            [old for new, old in zip(hoisted, conjuncts) if new is None]
+        )
+        changed = True
+        if condition is None:
+            break
+
+    if not changed:
+        return
+    if condition is None:
+        plan.remove_node(filter_id, heal=True)
+    else:
+        filter_node.condition = condition
+        plan[filter_id] = filter_node
+
+
 class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
     """
     Optimization Rule - Cross Join Filter Pushdown
 
-    Converts CROSS JOINs with equalities in WHERE clause to INNER JOINs.
+    Converts CROSS JOINs with equalities in WHERE clause to INNER JOINs, and moves
+    expression equalities (`A.x = B.y + 1`) from the WHERE into the ON of an INNER join
+    whose legs they span.
 
     Pattern:
         FROM A CROSS JOIN B WHERE A.id = B.id
 
     Converts to:
         FROM A INNER JOIN B ON A.id = B.id
+
+    Pattern:
+        FROM A INNER JOIN B ON A.k = B.k WHERE A.rn = B.rn + 1
+
+    Converts to:
+        FROM A INNER JOIN (B, rn + 1 AS <key>) ON A.k = B.k AND A.rn = B.<key>
 
     Impact:
         Avoids full cartesian product materialization, reducing intermediate data size.
@@ -583,6 +686,16 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
                     filter_node.condition = remaining_condition
                     plan[filter_id] = filter_node
 
+        # Expression equalities still in a Filter over a join PredicatePushdown already
+        # typed "inner" (it keyed the join on a plain equality and declined the rest).
+        # Filters are re-read: the loop above may have removed some.
+        for filter_id in [
+            nid
+            for nid, node in plan.nodes(True)
+            if node.node_type == LogicalPlanStepType.Filter
+        ]:
+            _hoist_expression_keys_into_inner_joins(plan, filter_id)
+
         # Handle the pattern left by predicate_pushdown:
         #   INNER JOIN(P_A_C AND P_B_C) [CROSS JOIN(A, B), C]
         # predicate_pushdown converts the outer cross join but consumes both predicates,
@@ -598,7 +711,10 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        """Only run if there are cross joins in the plan."""
+        """Run if there is a cross join to convert, or a keyed inner join with a Filter
+        somewhere above it that might hold an expression equality for it."""
+        has_filter = False
+        has_inner_join = False
         for _nid, node in plan.nodes(True):
             if (
                 node.node_type == LogicalPlanStepType.Join
@@ -606,4 +722,8 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
                 and not node.on
             ):
                 return True
-        return False
+            if node.node_type == LogicalPlanStepType.Filter:
+                has_filter = True
+            elif _is_keyed_inner_join(node):
+                has_inner_join = True
+        return has_filter and has_inner_join

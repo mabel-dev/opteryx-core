@@ -136,10 +136,38 @@ def _classify(expr, casted: dict, raw: set) -> None:
         _classify(child, casted, raw)
 
 
+def _classified_roots(node):
+    """The expression trees `_classify` reads from a non-Scan node."""
+    # An aggregate's ``columns`` is a derived input-column list
+    # (redundant with groups/aggregates); it lists the column as a
+    # bare identifier, which is read bookkeeping, not a raw use.
+    include_columns = node.node_type not in (
+        LogicalPlanStepType.AggregateAndGroup,
+        LogicalPlanStepType.Aggregate,
+    )
+    return expression_roots(node, include_columns=include_columns)
+
+
 class TimestampCastSinkStrategy(OptimizationStrategy):
     # Run after projection/predicate pushdown so scan.columns and scan.predicates
     # are settled — eligibility reads the pushed predicates.
     requires = ("projection-pushed",)
+
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # A column is retyped only if it was seen as the operand of a pure-retag CAST
+        # (`casted`), and `_classify` finds those in the roots `_classified_roots`
+        # yields. So a plan with no such CAST in them leaves `complete` nothing to do
+        # (it returns the plan as it found it), and `visit` only copies steps.
+        roots = [
+            root
+            for _, node in plan.nodes(True)
+            if node.node_type != LogicalPlanStepType.Scan
+            for root in _classified_roots(node)
+        ]
+        return any(
+            cast.value in _RETAG_TIMESTAMP_UNITS
+            for cast in get_all_nodes_of_type(roots, (NodeType.CAST,))
+        )
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node is None:
@@ -185,14 +213,7 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
                         if ident.schema_column is not None:
                             raw.add(ident.schema_column.identity)
             else:
-                # An aggregate's ``columns`` is a derived input-column list
-                # (redundant with groups/aggregates); it lists the column as a
-                # bare identifier, which is read bookkeeping, not a raw use.
-                include_columns = node.node_type not in (
-                    LogicalPlanStepType.AggregateAndGroup,
-                    LogicalPlanStepType.Aggregate,
-                )
-                for root in expression_roots(node, include_columns=include_columns):
+                for root in _classified_roots(node):
                     _classify(root, casted, raw)
 
         # Eligible: emitted by a retag-capable Scan, cast-only use, single

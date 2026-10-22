@@ -195,21 +195,23 @@ class TestRelationSchema:
         assert found is not None
         assert found.name == "user_id"
 
-    def test_schema_pop_column(self):
-        """Test removing a column."""
+    def test_schema_without_column(self):
+        """Removing a column gives a NEW schema; a schema is immutable."""
         col1 = _col("id", INT64)
         col2 = _col("name", VARCHAR)
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         assert schema.num_columns == 2
-        popped = schema.pop_column("id")
-        assert popped is not None
-        assert popped.name == "id"
-        assert schema.num_columns == 1
-        assert schema.column_names == ["name"]
+        narrowed = schema.without_column("id")
+        assert narrowed is not schema
+        assert narrowed.num_columns == 1
+        assert narrowed.column_names == ["name"]
+        # the schema it was made from is untouched
+        assert schema.num_columns == 2
+        assert schema.column_names == ["id", "name"]
 
-        not_found = schema.pop_column("missing")
-        assert not_found is None
+        # no such column: the same schema comes back
+        assert schema.without_column("missing") is schema
 
     def test_schema_all_column_names_with_aliases(self):
         """Test all_column_names including aliases."""

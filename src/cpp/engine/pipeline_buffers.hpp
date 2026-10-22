@@ -38,6 +38,7 @@
 // group's REAL names are kept in the unit record and restored on read, so a
 // morsel comes back identical in shape, order and identity.
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -515,5 +516,61 @@ struct BufferSource : Source {
         return SourceResult::HAVE_MORE;
     }
 };
+
+// The read side of a UNION ALL whose legs run CONCURRENTLY: every leg appends into its
+// OWN buffer, and this source yields buffer 0's morsels, then buffer 1's, and so on. A
+// single shared buffer would take the legs' morsels in the order they happened to finish,
+// so the union's rows would come out in a different order on every run; with the legs run
+// one after another (the engine's order until legs became concurrent) leg 0's rows always
+// came first, and that is the order kept. Within a leg the order is the leg's own (a
+// morsel stream across workers: unspecified, exactly as before).
+//
+// A template over the buffer type only so a test can drive it with a small in-memory buffer
+// (a MorselBuffer pulls in the whole spill store); the engine uses the MorselBuffer alias.
+template <class Buffer>
+struct ConcatSource : Source {
+    std::vector<Buffer*> bufs;
+    struct Global : GlobalSourceState {
+        std::atomic<size_t> cursor{0};
+        std::vector<size_t> offsets;     // offsets[i] = claims in buffers [0, i); back() = total
+        Buffer* failed = nullptr;        // the buffer whose seal failed, if any
+    };
+    explicit ConcatSource(std::vector<Buffer*> b) : bufs(std::move(b)) {}
+    std::unique_ptr<GlobalSourceState> make_global() override {
+        auto g = std::make_unique<Global>();
+        g->offsets.reserve(bufs.size() + 1);
+        g->offsets.push_back(0);
+        for (Buffer* b : bufs) {
+            if (g->failed == nullptr && !b->seal()) g->failed = b;
+            g->offsets.push_back(g->offsets.back() + (g->failed == nullptr ? b->claim_count() : 0));
+        }
+        return g;
+    }
+    std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
+        return std::make_unique<LocalSourceState>();
+    }
+    SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,
+                            ErrCtx& err) override {
+        auto& g = static_cast<Global&>(gs);
+        if (g.failed != nullptr) {
+            err.code = 1;
+            err.msg = g.failed->error().c_str();
+            return SourceResult::FINISHED;
+        }
+        const size_t idx = g.cursor.fetch_add(1);
+        if (idx >= g.offsets.back()) return SourceResult::FINISHED;
+        // The buffer holding claim `idx`: the last whose first claim is <= idx.
+        const size_t b = static_cast<size_t>(
+            std::upper_bound(g.offsets.begin(), g.offsets.end(), idx) - g.offsets.begin()) - 1;
+        if (!bufs[b]->get(idx - g.offsets[b], out)) {
+            err.code = 1;
+            err.msg = bufs[b]->error().c_str();
+            return SourceResult::FINISHED;
+        }
+        return SourceResult::HAVE_MORE;
+    }
+};
+
+using ConcatBufferSource = ConcatSource<MorselBuffer>;
 
 }  // namespace opteryx::engine

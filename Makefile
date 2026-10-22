@@ -67,7 +67,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test pipeline-latch-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -205,6 +205,7 @@ test: ## Run full test suite with compiled extensions
 	@clear || true
 	@$(MAKE) --no-print-directory err-latch-test
 	@$(MAKE) --no-print-directory worker-exception-test
+	@$(MAKE) --no-print-directory pipeline-latch-test
 	@MANUAL_TEST=1 VALIDATE_OPTIMIZER_PLANS=1 $(PYTEST) -n auto --color=yes
 
 
@@ -218,9 +219,11 @@ q:
 	@$(PYTEST) tests/integration/test_row_identity_native_scan_local.py -q
 	@$(PYTEST) tests/storage/test_mabel_connector.py -q
 	@$(MAKE) --no-print-directory chunk-cache-test
+	@$(MAKE) --no-print-directory simd-find-test
 	@$(MAKE) --no-print-directory gb-block-store-test
 	@$(MAKE) --no-print-directory packed-codes-test
 	@$(MAKE) --no-print-directory carchar-set-test
+	@$(MAKE) --no-print-directory pipeline-latch-test
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
@@ -305,6 +308,30 @@ worker-exception-test: ## Build (ASan) and run the executor worker C++-exception
 	@/tmp/opteryx-tests/test_worker_exception
 	$(call print_green,"✓ Executor worker-exception test passed")
 
+pipeline-latch-test: ## Build (ASan) and run the per-pipeline completion latch test (pipelines on different threads share the pool)
+	$(call print_blue,"Building and running pipeline latch test under ASan...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O1 -g -fsanitize=address -fno-omit-frame-pointer -pthread \
+	    -I$(CURDIR) \
+	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/third_party/ankerl \
+	    -I$(CURDIR)/third_party/bshoshany \
+	    -I$(CURDIR)/draken/core \
+	    -I$(CURDIR)/src/cpp \
+	    -I$(CURDIR)/src/cpp/engine \
+	    -I$(CURDIR)/third_party/cyan4973 \
+	    -I$(CURDIR)/skene/include \
+	    -I$(CURDIR)/skene/src \
+	    -I$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_paths()['include'])") \
+	    $(CURDIR)/src/cpp/engine/test_pipeline_latch.cpp \
+	    $(CURDIR)/opteryx/compiled/thread_pool_bridge.cpp \
+	    $(CURDIR)/draken/core/trace_bridge.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
+	    -o test_pipeline_latch
+	@/tmp/opteryx-tests/test_pipeline_latch
+	$(call print_green,"✓ Pipeline latch test passed")
+
 medius-test: ## Build and run the Medius bounded middle-tier tests
 	$(call print_blue,"Building and running Medius tests...")
 	@mkdir -p /tmp/opteryx-tests
@@ -361,6 +388,16 @@ chunk-cache-test: ## Build and run the chunk cache policy tests (S3-FIFO admissi
 	    -o chunk_cache_test
 	@/tmp/opteryx-tests/chunk_cache_test
 	$(call print_green,"✓ chunk cache policy tests passed")
+
+simd-find-test: ## Build and run the substring-search (simd_find.h) + parquet page-search oracle test under ASan/UBSan
+	$(call print_blue,"Building and running simd_find / page search oracle tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -I$(CURDIR)/draken/simd -I$(CURDIR)/rugo/src/parquet \
+	    $(CURDIR)/draken/simd/simd_find_test.cpp \
+	    -o /tmp/opteryx-tests/simd_find_test
+	@/tmp/opteryx-tests/simd_find_test
+	$(call print_green,"✓ simd_find / page search oracle tests passed")
 
 carchar-set-test: ## Build and run the CarcharSet batched-probe (mark_new) oracle test under ASan/UBSan
 	$(call print_blue,"Building and running CarcharSet batched-probe tests...")
@@ -963,9 +1000,12 @@ jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opter
 # the two datasets a quoted coverage number came from. The old spellings stay
 # as aliases.
 #
-# COVERAGE, NOT PERFORMANCE (see runner.py's docstring): this runs each of the
-# 99 queries once and reports pass/fail/timeout, so there is no DuckDB timing
-# baseline here and no shape comparison — unlike the TPC-H targets.
+# Each of the 99 queries runs min-of-3 and is compared to the DuckDB baseline in
+# tests/performance/tpcds/duckdb/results.sf<scale>.json, like the TPC-H and SSB
+# targets; pass/fail/timeout coverage is reported alongside. (This was a
+# coverage-only smoke suite while more than half the queries failed; the
+# architect moved it to a performance suite 2026-10-22.) The baseline is
+# regenerated by `make tpcds-sf<scale>-duckdb`.
 #
 # Gates, in order:
 #
@@ -999,19 +1039,31 @@ define tpcds_suite
 	@$(PYTHON) tests/performance/tpcds/runner.py --scale $(1) --variant skene
 endef
 
-tpcds-sf1: ## Run the TPC-DS SF1 smoke suite on the skene v3 mirror (coverage, not performance)
-	$(call print_blue,Running TPC-DS SF1 smoke suite (skene)...)
+tpcds-sf1: ## Run TPC-DS SF1 vs DuckDB on the skene v3 mirror
+	$(call print_blue,Running TPC-DS SF1 benchmark vs DuckDB (skene)...)
 	$(call tpcds_suite,1)
 
-tpcds-sf001: ## Run the TPC-DS SF0.01 smoke suite on the skene v3 mirror (fast iteration; label matches testdata/tpch_001)
-	$(call print_blue,Running TPC-DS SF0.01 smoke suite (skene)...)
+tpcds-sf001: ## Run TPC-DS SF0.01 vs DuckDB on the skene v3 mirror (fast iteration; label matches testdata/tpch_001)
+	$(call print_blue,Running TPC-DS SF0.01 benchmark vs DuckDB (skene)...)
 	$(call tpcds_suite,001)
 
 tpcds: tpcds-sf1 ## Alias for tpcds-sf1
 
 tpcds-001: tpcds-sf001 ## Alias for tpcds-sf001
 
-.PHONY: tpcds tpcds-001 tpcds-sf1 tpcds-sf001
+tpcds-sf1-duckdb: ## Re-run the DuckDB TPC-DS SF1 calibration on the parquet source
+	@test -d testdata/tpcds_1 || $(PYTHON) dev/tpcds/generate_data.py --scale 1
+	@$(PYTHON) tests/performance/tpcds/duckdb/runner.py --scale 1
+
+tpcds-sf001-duckdb: ## Re-run the DuckDB TPC-DS SF0.01 calibration on the parquet source
+	@test -d testdata/tpcds_001 || $(PYTHON) dev/tpcds/generate_data.py --scale 001
+	@$(PYTHON) tests/performance/tpcds/duckdb/runner.py --scale 001
+
+tpcds-sf10-duckdb: ## Re-run the DuckDB TPC-DS SF10 calibration on the parquet source
+	@test -d testdata/tpcds_10 || $(PYTHON) dev/tpcds/generate_data.py --scale 10
+	@$(PYTHON) tests/performance/tpcds/duckdb/runner.py --scale 10
+
+.PHONY: tpcds tpcds-001 tpcds-sf1 tpcds-sf001 tpcds-sf1-duckdb tpcds-sf001-duckdb tpcds-sf10-duckdb
 
 jsonbench-10-jsonl: ## Run JSONBench 10m vs DuckDB over the decompressed .jsonl shards
 	@clear || true
@@ -1118,8 +1170,8 @@ tpch-sf10-aistor: ## Run TPC-H SF10 vs DuckDB against the parquet source on AISt
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 10 --variant aistor
 
-tpcds-sf10-aistor: ## Run the TPC-DS SF10 smoke suite against the parquet source on AIStor (coverage, not performance; 300s/query)
-	$(call print_blue,Running TPC-DS SF10 smoke suite (AIStor)...)
+tpcds-sf10-aistor: ## Run TPC-DS SF10 against the parquet source on AIStor (300s/query; compared to the DuckDB sf10 baseline when present)
+	$(call print_blue,Running TPC-DS SF10 benchmark (AIStor)...)
 	@# 300s, not the runner's 30s default: at SF10 over high-latency storage the
 	@# multi-fact-table queries (Q04/05/14/33/54/75/76/80) legitimately run past
 	@# 30s, and a timeout records no time at all.
@@ -1170,8 +1222,8 @@ tpch-sf01-aistor: ## Quick: TPC-H SF0.1 vs DuckDB on AIStor (remote Iceberg)
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 01 --variant aistor
 
-tpcds-sf01-aistor: ## Quick: TPC-DS SF0.1 smoke suite on AIStor (coverage, not performance)
-	$(call print_blue,Running TPC-DS SF0.1 smoke suite (AIStor)...)
+tpcds-sf01-aistor: ## Quick: TPC-DS SF0.1 on AIStor (compared to the DuckDB sf01 baseline when present)
+	$(call print_blue,Running TPC-DS SF0.1 benchmark (AIStor)...)
 	@clear || true
 	@$(PYTHON) tests/performance/tpcds/runner.py --scale 01 --variant aistor
 

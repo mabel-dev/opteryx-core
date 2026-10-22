@@ -21,6 +21,7 @@ condition as text is the one thing done here.
 """
 
 from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.expression import format_expression
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.plan_context import PlanContext
 
@@ -55,8 +56,6 @@ def _expressions_by_id(plan: LogicalPlan) -> dict:
 
 
 def _record_telemetry(plan: LogicalPlan, context: PlanContext, telemetry, predicates, joins) -> None:
-    from opteryx.expression import format_expression
-
     store = context.statistics
     relational = steps_with("relation")
     row_counts = []

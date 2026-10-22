@@ -90,6 +90,7 @@ becomes a second annotation when the decode side can honour it.
 from draken.draken_native import DrakenType
 
 from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -173,6 +174,44 @@ def _classify(expr, needs: dict, raw: set) -> None:
         _classify(child, needs, raw)
 
 
+def _classified_roots(plan):
+    """Every expression tree `_classify` reads, over the whole plan."""
+    for nid, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Distinct and not node.on:
+            # A plain DISTINCT dedups on EVERY column that reaches it,
+            # comparing actual values, yet names none of them: `columns` and
+            # `on` are both empty, so expression_roots() yields nothing. Count
+            # every column emitted by a Scan beneath it as a raw use. This is
+            # conservative (a column consumed below the Distinct, e.g.
+            # `SELECT DISTINCT LENGTH(s)`, is disqualified too), which only
+            # forgoes the optimisation. Without it, `SUM(LENGTH(t)) FROM
+            # (SELECT DISTINCT s AS t ...)` elided s and the DistinctSink
+            # hashed the STR_ELIDED_PAYLOAD_OFFSET trap (SIGSEGV).
+            for producer_nid in plan.depth_first_order(nid):
+                producer = plan[producer_nid]
+                if producer.node_type == LogicalPlanStepType.Scan:
+                    yield from producer.columns or []
+        if node.node_type == LogicalPlanStepType.Scan:
+            # A Scan's `columns` is its emit list, not a read — a column
+            # emitted and never consumed is dead, not raw. Its pushed
+            # `predicates` (and any other expression it carries, e.g. a
+            # pushed top-N spec) are real uses and must be classified, so
+            # they are reached through expression_roots rather than by
+            # naming predicates directly.
+            include_columns = False
+        elif node.node_type in (
+            LogicalPlanStepType.AggregateAndGroup,
+            LogicalPlanStepType.Aggregate,
+        ):
+            # An aggregate's `columns` is a derived input-column list
+            # (redundant with groups/aggregates); it lists the column as a
+            # bare identifier, which is read bookkeeping, not a raw use.
+            include_columns = False
+        else:
+            include_columns = True
+        yield from expression_roots(node, include_columns=include_columns)
+
+
 class LengthOnlyColumnStrategy(OptimizationStrategy):
     # Runs last: every strategy that can add, remove or rewrite a column
     # reference must have had its say before uses are enumerated.
@@ -193,46 +232,26 @@ class LengthOnlyColumnStrategy(OptimizationStrategy):
             )
         return context
 
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # A column is length-only only if it was seen consumed by a length-answerable
+        # operation (`needs`), and `_classify` finds those in the roots
+        # `_classified_roots` yields. A plan with none of them in those roots leaves
+        # `complete` nothing to annotate, and `visit` only copies steps.
+        return any(
+            node.value in _LENGTH_ONLY_UNARY_OPS
+            if node.node_type == NodeType.UNARY_OPERATOR
+            else node.value in _LENGTH_ONLY_FUNCTIONS
+            for node in get_all_nodes_of_type(
+                list(_classified_roots(plan)), (NodeType.UNARY_OPERATOR, NodeType.FUNCTION)
+            )
+        )
+
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         needs: dict = {}
         raw: set = set()
 
-        for nid, node in plan.nodes(True):
-            if node.node_type == LogicalPlanStepType.Distinct and not node.on:
-                # A plain DISTINCT dedups on EVERY column that reaches it,
-                # comparing actual values, yet names none of them: `columns` and
-                # `on` are both empty, so expression_roots() yields nothing. Count
-                # every column emitted by a Scan beneath it as a raw use. This is
-                # conservative (a column consumed below the Distinct, e.g.
-                # `SELECT DISTINCT LENGTH(s)`, is disqualified too), which only
-                # forgoes the optimisation. Without it, `SUM(LENGTH(t)) FROM
-                # (SELECT DISTINCT s AS t ...)` elided s and the DistinctSink
-                # hashed the STR_ELIDED_PAYLOAD_OFFSET trap (SIGSEGV).
-                for producer_nid in plan.depth_first_order(nid):
-                    producer = plan[producer_nid]
-                    if producer.node_type == LogicalPlanStepType.Scan:
-                        for column in producer.columns or []:
-                            _classify(column, needs, raw)
-            if node.node_type == LogicalPlanStepType.Scan:
-                # A Scan's `columns` is its emit list, not a read — a column
-                # emitted and never consumed is dead, not raw. Its pushed
-                # `predicates` (and any other expression it carries, e.g. a
-                # pushed top-N spec) are real uses and must be classified, so
-                # they are reached through expression_roots rather than by
-                # naming predicates directly.
-                include_columns = False
-            elif node.node_type in (
-                LogicalPlanStepType.AggregateAndGroup,
-                LogicalPlanStepType.Aggregate,
-            ):
-                # An aggregate's `columns` is a derived input-column list
-                # (redundant with groups/aggregates); it lists the column as a
-                # bare identifier, which is read bookkeeping, not a raw use.
-                include_columns = False
-            else:
-                include_columns = True
-            for root in expression_roots(node, include_columns=include_columns):
-                _classify(root, needs, raw)
+        for root in _classified_roots(plan):
+            _classify(root, needs, raw)
 
         eligible = {
             identity

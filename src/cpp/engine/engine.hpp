@@ -207,24 +207,36 @@ struct PipelineNode {
     // into post-run, or -1. Empty for every pipeline that is not an eligible
     // join build. See docs/RUNTIME_MINMAX_FILTER_DESIGN.md.
     std::vector<int> fill_bound_slots;
-    int reads_buffer = -1;    // buffers index this pipeline's BufferSource reads, so
-                              // run() can free a buffer after its LAST consumer
+    std::vector<int> reads_buffers;   // buffers indexes this pipeline's source reads, so
+                                      // run() can free a buffer after its LAST consumer
     int dop_override = 0;     // >0 forces this pipeline's degree (order-sensitive
                               // consumers of a sorted buffer run at 1); 0 = engine dop
     std::atomic<bool> halt{false};   // set by LimitOperator when its quota is filled
     std::unique_ptr<GlobalSinkState> result;
-    // Filled by run(). Pipelines execute strictly one at a time, so a PROCESS-wide CPU
-    // clock read either side of run_pipeline() attributes all CPU burned in that window
-    // to this pipeline — which is what makes `cpu_ns / wall_ns` the average number of
-    // cores this pipeline actually kept busy. Per-operator OpStats cannot answer that:
-    // they measure the operators that DID run, and the question here is how much of the
-    // pool was doing nothing while they ran.
+    // Filled by run(). Outside a ConcurrentSpan pipelines execute one at a time, so a
+    // PROCESS-wide CPU clock read either side of run_pipeline() attributes all CPU burned
+    // in that window to this pipeline — which is what makes `cpu_ns / wall_ns` the
+    // average number of cores this pipeline actually kept busy. Per-operator OpStats
+    // cannot answer that: they measure the operators that DID run, and the question here
+    // is how much of the pool was doing nothing while they ran. INSIDE a ConcurrentSpan
+    // the window also holds the sibling legs' CPU, so cpu_ns over-states these pipelines
+    // (wall_ns stays right); per-operator OpStats are unaffected.
     uint64_t wall_ns = 0;
     uint64_t cpu_ns = 0;
     int dop_used = 0;
     // P3: barrier skew for this pipeline's run — how far apart its workers finished,
     // and what that spread cost in idle worker-time. Filled by run_pipeline().
     PipelineSkew skew{};
+};
+
+// A UNION's legs, declared by the compiler as independent pipeline ranges. Each range is
+// [first, last] inclusive and holds everything one leg needs: the compiler created those
+// pipelines in order, so within a leg creation order IS the dependency order. Between legs
+// there is none - they share only read-only inputs (a shared CTE's finished buffer) and
+// write only their own buffer. Ranges are ascending and disjoint; a leg may itself contain
+// a span (a nested union). A span never overlaps the recursive-CTE LoopSpan.
+struct ConcurrentSpan {
+    std::vector<std::pair<size_t, size_t>> legs;
 };
 
 // Fixpoint loop over a contiguous pipeline span — the recursive-CTE primitive
@@ -261,6 +273,12 @@ public:
     std::vector<std::unique_ptr<PipelineNode>> pipelines;  // run in creation order
     std::vector<std::unique_ptr<MorselBuffer>> buffers;
     std::vector<LoopSpan> loops;   // v1: at most one (compiler-enforced)
+    // UNION legs the compiler has declared independent (add_concurrent_span), in
+    // ascending order of their first pipeline. run() runs each span's legs at the same time.
+    std::vector<ConcurrentSpan> spans;
+    // Owned storage for the error text of a leg that failed on its own thread: that
+    // thread's thread_local latch dies with it, and ErrCtx::msg must outlive run().
+    std::string span_err_text_;
     SpillEnv spill_env;   // shared spill config/store for every buffer this run
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
     std::vector<std::unique_ptr<GroupJoinState>> groupjoin_states;
@@ -1280,7 +1298,39 @@ public:
     }
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(sink_buffer_(buf)));
-        pipelines[p]->reads_buffer = static_cast<int>(buf);
+        pipelines[p]->reads_buffers = {static_cast<int>(buf)};
+    }
+    // The read side of a UNION whose legs run concurrently: one buffer per leg, read in
+    // leg order (see ConcatBufferSource).
+    void set_concat_buffer_source(size_t p, const std::vector<size_t>& bufs) {
+        if (bufs.empty()) throw std::runtime_error("set_concat_buffer_source: no buffers");
+        std::vector<MorselBuffer*> raw;
+        std::vector<int> reads;
+        for (size_t b : bufs) {
+            raw.push_back(sink_buffer_(b));
+            reads.push_back(static_cast<int>(b));
+        }
+        set_source_(p, std::make_unique<ConcatBufferSource>(std::move(raw)));
+        pipelines[p]->reads_buffers = std::move(reads);
+    }
+    // Declare a UNION's legs as independent pipeline ranges (see ConcurrentSpan).
+    // Plan-time. Everything the engine relies on is checked HERE so a malformed span
+    // fails at plan build, never as a race at run time.
+    void add_concurrent_span(const std::vector<size_t>& firsts, const std::vector<size_t>& lasts) {
+        if (firsts.size() != lasts.size() || firsts.size() < 2)
+            throw std::runtime_error("concurrent span needs at least two legs");
+        ConcurrentSpan s;
+        for (size_t i = 0; i < firsts.size(); ++i) {
+            if (firsts[i] > lasts[i] || lasts[i] >= pipelines.size())
+                throw std::runtime_error("concurrent span leg out of range");
+            if (i > 0 && firsts[i] <= lasts[i - 1])
+                throw std::runtime_error("concurrent span legs overlap or are out of order");
+            s.legs.emplace_back(firsts[i], lasts[i]);
+        }
+        for (const LoopSpan& L : loops)
+            if (s.legs.front().first <= L.last && s.legs.back().second >= L.first)
+                throw std::runtime_error("concurrent span overlaps the recursive loop span");
+        spans.push_back(std::move(s));
     }
     // Scalar-subquery cardinality guard over a finalized buffer (see
     // native_scalar_guard.hpp). `names` are the leg's column identities and
@@ -1307,7 +1357,7 @@ public:
         schema->zero_col_rows = 0;
         set_source_(p, std::make_unique<ScalarGuardSource>(sink_buffer_(buf),
                                                            std::move(schema)));
-        pipelines[p]->reads_buffer = static_cast<int>(buf);
+        pipelines[p]->reads_buffers = {static_cast<int>(buf)};
     }
     void add_expr_filter(size_t p, void* instrs, int count, std::vector<int> col_idx,
                          std::vector<void*> lit_dv, ExprFilterFn fn,
@@ -1739,28 +1789,224 @@ public:
         return true;
     }
 
+    // What one pipeline step tells the loop that drives it. STOP is not an error: the
+    // consumer abandoned the query (LIMIT early exit / cursor dropped), so the rest of the
+    // graph would feed a closed queue.
+    enum class Step { OK, STOP, FAILED };
+
+    // State shared by every step of one run().
+    struct RunState {
+        // Consumers of each buffer that have not yet completed. A buffer is freed when the
+        // count reaches zero: a shared CTE's buffer holds the whole materialized result, so
+        // releasing it at its LAST consumer caps the window it is held over (morsels still
+        // referenced elsewhere, the output queue, survive via their shared_ptr refcounts).
+        // A count, not "the highest-indexed consumer": that rule is only true while
+        // pipelines run one at a time, and UNION legs now run at the same time.
+        std::unique_ptr<std::atomic<int>[]> remaining;
+        // A pipeline decrements once, however many times a loop re-runs it.
+        std::unique_ptr<std::atomic<bool>[]> completed;
+        // Buffers a LoopSpan re-reads on every pass: the loop's control step frees them,
+        // not a consumer's completion.
+        std::vector<uint8_t> loop_deferred;
+    };
+
+    // The span (if any) that starts at pipeline `idx` and ends no later than `limit`; the
+    // widest such span, so an enclosing union wins over one nested at its first pipeline.
+    const ConcurrentSpan* span_at_(size_t idx, size_t limit) const {
+        const ConcurrentSpan* best = nullptr;
+        for (const ConcurrentSpan& s : spans) {
+            if (s.legs.front().first != idx || s.legs.back().second > limit) continue;
+            if (best == nullptr || s.legs.back().second > best->legs.back().second) best = &s;
+        }
+        return best;
+    }
+
+    // Run pipeline `idx` to completion, then publish what it produced. `concurrent` = a
+    // sibling UNION leg may be running: no pool-wide barrier (run_pipeline's drain_pool).
+    Step run_step_(size_t idx, int dop, void* pool, ErrCtx& err, bool concurrent,
+                   RunState& rs) {
+        // Consumer abandoned: stop between pipelines. Not an error; matches QueueSink's
+        // dropped-put contract.
+        if (out_q != nullptr && out_q->closed()) return Step::STOP;
+        auto& pn = pipelines[idx];
+        Pipeline p;
+        p.source = pn->source.get();
+        p.operators.reserve(pn->operators.size());
+        for (auto& op : pn->operators) p.operators.push_back(op.get());
+        p.sink = pn->sink.get();
+        p.halt = &pn->halt;
+        int pdop = (pn->dop_override > 0 && pn->dop_override < dop)
+                       ? pn->dop_override : dop;
+        pn->dop_used = pdop;
+        const uint64_t w0 = telem_now_ns();
+        const uint64_t c0 = telem_process_cpu_now_ns();
+        pn->result = run_pipeline(p, pdop, dop, err, pool, &pn->skew, !concurrent);
+        // Accumulate (not assign): a pipeline inside a LoopSpan runs once per
+        // iteration and its reading should cover all of them. Identical for
+        // the ordinary single-run pipeline, which starts from zero.
+        pn->wall_ns += telem_now_ns() - w0;
+        pn->cpu_ns += telem_process_cpu_now_ns() - c0;
+        if (err.code != 0) return Step::FAILED;
+        if (pn->fill_join2_ref >= 0) {
+            const auto* bg = static_cast<const Join2BuildGlobal*>(pn->result.get());
+            join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g = bg;
+            // RUNTIME MIN/MAX JOIN FILTER — the one publish point.
+            //
+            // This is where the whole feature's correctness contract lives:
+            // the build pipeline has completed (run_pipeline above blocks
+            // until every worker combined and finalize() ran) and the probe
+            // pipeline's GlobalSourceState does not exist yet (it is
+            // constructed by the NEXT run_pipeline call of the SAME leg: a build and
+            // its probe are in one leg, in creation order). So a bound is
+            // always complete and always visible before the probe scan
+            // enumerates its first row group — no timeout, no late arrival,
+            // no partially-populated filter, and no atomics: a slot is written by
+            // this thread and read only by pipelines that run after it on the
+            // same thread.
+            for (size_t k = 0; k < pn->fill_bound_slots.size(); ++k) {
+                const int slot = pn->fill_bound_slots[k];
+                if (slot < 0) continue;
+                if (k >= bg->bound_any.size() || bg->bound_any[k] == 0) continue;
+                RuntimeKeyBound& out = *runtime_bounds[static_cast<size_t>(slot)];
+                out.lo = bg->bound_lo[k];
+                out.hi = bg->bound_hi[k];
+                out.valid = 1;
+            }
+        }
+        if (!rs.completed[idx].exchange(true)) {
+            for (int b : pn->reads_buffers) {
+                if (rs.remaining[static_cast<size_t>(b)].fetch_sub(1) == 1 &&
+                    !rs.loop_deferred[static_cast<size_t>(b)])
+                    buffers[static_cast<size_t>(b)]->release();
+            }
+        }
+        return Step::OK;
+    }
+
+    // One UNION leg: its pipelines in creation order (which is its dependency order),
+    // expanding any union nested inside it. `abort` is raised by a sibling that failed, so
+    // this leg stops at its next pipeline boundary instead of running on for nothing.
+    Step run_leg_(size_t first, size_t last, int dop, void* pool, ErrCtx& err, RunState& rs,
+                  const std::atomic<bool>& abort) {
+        size_t idx = first;
+        while (idx <= last) {
+            if (abort.load(std::memory_order_acquire)) return Step::STOP;
+            if (const ConcurrentSpan* inner = span_at_(idx, last)) {
+                const Step r = run_span_(*inner, dop, pool, err, rs);
+                if (r != Step::OK) return r;
+                idx = inner->legs.back().second + 1;
+                continue;
+            }
+            const Step r = run_step_(idx, dop, pool, err, true, rs);
+            if (r != Step::OK) return r;
+            ++idx;
+        }
+        return Step::OK;
+    }
+
+    // Run a union's legs at the same time: leg 0 on the calling thread, every other on a
+    // thread of its own. These are plain threads, NOT pool tasks - a leg's driver blocks
+    // waiting for its pipeline's workers, and a blocked pool task could starve the very
+    // pool those workers run on. All their pipelines share the one worker pool, FIFO, so
+    // the legs do not oversubscribe the machine: a later leg's workers start as an earlier
+    // leg's finish, which is exactly the barrier skew and the single-threaded finalize()
+    // gaps that were idle before.
+    Step run_span_(const ConcurrentSpan& s, int dop, void* pool, ErrCtx& err, RunState& rs) {
+        const size_t n = s.legs.size();
+        std::vector<Step> result(n, Step::OK);
+        std::vector<ErrCtx> errs(n);
+        std::vector<std::string> texts(n);   // message copies, made ON the failing leg's thread
+        std::atomic<bool> abort{false};
+        auto leg = [&](size_t i) {
+            ErrCtx& e = errs[i];
+            try {
+                result[i] = run_leg_(s.legs[i].first, s.legs[i].second, dop, pool, e, rs, abort);
+            } catch (const std::exception& ex) {
+                texts[i].assign("unhandled C++ exception in a UNION leg: ");
+                texts[i].append(ex.what());
+                e.code = 1;
+                e.msg = texts[i].c_str();
+                result[i] = Step::FAILED;
+            } catch (...) {
+                texts[i].assign("unhandled non-standard C++ exception in a UNION leg");
+                e.code = 1;
+                e.msg = texts[i].c_str();
+                result[i] = Step::FAILED;
+            }
+            if (result[i] == Step::FAILED) {
+                // ErrCtx::msg is borrowed and may point into this thread's thread_local
+                // latch, which dies with the thread: take an owned copy now.
+                if (e.msg != nullptr && e.msg != texts[i].c_str()) texts[i].assign(e.msg);
+                e.msg = texts[i].c_str();
+                abort.store(true, std::memory_order_release);
+            }
+        };
+        std::vector<std::thread> threads;
+        threads.reserve(n - 1);
+        bool spawn_failed = false;
+        try {
+            for (size_t i = 1; i < n; ++i) threads.emplace_back(leg, i);
+        } catch (...) {
+            spawn_failed = true;
+            abort.store(true, std::memory_order_release);
+        }
+        if (!spawn_failed) leg(0);
+        for (std::thread& t : threads) t.join();
+        if (spawn_failed) {
+            span_err_text_.assign("could not start a thread for a UNION leg");
+            err.code = 1;
+            err.msg = span_err_text_.c_str();
+            return Step::FAILED;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (result[i] == Step::FAILED) {
+                span_err_text_ = texts[i];
+                err.code = errs[i].code;
+                err.msg = span_err_text_.c_str();
+                return Step::FAILED;
+            }
+        }
+        for (size_t i = 0; i < n; ++i)
+            if (result[i] == Step::STOP) return Step::STOP;
+        return Step::OK;
+    }
+
     void run(int dop, void* pool, ErrCtx& err) {
-        // Free each buffer's morsels after its LAST consumer completes: pipelines
-        // run strictly in creation order, so once the highest-indexed pipeline
-        // sourcing a buffer is done, nothing can read it again. A shared CTE's
-        // buffer holds the whole materialized result — releasing it here caps the
-        // window it is held over, and morsels still referenced elsewhere (the
-        // output queue) survive via their shared_ptr refcounts.
+        // A concurrent span must lie wholly outside the fixpoint span: the loop re-runs its
+        // pipelines pass after pass on the driver thread. The compiler never declares one
+        // there; this is the guard behind that.
+        for (const ConcurrentSpan& s : spans) {
+            for (const LoopSpan& L : loops) {
+                if (s.legs.front().first <= L.last && s.legs.back().second >= L.first) {
+                    err.code = 1;
+                    err.msg = "a concurrent UNION span overlaps a recursive loop span";
+                    return;
+                }
+            }
+        }
+        // Buffers are freed after their LAST consumer completes (see RunState::remaining).
+        RunState rs;
+        rs.remaining.reset(new std::atomic<int>[buffers.size()]);
+        rs.completed.reset(new std::atomic<bool>[pipelines.size()]);
+        for (size_t b = 0; b < buffers.size(); ++b) rs.remaining[b].store(0);
+        for (size_t i = 0; i < pipelines.size(); ++i) rs.completed[i].store(false);
         std::vector<int> last_consumer(buffers.size(), -1);
         for (size_t i = 0; i < pipelines.size(); ++i) {
-            const int b = pipelines[i]->reads_buffer;
-            if (b >= 0) last_consumer[static_cast<size_t>(b)] = static_cast<int>(i);
+            for (int b : pipelines[i]->reads_buffers) {
+                rs.remaining[static_cast<size_t>(b)].fetch_add(1);
+                last_consumer[static_cast<size_t>(b)] = static_cast<int>(i);
+            }
         }
         // Loop-span liveness: a buffer whose last consumer lies INSIDE a span is
-        // re-read on every pass, so the per-pipeline release below must skip it —
-        // the whole span is ONE consumer for liveness purposes. The control step
-        // releases these (plus WORKING/DELTA) when the loop converges.
-        std::vector<uint8_t> loop_deferred(buffers.size(), 0);
+        // re-read on every pass, so the per-pipeline release must skip it — the whole
+        // span is ONE consumer for liveness purposes. The control step releases these
+        // (plus WORKING/DELTA) when the loop converges.
+        rs.loop_deferred.assign(buffers.size(), 0);
         for (const auto& L : loops)
             for (size_t b = 0; b < last_consumer.size(); ++b)
                 if (last_consumer[b] >= static_cast<int>(L.first) &&
                     last_consumer[b] <= static_cast<int>(L.last))
-                    loop_deferred[b] = 1;
+                    rs.loop_deferred[b] = 1;
 
         size_t pipeline_index = 0;
         while (pipeline_index < pipelines.size()) {
@@ -1772,7 +2018,7 @@ public:
                 if (!loop_control_(L, err)) return;
                 if (!L.active) {
                     for (size_t b = 0; b < last_consumer.size(); ++b)
-                        if (loop_deferred[b]) buffers[b]->release();
+                        if (rs.loop_deferred[b]) buffers[b]->release();
                     buffers[L.working_buf]->release();
                     buffers[L.delta_buf]->release();
                     pipeline_index = L.last + 1;
@@ -1780,59 +2026,13 @@ public:
                 break;   // one loop per engine (add_loop_span enforces)
             }
             if (pipeline_index >= pipelines.size()) break;
-            auto& pn = pipelines[pipeline_index];
-            // Consumer abandoned (LIMIT early-exit / cursor dropped): stop between
-            // pipelines — running the rest of the graph would be wasted work feeding
-            // a closed queue. Not an error; matches QueueSink's dropped-put contract.
-            if (out_q != nullptr && out_q->closed()) return;
-            Pipeline p;
-            p.source = pn->source.get();
-            p.operators.reserve(pn->operators.size());
-            for (auto& op : pn->operators) p.operators.push_back(op.get());
-            p.sink = pn->sink.get();
-            p.halt = &pn->halt;
-            int pdop = (pn->dop_override > 0 && pn->dop_override < dop)
-                           ? pn->dop_override : dop;
-            pn->dop_used = pdop;
-            const uint64_t w0 = telem_now_ns();
-            const uint64_t c0 = telem_process_cpu_now_ns();
-            pn->result = run_pipeline(p, pdop, dop, err, pool, &pn->skew);
-            // Accumulate (not assign): a pipeline inside a LoopSpan runs once per
-            // iteration and its reading should cover all of them. Identical for
-            // the ordinary single-run pipeline, which starts from zero.
-            pn->wall_ns += telem_now_ns() - w0;
-            pn->cpu_ns += telem_process_cpu_now_ns() - c0;
-            if (err.code != 0) return;
-            if (pn->fill_join2_ref >= 0) {
-                const auto* bg = static_cast<const Join2BuildGlobal*>(pn->result.get());
-                join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g = bg;
-                // RUNTIME MIN/MAX JOIN FILTER — the one publish point.
-                //
-                // This is where the whole feature's correctness contract lives:
-                // the build pipeline has completed (run_pipeline above blocks
-                // until every worker combined and finalize() ran) and the probe
-                // pipeline's GlobalSourceState does not exist yet (it is
-                // constructed by the NEXT run_pipeline call). So a bound is
-                // always complete and always visible before the probe scan
-                // enumerates its first row group — no timeout, no late arrival,
-                // no partially-populated filter, and no atomics: this is the
-                // driver thread, between two pipelines.
-                for (size_t k = 0; k < pn->fill_bound_slots.size(); ++k) {
-                    const int slot = pn->fill_bound_slots[k];
-                    if (slot < 0) continue;
-                    if (k >= bg->bound_any.size() || bg->bound_any[k] == 0) continue;
-                    RuntimeKeyBound& out = *runtime_bounds[static_cast<size_t>(slot)];
-                    out.lo = bg->bound_lo[k];
-                    out.hi = bg->bound_hi[k];
-                    out.valid = 1;
-                }
+            // A UNION whose legs were declared independent: run them at the same time.
+            if (const ConcurrentSpan* span = span_at_(pipeline_index, pipelines.size() - 1)) {
+                if (run_span_(*span, dop, pool, err, rs) != Step::OK) return;
+                pipeline_index = span->legs.back().second + 1;
+                continue;
             }
-            for (size_t b = 0; b < last_consumer.size(); ++b) {
-                if (last_consumer[b] == static_cast<int>(pipeline_index) &&
-                    !loop_deferred[b]) {
-                    buffers[b]->release();
-                }
-            }
+            if (run_step_(pipeline_index, dop, pool, err, false, rs) != Step::OK) return;
             // End of an active span: jump back to its control step.
             bool jumped = false;
             for (const auto& L : loops) {

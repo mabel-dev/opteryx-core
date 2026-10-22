@@ -1018,6 +1018,10 @@ class _Compiler:
         # to its own self-constructed pool, unchanged behaviour (EXPLAIN, tests that
         # compile a plan directly, any caller outside execute_native).
         self._pool = pool
+        # True while compiling a recursive CTE's TERM: its pipelines are re-run pass after
+        # pass by the engine's fixpoint loop, which a UNION inside it must not interleave
+        # with, so its legs are not declared concurrent (see the UnionNode arm).
+        self._in_recursive_term = False
         # Stream column types by identity (physical, and the full ColumnType), filled
         # as columns enter the layout (_remember_types, _add_computed).
         self._types: dict = {}
@@ -3126,23 +3130,39 @@ class _Compiler:
             ids = [column.schema_column.identity for column in node.columns]
             if not ids:
                 _unsupported("a UNION with no output columns")
-            buf = self.nplan.new_buffer()
             if len(in_edges) < 2:
                 _unsupported(f"a UNION with {len(in_edges)} legs")
+            # One buffer per leg, read back in leg order: the legs run at the same time,
+            # and a single shared buffer would hand the union's rows out in the order the
+            # legs happened to finish. Each leg's pipelines are the ones created while it
+            # compiles - contiguous, in dependency order, and ending in the pipeline that
+            # appends to the leg's buffer - which is exactly the range the engine runs
+            # concurrently with the other legs' (a leg shares nothing with its siblings but
+            # read-only inputs, a shared CTE's finished buffer).
+            leg_buffers = []
+            leg_ranges = []
             for provider, _target, _label in in_edges:
+                first = self.nplan.pipeline_count()
                 (lp, llayout) = self.compile_node(provider)
                 if len(llayout) < len(ids):
                     _unsupported("a UNION leg narrower than the union schema")
+                if lp != self.nplan.pipeline_count() - 1:
+                    _unsupported("a UNION leg whose head pipeline is not the last it created")
+                leg_buf = self.nplan.new_buffer()
                 # The per-leg align/append is this UNION's plumbing — attribute it here,
                 # not to the leg whose identity compile_node just left current.
                 self.nplan.set_current_identity(node.identity)
                 self.nplan.set_current_display_name(node.kind)
                 self.nplan.add_select(lp, list(range(len(ids))), ids)
-                self.nplan.set_buffer_append_sink(lp, buf)
+                self.nplan.set_buffer_append_sink(lp, leg_buf)
+                leg_buffers.append(leg_buf)
+                leg_ranges.append((first, lp))
+            if not self._in_recursive_term:
+                self.nplan.add_concurrent_span(leg_ranges)
             self.nplan.set_current_identity(node.identity)
             self.nplan.set_current_display_name(node.kind)
             p2 = self.nplan.new_pipeline()
-            self.nplan.set_buffer_source(p2, buf)
+            self.nplan.set_concat_buffer_source(p2, leg_buffers)
             return p2, ids
 
         if kind == "UnnestJoinNode":
@@ -7216,6 +7236,7 @@ def compile_to_native(plan, pool=None):
             # the RESULT it is accumulating into — an OVERRIDDEN copy of the
             # buffer registry, never the shared dict itself.
             state = recursive_state[role[0]]
+            body_compiler._in_recursive_term = True
             body_compiler.cte_buffers = dict(compiler.cte_buffers)
             body_compiler.cte_buffers[role[0]] = (state["working"], state["layout"])
             state["first"] = nplan.pipeline_count()

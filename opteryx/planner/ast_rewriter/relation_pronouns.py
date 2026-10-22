@@ -153,6 +153,9 @@ VALUE_PART_KEYS = {"CompoundIdentifier": None, "variable": "ShowVariable"}
 # every permission pattern.
 NAME_PART = re.compile(r"^[A-Za-z0-9_\-]+$")
 
+# Every key `_walk` treats specially, so a node's other keys cost one lookup.
+_NAME_BEARING_KEYS = OBJECT_NAME_KEYS | OBJECT_NAME_LIST_KEYS | frozenset(VALUE_PART_KEYS)
+
 
 def _pronoun(written: str) -> Optional[str]:
     """The variable `written` stands for, or None if it is not a pronoun.
@@ -224,39 +227,46 @@ def _is_object_name(value: Any) -> bool:
 
 
 def _walk(node: Union[Dict, List], variables, parent_key: Optional[str] = None) -> None:
-    if isinstance(node, list):
+    # The parsed AST is plain dicts and lists around scalars; most of its nodes are
+    # scalars, so only a container is stepped into (no call per scalar).
+    if type(node) is list:
         for item in node:
-            _walk(item, variables, parent_key)
+            kind = type(item)
+            if kind is dict or kind is list:
+                _walk(item, variables, parent_key)
         return
-    if not isinstance(node, dict):
+    if type(node) is not dict:
         return
 
     for key, value in node.items():
-        # `Function` shares the `name` key with the relation-bearing nodes. A
-        # function called `$me` is not a pronoun, but it is not a relation
-        # either, so it is left exactly as written to fail as an unknown
-        # function.
-        if key in OBJECT_NAME_KEYS and parent_key != "Function" and _is_object_name(value):
-            _substitute_object_name(value, variables)
-            continue
-        if key in OBJECT_NAME_LIST_KEYS and isinstance(value, list):
-            for object_name in value:
-                if _is_object_name(object_name):
-                    _substitute_object_name(object_name, variables)
-            continue
-        if key in VALUE_PART_KEYS and isinstance(value, list):
-            required_parent = VALUE_PART_KEYS[key]
-            if required_parent is None or parent_key == required_parent:
-                for part in value:
-                    written = part.get("value") if isinstance(part, dict) else None
-                    if (
-                        isinstance(written, str)
-                        and part.get("quote_style") is None
-                        and _pronoun(written) is not None
-                    ):
-                        part["value"] = _resolve(written, variables)
+        if key in _NAME_BEARING_KEYS:
+            # `Function` shares the `name` key with the relation-bearing nodes. A
+            # function called `$me` is not a pronoun, but it is not a relation
+            # either, so it is left exactly as written to fail as an unknown
+            # function.
+            if key in OBJECT_NAME_KEYS and parent_key != "Function" and _is_object_name(value):
+                _substitute_object_name(value, variables)
                 continue
-        _walk(value, variables, key)
+            if key in OBJECT_NAME_LIST_KEYS and isinstance(value, list):
+                for object_name in value:
+                    if _is_object_name(object_name):
+                        _substitute_object_name(object_name, variables)
+                continue
+            if key in VALUE_PART_KEYS and isinstance(value, list):
+                required_parent = VALUE_PART_KEYS[key]
+                if required_parent is None or parent_key == required_parent:
+                    for part in value:
+                        written = part.get("value") if isinstance(part, dict) else None
+                        if (
+                            isinstance(written, str)
+                            and part.get("quote_style") is None
+                            and _pronoun(written) is not None
+                        ):
+                            part["value"] = _resolve(written, variables)
+                    continue
+        kind = type(value)
+        if kind is dict or kind is list:
+            _walk(value, variables, key)
 
 
 def do_substitute_relation_pronouns(asts: List[dict], variables) -> List[dict]:

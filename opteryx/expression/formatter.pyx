@@ -245,17 +245,14 @@ def format_expression(root, qualify=False, cache=None):
 
 
 # The expression types with both a left and a right operand (built on first use:
-# NodeType is imported lazily, see _format_expression_inner).
+# this file is included before `NodeType` is defined in the module body).
 cdef object _LEFT_RIGHT_TYPES = None
 
 
 def _format_expression_inner(root, qualify, cache):
-    # Lazy: opteryx.expression imports format_expression at module load,
-    # and opteryx.expression.operator_catalog imports from .expression — a
-    # cycle that's only safe to break at first call.
-    from . import INTERNAL_TYPE, NodeType
-    from .operator_catalog import get_operator_token
-
+    # `INTERNAL_TYPE`, `NodeType` and `get_operator_token` are globals of this module:
+    # formatter.pyx and operator_catalog.pyx are textually included into
+    # expression/__init__.pyx, so they are read at call time with no import.
     if root is None:
         return "null"
 

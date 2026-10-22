@@ -207,6 +207,11 @@ def _table_ref_locations(con: duckdb.DuckDBPyConnection, sql: str) -> list[tuple
         (see query 49's catalog leg) while the collision it needs to avoid
         for `store` happens to match case exactly — this must not depend on
         that coincidence.
+
+        The same collision exists for an aliased BASE_TABLE (a table or CTE
+        reference written `FROM store_v1 store`), which DuckDB parses as a
+        BASE_TABLE node with an `alias`, not a SUBQUERY: Q51. Its aliases are
+        collected with the subquery ones.
     """
     raw = con.execute("SELECT json_serialize_sql($sql)", {"sql": sql}).fetchone()[0]
     data = json.loads(raw)
@@ -217,7 +222,9 @@ def _table_ref_locations(con: duckdb.DuckDBPyConnection, sql: str) -> list[tuple
 
     def collect_subquery_aliases(node) -> None:
         if isinstance(node, dict):
-            if node.get("type") == "SUBQUERY" and node.get("alias"):
+            # A BASE_TABLE alias is the same collision: Q51 writes `FROM store_v1 store`
+            # (a CTE reference aliased with a real table's name) and then `store.item_sk`.
+            if node.get("type") in ("SUBQUERY", "BASE_TABLE") and node.get("alias"):
                 subquery_aliases.add(node["alias"].lower())
             for v in node.values():
                 collect_subquery_aliases(v)

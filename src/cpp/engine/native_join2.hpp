@@ -330,10 +330,20 @@ struct RadixJoinTable {
         const uint32_t hi = o[b + 1];
         for (uint32_t i = o[b]; i < hi; ++i) {
             if (hashes[i] == h) {
-                uint32_t e = i + 1;
-                while (e < hi && hashes[e] == h) ++e;
+                // The bucket is sorted by hash, so the run's end is a binary search,
+                // not a walk: a key with 287K duplicates cost every caller 287K
+                // compares per lookup, and GroupJoin's stream pass looks up once per
+                // streamed row (`avg() OVER (PARTITION BY d_year)` over 1.15M rows: 5 s).
                 start = i;
-                count = e - i;
+                // A unique key (the common case) is settled by one compare; only a
+                // duplicated key pays the search.
+                const uint32_t next = i + 1;
+                if (next >= hi || hashes[next] != h) {
+                    count = 1;
+                    return;
+                }
+                const uint64_t* run_end = std::upper_bound(hashes.get() + next, hashes.get() + hi, h);
+                count = static_cast<uint32_t>(run_end - (hashes.get() + i));
                 return;
             }
         }

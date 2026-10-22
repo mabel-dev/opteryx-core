@@ -107,6 +107,7 @@ class RelationSchema:
         """This schema with `columns` in place of its own - a new schema."""
         new = self.clone()
         new.__dict__["columns"] = tuple(columns)
+        new.__dict__.pop("_lowercase_columns", None)
         return new
 
     def __str__(self) -> str:
@@ -155,6 +156,22 @@ class RelationSchema:
         """Get number of columns."""
         return len(self.columns)
 
+    def _lowercase_index(self) -> Dict[str, SchemaColumn]:
+        """Lowercased column name or alias -> the FIRST column carrying it (column
+        order, a column's name before its aliases), built on first use and held in
+        the instance dict. Sound because a column's name and aliases are fixed once
+        minted and `columns` only changes through `with_columns`, which drops it."""
+        index = self.__dict__.get("_lowercase_columns")
+        if index is None:
+            index = {}
+            for col in self.columns:
+                index.setdefault(col.name.lower(), col)
+                if col.aliases:
+                    for alias in col.aliases:
+                        index.setdefault(alias.lower(), col)
+            self.__dict__["_lowercase_columns"] = index
+        return index
+
     def column(self, name: str, case_insensitive: bool = False) -> Optional[SchemaColumn]:
         """Find column by name (including aliases).
 
@@ -166,14 +183,7 @@ class RelationSchema:
             SchemaColumn if found, None otherwise
         """
         if case_insensitive:
-            name_lower = name.lower()
-            for col in self.columns:
-                if col.name.lower() == name_lower:
-                    return col
-                if col.aliases:
-                    for alias in col.aliases:
-                        if alias.lower() == name_lower:
-                            return col
+            return self._lowercase_index().get(name.lower())
         else:
             for col in self.columns:
                 if col.name == name or (col.aliases and name in col.aliases):

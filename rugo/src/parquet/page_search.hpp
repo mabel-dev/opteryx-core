@@ -18,7 +18,7 @@
 // value: the value is decided, and nothing before its end can start a match in
 // a later value.
 
-#include "simd_find.h"   // simd_find_cs (draken/simd)
+#include "simd_find.h"   // simd_find_cs_pair / simd_pick_pair (draken/simd)
 
 #include <cstdint>
 #include <cstring>
@@ -42,6 +42,14 @@ inline uint32_t mark_values_containing(const uint8_t* region, size_t region_len,
                                        uint8_t* hit) {
     if (pat_len == 0)
         throw std::logic_error("page search: empty needle (the caller must not arm it)");
+    // Anchor pair for the SIMD candidate filter: the two rarest needle bytes by
+    // a histogram of the region's first 16 KiB, picked ONCE for the whole
+    // region (the search restarts after every hit). Small regions keep
+    // first+last — the histogram would cost more than it saves.
+    size_t anchor_a = 0, anchor_b = pat_len - 1;
+    if (pat_len >= 2 && region_len >= 4096)
+        simd_pick_pair(region, region_len < 16384 ? region_len : 16384, pat, pat_len,
+                       &anchor_a, &anchor_b);
     uint32_t marked = 0;
     size_t from = 0;
     // Cursor: value `v` has payload [vstart, vend). v == n_values means "not loaded yet"
@@ -62,7 +70,8 @@ inline uint32_t mark_values_containing(const uint8_t* region, size_t region_len,
         vend = vstart + static_cast<size_t>(len);
     };
     while (from < region_len) {
-        size_t p = simd_find_cs(region + from, region_len - from, pat, pat_len);
+        size_t p = simd_find_cs_pair(region + from, region_len - from, pat, pat_len,
+                                     anchor_a, anchor_b);
         if (p == SIZE_MAX) break;
         p += from;
         if (!loaded) {

@@ -124,6 +124,93 @@ def _source_relation(plan: LogicalPlan) -> PlanStep:
         nid = below[0][0]
 
 
+# Steps that DO work on rows. A window input relation whose body holds none of these
+# (a table, a filter, a projection) is cheaper to read twice than to materialize once.
+_COMPUTE_STEP_TYPES = frozenset(
+    {
+        LogicalPlanStepType.Join,
+        LogicalPlanStepType.Aggregate,
+        LogicalPlanStepType.AggregateAndGroup,
+        LogicalPlanStepType.Union,
+        LogicalPlanStepType.Intersect,
+        LogicalPlanStepType.Except,
+        LogicalPlanStepType.Distinct,
+        LogicalPlanStepType.Window,
+        LogicalPlanStepType.FramedWindow,
+    }
+)
+
+
+def _first_relation_nid(plan: LogicalPlan, nid: str):
+    """The first relation-introducing node at or below `nid`, or None at a branch or a
+    leaf that names none - the cases `_source_relation` refuses."""
+    from opteryx.planner.relation_resolver import RELATION_STEP_TYPES
+
+    while True:
+        if plan[nid].node_type in RELATION_STEP_TYPES:
+            return nid
+        below = plan.ingoing_edges(nid)
+        if len(below) != 1:
+            return None
+        nid = below[0][0]
+
+
+def _share_source_relation(plan: LogicalPlan, source_nid: str, *, plan_context) -> None:
+    """Materialize the window's input relation ONCE when it does real work.
+
+    The rewrite reads that input twice - as the join's outer leg and under the CTE
+    that aggregates it - and the plan has one consumer per node, so the second read
+    was a full COPY of the sub-plan: `avg(SUM(x)) OVER (...)` over a grouped join ran
+    the join and the aggregate twice (TPC-DS Q47/Q57: +22 ms over the source against
+    DuckDB's +1.2).
+
+    A relation that is a Subquery boundary over a body containing a join, an aggregate
+    or another row-producing step is carved out into a shared body, the engine's
+    materialize-once rail (relation_resolver `_finalize_cte_sharing`): the body goes to
+    `plan_context.pending_shared_ctes`, and a MaterializedCteRef takes the boundary's
+    place under its alias, so everything above still addresses the relation by name and
+    the copy the CTE leg takes is a second cheap read of the one result.
+
+    NOT shared: a Scan or any body with no compute step. Measured: a window over a bare
+    table costs the same either way (127.9 vs 128.3 ms), and a copy keeps a filter on
+    the partition key pushing into BOTH legs' scans, which a shared body, optimized on
+    its own, cannot.
+    """
+    from opteryx.compiled.structures.plan_steps import MaterializedCteRefStep
+    from opteryx.planner.relation_resolver import subplan_rooted_at
+    from opteryx.utils import random_string
+
+    relation_nid = _first_relation_nid(plan, source_nid)
+    if relation_nid is None or plan[relation_nid].node_type != LogicalPlanStepType.Subquery:
+        return
+    body = subplan_rooted_at(plan, relation_nid)
+    below = [nid for nid, _ in body.nodes(True) if nid != relation_nid]
+    if not any(body[nid].node_type in _COMPUTE_STEP_TYPES for nid in below):
+        return
+
+    boundary = plan[relation_nid]
+    cte_key = f"$win_shared-{random_string(8)}"
+    reference = MaterializedCteRefStep(
+        uuid=boundary.uuid,  # stays listed as a reader of any join above, as `_splice` keeps it
+        alias=boundary.alias,
+        relation=boundary.relation,
+        hints=boundary.hints,
+        hint_settings=boundary.hint_settings,
+        all_relations=boundary.all_relations,
+        pre_update_columns=boundary.pre_update_columns,
+        columns=[],
+        cte_key=cte_key,
+        cte_name=boundary.alias,
+    )
+    # The boundary heads the shared body; the reference has its uuid, so the body's gets
+    # a fresh one rather than two steps claiming the same reader.
+    boundary.uuid = random_string(32)
+    for nid in below:
+        plan.remove_node(nid)
+    plan[relation_nid] = reference
+    plan_context.pending_shared_ctes.append((cte_key, body))
+
+
 def _build_eq_condition(left_col: Expression, right_col: Expression) -> Expression:
     eq = Comparison(value="Eq", do_not_create_column=True, arena=left_col.arena)
     eq.left = left_col
@@ -261,6 +348,10 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list, *, plan_context) -> Lo
         raise InvalidInternalStateError(
             "an aggregate Window node was left below a window chain"
         )
+    # After the invariant check above, which needs the whole source in view: sharing
+    # moves the relation's body out of this plan.
+    _share_source_relation(plan, source_nid, plan_context=plan_context)
+    source_subplan = subplan_rooted_at(plan, source_nid)
     source_relation = _source_relation(source_subplan)
     source_alias = source_relation.alias
 

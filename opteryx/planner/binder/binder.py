@@ -16,7 +16,10 @@ from opteryx.exceptions import (
     UnexpectedDatasetReferenceError,
     UnsupportedSyntaxError,
 )
+from opteryx.expression import ExpressionColumn
 from opteryx.expression import NodeType
+from opteryx.expression import format_expression
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar import fixed_value_function
 from opteryx.planner.binder.binding_context import BindingContext
@@ -222,8 +225,6 @@ def _bound_cast_node(source, target, *, plan_context):
     the query dies at compile time with "CAST DECIMAL → DECIMAL(24, 4) is not
     supported".
     """
-    from opteryx.expression import ExpressionColumn
-
     parameters = []
     if target.category == LogicalCategory.DECIMAL:
         value = "DECIMAL"
@@ -528,7 +529,6 @@ def bind_correlated_subquery(node: Expression, context: Any) -> Tuple[Expression
     The returned context is the CALLER's, unchanged — a subquery's scope must
     not leak outwards.
     """
-    from opteryx.expression import get_all_nodes_of_type
     from opteryx.planner.binder.common import BinderVisitor
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
@@ -619,8 +619,6 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
         UnexpectedDatasetReferenceError: If the source dataset is not found.
         ColumnNotFoundError: If the column is not found in the schema.
     """
-    from opteryx.planner.binder import BindingContext
-
     def create_variable_node(node: Expression, context: BindingContext) -> Expression:
         """Populates a Node object for a variable.
 
@@ -854,9 +852,6 @@ def inner_binder(
     every node is exactly what an uncached render would produce — this collapses
     the O(n²) per-node memo-key rendering of deep expressions to O(n).
     """
-    # Import relevant classes and functions
-    from opteryx.expression import ExpressionColumn, format_expression, get_all_nodes_of_type
-
     # Retrieve the node type for further processing.
     node_type = node.node_type
 

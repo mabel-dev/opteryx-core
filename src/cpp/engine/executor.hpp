@@ -19,11 +19,13 @@
 // Python at most once and reuses it across pipeline runs, instead of re-running that
 // race on every single pipeline invocation.
 
+#include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -95,6 +97,27 @@ inline uint64_t telem_nbytes(const MorselPtr& m) {
          * 8ull;
 }
 
+// Completion latch for ONE pipeline run: counts that pipeline's own worker tasks down
+// to zero. The pool-wide `bs_pool_wait_native` this replaces waits for every task on
+// the pool, which is only the pipeline's own while pipelines run one at a time. UNION
+// legs run their pipelines concurrently (Engine::run_span_), and a pool-wide wait would
+// have each leg's driver also wait for its siblings' tasks. arrive() notifies WHILE
+// HOLDING the mutex, so a waiter that sees remaining == 0 cannot destroy the latch
+// under a notifier still inside notify_all().
+struct PipelineLatch {
+    std::mutex mtx;
+    std::condition_variable cv;
+    int remaining = 0;
+    void arrive() {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (--remaining == 0) cv.notify_all();
+    }
+    void wait() {
+        std::unique_lock<std::mutex> lock(mtx);
+        cv.wait(lock, [this] { return remaining == 0; });
+    }
+};
+
 // Per-worker state, shared by both dispatch backends below.
 struct WorkerCtx {
     Pipeline*           p;
@@ -102,6 +125,9 @@ struct WorkerCtx {
     GlobalSinkState*    gsink;
     std::vector<ErrCtx>* errs;
     int                 w;
+    // Set by the pool backend: run_worker_task arrives at it as its LAST act, after
+    // which the ctx may be destroyed by the waiter. Null on the std::thread backend.
+    PipelineLatch*      latch = nullptr;
     // P3 (docs/EXECUTION_PROFILING_IMPALA_GAP.md): when this worker started and
     // when it actually finished. TWO CLOCK READS PER WORKER PER PIPELINE — not
     // per morsel — so the cost is ~52ns per worker per pipeline, immeasurable.
@@ -310,7 +336,12 @@ inline void run_worker(WorkerCtx* ctx) {
 
 // Native-task entry matching BSThreadPoolBridge::submit_native's `void(*)(void*)` shape.
 inline void run_worker_task(void* raw) {
-    run_worker(static_cast<WorkerCtx*>(raw));
+    WorkerCtx* ctx = static_cast<WorkerCtx*>(raw);
+    // Read before the run: once arrive() lets the waiter go, ctx may be gone. run_worker
+    // converts every exception into the worker's ErrCtx, so arrive() is always reached.
+    PipelineLatch* latch = ctx->latch;
+    run_worker(ctx);
+    if (latch != nullptr) latch->arrive();
 }
 
 // ErrCtx::msg is a BORROWED `const char*`, documented as "valid at raise time"
@@ -448,12 +479,24 @@ run_pipeline(Pipeline& p, int dop, ErrCtx& err, PipelineSkew* skew = nullptr) {
 // bs_pool_bridge_c.h symbols (resolved via RTLD_GLOBAL to thread_pool.so's own compiled
 // code, the same pattern draken_native.so uses for draken_vector_unwrap et al.) ensures
 // the pool is only ever touched by the code that was compiled against its true layout.
+//
+// The wait is on this pipeline's OWN workers (PipelineLatch), so pipelines on different
+// driver threads can share the pool. `drain_pool` additionally runs the pool-wide barrier
+// the engine has always had after a pipeline: the serial path keeps it (identical
+// behaviour, and a no-op once the latch has released), while a concurrent UNION leg must
+// not - it would wait for its siblings' tasks.
 inline std::unique_ptr<GlobalSinkState>
 run_pipeline(Pipeline& p, int dop, int query_dop, ErrCtx& err, void* pool,
-             PipelineSkew* skew = nullptr) {
-    return run_pipeline_impl(p, dop, query_dop, err, [pool](std::vector<WorkerCtx>& ctxs) {
-        for (WorkerCtx& ctx : ctxs) bs_pool_submit_native(pool, &run_worker_task, &ctx);
-        bs_pool_wait_native(pool);
+             PipelineSkew* skew = nullptr, bool drain_pool = true) {
+    return run_pipeline_impl(p, dop, query_dop, err, [pool, drain_pool](std::vector<WorkerCtx>& ctxs) {
+        PipelineLatch latch;
+        latch.remaining = static_cast<int>(ctxs.size());
+        for (WorkerCtx& ctx : ctxs) {
+            ctx.latch = &latch;
+            bs_pool_submit_native(pool, &run_worker_task, &ctx);
+        }
+        latch.wait();
+        if (drain_pool) bs_pool_wait_native(pool);
     }, skew);
 }
 

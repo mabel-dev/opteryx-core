@@ -44,7 +44,6 @@ used - it never changes an answer.
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.planner.unsearchable_sorts import distance_calls
 from opteryx.planner.unsearchable_sorts import leading_call
 
 from .optimization_strategy import OptimizationStrategy
@@ -61,7 +60,15 @@ class VectorSearchStrategy(OptimizationStrategy):
         return context
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        return any(distance_calls(node.expressions()) for _, node in plan.nodes(True))
+        # `complete` acts only on a HeapSort carrying the `drops_unsearchable` mark
+        # (unsearchable_sorts.py puts it on every COSINE_DISTANCE-led Order, OperatorFusion
+        # carries it onto the HeapSort), so that is exactly when a run can change anything.
+        # A COSINE_DISTANCE elsewhere in the plan (a WHERE, a SELECT list) gives it nothing
+        # to do, and finding one needs a walk of every expression.
+        return any(
+            node.node_type == LogicalPlanStepType.HeapSort and node.drops_unsearchable
+            for _, node in plan.nodes(True)
+        )
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         for sort_nid, sort in list(plan.nodes(True)):

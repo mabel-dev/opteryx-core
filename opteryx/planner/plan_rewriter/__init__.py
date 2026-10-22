@@ -65,7 +65,43 @@ def do_plan_rewrite(
     # execute once each — but they are query text like any other and carry the
     # same shapes this pass exists to eliminate (subquery expressions, windows).
     # Rewrite each body as a plan in its own right, then the main plan.
+    #
+    # A strategy can carve a NEW shared body out of the plan it is rewriting
+    # (`plan_context.pending_shared_ctes`; window_to_join shares a window's input).
+    # `shared_ctes` is dependencies-first, and a carved body depends on a subset of
+    # what the plan it came out of depends on, so it goes immediately BEFORE that
+    # plan's entry (before its anchor, for a recursive CTE's term leg — the pair stays
+    # adjacent) or at the end when it came out of the main plan. A carved body is
+    # rewritten like any other, and may carve in turn.
     shared_ctes = plan_context.shared_ctes
-    for key, body in shared_ctes.items():
-        shared_ctes[key] = rewriter.rewrite(body, {})
-    return rewriter.rewrite(plan, {})
+    term_to_anchor = {meta["term_key"]: meta["anchor_key"] for meta in plan_context.recursive_ctes.values()}
+
+    def _place_pending(before_key):
+        pending, plan_context.pending_shared_ctes = plan_context.pending_shared_ctes, []
+        if not pending:
+            return []
+        anchor = term_to_anchor.get(before_key, before_key)
+        entries = list(shared_ctes.items())
+        shared_ctes.clear()
+        placed = False
+        for key, body in entries:
+            if key == anchor:
+                shared_ctes.update(pending)
+                placed = True
+            shared_ctes[key] = body
+        if not placed:
+            shared_ctes.update(pending)
+        return [key for key, _ in pending]
+
+    queue = list(shared_ctes)
+    while queue:
+        key = queue.pop(0)
+        shared_ctes[key] = rewriter.rewrite(shared_ctes[key], {})
+        queue.extend(_place_pending(key))
+    rewritten = rewriter.rewrite(plan, {})
+    queue = _place_pending(None)
+    while queue:
+        key = queue.pop(0)
+        shared_ctes[key] = rewriter.rewrite(shared_ctes[key], {})
+        queue.extend(_place_pending(key))
+    return rewritten

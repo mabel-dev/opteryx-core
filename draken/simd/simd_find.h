@@ -5,6 +5,29 @@
 // (fk_contains_hit), rugo (the parquet page search, the JSONL prefilter) and
 // opteryx (src/cpp/volnitsky.h) share ONE implementation without draken
 // depending on opteryx's src/cpp. Moved out of src/cpp/volnitsky.h 2026-10-06.
+//
+// Algorithm (2026-10-22): a two-anchor SIMD candidate filter. Two bytes of the
+// needle at positions a < b are compared against the haystack at every offset
+// in parallel (Muła's first+last scheme generalised to any pair); only offsets
+// where BOTH match are verified with memcmp. The main loop takes 64 bytes per
+// step and tests "any candidate in these 64 bytes" with one horizontal reduce
+// before it extracts a single mask, so a candidate-free stretch costs 8 loads,
+// 8 compares and one reduce per 64 bytes.
+//
+// Which pair: the generic entry (simd_find_cs) uses first+last. A caller that
+// searches a large region picks the two RAREST needle bytes from a histogram of
+// a sample of that region (simd_pick_pair) and passes them to simd_find_cs_pair
+// — on URL-like text the first byte of a needle is often common ('g' is 1.3%
+// of URL bytes), and a rare pair cuts the candidate rate by orders of
+// magnitude. Measured 2026-10-22 on real URL dictionary bytes (M5 Pro, one
+// thread): first+last with the old 1 KB first-byte sieve 14.7 GB/s; first+last
+// 64-byte loop 37 GB/s; rare pair 64-byte loop 59 GB/s. The old sieve LOST
+// whenever the first byte was common (every 1 KB chunk had one) and is gone.
+//
+// simd_find_cs returns the offset of the LEFTMOST occurrence (SIZE_MAX when
+// absent) — the parquet page search (rugo/src/parquet/page_search.hpp) needs
+// the position to map a hit back to its value. simd_contains_cs is the same
+// search reduced to a bool.
 
 #include <cstddef>
 #include <cstdint>
@@ -63,94 +86,152 @@ static inline size_t _find_first_byte(
 #endif
 }
 
-// simd_find_cs / simd_contains_cs — case-sensitive substring search,
-// first+last-byte SIMD verify.
-//
-// Measured faster than volnitsky_contains_cs on realistic (non-worst-case)
-// data: 1.2-8.6x across common-first-byte and hit workloads at haystack
-// lengths 24B-64KB, needles 2-32B (see memory: contains kernel benchmark).
-// No bigram table: nothing to allocate, build, or free per call.
-//
-// Haystacks <= CHUNK: a single first+last-byte SIMD pass over the whole input
-// (Muła's algorithm) — compare pat[0] and pat[pat_len-1] at every candidate
-// offset in parallel, verify the middle bytes only where both match.
-//
-// Haystacks > CHUNK: the same pass runs per CHUNK-byte window, but each window
-// is skipped via a first-byte-only SIMD sieve first. The sieve is cheaper per
-// byte than the two-load first+last pass, so long inputs whose first byte is
-// rare (Volnitsky's best case) still complete in close to Volnitsky's time,
-// while every other shape stays 1.2-3x faster than Volnitsky. Windows extend
-// pat_len-1 bytes past the chunk boundary so a match spanning two chunks is
-// still found, and window k only admits match STARTS inside chunk k, so the
-// first match found is the leftmost.
-//
-// simd_find_cs returns the offset of the LEFTMOST occurrence (SIZE_MAX when
-// absent) — the parquet page search (rugo/src/parquet/page_search.hpp) needs
-// the position to map a hit back to its value. simd_contains_cs is the same
-// search reduced to a bool; there is one inner loop, not two.
 // ---------------------------------------------------------------------------
-static inline size_t _simd_first_last_find(
-    const uint8_t* __restrict__ hay, size_t hay_len,
-    const uint8_t* __restrict__ pat, size_t pat_len) noexcept
+// simd_pick_pair — choose the two anchor positions (a < b) of `pat` whose bytes
+// are rarest in `sample` (a histogram of the first `sample_len` bytes of the
+// region about to be searched). Ties keep the earlier position; the two
+// positions are always distinct. pat_len must be >= 2. Cost is one byte
+// histogram of the sample — pass a bounded prefix (page_search uses 16 KiB),
+// never the whole region, and pick ONCE per region, not per call.
+// ---------------------------------------------------------------------------
+static inline void simd_pick_pair(
+    const uint8_t* sample, size_t sample_len,
+    const uint8_t* pat, size_t pat_len,
+    size_t* a, size_t* b) noexcept
 {
-    const uint8_t f    = pat[0];
-    const uint8_t l    = pat[pat_len - 1];
-    const size_t  last = pat_len - 1;
-    const size_t  span = hay_len - last;   // hay_len >= pat_len is guaranteed by callers
-
-#if defined(__AVX2__)
-    const __m256i vf = _mm256_set1_epi8(static_cast<char>(f));
-    const __m256i vl = _mm256_set1_epi8(static_cast<char>(l));
-    size_t i = 0;
-    for (; i + 32 <= span; i += 32) {
-        const __m256i bf = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hay + i));
-        const __m256i bl = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hay + i + last));
-        unsigned mask = _mm256_movemask_epi8(
-            _mm256_and_si256(_mm256_cmpeq_epi8(bf, vf), _mm256_cmpeq_epi8(bl, vl)));
-        while (mask) {
-            const unsigned j = __builtin_ctz(mask);
-            if (pat_len <= 2 || memcmp(hay + i + j + 1, pat + 1, pat_len - 2) == 0)
-                return i + j;
-            mask &= mask - 1;
-        }
+    uint32_t hist[256];
+    std::memset(hist, 0, sizeof(hist));
+    for (size_t i = 0; i < sample_len; ++i) hist[sample[i]]++;
+    // Start from the ends (the first+last pair), then let any interior position
+    // with a strictly rarer byte displace the commoner of the two.
+    size_t p0 = 0, p1 = pat_len - 1;
+    uint32_t c0 = hist[pat[p0]], c1 = hist[pat[p1]];
+    if (c1 < c0) { const size_t tp = p0; p0 = p1; p1 = tp; const uint32_t tc = c0; c0 = c1; c1 = tc; }
+    for (size_t i = 1; i + 1 < pat_len; ++i) {
+        const uint32_t c = hist[pat[i]];
+        if (c < c0)      { p1 = p0; c1 = c0; p0 = i; c0 = c; }
+        else if (c < c1) { p1 = i; c1 = c; }
     }
-    for (; i < span; ++i)
-        if (hay[i] == f && hay[i + last] == l &&
-            (pat_len <= 2 || memcmp(hay + i + 1, pat + 1, pat_len - 2) == 0))
-            return i;
-    return SIZE_MAX;
-#elif defined(__ARM_NEON)
-    const uint8x16_t vf = vdupq_n_u8(f);
-    const uint8x16_t vl = vdupq_n_u8(l);
-    size_t i = 0;
-    for (; i + 16 <= span; i += 16) {
-        const uint8x16_t bf = vld1q_u8(hay + i);
-        const uint8x16_t bl = vld1q_u8(hay + i + last);
-        const uint8x16_t eq = vandq_u8(vceqq_u8(bf, vf), vceqq_u8(bl, vl));
-        // vshrn nibble-mask (see _find_first_byte): ctzll>>2 = first match lane.
-        uint64_t mask = vget_lane_u64(
-            vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(eq), 4)), 0);
-        while (mask) {
-            const unsigned j = static_cast<unsigned>(__builtin_ctzll(mask) >> 2);
-            if (pat_len <= 2 || memcmp(hay + i + j + 1, pat + 1, pat_len - 2) == 0)
-                return i + j;
-            mask &= ~(0xFull << (j << 2));
-        }
-    }
-    for (; i < span; ++i)
-        if (hay[i] == f && hay[i + last] == l &&
-            (pat_len <= 2 || memcmp(hay + i + 1, pat + 1, pat_len - 2) == 0))
-            return i;
-    return SIZE_MAX;
-#else
-    for (size_t i = 0; i < span; ++i)
-        if (hay[i] == f && hay[i + last] == l &&
-            (pat_len <= 2 || memcmp(hay + i + 1, pat + 1, pat_len - 2) == 0))
-            return i;
-    return SIZE_MAX;
-#endif
+    if (p0 < p1) { *a = p0; *b = p1; } else { *a = p1; *b = p0; }
 }
 
+#if defined(__ARM_NEON)
+// 0x00/0xFF lanes -> 64-bit nibble mask (lane j matched iff nibble j != 0).
+static inline uint64_t _simd_neon_nibble_mask(uint8x16_t eq) noexcept {
+    return vget_lane_u64(
+        vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(eq), 4)), 0);
+}
+#endif
+
+// Two-anchor search core. Preconditions (checked by the public entries):
+// pat_len >= 2, hay_len >= pat_len, a < b <= pat_len - 1.
+// Window i covers match starts i .. i+W-1; it loads hay[i+a .. i+a+W-1] and
+// hay[i+b .. i+b+W-1], which stay inside the haystack whenever i + W <= span
+// (span = hay_len - pat_len + 1 and b <= pat_len - 1). The first candidate
+// found is the leftmost because windows advance monotonically and each
+// window's candidates are taken in ascending lane order.
+static inline size_t _simd_pair_find(
+    const uint8_t* __restrict__ hay, size_t hay_len,
+    const uint8_t* __restrict__ pat, size_t pat_len,
+    size_t a, size_t b) noexcept
+{
+    const size_t span = hay_len - pat_len + 1;
+    const uint8_t ba = pat[a];
+    const uint8_t bb = pat[b];
+    size_t i = 0;
+
+#if defined(__AVX2__)
+    const __m256i va = _mm256_set1_epi8(static_cast<char>(ba));
+    const __m256i vb = _mm256_set1_epi8(static_cast<char>(bb));
+    auto block = [&](size_t off) -> unsigned {
+        const __m256i la = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hay + off + a));
+        const __m256i lb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hay + off + b));
+        return static_cast<unsigned>(_mm256_movemask_epi8(
+            _mm256_and_si256(_mm256_cmpeq_epi8(la, va), _mm256_cmpeq_epi8(lb, vb))));
+    };
+    for (; i + 64 <= span; i += 64) {
+        const unsigned m0 = block(i);
+        const unsigned m1 = block(i + 32);
+        if ((m0 | m1) == 0) continue;
+        unsigned m = m0;
+        while (m) {
+            const unsigned j = __builtin_ctz(m);
+            if (memcmp(hay + i + j, pat, pat_len) == 0) return i + j;
+            m &= m - 1;
+        }
+        m = m1;
+        while (m) {
+            const unsigned j = __builtin_ctz(m);
+            if (memcmp(hay + i + 32 + j, pat, pat_len) == 0) return i + 32 + j;
+            m &= m - 1;
+        }
+    }
+    for (; i + 32 <= span; i += 32) {
+        unsigned m = block(i);
+        while (m) {
+            const unsigned j = __builtin_ctz(m);
+            if (memcmp(hay + i + j, pat, pat_len) == 0) return i + j;
+            m &= m - 1;
+        }
+    }
+#elif defined(__ARM_NEON)
+    const uint8x16_t va = vdupq_n_u8(ba);
+    const uint8x16_t vb = vdupq_n_u8(bb);
+    auto block = [&](size_t off) -> uint8x16_t {
+        return vandq_u8(vceqq_u8(vld1q_u8(hay + off + a), va),
+                        vceqq_u8(vld1q_u8(hay + off + b), vb));
+    };
+    for (; i + 64 <= span; i += 64) {
+        const uint8x16_t e0 = block(i);
+        const uint8x16_t e1 = block(i + 16);
+        const uint8x16_t e2 = block(i + 32);
+        const uint8x16_t e3 = block(i + 48);
+        const uint8x16_t any = vorrq_u8(vorrq_u8(e0, e1), vorrq_u8(e2, e3));
+        if (vmaxvq_u8(any) == 0) continue;
+        const uint8x16_t es[4] = {e0, e1, e2, e3};
+        for (int k = 0; k < 4; ++k) {
+            uint64_t m = _simd_neon_nibble_mask(es[k]);
+            while (m) {
+                const unsigned j = static_cast<unsigned>(__builtin_ctzll(m) >> 2);
+                const size_t at = i + static_cast<size_t>(16 * k) + j;
+                if (memcmp(hay + at, pat, pat_len) == 0) return at;
+                m &= ~(0xFull << (j << 2));
+            }
+        }
+    }
+    for (; i + 16 <= span; i += 16) {
+        uint64_t m = _simd_neon_nibble_mask(block(i));
+        while (m) {
+            const unsigned j = static_cast<unsigned>(__builtin_ctzll(m) >> 2);
+            if (memcmp(hay + i + j, pat, pat_len) == 0) return i + j;
+            m &= ~(0xFull << (j << 2));
+        }
+    }
+#endif
+    for (; i < span; ++i)
+        if (hay[i + a] == ba && hay[i + b] == bb && memcmp(hay + i, pat, pat_len) == 0)
+            return i;
+    return SIZE_MAX;
+}
+
+// Leftmost occurrence with caller-chosen anchors (see simd_pick_pair).
+// a and b must be distinct positions inside the needle; order is free.
+static inline size_t simd_find_cs_pair(
+    const uint8_t* __restrict__ hay, size_t hay_len,
+    const uint8_t* __restrict__ pat, size_t pat_len,
+    size_t a, size_t b) noexcept
+{
+    if (pat_len == 0) return 0;
+    if (hay_len < pat_len) return SIZE_MAX;
+    if (pat_len == 1) {
+        const void* p = memchr(hay, pat[0], hay_len);
+        return p != nullptr ? static_cast<size_t>(static_cast<const uint8_t*>(p) - hay) : SIZE_MAX;
+    }
+    if (a > b) { const size_t t = a; a = b; b = t; }
+    return _simd_pair_find(hay, hay_len, pat, pat_len, a, b);
+}
+
+// Leftmost occurrence, first+last anchors.
 static inline size_t simd_find_cs(
     const uint8_t* __restrict__ hay, size_t hay_len,
     const uint8_t* __restrict__ pat, size_t pat_len) noexcept
@@ -161,26 +242,7 @@ static inline size_t simd_find_cs(
         const void* p = memchr(hay, pat[0], hay_len);
         return p != nullptr ? static_cast<size_t>(static_cast<const uint8_t*>(p) - hay) : SIZE_MAX;
     }
-
-    constexpr size_t CHUNK = 1024;
-    if (hay_len <= CHUNK)
-        return _simd_first_last_find(hay, hay_len, pat, pat_len);
-
-    const uint8_t f = pat[0];
-    for (size_t base = 0; base < hay_len; base += CHUNK) {
-        const size_t clen = (CHUNK < hay_len - base) ? CHUNK : (hay_len - base);
-        if (_find_first_byte(hay + base, clen, f) == SIZE_MAX) continue;
-        const size_t wlen = ((clen + pat_len - 1) < (hay_len - base))
-                                 ? (clen + pat_len - 1) : (hay_len - base);
-        // A final chunk shorter than the pattern holds no match start: every earlier
-        // window already reached pat_len-1 bytes past its chunk. Searching it would break
-        // _simd_first_last_find's hay_len >= pat_len contract (span underflows and the
-        // scan reads past the haystack — a false positive from the next string's bytes).
-        if (wlen < pat_len) break;
-        const size_t r = _simd_first_last_find(hay + base, wlen, pat, pat_len);
-        if (r != SIZE_MAX) return base + r;
-    }
-    return SIZE_MAX;
+    return _simd_pair_find(hay, hay_len, pat, pat_len, 0, pat_len - 1);
 }
 
 static inline bool simd_contains_cs(

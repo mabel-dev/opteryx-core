@@ -15,19 +15,9 @@ compiler arms the native sort with it.
 """
 
 from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 FUNCTION = "COSINE_DISTANCE"
-
-
-def distance_calls(expressions):
-    """Every COSINE_DISTANCE call in `expressions`."""
-    return [
-        node
-        for node in get_all_nodes_of_type(list(expressions), (NodeType.FUNCTION,))
-        if str(node.value).upper() == FUNCTION
-    ]
 
 
 def leading_call(plan, key):
