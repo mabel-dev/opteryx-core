@@ -193,10 +193,10 @@ static std::vector<uint32_t> sort_via_generic(const std::vector<SortKeyColumn>& 
 }
 
 static std::vector<SortKeyColumn> keys_of(const std::vector<MorselPtr>& ms,
-                                          const std::vector<SortKeySpec>& spec, size_t n) {
+                                          const std::vector<SortKeySpec>& spec) {
     ErrCtx err;
     std::vector<SortKeyColumn> keys;
-    bool ok = build_sort_keys(ms, spec, n, keys, err);
+    bool ok = build_sort_keys(ms, spec, keys, err);
     CHECK(ok, err.msg ? err.msg : "build_sort_keys failed");
     return keys;
 }
@@ -230,7 +230,7 @@ static void test_aos_matches_generic() {
                                     (k + trial / 2) % 2 == 0});
                 }
                 std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-                auto keys = keys_of(ms, spec, n);
+                auto keys = keys_of(ms, spec);
                 CHECK(sort_via_dispatch(keys, n, SIZE_MAX) == sort_via_generic(keys, n, SIZE_MAX),
                       "AoS and generic comparators disagree");
             }
@@ -253,7 +253,7 @@ static void test_matches_independent_reference() {
     }
     std::vector<MorselPtr> ms{make_morsel({col_i64(a, va), col_i64(b, vb)})};
     std::vector<SortKeySpec> spec{{0, true, true}, {1, false, false}};   // c0 ASC, c1 DESC
-    auto keys = keys_of(ms, spec, n);
+    auto keys = keys_of(ms, spec);
 
     std::vector<uint32_t> want(n);
     std::iota(want.begin(), want.end(), 0u);
@@ -273,12 +273,12 @@ static void test_null_placement() {
     std::vector<bool> valid{true, false, true, false, true};
     std::vector<MorselPtr> ms{make_morsel({col_i64(v, valid)})};
 
-    auto asc_keys = keys_of(ms, {{0, true, true}}, 5);
+    auto asc_keys = keys_of(ms, {{0, true, true}});
     auto asc = sort_via_dispatch(asc_keys, 5, SIZE_MAX);
     CHECK(!valid[asc[0]] && !valid[asc[1]], "ASC must place NULLs first");
     CHECK(v[asc[2]] == 1 && v[asc[3]] == 2 && v[asc[4]] == 3, "ASC value order wrong");
 
-    auto desc_keys = keys_of(ms, {{0, false, false}}, 5);
+    auto desc_keys = keys_of(ms, {{0, false, false}});
     auto desc = sort_via_dispatch(desc_keys, 5, SIZE_MAX);
     CHECK(!valid[desc[3]] && !valid[desc[4]], "DESC must place NULLs last");
     CHECK(v[desc[0]] == 3 && v[desc[1]] == 2 && v[desc[2]] == 1, "DESC value order wrong");
@@ -292,7 +292,7 @@ static void test_float_sign_order() {
     std::vector<MorselPtr> ms{make_morsel({col_f64(v, valid)})};
     size_t n = v.size();
 
-    auto keys = keys_of(ms, {{0, true, true}}, n);
+    auto keys = keys_of(ms, {{0, true, true}});
     auto got = sort_via_dispatch(keys, n, SIZE_MAX);
     std::vector<double> sorted;
     for (uint32_t i : got) sorted.push_back(v[i]);
@@ -322,7 +322,7 @@ static void test_vergesort_hit_and_miss_agree() {
     // already ascending -> single run -> prepass hit
     {
         std::vector<MorselPtr> ms{make_morsel({col_i64(base, valid)})};
-        auto keys = keys_of(ms, {{0, true, true}}, n);
+        auto keys = keys_of(ms, {{0, true, true}});
         auto got = sort_via_dispatch(keys, n, SIZE_MAX);
         std::vector<uint32_t> want(n);
         std::iota(want.begin(), want.end(), 0u);
@@ -333,7 +333,7 @@ static void test_vergesort_hit_and_miss_agree() {
         std::vector<int64_t> desc(n);
         for (size_t i = 0; i < n; ++i) desc[i] = static_cast<int64_t>(n - i);
         std::vector<MorselPtr> ms{make_morsel({col_i64(desc, valid)})};
-        auto keys = keys_of(ms, {{0, true, true}}, n);
+        auto keys = keys_of(ms, {{0, true, true}});
         auto got = sort_via_dispatch(keys, n, SIZE_MAX);
         for (size_t i = 0; i + 1 < n; ++i)
             CHECK(desc[got[i]] <= desc[got[i + 1]], "reversed-run output not ascending");
@@ -343,7 +343,7 @@ static void test_vergesort_hit_and_miss_agree() {
         std::vector<int64_t> shuf = base;
         std::shuffle(shuf.begin(), shuf.end(), std::mt19937_64(5));
         std::vector<MorselPtr> ms{make_morsel({col_i64(shuf, valid)})};
-        auto keys = keys_of(ms, {{0, true, true}}, n);
+        auto keys = keys_of(ms, {{0, true, true}});
         auto aos = sort_via_dispatch(keys, n, SIZE_MAX);
         auto gen = sort_via_generic(keys, n, SIZE_MAX);
         CHECK(aos == gen, "AoS/generic disagree on the vergesort-miss path");
@@ -365,7 +365,7 @@ static void test_string_keys() {
     valid[2] = false;                      // the "" slot becomes NULL
     size_t n = v.size();
     std::vector<MorselPtr> ms{make_morsel({col_str(v, valid)})};
-    auto keys = keys_of(ms, {{0, true, true}}, n);
+    auto keys = keys_of(ms, {{0, true, true}});
     CHECK(!aos_keys_eligible(keys), "string keys must NOT be AoS-eligible");
 
     std::vector<uint32_t> perm(n);
@@ -387,7 +387,7 @@ static void test_decimal128_keys() {
     std::vector<__int128> v{big, -big, 0, big - 1, -1};
     size_t n = v.size();
     std::vector<MorselPtr> ms{make_morsel({col_dec128(v)})};
-    auto keys = keys_of(ms, {{0, true, true}}, n);
+    auto keys = keys_of(ms, {{0, true, true}});
     CHECK(!aos_keys_eligible(keys), "DECIMAL128 keys must NOT be AoS-eligible");
 
     std::vector<uint32_t> perm(n);
@@ -411,7 +411,7 @@ static void test_null_placement_explicit() {
     for (bool asc : {true, false}) {
         for (bool nf : {true, false}) {
             for (int lane = 0; lane < 2; ++lane) {
-                auto keys = keys_of(lane == 0 ? ms_i : ms_s, {{0, asc, nf}}, 5);
+                auto keys = keys_of(lane == 0 ? ms_i : ms_s, {{0, asc, nf}});
                 for (size_t take : {SIZE_MAX, size_t{1}, size_t{2}, size_t{3}}) {
                     auto got = sort_via_dispatch(keys, 5, take);
                     auto gen = sort_via_generic(keys, 5, take);
@@ -437,7 +437,7 @@ static void test_null_placement_explicit() {
     // branch as the string lane above. Check its value order is unaffected by nf.
     std::vector<MorselPtr> ms_d{make_morsel({col_dec128(dv)})};
     for (bool nf : {true, false}) {
-        auto keys = keys_of(ms_d, {{0, true, nf}}, 5);
+        auto keys = keys_of(ms_d, {{0, true, nf}});
         auto got = sort_via_dispatch(keys, 5, SIZE_MAX);
         for (size_t i = 1; i < 5; ++i)
             CHECK(dv[got[i - 1]] <= dv[got[i]], "DECIMAL128 value order changed by nulls_first");
@@ -456,7 +456,7 @@ static void test_null_placement_explicit() {
         if (p(rng) <= 20) vb[i] = false;
     }
     std::vector<MorselPtr> ms{make_morsel({col_i64(a, va), col_i64(b, vb)})};
-    auto keys = keys_of(ms, {{0, false, true}, {1, true, false}}, n);
+    auto keys = keys_of(ms, {{0, false, true}, {1, true, false}});
     std::vector<uint32_t> want(n);
     std::iota(want.begin(), want.end(), 0u);
     std::stable_sort(want.begin(), want.end(), [&](uint32_t x, uint32_t y) {
@@ -484,7 +484,7 @@ static void test_five_columns_fall_back() {
         spec.push_back({static_cast<size_t>(k), true, true});
     }
     std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-    auto keys = keys_of(ms, spec, n);
+    auto keys = keys_of(ms, spec);
     CHECK(!aos_keys_eligible(keys), "5 columns must exceed SORT_AOS_MAX_PARTS");
 
     std::vector<uint32_t> perm(n);
@@ -509,7 +509,7 @@ static void test_take_first_prefix() {
     std::vector<int64_t> v(n);
     for (size_t i = 0; i < n; ++i) v[i] = d(rng);
     std::vector<MorselPtr> ms{make_morsel({col_i64(v, std::vector<bool>(n, true))})};
-    auto keys = keys_of(ms, {{0, true, true}}, n);
+    auto keys = keys_of(ms, {{0, true, true}});
 
     auto full = sort_via_dispatch(keys, n, SIZE_MAX);
     for (size_t k : {size_t(1), size_t(10), size_t(500)}) {
@@ -588,7 +588,7 @@ static void test_aos_gate_does_not_change_the_answer() {
     for (size_t i = 0; i < n; ++i) { a[i] = d(rng); b[i] = d(rng); }
     std::vector<MorselPtr> ms{make_morsel({col_i64(a, std::vector<bool>(n, true)),
                                            col_i64(b, std::vector<bool>(n, true))})};
-    auto keys = keys_of(ms, {{0, true, true}, {1, false, false}}, n);
+    auto keys = keys_of(ms, {{0, true, true}, {1, false, false}});
     CHECK(aos_keys_eligible(keys), "expected AoS-eligible keys");
 
     // Straddle the gate: k=10 skips the build, k=4000 takes it. Compare each against
@@ -690,7 +690,7 @@ static void test_radix_matches_stable_sort() {
                                     (k + trial / 2) % 2 == 0});
                 }
                 std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-                auto keys = keys_of(ms, spec, n);
+                auto keys = keys_of(ms, spec);
 
                 for (int order = 0; order < 3; ++order) {
                     // 0: identity start; 1: shuffled start; 2: start = the sorted order
@@ -737,7 +737,7 @@ static void test_run_census_routes() {
         cols.push_back(col_i64(vals, std::vector<bool>(n, true)));
         std::vector<SortKeySpec> spec{{0, true, true}};
         std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-        auto keys = keys_of(ms, spec, n);
+        auto keys = keys_of(ms, spec);
         std::vector<uint32_t> ref(n);
         std::iota(ref.begin(), ref.end(), 0u);
         std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
@@ -777,7 +777,7 @@ static void test_radix_scratch_is_charged() {
     cols.push_back(col_i64(vals, std::vector<bool>(n, true)));
     std::vector<SortKeySpec> spec{{0, true, true}};
     std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-    auto keys = keys_of(ms, spec, n);
+    auto keys = keys_of(ms, spec);
     std::vector<uint32_t> start(n);
     std::iota(start.begin(), start.end(), 0u);
 
@@ -819,7 +819,7 @@ static void test_wide_team_threshold_routes() {
         cols.push_back(col_i64(vals, valid));
         std::vector<SortKeySpec> spec{{0, shape % 2 == 0, true}};
         std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-        auto keys = keys_of(ms, spec, n);
+        auto keys = keys_of(ms, spec);
         std::vector<uint32_t> ref(n);
         std::iota(ref.begin(), ref.end(), 0u);
         std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
@@ -868,7 +868,7 @@ static void test_census_runs_match_vergesort() {
         cols.push_back(col_i64(vals, std::vector<bool>(n, true)));
         std::vector<SortKeySpec> spec{{0, true, true}};
         std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-        auto keys = keys_of(ms, spec, n);
+        auto keys = keys_of(ms, spec);
         SortKeyCmp cmp{keys};
         for (uint32_t th : {1u, 2u, 4u, SORT_VERGESORT_THRESHOLD}) {
             std::vector<uint32_t> id(n);
@@ -1024,7 +1024,7 @@ static void test_string_radix_matches_stable_sort() {
                     spec.push_back({static_cast<size_t>(k), (k + trial) % 2 == 0, (trial + k / 2) % 2 == 0});
                 }
                 std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-                auto keys = keys_of(ms, spec, n);
+                auto keys = keys_of(ms, spec);
                 CHECK(keys_have_string(keys) && radix_keys_eligible(keys), "string radix route not taken");
                 for (int order = 0; order < 2; ++order) {
                     std::vector<uint32_t> start(n);
@@ -1063,7 +1063,7 @@ static void test_string_radix_deep_prefix() {
             cols.push_back(col_str(v, valid));
             std::vector<SortKeySpec> spec{{0, dir == 0, dir == 0}};
             std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
-            auto keys = keys_of(ms, spec, n);
+            auto keys = keys_of(ms, spec);
             std::vector<uint32_t> ref(n);
             std::iota(ref.begin(), ref.end(), 0u);
             std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});

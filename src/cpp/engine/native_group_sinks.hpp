@@ -6157,7 +6157,7 @@ struct GroupBySink : Sink {
         }
         // 2. Rank: the top k by the exact comparator the final sort uses.
         std::vector<SortKeyColumn> keys;
-        if (!build_sort_keys({km}, kspec, total, keys, err)) return 0;
+        if (!build_sort_keys({km}, kspec, keys, err)) return 0;
         std::vector<uint32_t> perm(total);
         for (uint32_t i = 0; i < N; ++i) perm[i] = i;
         sort_perm(keys, perm, k, 1u);   // partial sort: perm[0, k) is the top k

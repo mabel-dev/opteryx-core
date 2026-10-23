@@ -46,8 +46,14 @@ case "${MODE}" in
     # The RTLD_GLOBAL bridge check: pulls opteryx.expression ->
     # opteryx.compiled.nanobind.vectors, which resolves draken_* from the global
     # namespace. This is the exact import 0.9.56 broke.
+    # HTTP/2 check: the wheel's libcurl must speak h2 — a wheel built without
+    # nghttp2 makes every object-store batch HTTP/1.1, at most
+    # max_host_connections requests per host per thread (0.9.173 shipped that).
     DEEP_IMPORT='import opteryx
-from opteryx.connectors import OpteryxConnector'
+from opteryx.connectors import OpteryxConnector
+from opteryx.compiled.http_client import curl_build_features
+f = curl_build_features()
+assert f["http2"], ("the wheel libcurl has no HTTP/2", f)'
     ;;
   rugo)
     PKG="rugo"

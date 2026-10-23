@@ -524,7 +524,7 @@ class NativeSkeneLatmatScanSource : public Source {
             std::vector<SortKeySpec> spec{SortKeySpec{0, sort_ascending_, sort_nulls_first_}};
             std::vector<SortKeyColumn> keys;
             ErrCtx kerr;
-            if (!build_sort_keys(ms, spec, total, keys, kerr)) {
+            if (!build_sort_keys(ms, spec, keys, kerr)) {
                 record_error(g, kerr.code != 0 ? kerr.code : 1,
                              kerr.msg != nullptr
                                  ? std::string(kerr.msg)

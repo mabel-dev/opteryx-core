@@ -103,6 +103,21 @@ def build_vendored_libcurl(build_subdir="curl", cppflags=""):
         # breaks the aarch64 wheels only — x86_64 will keep building green.
         "--with-pic",
         "--with-openssl",  # Enable SSL/TLS via OpenSSL for HTTPS support
+        # HTTP/2 is REQUIRED, not opportunistic. Object stores (GCS) speak h2, and
+        # without it every get_many() is HTTP/1.1: at most max_host_connections
+        # requests per host per thread, no multiplexing. It used to be whatever
+        # configure happened to find — present on a Homebrew build, ABSENT from the
+        # manylinux wheels (0.9.173 carries no nghttp2). `--with-nghttp2` asks for
+        # it, but this curl's configure does NOT fail when the headers are missing
+        # (measured on Debian 12: it built HTTP/1.1-only), so the gate is
+        # resolve_libcurl's check of what was built (_assert_vendored_curl_http2).
+        "--with-nghttp2",
+        # HTTP/3 needs a QUIC backend this build never has, so a found nghttp3 was
+        # linked and bundled for nothing (curl-config --features: no HTTP3). Said
+        # explicitly so the wheel's contents do not depend on the build host.
+        "--without-nghttp3",
+        "--without-ngtcp2",
+        "--without-quiche",
         "--without-zlib",
         "--without-libpsl",
         "--without-libidn2",
@@ -379,6 +394,28 @@ def _vendored_curl_select_fd_limit(curl_build, fd_setsize):
     return 0 if has_poll else fd_setsize
 
 
+def _assert_vendored_curl_http2(curl_build):
+    """Fail the build unless the vendored libcurl in `curl_build` has HTTP/2.
+
+    Checks what was BUILT (its own curl-config), not what configure was asked
+    for, and runs on a cached archive too — called by resolve_libcurl after the
+    archive is resolved, outside build_vendored_libcurl's catch-all.
+    """
+    import subprocess
+
+    curl_config = os.path.join(curl_build, "bin", "curl-config")
+    features = subprocess.run(
+        [curl_config, "--features"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    if "HTTP2" not in features:
+        raise RuntimeError(
+            f"The vendored libcurl in {curl_build} was built without HTTP/2 "
+            f"(features: {' '.join(features)}). Install the nghttp2 development package "
+            "(manylinux: libnghttp2-devel; macOS: brew install libnghttp2), delete that "
+            "directory and rebuild."
+        )
+
+
 def _vendored_curl_static_libs(curl_build):
     """Link args for the vendored static libcurl, from its own curl-config.
 
@@ -414,7 +451,9 @@ def resolve_libcurl():
     """
     if is_mac():
         assert_openssl_thread_safe(fail_when_unknown=True)
-        subdir = f"curl-fdsetsize-{_DARWIN_CURL_FD_SETSIZE}"
+        # `-h2`: the cache key changes with the configure flags (see
+        # build_vendored_libcurl), so a pre-HTTP/2 cached archive is never reused.
+        subdir = f"curl-fdsetsize-{_DARWIN_CURL_FD_SETSIZE}-h2"
         libcurl_a = build_vendored_libcurl(
             build_subdir=subdir,
             cppflags=f"-D_DARWIN_UNLIMITED_SELECT -DFD_SETSIZE={_DARWIN_CURL_FD_SETSIZE}",
@@ -427,6 +466,7 @@ def resolve_libcurl():
                 "(brew install openssl@3 pkg-config)."
             )
         curl_build = os.path.join(os.path.dirname(__file__), "build", subdir)
+        _assert_vendored_curl_http2(curl_build)
         fd_limit = _vendored_curl_select_fd_limit(curl_build, _DARWIN_CURL_FD_SETSIZE)
         link_args = _vendored_curl_static_libs(curl_build)
         print(f"Using vendored libcurl (darwin, select fd limit {fd_limit}): {' '.join(link_args)}")
@@ -446,11 +486,15 @@ def resolve_libcurl():
     # pkg-config prefix that build_vendored_libcurl() passes to --with-openssl, so
     # the gate is exact here and an undeterminable version is itself a failure.
     assert_openssl_thread_safe(fail_when_unknown=True)
-    libcurl_a = build_vendored_libcurl()
+    libcurl_a = build_vendored_libcurl(build_subdir="curl-h2")
     if libcurl_a and os.path.exists(libcurl_a):
-        curl_build = os.path.join(os.path.dirname(__file__), "build", "curl")
+        curl_build = os.path.join(os.path.dirname(__file__), "build", "curl-h2")
+        _assert_vendored_curl_http2(curl_build)
         fd_limit = _vendored_curl_select_fd_limit(curl_build, _LINUX_FD_SETSIZE)
-        return ["third_party/curl/include"], [libcurl_a, "-lssl", "-lcrypto"], fd_limit
+        # The archive's own link line (as on darwin): libcurl.a, -lnghttp2, and
+        # the TLS libraries from the prefix configure used. A hand-written
+        # "-lssl -lcrypto" would leave the nghttp2 symbols unresolved until import.
+        return ["third_party/curl/include"], _vendored_curl_static_libs(curl_build), fd_limit
 
     raise RuntimeError(
         "Failed to resolve libcurl. The http_client extension is REQUIRED.\n\n"

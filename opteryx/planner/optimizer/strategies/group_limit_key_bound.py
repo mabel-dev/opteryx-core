@@ -39,8 +39,10 @@ aggregates are complete - this is a choice of groups, never a partial count.
 Row groups. For an integer key on a reader that serves them
 (`supports_row_group_key_bounds`), the same proof is re-run with every surviving
 file's ROW GROUPS as the witnesses and the T it yields replaces the file-level T when
-tighter. T stays a plan-time literal, so the row filter and the scan's row-group
-pruning agree on it and every kept key keeps all of its rows.
+tighter. When the files give no window at all (a single file, or fewer than K file
+witnesses) every file's row groups are the witnesses. T stays a plan-time literal, so
+the row filter and the scan's row-group pruning agree on it and every kept key keeps
+all of its rows.
 
 Strings. Stored string bounds may be truncated: a stored min is a byte PREFIX p
 of the true min, so the true min is < inc(p) (p with its last byte bumped) - a
@@ -60,7 +62,7 @@ Abandoned - quickly, and silently (no behaviour changes) - unless ALL hold:
 - The key is an INTEGER or string column (floats: NaN; temporals: unit encodings
   - not v1).
 - At least K distinct provable witnesses exist, and the bound really prunes a
-  file.
+  file or a row group.
 
 NULL keys are irrelevant here: no ordering means the NULL group is simply not one
 of the groups chosen, and `k <= T` excludes it.
@@ -194,8 +196,8 @@ class GroupLimitKeyBoundStrategy(OptimizationStrategy):
         return None, None
 
     def _row_group_units(self, scan, manifest, name, bounds, floors, window):
-        """Row-group units ``(lo, hi, proven, file)`` of the files `window` touches, or
-        None when the reader cannot describe row groups.
+        """Row-group units ``(lo, hi, proven, file)`` of the files `window` touches
+        (None = every file), or None when the reader cannot describe row groups.
 
         A file whose row groups are not ALL described contributes its own min/max as
         one unit, as at file level. Files outside `window` are not read: a sub-window
@@ -203,8 +205,11 @@ class GroupLimitKeyBoundStrategy(OptimizationStrategy):
         connector = scan.connector
         if connector is None or not connector.supports_row_group_key_bounds:
             return None
-        lower, upper = window
-        rows = [row for row, (lo, hi) in enumerate(bounds) if lo[1] <= upper and hi[1] >= lower]
+        if window is None:
+            rows = list(range(len(bounds)))
+        else:
+            lower, upper = window
+            rows = [row for row, (lo, hi) in enumerate(bounds) if lo[1] <= upper and hi[1] >= lower]
         paths = manifest.get_file_paths()
         sizes = manifest.file_sizes()
         described = connector.row_group_key_bounds(
@@ -220,26 +225,31 @@ class GroupLimitKeyBoundStrategy(OptimizationStrategy):
 
     def _integer_candidate(self, scan, manifest, name, physical, bounds, k):
         """(lower, upper, description, kept_files) for an integer key, or None.
-        `lower` is None when no file sits wholly below it, so no filter is needed."""
+        `lower` is None when no file or row group sits wholly below it, so no filter
+        is needed."""
         floors = manifest.file_distinct_floors(name)
         units = [(lo[1], hi[1], 0 if floors is None else floors[row], row) for row, (lo, hi) in enumerate(bounds)]
         found = _integer_window(units, k)
+        window = None if found is None else found[:2]
+        text = None if found is None else f"{found[3]} of {len(bounds)} files"
+        if physical != DrakenType.UINT64:
+            # no file window (a single file, or too few file witnesses): every file's
+            # row groups are the witnesses
+            row_groups = self._row_group_units(scan, manifest, name, bounds, floors, window)
+            if row_groups is not None:
+                refined = _integer_window(row_groups, k, within=window)
+                if refined is not None and refined[:2] != window:
+                    found, units = refined, row_groups
+                    text = f"{refined[3]} of {len(bounds)} files, {refined[2]} of {len(row_groups)} row groups"
         if found is None:
             return None
-        lower, upper, kept_units, kept_files = found
-        text = f"{kept_files} of {len(bounds)} files"
-        if physical != DrakenType.UINT64:
-            row_groups = self._row_group_units(scan, manifest, name, bounds, floors, (lower, upper))
-            if row_groups is not None:
-                refined = _integer_window(row_groups, k, within=(lower, upper))
-                if refined is not None and refined[:2] != (lower, upper):
-                    lower, upper, kept_units, kept_files = refined
-                    text = f"{kept_files} of {len(bounds)} files, {kept_units} of {len(row_groups)} row groups"
-        # judged against EVERY file: a file outside the window is still a file the
-        # filter must exclude, whichever units the refinement happened to read
-        pruning_below = any(hi[1] < lower for _lo, hi in bounds)
-        pruning_above = any(lo[1] > upper for lo, _hi in bounds)
-        if not pruning_below and not pruning_above and kept_units >= len(units):
+        lower, upper, _kept_units, kept_files = found
+        # judged against EVERY file as well as the units read: a file outside the
+        # window is still a file the filter must exclude, whichever units the
+        # refinement happened to read
+        pruning_below = any(hi < lower for _lo, hi, _p, _f in units) or any(hi[1] < lower for _lo, hi in bounds)
+        pruning_above = any(lo > upper for lo, _hi, _p, _f in units) or any(lo[1] > upper for lo, _hi in bounds)
+        if not pruning_below and not pruning_above:
             return None
         return (lower if pruning_below else None), upper, text, kept_files
 
@@ -265,8 +275,6 @@ class GroupLimitKeyBoundStrategy(OptimizationStrategy):
             return context
         manifest = scan.manifest
         if manifest is None or not manifest.stats_are_authoritative or manifest.has_deletes():
-            return context
-        if manifest.get_file_count() < 2:
             return context
 
         scan_identities = {c.identity for c in scan.schema.columns}

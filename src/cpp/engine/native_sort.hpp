@@ -424,13 +424,14 @@ struct WindowSink : Sink, EmitSubset {
         for (const MorselPtr& m : g.morsels) if (m->num_rows() > 0) src.push_back(m);
         if (src.empty()) return;
 
+        const unsigned dop = static_cast<unsigned>(g.query_dop);
         std::vector<uint32_t> row_m, row_r;
-        size_t n = flatten_rows(src, row_m, row_r);
+        size_t n = flatten_rows(src, row_m, row_r, dop);
         std::vector<SortKeyColumn> keys;
-        if (!build_sort_keys(src, sort_spec, n, keys, err)) return;
+        if (!build_sort_keys(src, sort_spec, keys, err, dop)) return;
         std::vector<uint32_t> perm(n);
         for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
-        sort_perm(keys, perm, SIZE_MAX, static_cast<unsigned>(g.query_dop));
+        sort_perm(keys, perm, SIZE_MAX, dop);
 
         // Rank numbers in perm order (gather_rows emits rows in perm order too).
         // Navigation functions (LAG/LEAD) get no rank: their per-row value is a
@@ -485,96 +486,183 @@ struct WindowSink : Sink, EmitSubset {
         // internal INTERSECT/EXCEPT ALL ROW_NUMBER) the key range is empty,
         // win_keys_equal is vacuously true, and the whole partition is one peer
         // group — which is the right reading: with no ordering every row ties.
-        size_t ps = 0;
-        while (ps < n) {
-            size_t pe = ps + 1;
-            while (pe < n && win_keys_equal(keys, perm[pe], perm[ps], 0, n_part)) ++pe;
-            const int64_t pn = static_cast<int64_t>(pe - ps);
+        //
+        // The extents are found in parallel, in sorted order. Pass 1 classifies each
+        // sorted position against its predecessor — brk[i] = 2 opens a partition, 1
+        // opens a peer group inside one, 0 continues the group — the same split as
+        // comparing every row with its run's FIRST row, because win_keys_equal is an
+        // exact equality. Pass 2 gives every row its value from (partition start,
+        // partition end, peer-group start, peer-group end, dense rank), each team
+        // member walking its own slice of the sorted positions. What a slice inherits
+        // from the slices before it (the open group and partition, the dense rank so
+        // far) and the first break after it are settled serially, between the passes,
+        // from one summary per slice.
+        const size_t nk = sort_spec.size();
+        const unsigned wt = sort_team_width(n, dop);
+        auto slice_lo = [n, wt](unsigned t) { return n * t / wt; };
+        constexpr size_t kNone = SIZE_MAX;
+        struct WalkSlice {
+            size_t first_g = SIZE_MAX, last_g = SIZE_MAX;   // first / last group break
+            size_t first_p = SIZE_MAX, last_p = SIZE_MAX;   // first / last partition break
+            int64_t groups = 0;                       // group breaks in the slice
+            int64_t groups_from_last_p = 0;           // ...from last_p on (all if none)
+        };
+        std::vector<uint8_t> brk(n);
+        std::vector<WalkSlice> slices(wt);
+        fork_join(wt, [&](unsigned t) {
+            const size_t lo = slice_lo(t), hi = slice_lo(t + 1);
+            WalkSlice sl;
+            for (size_t i = lo; i < hi; ++i) {
+                uint8_t b;
+                if (i == 0 || !win_keys_equal(keys, perm[i], perm[i - 1], 0, n_part)) b = 2;
+                else b = win_keys_equal(keys, perm[i], perm[i - 1], n_part, nk) ? 0 : 1;
+                brk[i] = b;
+                if (b == 0) continue;
+                if (sl.first_g == kNone) sl.first_g = i;
+                sl.last_g = i;
+                ++sl.groups;
+                if (b == 2) {
+                    if (sl.first_p == kNone) sl.first_p = i;
+                    sl.last_p = i;
+                    sl.groups_from_last_p = 0;
+                }
+                ++sl.groups_from_last_p;
+            }
+            slices[t] = sl;
+        });
 
-            size_t gs = ps;
+        // Carry-in for each slice: the group and partition open at its first row, the
+        // dense rank reached just before it, and the first group / partition break
+        // after it (n when none). Slice 0 starts on a partition break, so its
+        // carry-in is never read.
+        struct WalkCarry { size_t gs = 0, ps = 0, ge_after = 0, pe_after = 0; int64_t dense = 0; };
+        std::vector<WalkCarry> carry(wt);
+        {
+            size_t gs = 0, ps = 0;
             int64_t dense = 0;
-            while (gs < pe) {
-                size_t ge = gs + 1;
-                while (ge < pe &&
-                       win_keys_equal(keys, perm[ge], perm[gs], n_part, sort_spec.size()))
-                    ++ge;
-                ++dense;
-                // RANK is the peer group's FIRST position; CUME_DIST counts through
-                // its LAST. Both are properties of the group, not of the row.
-                const int64_t rank = static_cast<int64_t>(gs - ps) + 1;
-                const int64_t through_last_peer = static_cast<int64_t>(ge - ps);
+            for (unsigned t = 0; t < wt; ++t) {
+                carry[t].gs = gs;
+                carry[t].ps = ps;
+                carry[t].dense = dense;
+                const WalkSlice& sl = slices[t];
+                if (sl.last_g != kNone) gs = sl.last_g;
+                if (sl.last_p != kNone) { ps = sl.last_p; dense = sl.groups_from_last_p; }
+                else dense += sl.groups;
+            }
+            size_t ge = n, pe = n;
+            for (unsigned t = wt; t-- > 0;) {
+                carry[t].ge_after = ge;
+                carry[t].pe_after = pe;
+                if (slices[t].first_g != kNone) ge = slices[t].first_g;
+                if (slices[t].first_p != kNone) pe = slices[t].first_p;
+            }
+        }
 
-                for (size_t i = gs; i < ge; ++i) {
-                    const int64_t idx = static_cast<int64_t>(i - ps);  // 0-based
-                    for (size_t f = 0; f < nf; ++f) {
-                        const WindowFnSpec& fn = funcs[f];
-                        if (win_fn_is_gather(fn.kind)) {
-                            // Every gather kind resolves to one absolute position
-                            // within [ps, pe); anything outside is NULL.
-                            int64_t j;
-                            switch (fn.kind) {
-                                case WinFn::Lag:
-                                    j = static_cast<int64_t>(i) - fn.offset; break;
-                                case WinFn::Lead:
-                                    j = static_cast<int64_t>(i) + fn.offset; break;
-                                case WinFn::FirstValue:
-                                    j = static_cast<int64_t>(ps); break;
-                                case WinFn::LastValue:
-                                    j = static_cast<int64_t>(pe) - 1; break;
-                                default:  // NthValue, 1-based within the partition
-                                    j = static_cast<int64_t>(ps) + fn.offset - 1; break;
-                            }
-                            bool in_part = j >= static_cast<int64_t>(ps) &&
-                                           j < static_cast<int64_t>(pe);
-                            nav_order[f][i] =
-                                in_part ? perm[static_cast<size_t>(j)] : kGatherNullRow;
-                            continue;
-                        }
-                        if (win_fn_is_float(fn.kind)) {
-                            double val;
-                            if (fn.kind == WinFn::PercentRank) {
-                                // (rank - 1) / (rows - 1); a one-row partition has
-                                // no spread to be a fraction of, and the standard
-                                // fixes that degenerate case at 0.
-                                val = pn > 1
-                                    ? static_cast<double>(rank - 1) /
-                                      static_cast<double>(pn - 1)
-                                    : 0.0;
-                            } else {  // CumeDist — always in (0, 1]
-                                val = static_cast<double>(through_last_peer) /
-                                      static_cast<double>(pn);
-                            }
-                            fracs[f][i] = val;
-                            continue;
-                        }
-                        int64_t val;
-                        switch (fn.kind) {
-                            case WinFn::RowNumber: val = idx + 1; break;
-                            case WinFn::Rank:      val = rank; break;
-                            case WinFn::DenseRank: val = dense; break;
-                            default: {  // Ntile
-                                // pn rows into k buckets: the first (pn % k) buckets
-                                // take one row more than the rest. When k > pn the
-                                // quotient is 0, every one of the first pn buckets
-                                // takes exactly one row, and `big` spans the whole
-                                // partition — so the `/ q` branch is unreachable and
-                                // cannot divide by zero.
-                                const int64_t k = fn.offset;
-                                const int64_t q = pn / k;
-                                const int64_t r = pn % k;
-                                const int64_t big = r * (q + 1);
-                                val = idx < big ? idx / (q + 1) + 1
-                                                : r + (idx - big) / q + 1;
-                                break;
-                            }
-                        }
-                        ranks[f][i] = val;
+        // Every function's value for sorted position i, given its extents.
+        auto emit_row = [&](size_t i, size_t ps, size_t pe, size_t gs, size_t ge,
+                            int64_t dense) {
+            const int64_t pn = static_cast<int64_t>(pe - ps);
+            // RANK is the peer group's FIRST position; CUME_DIST counts through
+            // its LAST. Both are properties of the group, not of the row.
+            const int64_t rank = static_cast<int64_t>(gs - ps) + 1;
+            const int64_t through_last_peer = static_cast<int64_t>(ge - ps);
+            const int64_t idx = static_cast<int64_t>(i - ps);  // 0-based
+            for (size_t f = 0; f < nf; ++f) {
+                const WindowFnSpec& fn = funcs[f];
+                if (win_fn_is_gather(fn.kind)) {
+                    // Every gather kind resolves to one absolute position
+                    // within [ps, pe); anything outside is NULL.
+                    int64_t j;
+                    switch (fn.kind) {
+                        case WinFn::Lag:
+                            j = static_cast<int64_t>(i) - fn.offset; break;
+                        case WinFn::Lead:
+                            j = static_cast<int64_t>(i) + fn.offset; break;
+                        case WinFn::FirstValue:
+                            j = static_cast<int64_t>(ps); break;
+                        case WinFn::LastValue:
+                            j = static_cast<int64_t>(pe) - 1; break;
+                        default:  // NthValue, 1-based within the partition
+                            j = static_cast<int64_t>(ps) + fn.offset - 1; break;
+                    }
+                    bool in_part = j >= static_cast<int64_t>(ps) &&
+                                   j < static_cast<int64_t>(pe);
+                    nav_order[f][i] =
+                        in_part ? perm[static_cast<size_t>(j)] : kGatherNullRow;
+                    continue;
+                }
+                if (win_fn_is_float(fn.kind)) {
+                    double val;
+                    if (fn.kind == WinFn::PercentRank) {
+                        // (rank - 1) / (rows - 1); a one-row partition has
+                        // no spread to be a fraction of, and the standard
+                        // fixes that degenerate case at 0.
+                        val = pn > 1
+                            ? static_cast<double>(rank - 1) /
+                              static_cast<double>(pn - 1)
+                            : 0.0;
+                    } else {  // CumeDist — always in (0, 1]
+                        val = static_cast<double>(through_last_peer) /
+                              static_cast<double>(pn);
+                    }
+                    fracs[f][i] = val;
+                    continue;
+                }
+                int64_t val;
+                switch (fn.kind) {
+                    case WinFn::RowNumber: val = idx + 1; break;
+                    case WinFn::Rank:      val = rank; break;
+                    case WinFn::DenseRank: val = dense; break;
+                    default: {  // Ntile
+                        // pn rows into k buckets: the first (pn % k) buckets
+                        // take one row more than the rest. When k > pn the
+                        // quotient is 0, every one of the first pn buckets
+                        // takes exactly one row, and `big` spans the whole
+                        // partition — so the `/ q` branch is unreachable and
+                        // cannot divide by zero.
+                        const int64_t k = fn.offset;
+                        const int64_t q = pn / k;
+                        const int64_t r = pn % k;
+                        const int64_t big = r * (q + 1);
+                        val = idx < big ? idx / (q + 1) + 1
+                                        : r + (idx - big) / q + 1;
+                        break;
                     }
                 }
-                gs = ge;
+                ranks[f][i] = val;
             }
-            ps = pe;
-        }
+        };
+
+        fork_join(wt, [&](unsigned t) {
+            const size_t lo = slice_lo(t), hi = slice_lo(t + 1);
+            const WalkCarry& c = carry[t];
+            // First position in [from, hi) whose break is at least `level`, else the
+            // first such break after the slice.
+            auto next_break = [&brk, hi](size_t from, uint8_t level, size_t after) {
+                for (size_t j = from; j < hi; ++j) if (brk[j] >= level) return j;
+                return after;
+            };
+            size_t ps = c.ps, gs = c.gs;
+            int64_t dense = c.dense;
+            // Ends of the group / partition open at `lo` (recomputed below when `lo`
+            // itself opens one).
+            size_t ge = next_break(lo, 1, c.ge_after);
+            size_t pe = next_break(lo, 2, c.pe_after);
+            for (size_t i = lo; i < hi; ++i) {
+                const uint8_t b = brk[i];
+                if (b == 2) {
+                    ps = i;
+                    pe = next_break(i + 1, 2, c.pe_after);
+                    dense = 0;
+                }
+                if (b != 0) {
+                    gs = i;
+                    ge = next_break(i + 1, 1, c.ge_after);
+                    ++dense;
+                }
+                emit_row(i, ps, pe, gs, ge, dense);
+            }
+        });
 
         // WindowTopKFusionStrategy's fused `WHERE <rank> <= K` filter (top_k >= 0):
         // every row still got an exact rank above — RANK/DENSE_RANK ties can only be

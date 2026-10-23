@@ -49,7 +49,6 @@ cdef extern from "morsels/sort.hpp" nogil:
     bint build_sort_keys(
         const vector[shared_ptr[CxxMorsel]]& ms,
         const vector[SortKeySpec]& spec,
-        size_t n,
         vector[SortKeyColumn]& out,
         ErrCtx& err,
     ) nogil
@@ -196,7 +195,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
 
     cdef size_t i
     with nogil:
-        ok = build_sort_keys(cxx_in, spec, n, keys, err)
+        ok = build_sort_keys(cxx_in, spec, keys, err)
         if ok:
             for i in range(n):
                 perm[i] = <uint32_t>i

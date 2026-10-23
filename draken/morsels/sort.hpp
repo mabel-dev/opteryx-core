@@ -183,16 +183,76 @@ struct SortKeyColumn {
     std::vector<uint32_t> slen;             //  which the caller keeps alive)
 };
 
+// Rows each team member must own before another member is worth spawning. Matches the
+// granularity the stable comparison sort already threads at (one thread below 200k).
+inline constexpr size_t SORT_TEAM_ROWS_PER_THREAD = 65536;
+
+inline unsigned sort_team_width(size_t n, unsigned nthreads) {
+    size_t cap = n / SORT_TEAM_ROWS_PER_THREAD;
+    if (cap < 1) cap = 1;
+    unsigned nt = nthreads < 1 ? 1u : nthreads;
+    return cap < nt ? static_cast<unsigned>(cap) : nt;
+}
+
+// Run fn(t) for t in [0, nt) — member 0 on the calling thread.
+template <class Fn>
+inline void sort_team_run(unsigned nt, Fn fn) {
+    std::vector<std::thread> team;
+    team.reserve(nt > 0 ? nt - 1 : 0);
+    for (unsigned t = 1; t < nt; ++t) team.emplace_back([&fn, t]() { fn(t); });
+    fn(0);
+    for (std::thread& th : team) th.join();
+}
+
+// First global row of each morsel in the flattened row order every helper here shares
+// (morsel by morsel, row by row): off[i] = first row of ms[i], off.back() = total.
+inline std::vector<size_t> sort_morsel_offsets(const std::vector<MorselPtr>& ms) {
+    std::vector<size_t> off(ms.size() + 1, 0);
+    for (size_t i = 0; i < ms.size(); ++i) off[i + 1] = off[i] + ms[i]->num_rows();
+    return off;
+}
+
+// fn(mb, me) over contiguous morsel ranges [mb, me), one range per team member,
+// balanced by ROWS: a member takes every morsel whose first row falls in its share.
+// Width follows sort_team_width, so nthreads == 1 (a caller running ON an execution
+// worker, which must not fan out) runs fn(0, all) on the calling thread. fn writes
+// pre-sized buffers by index and must not allocate: sort_team_run does not carry
+// exceptions across threads.
+template <class Fn>
+inline void sort_for_morsel_ranges(const std::vector<size_t>& off, unsigned nthreads, Fn fn) {
+    const size_t nm = off.size() - 1;
+    const size_t n = off[nm];
+    unsigned nt = sort_team_width(n, nthreads);
+    if (nt > nm) nt = nm < 1 ? 1u : static_cast<unsigned>(nm);
+    if (nt <= 1) { fn(size_t{0}, nm); return; }
+    sort_team_run(nt, [&off, &fn, nm, n, nt](unsigned t) {
+        auto first_at = [&off, nm](size_t row) {
+            return static_cast<size_t>(
+                std::lower_bound(off.begin(), off.begin() + nm, row) - off.begin());
+        };
+        const size_t mb = first_at(n * t / nt);
+        const size_t me = t + 1 == nt ? nm : first_at(n * (t + 1) / nt);
+        fn(mb, me);
+    });
+}
+
+// Normalized key lanes for `spec` over the flattened rows of `ms`. Typing and the
+// range/type checks run serially (one check per morsel); every lane is then sized
+// to the row count once and filled BY INDEX, a morsel range per team member
+// (sort_for_morsel_ranges) — no per-row push_back. nthreads defaults to 1 for the
+// callers that run on an execution worker.
 inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
                             const std::vector<SortKeySpec>& spec,
-                            size_t n, std::vector<SortKeyColumn>& out, ErrCtx& err) {
+                            std::vector<SortKeyColumn>& out, ErrCtx& err,
+                            unsigned nthreads = 1) {
     out.clear();
     out.resize(spec.size());
+    const std::vector<size_t> off = sort_morsel_offsets(ms);
+    const size_t total = off.back();
     for (size_t k = 0; k < spec.size(); ++k) {
         SortKeyColumn& col = out[k];
         col.asc = spec[k].ascending;
         col.nulls_first = spec[k].nulls_first;
-        col.valid.reserve(n);
         bool typed = false;
         for (const MorselPtr& m : ms) {
             if (m->num_rows() == 0) continue;
@@ -201,8 +261,15 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
                 err.msg = "SortSink: key column index out of range";
                 return false;
             }
-            const CxxColumn& c = m->columns[spec[k].col_idx];
-            const DrakenVector& v = c.view;
+            const DrakenVector& v = m->columns[spec[k].col_idx].view;
+            if (v.length != m->num_rows()) {
+                // The lanes are indexed by the morsel's row offsets: a key column of
+                // another length would misalign every later row's key.
+                err.code = 1;
+                err.msg = "SortSink: key column length differs from its morsel's row "
+                          "count — fail loud, never a misaligned key";
+                return false;
+            }
             if (!typed) {
                 if (!sort_key_type_supported(v.type)) {
                     err.code = 1;
@@ -213,44 +280,70 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
                 col.is_str = sort_type_is_string(v.type);
                 col.is_i128 = (v.type == DRAKEN_DECIMAL128 || v.type == DRAKEN_UUID);
                 col.is_uuid = (v.type == DRAKEN_UUID);
-                if (col.is_str) { col.sptr.reserve(n); col.slen.reserve(n); }
-                else if (col.is_i128) { col.num128.reserve(n); }
-                else { col.num.reserve(n); }
                 typed = true;
             }
-            const DrakenStringArena* sa = col.is_str ? string_arena_of(v) : nullptr;
-            for (uint32_t r = 0; r < v.length; ++r) {
-                bool ok = sort_row_valid(v, r);
-                col.valid.push_back(ok ? 1 : 0);
+        }
+        col.valid.resize(total);
+        if (col.is_str) { col.sptr.resize(total); col.slen.resize(total); }
+        else if (col.is_i128) { col.num128.resize(total); }
+        else { col.num.resize(total); }
+    }
+    sort_for_morsel_ranges(off, nthreads, [&ms, &spec, &out, &off](size_t mb, size_t me) {
+        for (size_t mi = mb; mi < me; ++mi) {
+            const CxxMorsel& m = *ms[mi];
+            const uint32_t rows = m.num_rows();
+            if (rows == 0) continue;
+            const size_t base = off[mi];
+            for (size_t k = 0; k < spec.size(); ++k) {
+                SortKeyColumn& col = out[k];
+                const DrakenVector& v = m.columns[spec[k].col_idx].view;
+                uint8_t* valid = col.valid.data() + base;
                 if (col.is_str) {
-                    if (ok) {
-                        const DrakenStringSlot* slot = &sa->slots[v.selection[r]];
-                        col.slen.push_back(str_length(slot));
-                        col.sptr.push_back(
-                            reinterpret_cast<const uint8_t*>(str_data(slot, sa->arena)));
-                    } else {
-                        col.slen.push_back(0);
-                        col.sptr.push_back(nullptr);
-                    }
-                } else if (col.is_i128) {
-                    __int128 kv = 0;
-                    if (ok) {
-                        const uint8_t* p = static_cast<const uint8_t*>(v.data)
-                                           + static_cast<size_t>(v.selection[r]) * 16u;
-                        if (col.is_uuid) {
-                            // memcmp order as a signed key (the lane compares signed).
-                            kv = draken::ops::uuid_order_key(p);
+                    const DrakenStringArena* sa = string_arena_of(v);
+                    uint32_t* slen = col.slen.data() + base;
+                    const uint8_t** sptr = col.sptr.data() + base;
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        const bool ok = sort_row_valid(v, r);
+                        valid[r] = ok ? 1 : 0;
+                        if (ok) {
+                            const DrakenStringSlot* slot = &sa->slots[v.selection[r]];
+                            slen[r] = str_length(slot);
+                            sptr[r] = reinterpret_cast<const uint8_t*>(str_data(slot, sa->arena));
                         } else {
-                            std::memcpy(&kv, p, 16u);
+                            slen[r] = 0;
+                            sptr[r] = nullptr;
                         }
                     }
-                    col.num128.push_back(kv);
+                } else if (col.is_i128) {
+                    __int128* num128 = col.num128.data() + base;
+                    const bool is_uuid = col.is_uuid;
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        const bool ok = sort_row_valid(v, r);
+                        valid[r] = ok ? 1 : 0;
+                        __int128 kv = 0;
+                        if (ok) {
+                            const uint8_t* p = static_cast<const uint8_t*>(v.data)
+                                               + static_cast<size_t>(v.selection[r]) * 16u;
+                            if (is_uuid) {
+                                // memcmp order as a signed key (the lane compares signed).
+                                kv = draken::ops::uuid_order_key(p);
+                            } else {
+                                std::memcpy(&kv, p, 16u);
+                            }
+                        }
+                        num128[r] = kv;
+                    }
                 } else {
-                    col.num.push_back(ok ? sort_num_key(v, r) : 0);
+                    uint64_t* num = col.num.data() + base;
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        const bool ok = sort_row_valid(v, r);
+                        valid[r] = ok ? 1 : 0;
+                        num[r] = ok ? sort_num_key(v, r) : 0;
+                    }
                 }
             }
         }
-    }
+    });
     return true;
 }
 
@@ -619,27 +712,6 @@ public:
         cv_.wait(lk, [&] { return generation_ != gen; });
     }
 };
-
-// Rows each team member must own before another member is worth spawning. Matches the
-// granularity the stable comparison sort already threads at (one thread below 200k).
-inline constexpr size_t SORT_TEAM_ROWS_PER_THREAD = 65536;
-
-inline unsigned sort_team_width(size_t n, unsigned nthreads) {
-    size_t cap = n / SORT_TEAM_ROWS_PER_THREAD;
-    if (cap < 1) cap = 1;
-    unsigned nt = nthreads < 1 ? 1u : nthreads;
-    return cap < nt ? static_cast<unsigned>(cap) : nt;
-}
-
-// Run fn(t) for t in [0, nt) — member 0 on the calling thread.
-template <class Fn>
-inline void sort_team_run(unsigned nt, Fn fn) {
-    std::vector<std::thread> team;
-    team.reserve(nt > 0 ? nt - 1 : 0);
-    for (unsigned t = 1; t < nt; ++t) team.emplace_back([&fn, t]() { fn(t); });
-    fn(0);
-    for (std::thread& th : team) th.join();
-}
 
 // ---- stage 0: run census ------------------------------------------------------------
 //
@@ -1894,20 +1966,31 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
     return out;
 }
 
-// Flatten a morsel list into global-row maps. Returns total row count.
+// Flatten a morsel list into global-row maps, appended to row_m / row_r. Returns the
+// total row count. Sized once and filled by index, a morsel range per team member
+// (sort_for_morsel_ranges); nthreads defaults to 1 for callers on an execution worker.
 inline size_t flatten_rows(const std::vector<MorselPtr>& ms,
-                           std::vector<uint32_t>& row_m, std::vector<uint32_t>& row_r) {
-    size_t n = 0;
-    for (const MorselPtr& m : ms) n += m->num_rows();
-    row_m.reserve(n);
-    row_r.reserve(n);
-    for (uint32_t mi = 0; mi < ms.size(); ++mi) {
-        uint32_t rows = ms[mi]->num_rows();
-        for (uint32_t r = 0; r < rows; ++r) {
-            row_m.push_back(mi);
-            row_r.push_back(r);
+                           std::vector<uint32_t>& row_m, std::vector<uint32_t>& row_r,
+                           unsigned nthreads = 1) {
+    const std::vector<size_t> off = sort_morsel_offsets(ms);
+    const size_t n = off.back();
+    const size_t bm = row_m.size(), br = row_r.size();
+    row_m.resize(bm + n);
+    row_r.resize(br + n);
+    uint32_t* pm = row_m.data() + bm;
+    uint32_t* pr = row_r.data() + br;
+    sort_for_morsel_ranges(off, nthreads, [&ms, &off, pm, pr](size_t mb, size_t me) {
+        for (size_t mi = mb; mi < me; ++mi) {
+            const uint32_t rows = ms[mi]->num_rows();
+            const uint32_t id = static_cast<uint32_t>(mi);
+            uint32_t* om = pm + off[mi];
+            uint32_t* orow = pr + off[mi];
+            for (uint32_t r = 0; r < rows; ++r) {
+                om[r] = id;
+                orow[r] = r;
+            }
         }
-    }
+    });
     return n;
 }
 
@@ -1939,7 +2022,7 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
     std::vector<uint32_t> row_m, row_r;
     size_t n = flatten_rows(src, row_m, row_r);
     std::vector<SortKeyColumn> keys;
-    if (!build_sort_keys(src, spec, n, keys, err)) return false;
+    if (!build_sort_keys(src, spec, keys, err)) return false;
     std::vector<uint32_t> perm(n);
     for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
     sort_perm(keys, perm, take_first, nthreads);

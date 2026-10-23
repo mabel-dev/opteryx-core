@@ -9,7 +9,11 @@ set -ex
 # the actual libcurl.a used at link time is still the vendored static build.
 # pkg-config lets setup.py's resolve_openssl() find OpenSSL for the native
 # Postgres client; it falls back to default paths without it, but be explicit.
-yum install -y openssl-devel curl-devel pkgconfig || dnf install -y openssl-devel libcurl-devel pkgconf-pkg-config
+# libnghttp2-devel: the vendored libcurl is configured --with-nghttp2 (HTTP/2 is
+# required; setup.py fails the build without it) and auditwheel bundles
+# libnghttp2.so into the wheel, as it does libssl/libcrypto. Without the headers
+# here, configure silently built HTTP/1.1-only (0.9.173's manylinux wheel).
+yum install -y openssl-devel curl-devel pkgconfig libnghttp2-devel || dnf install -y openssl-devel libcurl-devel pkgconf-pkg-config libnghttp2-devel
 
 # Install Rust 1.83.0 (pinned version to avoid GLIBC_2.18 symbols from newer compilers)
 #

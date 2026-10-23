@@ -7,14 +7,16 @@
 # On darwin setup.py ALWAYS builds the vendored static libcurl with select()
 # unbounded (see setup.py _DARWIN_CURL_FD_SETSIZE): every darwin libcurl —
 # Apple's and Homebrew's — is select()-only and fails connections on fd >= 1024.
-# It needs OpenSSL via pkg-config; curl's configure also picks up Homebrew's
-# nghttp2/nghttp3 if present, which delocate then bundles.
+# It needs OpenSSL and nghttp2 via pkg-config: setup.py configures curl
+# --with-nghttp2 and fails the build if what was built lacks HTTP/2, and
+# --without-nghttp3 (no QUIC backend, so HTTP/3 was never usable). delocate
+# bundles libnghttp2 with the OpenSSL dylibs.
 set -ex
 
 # repo root = parent of this script's dir (dev/). setup.py self-roots here.
 cd "$(dirname "$0")/.."
 
-brew install curl pkg-config openssl
+brew install curl pkg-config openssl libnghttp2
 
 # Install Rust (pinned to match the Linux release build for consistency).
 curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.83.0 -y

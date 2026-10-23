@@ -477,7 +477,7 @@ struct LatmatScanSource : Source {
                 SortKeySpec{static_cast<size_t>(sort_p1_index), sort_ascending,
                             sort_nulls_first}};
             std::vector<SortKeyColumn> keys;
-            if (!build_sort_keys(ms, spec, total, keys, err)) return;
+            if (!build_sort_keys(ms, spec, keys, err)) return;
             SortKeyCmp cmp{keys};
             std::vector<uint32_t> idx(total);
             std::iota(idx.begin(), idx.end(), 0u);

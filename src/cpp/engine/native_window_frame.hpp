@@ -184,7 +184,7 @@ struct FramedWindowSink : Sink, EmitSubset {
         std::vector<uint32_t> row_m, row_r;
         size_t n = flatten_rows(src, row_m, row_r);
         std::vector<SortKeyColumn> keys;
-        if (!build_sort_keys(src, sort_spec, n, keys, err)) return;
+        if (!build_sort_keys(src, sort_spec, keys, err)) return;
         std::vector<uint32_t> perm(n);
         for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
         sort_perm(keys, perm, SIZE_MAX, static_cast<unsigned>(g.query_dop));

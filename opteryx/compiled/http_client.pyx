@@ -72,6 +72,32 @@ cdef extern from *:
     void opteryx_http_error_info(string& message, long& status)
 
 
+cdef extern from *:
+    """
+    #include <string>
+    #include <curl/curl.h>
+
+    // What the linked libcurl was BUILT with. Every extension that speaks HTTP
+    // links the same vendored libcurl.a statically, so this one answers for all.
+    static std::string opteryx_curl_version() {
+        return curl_version_info(CURLVERSION_NOW)->version;
+    }
+    static bool opteryx_curl_has_http2() {
+        return (curl_version_info(CURLVERSION_NOW)->features & CURL_VERSION_HTTP2) != 0;
+    }
+    """
+    string opteryx_curl_version()
+    bint opteryx_curl_has_http2()
+
+
+def curl_build_features():
+    """{"version": str, "http2": bool} for the libcurl this build links. The release
+    gate (dev/verify-wheel-imports.sh) asserts `http2` on the installed wheel: an
+    HTTP/1.1-only libcurl makes every object-store batch one request per
+    connection, at most max_host_connections per host per thread."""
+    return {"version": opteryx_curl_version().decode("ascii"), "http2": bool(opteryx_curl_has_http2())}
+
+
 cdef void _raise_http_error() except *:
     """Translate the in-flight C++ exception into HttpStatusError.
 

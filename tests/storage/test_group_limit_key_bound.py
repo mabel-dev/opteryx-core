@@ -370,6 +370,81 @@ def test_row_group_bound_never_loosens_the_file_bound(row_group_dataset):
     assert all(r["c"] == RG_KEY_ROWS for r in got)
 
 
+# --------------------------------------------------------------------------
+# Single file: no file window exists, the row groups are the only witnesses
+# --------------------------------------------------------------------------
+
+SINGLE_RGS = 8
+# Row groups 2p and 2p+1 hold the SAME 25 keys (two rows each per row group), so a
+# kept key must be kept in both or its count is partial.
+SINGLE_KEY_ROWS = 4
+
+
+def _single_keys(rg_no):
+    return [(rg_no // 2) * 100 + (i % 25) for i in range(RG_ROWS)]
+
+
+@pytest.fixture(scope="module", params=["parquet", "skene"])
+def single_file_dataset(request):
+    import skene
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    def _morsel(ids):
+        return Morsel.from_vectors(
+            ["id", "payload"],
+            [
+                vector_from_sequence(ids, DrakenType.INT64),
+                vector_from_sequence(list(range(len(ids))), DrakenType.INT64),
+            ],
+        )
+
+    ds_dir = Path("testdata") / f"group_limit_key_bound_single_{request.param}"
+    if ds_dir.exists():
+        shutil.rmtree(ds_dir)
+    ds_dir.mkdir(parents=True)
+    if request.param == "parquet":
+        keys = [k for rg in range(SINGLE_RGS) for k in _single_keys(rg)]
+        (ds_dir / "part-0.parquet").write_bytes(write_parquet(_morsel(keys), max_rows_per_row_group=RG_ROWS))
+    else:
+        writer = skene.SkeneWriter(read_acceleration=True)
+        for rg in range(SINGLE_RGS):
+            writer.add_row_group(_morsel(_single_keys(rg)))
+        writer.write_to(str(ds_dir / "part-0.skene"))
+    yield request.param, f"testdata.group_limit_key_bound_single_{request.param}"
+    shutil.rmtree(ds_dir, ignore_errors=True)
+
+
+def test_single_file_bound_comes_from_its_row_groups(single_file_dataset):
+    # one file: witnesses {0, 324} are too few for K=5, so only row-group witnesses
+    # can give a window. Rugo's writer does not cut row groups on the 50-row
+    # boundaries, so for parquet only "some row group is pruned" is layout-proof;
+    # skene's row groups are the ones written, and its exact per-row-group distinct
+    # count (25) proves one row-group pair alone.
+    kind, name = single_file_dataset
+    sql = f"SELECT id, COUNT(*) AS c FROM {name} GROUP BY id LIMIT 5"
+    assert _fired(sql)
+    session = opteryx.session()
+    got = _rows(session, sql)
+    scan = session.telemetry["operations"][1]
+    if kind == "parquet":
+        assert scan["row_groups_pruned"] > 0
+    else:
+        assert scan["row_groups_read"] == 2
+    assert len(got) == 5
+    assert len({r["id"] for r in got}) == 5
+    truth = _full_counts(session, name, "id")
+    for row in got:
+        assert row["c"] == truth[row["id"]] == SINGLE_KEY_ROWS, f"partial or wrong group {row}"
+
+
+def test_single_file_does_not_fire_when_no_row_group_could_be_dropped(single_file_dataset):
+    # 100 distinct keys in total: K=100 needs every row group
+    _kind, name = single_file_dataset
+    assert not _fired(f"SELECT id, COUNT(*) FROM {name} GROUP BY id LIMIT 100")
+
+
 def test_window_with_a_lower_edge_reads_fewer_files_and_stays_complete():
     from draken.draken_native import DrakenType
     from draken.interop.vector_sequence import vector_from_sequence
