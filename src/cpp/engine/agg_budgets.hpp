@@ -7,7 +7,7 @@
 // the engine bundle back without a cycle. A header with no includes and no
 // dependants can be pulled into a small extension that `variables` CAN import.
 //
-// Why they are reported to users at all: MEDIAN and ARRAY_AGG retain every input
+// Why they are reported to users at all: MEDIAN/PERCENTILE_CONT and ARRAY_AGG retain every input
 // value until finalize and fail loud on these budgets. `SHOW VARIABLES` carries
 // them so an author can see the line before hitting it — a limit nobody can
 // discover is a limit that only ever shows up as a surprise. The variables are
@@ -30,7 +30,8 @@
 
 namespace opteryx { namespace agg_budgets {
 
-// MEDIAN — buffers every non-null value as a double until finalize.
+// MEDIAN / PERCENTILE_CONT (the exact-quantile family, one budget between them) —
+// buffers every non-null value as a double until finalize.
 //
 // TWO figures, because a single ceiling has to be wrong in one direction or the
 // other. Holding 2GB open for a query that needs 10MB is not a use of a shared
@@ -38,7 +39,8 @@ namespace opteryx { namespace agg_budgets {
 // finish in 300MB is not either. So 256MB is what a query STARTS entitled to,
 // and the ceiling doubles on measured demand up to 2GB before the query is
 // refused. Almost nothing reaches the second step: the budget is charged only
-// by MEDIAN, and in the benchmark suite exactly one query in 193 uses it.
+// by the exact quantiles, and in the benchmark suite exactly one query in 193 used it
+// (counted before PERCENTILE_CONT existed).
 //
 // The escalation is on MEASUREMENT, never on a plan-time estimate. That is the
 // same rule as before and for the same reason: what a buffering aggregate

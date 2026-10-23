@@ -47,6 +47,7 @@ from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn
 from opteryx.operators.aggregate.helpers import DISTINCT_SPELLINGS, aggregator_names, is_aggregator
+from opteryx.operators.aggregate.helpers import ORDERED_SET_AGGREGATES
 from opteryx.operators.window.helpers import GATHERED_FUNCTIONS
 from opteryx.operators.window.helpers import NAVIGATION_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
@@ -2094,11 +2095,6 @@ def _validate_window_int_literal(func: str, node, role: str, minimum: int) -> No
         raise UnsupportedSyntaxError(f"{func}()'s {role} must be a {bound}.")
 
 
-#: Ordered-set aggregates: the argument list carries only the fraction, and the
-#: values arrive through WITHIN GROUP (ORDER BY ...).
-_ORDERED_SET_AGGREGATES = frozenset({"PERCENTILE_CONT"})
-
-
 def _ordered_set_aggregate(
     func,
     args,
@@ -2134,7 +2130,7 @@ def _ordered_set_aggregate(
                 f"for example {md_code('PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY column)')}",
             )
         )
-    if func not in _ORDERED_SET_AGGREGATES:
+    if func not in ORDERED_SET_AGGREGATES:
         raise UnsupportedSyntaxError(
             compose(
                 f"{md_syntax('WITHIN GROUP (ORDER BY ...)')} is only meaningful for an ordered-set "
@@ -2262,7 +2258,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None, *, plan_contex
     # the fraction's arguments. Anything else carrying the clause is refused there:
     # it used to be dropped without a word, so `SUM(x) WITHIN GROUP (ORDER BY y)`
     # answered SUM(x).
-    if branch.get("within_group") or func in _ORDERED_SET_AGGREGATES or func == "PERCENTILE_DISC":
+    if branch.get("within_group") or func in ORDERED_SET_AGGREGATES or func == "PERCENTILE_DISC":
         return _ordered_set_aggregate(
             func,
             args,

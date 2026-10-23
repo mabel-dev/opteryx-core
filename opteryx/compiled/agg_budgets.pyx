@@ -31,7 +31,8 @@ cdef extern from "engine/agg_budgets.hpp" namespace "opteryx::agg_budgets" nogil
 
 
 def median_budget_bytes() -> int:
-    """Bytes MEDIAN may buffer across all groups before it fails loud."""
+    """Bytes the exact-quantile aggregates (MEDIAN, PERCENTILE_CONT) may buffer,
+    together, across all groups before they fail loud."""
     return <int64_t>kMedianBytes
 
 

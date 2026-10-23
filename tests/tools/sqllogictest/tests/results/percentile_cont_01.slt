@@ -1,0 +1,96 @@
+# PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x [DESC]) — the exact, interpolated
+# percentile. One native aggregate with MEDIAN (AggFn::Quantile, MEDIAN is p = 0.5):
+# rank p * (n - 1) in the requested order, linear interpolation between the two
+# nearest ranks. FLOAT64; NULLs ignored; a group with no values is NULL.
+# Expected values are derived from that definition by hand (and agree with
+# DuckDB, except where noted). tests/sql/test_percentile_cont.py carries the
+# bit-level DuckDB comparisons.
+
+# Interpolation over 1, 2, 3, 4: ranks 0, 0.75, 1.5, 2.25, 3.
+query RRRRR
+SELECT PERCENTILE_CONT(0) WITHIN GROUP (ORDER BY x), PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY x),
+       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x), PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY x),
+       PERCENTILE_CONT(1) WITHIN GROUP (ORDER BY x)
+FROM (VALUES (1), (2), (3), (4)) AS t(x)
+----
+1.000 1.750 2.500 3.250 4.000
+
+# DESC ranks from the top: p = 0 is the MAXIMUM (DuckDB 1.5.4 answers 1 here).
+query RRR
+SELECT PERCENTILE_CONT(0) WITHIN GROUP (ORDER BY x DESC), PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY x DESC),
+       PERCENTILE_CONT(1) WITHIN GROUP (ORDER BY x DESC)
+FROM (VALUES (1), (2), (3), (4)) AS t(x)
+----
+4.000 3.250 1.000
+
+# NULLs are not values.
+query RI
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x), COUNT(x)
+FROM (VALUES (10), (NULL), (20), (NULL), (30)) AS t(x)
+----
+20.000 3
+
+# Grouped; a group holding only NULLs is NULL.
+query IR rowsort
+SELECT g, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)
+FROM (VALUES (1, 10), (1, 20), (2, NULL), (2, NULL), (3, 5)) AS t(g, x)
+GROUP BY g
+----
+1 15.000
+2 NULL
+3 5.000
+
+# Empty input, ungrouped: one row of NULLs.
+query RR
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY id), PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY id)
+FROM $planets WHERE id > 100
+----
+NULL NULL
+
+# Empty input, grouped: no groups.
+query TR
+SELECT name, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY id) FROM $planets WHERE id > 100 GROUP BY name
+----
+
+# Several quantiles of one column share one buffer: ids 1..9, ranks 4, 0.8, 7.2,
+# and 7.2 from the top (between 2 and 1).
+query RRRR
+SELECT MEDIAN(id), PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY id),
+       PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY id), PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY id DESC)
+FROM $planets
+----
+5.000 1.800 8.200 1.800
+
+# MEDIAN(DISTINCT x) ranks the deduplicated values, so it keeps its own buffer.
+query RRRR
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x), MEDIAN(DISTINCT x),
+       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY y), PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY x)
+FROM (VALUES (1, 100), (1, 200), (1, 300), (4, 400)) AS t(x, y)
+----
+1.000 2.500 250.000 1.000
+
+# The extended ClickBench battery's Q54 and Q55 (ClickHouse/ClickBench#1489), on
+# the tiny sample: 167,332 rows qualify.
+query RRR
+SELECT PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY ResponseEndTiming),
+       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ResponseEndTiming),
+       PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY ResponseEndTiming)
+FROM testdata.clickbench_tiny WHERE ResponseEndTiming > 0
+----
+2.000 25.000 239.000
+
+query R
+SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ResponseEndTiming)
+FROM testdata.clickbench_tiny WHERE ResponseEndTiming > 0
+----
+2187.760
+
+# WITHIN GROUP on any other aggregate is refused (it used to be dropped silently).
+statement error
+SELECT SUM(id) WITHIN GROUP (ORDER BY name) FROM $planets
+
+statement error
+SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY id) FROM $planets
+
+statement error
+SELECT PERCENTILE_CONT(1.5) WITHIN GROUP (ORDER BY id) FROM $planets

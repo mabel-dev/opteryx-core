@@ -232,6 +232,10 @@ EXCLUSIONS: Dict[str, str] = {
     "APPROX_COUNT_DISTINCT": "approximate: no exact identity to assert it against",
     "APPROX_PERCENTILE": "approximate: no exact identity to assert it against",
     "CORR": "two-column aggregate whose float result is not stable enough for multiset equality",
+    "PERCENTILE_CONT": (
+        "ordered-set syntax: the values arrive through WITHIN GROUP (ORDER BY x) and the argument "
+        "is the fraction, which this grammar's AGG(x) shape cannot spell"
+    ),
     "STDDEV": "float accumulation order is not fixed, so multiset equality across plans is not sound",
     # ANY_VALUE is not listed: aggregates.json now records `deterministic: false`
     # for it, and _load_aggregates drops non-deterministic aggregates on that

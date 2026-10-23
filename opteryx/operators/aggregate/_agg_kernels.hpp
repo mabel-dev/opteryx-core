@@ -444,12 +444,17 @@ struct QuantileState {
     // CONTINUOUS (linear) interpolation — PERCENTILE_CONT, and MEDIAN at p = 0.5 —
     // written with DuckDB's quantile_cont arithmetic so the two agree to the bit:
     //     RN = p * (n - 1);   lo = value at rank floor(RN);   hi = at rank ceil(RN)
-    //     result = lo + (RN - floor(RN)) * (hi - lo)
-    // where rank counts in the requested order. `descending` (ORDER BY x DESC)
-    // ranks from the top, NOT by rewriting p as 1 - p: (1 - p) * (n - 1) and
-    // (n - 1) - p * (n - 1) round differently, and the answer would move.
-    // MEDIAN's former `(lo + hi) * 0.5` is replaced by the formula above (an
-    // architect decision, 2026-10-23): at most an ulp apart, and now DuckDB's.
+    //     d = RN - floor(RN);  result = fma(lo, 1 - d, hi * d)
+    // where rank counts in the requested order. DuckDB writes `lo * (1 - d) + hi * d`
+    // and leaves the rounding to its compiler: its ARM build contracts that into
+    // exactly the fma above (MEASURED, DuckDB 1.5.4: 556 of 556 random
+    // interpolations bit-equal, against 464 for `lo + d * (hi - lo)`), while a
+    // build without contraction rounds the product sum twice. The fma is spelled out
+    // here so the answer is the same on every target, not a property of a flag.
+    // `descending` (ORDER BY x DESC) ranks from the top, NOT by rewriting p as
+    // 1 - p: (1 - p) * (n - 1) and (n - 1) - p * (n - 1) round differently, and the
+    // answer would move. MEDIAN's former `(lo + hi) * 0.5` is replaced by the
+    // formula above (an architect decision, 2026-10-23): at most an ulp apart.
     //
     // QUANTILES OVER NaN — RATIFIED SEMANTICS.
     // A quantile is an ORDER STATISTIC, and the order is the one float_ops.h
@@ -491,7 +496,8 @@ struct QuantileState {
         const double hi = descending
             ? *std::max_element(buf, buf + lo_idx, total_lt)
             : *std::min_element(buf + lo_idx + 1, buf + size, total_lt);
-        return lo + (rn - frn) * (hi - lo);
+        const double d = rn - frn;
+        return std::fma(lo, 1.0 - d, hi * d);
     }
 };
 

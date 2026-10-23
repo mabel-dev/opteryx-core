@@ -41,6 +41,12 @@ DISTINCT_SPELLINGS: dict = {
     "COUNT_DISTINCT": "COUNT",
 }
 
+# Ordered-set aggregates: `AGG(fraction) WITHIN GROUP (ORDER BY expr)`, the values
+# arriving through WITHIN GROUP rather than the argument list. Two readers, like
+# DISTINCT_SPELLINGS: the builder that lowers the syntax (and refuses OVER on it),
+# and reference/window_catalog.py, which must not claim a window form for them.
+ORDERED_SET_AGGREGATES = frozenset({"PERCENTILE_CONT"})
+
 
 def is_aggregator(name: str) -> bool:
     return name in AGGREGATORS

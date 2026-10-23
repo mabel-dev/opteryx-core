@@ -269,6 +269,7 @@ def test_aggregate_catalog_includes_execution_support():
         "MAX",
         "MEDIAN",
         "MIN",
+        "PERCENTILE_CONT",
         "STDDEV",
         "STDDEV_POP",
         "STDDEV_SAMP",

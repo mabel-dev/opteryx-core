@@ -67,6 +67,7 @@ from typing import Any
 
 from opteryx.operators.aggregate.helpers import AGGREGATORS
 from opteryx.operators.aggregate.helpers import DISTINCT_SPELLINGS
+from opteryx.operators.aggregate.helpers import ORDERED_SET_AGGREGATES
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 
@@ -408,9 +409,12 @@ def _aggregate_window_support() -> OrderedDict[str, dict[str, bool]]:
         # which is why this resolves through DISTINCT_SPELLINGS rather than
         # stripping a `_DISTINCT` suffix, a rule that would wrongly promote it.
         framed = DISTINCT_SPELLINGS.get(aggregate, aggregate) in FRAMED_AGGREGATE_FUNCTIONS
+        # An ordered-set aggregate refuses OVER outright (the builder's
+        # _ordered_set_aggregate), however it is supported as a plain aggregate.
+        windowable = aggregate not in ORDERED_SET_AGGREGATES
         support[aggregate] = {
-            "over_empty": aggregate in _GLOBAL_SUPPORTED,
-            "over_partition_by": aggregate in _GROUPED_SUPPORTED,
+            "over_empty": windowable and aggregate in _GLOBAL_SUPPORTED,
+            "over_partition_by": windowable and aggregate in _GROUPED_SUPPORTED,
             "over_order_by": framed,
             "over_frame": framed,
         }

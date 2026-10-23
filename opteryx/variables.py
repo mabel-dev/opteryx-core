@@ -508,7 +508,7 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # the parallelism budget. `max_execution_workers` is that.
     "cpu_count": (INT64, _cpu_count(), VariableOwner.SERVER, Visibility.RESTRICTED),
     # The buffering ("holistic") aggregates' memory ceilings. These are here to be
-    # COMMUNICATED, not changed: MEDIAN and ARRAY_AGG retain every input value
+    # COMMUNICATED, not changed: MEDIAN/PERCENTILE_CONT and ARRAY_AGG retain every input value
     # until finalize, and each fails loud on its own global byte budget. Without a
     # row here, an author who hits that failure has no way to learn where the line
     # was, and no way to see it BEFORE hitting it — which is what this table exists
