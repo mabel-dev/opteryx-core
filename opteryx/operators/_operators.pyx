@@ -66,7 +66,7 @@ from opteryx.compiled.morsel_queue cimport PyMorselQueue, MorselQueue
 from libcpp.vector cimport vector as cppvector
 from libcpp.pair cimport pair
 from libcpp.string cimport string
-from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline
+from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline, ParquetBloomProbe
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterMap
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 
@@ -220,6 +220,12 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_da_rejects "opteryx::engine::groupby_tel::da_rejects_count" ()
     long long gb_tel_da_fallbacks "opteryx::engine::groupby_tel::da_fallbacks_count" ()
     long long gb_tel_dict_codepass "opteryx::engine::groupby_tel::dict_codepass_count" ()
+    long long gb_tel_raw_from_plan "opteryx::engine::groupby_tel::raw_from_plan_count" ()
+    long long gb_tel_mid_skipped "opteryx::engine::groupby_tel::mid_skipped_count" ()
+    long long gb_tel_est_groups "opteryx::engine::groupby_tel::est_groups_count" ()
+    long long gb_tel_planner_ndv "opteryx::engine::groupby_tel::planner_ndv_count" ()
+    long long gb_tel_ticket_sinks "opteryx::engine::groupby_tel::ticket_sinks_count" ()
+    long long gb_tel_ticket_spills "opteryx::engine::groupby_tel::ticket_spills_count" ()
     long long gb_pool_hits "opteryx::engine::groupby_tel::gb_pool_hits_count" ()
     long long gb_pool_misses "opteryx::engine::groupby_tel::gb_pool_misses_count" ()
     long long gb_pool_os_bytes "opteryx::engine::groupby_tel::gb_pool_os_bytes_count" ()
@@ -542,6 +548,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void add_parquet_runtime_bound(size_t p, size_t bound_idx, string column,
                                        int64_t* pruned_slot)
+        void set_parquet_bloom_probes(size_t p, const cppvector[ParquetBloomProbe]* probes,
+                                      int64_t* pruned_slot) except +
         # Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md). `except +`:
         # each wiring call throws when the plan and the compiler's eligibility test
         # disagree, and that must surface as an error, not a terminate.
@@ -911,6 +919,12 @@ def get_groupby_telemetry():
         "da_rejects":         gb_tel_da_rejects(),
         "da_fallbacks":       gb_tel_da_fallbacks(),
         "dict_codepass":      gb_tel_dict_codepass(),
+        "raw_from_plan":      gb_tel_raw_from_plan(),
+        "mid_skipped":        gb_tel_mid_skipped(),
+        "est_groups":         gb_tel_est_groups(),
+        "planner_ndv":        gb_tel_planner_ndv(),
+        "ticket_sinks":       gb_tel_ticket_sinks(),
+        "ticket_spills":      gb_tel_ticket_spills(),
         # GROUP BY block pool (gb_block_store.hpp): blocks served from the pool vs
         # allocated from the system, bytes allocated/freed, bytes the pool now holds.
         "pool_hits":          gb_pool_hits(),
@@ -3135,6 +3149,11 @@ cdef class NativePlan:
                                        &splan.hash_key_columns, &splan.array_columns,
                                        &splan.widen_types,
                                        c_row_limit)
+        # Remote bloom membership: the probes planning attached to this plan's
+        # remote work items, issued by the Source in its first fetch round.
+        if not splan.bloom_probes.empty():
+            self._e.set_parquet_bloom_probes(p, &splan.bloom_probes,
+                                             &splan.row_groups_pruned_bloom)
 
     def set_latmat_scan_source(self, size_t p, NativeScanPlan p1_plan,
                                NativeScanPlan p2_plan, size_t pred_fn, size_t pred_ctx,

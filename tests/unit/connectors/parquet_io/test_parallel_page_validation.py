@@ -6,7 +6,8 @@ The Tier-3 parallel page walk (non-nullable, non-nested, no dictionary,
 fixed-width, more than two pages) kept its own copy of the decode rules: it
 decoded DELTA for integers and copied every other encoding as PLAIN. A
 non-nullable BYTE_STREAM_SPLIT column therefore came back as plausible garbage
-(SUM/MAX = NaN) with no error, while the sequential walk refuses the encoding.
+(SUM/MAX = NaN) with no error, while the sequential walk refused the encoding.
+Both walks now decode BYTE_STREAM_SPLIT; this exact shape must come back exact.
 
 Fixtures are written with PyArrow (allowed in tests/ only).
 """
@@ -53,16 +54,15 @@ def _write_bss(sink, page_version):
 
 
 @pytest.mark.parametrize("page_version", ["1.0", "2.0"])
-def test_byte_stream_split_refused_by_rugo(page_version):
+def test_byte_stream_split_decoded_by_rugo(page_version):
     sink = io.BytesIO()
     _write_bss(sink, page_version)
-    with pytest.raises(RuntimeError, match=r"unsupported page encoding 9 \(BYTE_STREAM_SPLIT\)"):
-        for _ in rp.read_parquet(sink.getvalue()):
-            pass
+    got = [v for m in rp.read_parquet(sink.getvalue()) for v in m.column(b"f").to_pylist()]
+    assert got == VALUES
 
 
 @pytest.mark.parametrize("page_version", ["1.0", "2.0"])
-def test_byte_stream_split_refused_by_engine(page_version):
+def test_byte_stream_split_decoded_by_engine(page_version):
     with tempfile.TemporaryDirectory() as tmp:
         workspace = f"ws_bss_{page_version.replace('.', '')}_{os.getpid()}"
         data_dir = os.path.join(tmp, workspace, "t")
@@ -72,13 +72,14 @@ def test_byte_stream_split_refused_by_engine(page_version):
         os.chdir(tmp)
         try:
             opteryx.register_workspace(workspace, DiskConnector)
-            with pytest.raises(Exception, match=r"unsupported page encoding 9 \(BYTE_STREAM_SPLIT\)"):
-                for _ in opteryx.session().execute_to_morsels(
-                    f"SELECT SUM(f), MAX(f) FROM {workspace}.t"
-                ):
-                    pass
+            rows = []
+            for morsel in opteryx.session().execute_to_morsels(
+                f"SELECT SUM(f), MAX(f) FROM {workspace}.t"
+            ):
+                rows.append([morsel.column(c).to_pylist()[0] for c in morsel.column_names])
         finally:
             os.chdir(cwd)
+    assert rows == [[sum(VALUES), max(VALUES)]]
 
 
 def test_plain_non_nullable_still_decodes():
@@ -147,8 +148,8 @@ def test_uncompressed_v2_pages_in_compressed_column_engine():
 
 if __name__ == "__main__":
     for v in ("1.0", "2.0"):
-        test_byte_stream_split_refused_by_rugo(v)
-        test_byte_stream_split_refused_by_engine(v)
+        test_byte_stream_split_decoded_by_rugo(v)
+        test_byte_stream_split_decoded_by_engine(v)
     test_plain_non_nullable_still_decodes()
     test_uncompressed_v2_pages_in_compressed_column_rugo()
     test_uncompressed_v2_pages_in_compressed_column_engine()

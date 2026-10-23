@@ -304,6 +304,21 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + skipped
         entry["row_groups_read"] = max(0, entry.get("row_groups_read", 0) - skipped)
 
+    # The remote bloom round's share: units the native scan walked past because a
+    # landed bloom proved them empty — counted after plan-time pruning, so it is
+    # this mechanism's marginal saving only. Absent (not 0) for a scan no probe was
+    # planned for. Every entry of scan_plans is a NativeScanPlan.
+    for plan in parquet_plans or []:
+        bloom_pruned = plan.bloom_pruned_row_groups
+        if bloom_pruned is None:
+            continue
+        entry = facts.get(plan.scan_identity)
+        if entry is None:
+            continue
+        entry["row_groups_pruned_bloom"] = bloom_pruned
+        entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + bloom_pruned
+        entry["row_groups_read"] = max(0, entry.get("row_groups_read", 0) - bloom_pruned)
+
 
 def _and_conjuncts(node):
     """Flatten an ON tree's AND spine into its leaf conjuncts.

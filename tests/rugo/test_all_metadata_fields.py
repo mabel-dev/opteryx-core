@@ -67,6 +67,10 @@ def test_all_metadata_fields_exposed():
             "max",
             "null_count",
             "distinct_count",
+            # Statistics.is_min/max_value_exact: min/max are the values, not
+            # only bounds (rugo cuts long BYTE_ARRAY bounds to 16 bytes).
+            "min_exact",
+            "max_exact",
             # Bloom filter
             "bloom_offset",
             "bloom_length",

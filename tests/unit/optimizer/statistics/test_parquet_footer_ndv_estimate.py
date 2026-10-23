@@ -118,6 +118,34 @@ def test_sorted_key_straddling_row_groups_is_exact(tmp_path):
     assert ndv == len(set(values))
 
 
+def test_skewed_key_takes_the_writers_file_count(tmp_path):
+    # The TPC-DS shape (ss_customer_sk): half of every row group is one hot
+    # value and the rest is a long tail spread over the whole file, so every
+    # range overlaps and the uniform-sampling inversion reads the hot value as
+    # a small domain - it reported ~5-50x too few. The writer's file-level
+    # `rugo.ndv` count (exact below 1024 distinct, a K=1024 sketch above) is
+    # what the scan must see instead.
+    rng = random.Random(13)
+    values = [0 if k % 2 == 0 else rng.randrange(1, 1_000_000) for k in range(ROWS)]
+    true_ndv = len(set(values))
+    footer, ndv = _footer_and_ndv(_dataset(tmp_path, values))
+    assert footer["distinct_count"] < ROWS_PER_GROUP
+    assert abs(footer["distinct_estimate"] - true_ndv) <= 0.05 * true_ndv, (footer, true_ndv)
+    assert abs(ndv - true_ndv) <= 0.05 * true_ndv, (ndv, true_ndv)
+
+
+def test_low_cardinality_unsorted_key_is_exact(tmp_path):
+    # 700 distinct values, shuffled over every row group: each row group holds
+    # most of them and every range overlaps, so the merge only brackets the
+    # count. Below the sketch width the writer's count is exact.
+    rng = random.Random(17)
+    values = [rng.randrange(700) for _ in range(ROWS)]
+    footer, ndv = _footer_and_ndv(_dataset(tmp_path, values))
+    assert footer["distinct_count"] == len(set(values)), footer
+    assert footer["distinct_estimate"] == len(set(values)), footer
+    assert ndv == len(set(values))
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

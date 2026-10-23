@@ -152,6 +152,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
 
     for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
       uint8_t bit_width = bit_widths[mb];
+      if (bit_width > 64) break;  // corrupt: ReadPackedLSB holds widths <= 64
 
       if (bit_width == 0) {
         // All deltas in this miniblock equal min_delta; no data bytes needed.
@@ -166,15 +167,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
         if (ptr + bytes_needed > end) break;
 
         for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
-          uint64_t delta = 0;
-          int bit_pos    = i * bit_width;
-          int byte_pos   = bit_pos / 8;
-          int bit_offset = bit_pos % 8;
-
-          for (int b = 0; b < 9 && byte_pos + b < bytes_needed; b++) {
-            delta |= ((uint64_t)ptr[byte_pos + b]) << (b * 8);
-          }
-          delta = (delta >> bit_offset) & ((1ULL << bit_width) - 1);
+          const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
 
           T last = values.back();
           values.push_back(last + static_cast<T>(min_delta + (int64_t)delta));
@@ -238,6 +231,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
 
     for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
       uint8_t bit_width = bit_widths[mb];
+      if (bit_width > 64) break;  // corrupt: ReadPackedLSB holds widths <= 64
 
       if (bit_width == 0) {
         // All deltas in this miniblock equal min_delta; no data bytes needed.
@@ -252,15 +246,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
         if (ptr + bytes_needed > end) break;
 
         for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
-          uint64_t delta = 0;
-          int bit_pos    = i * bit_width;
-          int byte_pos   = bit_pos / 8;
-          int bit_offset = bit_pos % 8;
-
-          for (int b = 0; b < 9 && byte_pos + b < bytes_needed; b++) {
-            delta |= ((uint64_t)ptr[byte_pos + b]) << (b * 8);
-          }
-          delta = (delta >> bit_offset) & ((1ULL << bit_width) - 1);
+          const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
 
           T last = out[decoded - 1];
           out[decoded] = last + static_cast<T>(min_delta + (int64_t)delta);
@@ -283,3 +269,28 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
 int32_t DecodeDeltaByteArray(const uint8_t *data, size_t data_size,
                              int32_t num_values,
                              std::vector<std::string> &values);
+
+// ---------------------------------------------------------------------------
+// Value encodings decoded into PLAIN layout
+// ---------------------------------------------------------------------------
+// DELTA_LENGTH_BYTE_ARRAY (6), BYTE_STREAM_SPLIT (9) and ALP (10) decode into
+// the page's PLAIN byte layout, so the walks read them through the PLAIN path
+// unchanged. `num_values` is the page's PRESENT value count. Each returns an
+// empty string on success, else the reason the page cannot be decoded.
+
+// BYTE_STREAM_SPLIT: `width` streams of `num_values` bytes (stream j holds byte
+// j of every value) -> `num_values` contiguous `width`-byte values at `dst`.
+std::string DecodeByteStreamSplit(const uint8_t *data, size_t data_size,
+                                  int32_t num_values, size_t width, uint8_t *dst);
+
+// ALP (parquet-format AlpEncoding.md): FLOAT when `width` is 4, DOUBLE when 8.
+// Writes `num_values` values, bit-exact, at `dst`.
+std::string DecodeAlp(const uint8_t *data, size_t data_size, int32_t num_values,
+                      size_t width, uint8_t *dst);
+
+// DELTA_LENGTH_BYTE_ARRAY: a DELTA_BINARY_PACKED stream of lengths, then every
+// value's bytes back to back -> PLAIN BYTE_ARRAY (4-byte LE length + bytes per
+// value) in `out`, which is cleared first.
+std::string DecodeDeltaLengthByteArray(const uint8_t *data, size_t data_size,
+                                       int32_t num_values,
+                                       draken::AppendBuffer<uint8_t> &out);

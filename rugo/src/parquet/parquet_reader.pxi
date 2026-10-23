@@ -625,12 +625,16 @@ def read_rowgroup_stats(data):
          "columns": [
              {"name": str, "physical_type": str, "logical_type": str,
               "min": bytes|None, "max": bytes|None, "null_count": int,
+              "min_exact": bool, "max_exact": bool,
               "max_repetition_level": int,
               "is_sorted": bool, "sort_descending": bool,
               "sort_nulls_first": bool}, ...]}
 
     `min`/`max` are the raw parquet statistic bytes (None when absent); decode
     them to typed values with `decode_value(physical_type, logical_type, raw)`.
+    They are always BOUNDS. `min_exact`/`max_exact` say whether they are also
+    the chunk's actual values: rugo cuts BYTE_ARRAY bounds longer than 16 bytes
+    (inexact), and a writer that states nothing is read as inexact.
 
     `is_sorted` reflects this row group's parquet sorting_columns claim, but
     ONLY when the file's created_by footer field identifies rugo as the
@@ -666,6 +670,8 @@ def read_rowgroup_stats(data):
                 "max": (<bytes>fs.row_groups[rg_i].columns[c_i].max)
                        if fs.row_groups[rg_i].columns[c_i].has_max else None,
                 "null_count": fs.row_groups[rg_i].columns[c_i].null_count,
+                "min_exact": fs.row_groups[rg_i].columns[c_i].min_exact,
+                "max_exact": fs.row_groups[rg_i].columns[c_i].max_exact,
                 # >0 for a nested (list/map) leaf. null_count is then a count of
                 # null LEAF VALUES, which is not a count of null ROWS, so a
                 # caller pruning on it must know the difference — see

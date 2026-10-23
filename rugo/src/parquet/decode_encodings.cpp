@@ -1128,3 +1128,216 @@ int32_t DecodeDeltaByteArray(const uint8_t *data, size_t data_size,
 
   return (int32_t)values.size();
 }
+
+// ---------------------------------------------------------------------------
+// DecodeByteStreamSplit
+// ---------------------------------------------------------------------------
+
+// The PLAIN-layout decoders below write native values as PLAIN's little-endian
+// bytes; every target (ARM64, x86-64, RISC-V) is little-endian.
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+              "PLAIN-layout decoders write native little-endian bytes");
+
+template <size_t W>
+static void UnsplitStreams(const uint8_t *data, size_t n, uint8_t *dst) {
+  for (size_t i = 0; i < n; ++i)
+    for (size_t j = 0; j < W; ++j) dst[i * W + j] = data[j * n + i];
+}
+
+std::string DecodeByteStreamSplit(const uint8_t *data, size_t data_size,
+                                  int32_t num_values, size_t width, uint8_t *dst) {
+  const size_t n = (size_t)num_values;
+  if (num_values < 0 || width == 0 || data_size != n * width) {
+    return "BYTE_STREAM_SPLIT page holds " + std::to_string(data_size) +
+           " value bytes, expected " + std::to_string(n * width) + " (" +
+           std::to_string(num_values) + " values of " + std::to_string(width) + " bytes)";
+  }
+  switch (width) {
+  case 4: UnsplitStreams<4>(data, n, dst); break;
+  case 8: UnsplitStreams<8>(data, n, dst); break;
+  default:
+    for (size_t j = 0; j < width; ++j) {
+      const uint8_t *s = data + j * n;
+      for (size_t i = 0; i < n; ++i) dst[i * width + j] = s[i];
+    }
+  }
+  return std::string();
+}
+
+// ---------------------------------------------------------------------------
+// DecodeAlp
+// ---------------------------------------------------------------------------
+// Normative decode (AlpEncoding.md "Decoding"): unpack the FOR deltas, add the
+// frame of reference, multiply by 10^factor THEN by 10^-exponent in the value's
+// own precision, then patch the exceptions in by raw bit pattern. The power-of-
+// ten tables are the correctly rounded IEEE 754 values of the decimal literals,
+// as the spec requires — compile-time literals, never pow().
+
+namespace {
+
+template <typename F> struct AlpTraits;
+template <> struct AlpTraits<float> {
+  using Signed = int32_t;
+  using Unsigned = uint32_t;
+  static constexpr uint8_t kMaxExponent = 10;
+  static constexpr size_t kForBytes = 5;  // int32 frame_of_reference + bit_width
+  static constexpr float kPow10[11] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f,
+                                       1e6f, 1e7f, 1e8f, 1e9f, 1e10f};
+  static constexpr float kNegPow10[11] = {1e0f,  1e-1f, 1e-2f, 1e-3f, 1e-4f, 1e-5f,
+                                          1e-6f, 1e-7f, 1e-8f, 1e-9f, 1e-10f};
+};
+template <> struct AlpTraits<double> {
+  using Signed = int64_t;
+  using Unsigned = uint64_t;
+  static constexpr uint8_t kMaxExponent = 18;
+  static constexpr size_t kForBytes = 9;  // int64 frame_of_reference + bit_width
+  static constexpr double kPow10[19] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,
+                                        1e7,  1e8,  1e9,  1e10, 1e11, 1e12, 1e13,
+                                        1e14, 1e15, 1e16, 1e17, 1e18};
+  static constexpr double kNegPow10[19] = {1e0,   1e-1,  1e-2,  1e-3,  1e-4,
+                                           1e-5,  1e-6,  1e-7,  1e-8,  1e-9,
+                                           1e-10, 1e-11, 1e-12, 1e-13, 1e-14,
+                                           1e-15, 1e-16, 1e-17, 1e-18};
+};
+
+std::string AlpError(const std::string &what) { return "ALP page: " + what; }
+
+template <typename F>
+std::string DecodeAlpTyped(const uint8_t *data, size_t data_size, int32_t num_values,
+                           F *out) {
+  using T = AlpTraits<F>;
+  using U = typename T::Unsigned;
+  using S = typename T::Signed;
+  constexpr size_t kVecHeader = 4 + T::kForBytes;
+  constexpr uint32_t kMaxBits = sizeof(U) * 8;
+
+  if (data_size < 7) return AlpError("truncated header");
+  if (data[0] != 0)
+    return AlpError("compression_mode " + std::to_string(data[0]) +
+                    " is not supported (only 0 = ALP)");
+  if (data[1] != 0)
+    return AlpError("integer_encoding " + std::to_string(data[1]) +
+                    " is not supported (only 0 = FOR + bit-packing)");
+  const uint32_t log_vs = data[2];
+  if (log_vs < 3 || log_vs > 15)
+    return AlpError("log_vector_size " + std::to_string(log_vs) + " is outside [3, 15]");
+  const int32_t num_elements = ReadLE32(data + 3);
+  if (num_elements != num_values)
+    return AlpError("header declares " + std::to_string(num_elements) +
+                    " values, the page holds " + std::to_string(num_values) +
+                    " present values");
+
+  const size_t n = (size_t)num_values;
+  const size_t vs = (size_t)1 << log_vs;
+  const size_t num_vectors = (n + vs - 1) / vs;
+  const uint8_t *base = data + 7;  // offsets are relative to the offset array
+  const size_t region = data_size - 7;
+  if (num_vectors * 4 > region) return AlpError("truncated offset array");
+
+  for (size_t v = 0; v < num_vectors; ++v) {
+    const size_t off = ReadLE32U(base + v * 4);
+    const size_t limit = v + 1 < num_vectors ? ReadLE32U(base + (v + 1) * 4) : region;
+    if (off < num_vectors * 4 || off > limit || limit > region)
+      return AlpError("vector " + std::to_string(v) + " offset is out of bounds");
+    const uint8_t *p = base + off;
+    const size_t avail = limit - off;
+    const size_t count = std::min(vs, n - v * vs);
+    if (avail < kVecHeader)
+      return AlpError("vector " + std::to_string(v) + " header is truncated");
+
+    const uint8_t exponent = p[0];
+    const uint8_t factor = p[1];
+    const size_t num_exceptions = (size_t)p[2] | ((size_t)p[3] << 8);
+    U frame;
+    std::memcpy(&frame, p + 4, sizeof(U));
+    const uint32_t bit_width = p[4 + sizeof(U)];
+    if (exponent > T::kMaxExponent || factor > exponent)
+      return AlpError("vector " + std::to_string(v) + " exponent " +
+                      std::to_string(exponent) + " / factor " + std::to_string(factor) +
+                      " is out of range");
+    if (bit_width > kMaxBits)
+      return AlpError("vector " + std::to_string(v) + " bit_width " +
+                      std::to_string(bit_width) + " exceeds " + std::to_string(kMaxBits));
+    if (num_exceptions > count)
+      return AlpError("vector " + std::to_string(v) + " declares " +
+                      std::to_string(num_exceptions) + " exceptions for " +
+                      std::to_string(count) + " values");
+    const size_t packed_bytes = (count * bit_width + 7) / 8;
+    if (kVecHeader + packed_bytes + num_exceptions * (2 + sizeof(F)) > avail)
+      return AlpError("vector " + std::to_string(v) + " data is truncated");
+
+    const uint8_t *packed = p + kVecHeader;
+    const F mul_factor = T::kPow10[factor];
+    const F mul_exponent = T::kNegPow10[exponent];
+    F *dst = out + v * vs;
+    if (bit_width == 0) {
+      const F value = static_cast<F>(static_cast<S>(frame)) * mul_factor * mul_exponent;
+      for (size_t i = 0; i < count; ++i) dst[i] = value;
+    } else {
+      for (size_t i = 0; i < count; ++i) {
+        const U delta = (U)ReadPackedLSB(packed, packed_bytes, i, bit_width);
+        dst[i] = static_cast<F>(static_cast<S>(delta + frame)) * mul_factor * mul_exponent;
+      }
+    }
+
+    const uint8_t *positions = packed + packed_bytes;
+    const uint8_t *exceptions = positions + num_exceptions * 2;
+    for (size_t k = 0; k < num_exceptions; ++k) {
+      const size_t pos = (size_t)positions[2 * k] | ((size_t)positions[2 * k + 1] << 8);
+      if (pos >= count)
+        return AlpError("vector " + std::to_string(v) + " exception position " +
+                        std::to_string(pos) + " is outside its " +
+                        std::to_string(count) + " values");
+      std::memcpy(dst + pos, exceptions + k * sizeof(F), sizeof(F));
+    }
+  }
+  return std::string();
+}
+
+}  // namespace
+
+std::string DecodeAlp(const uint8_t *data, size_t data_size, int32_t num_values,
+                      size_t width, uint8_t *dst) {
+  if (num_values < 0) return AlpError("negative value count");
+  if (width == 4)
+    return DecodeAlpTyped<float>(data, data_size, num_values, reinterpret_cast<float *>(dst));
+  if (width == 8)
+    return DecodeAlpTyped<double>(data, data_size, num_values, reinterpret_cast<double *>(dst));
+  return AlpError("value width " + std::to_string(width) + " is not FLOAT or DOUBLE");
+}
+
+// ---------------------------------------------------------------------------
+// DecodeDeltaLengthByteArray
+// ---------------------------------------------------------------------------
+
+std::string DecodeDeltaLengthByteArray(const uint8_t *data, size_t data_size,
+                                       int32_t num_values,
+                                       draken::AppendBuffer<uint8_t> &out) {
+  out.clear();
+  if (num_values == 0) return std::string();
+  const uint8_t *end = data + data_size;
+  std::vector<int32_t> lengths;
+  if (DecodeDeltaBinaryPacked(data, data_size, num_values, lengths) != num_values)
+    return "DELTA_LENGTH_BYTE_ARRAY page: length stream holds fewer than " +
+           std::to_string(num_values) + " lengths";
+  const uint8_t *bytes = SkipDeltaBinaryPacked(data, end, num_values);
+  if (bytes > end)
+    return "DELTA_LENGTH_BYTE_ARRAY page: length stream runs past the page";
+  size_t total = 0;
+  for (int32_t len : lengths) {
+    if (len < 0) return "DELTA_LENGTH_BYTE_ARRAY page: negative value length";
+    total += (size_t)len;
+  }
+  if (total > (size_t)(end - bytes))
+    return "DELTA_LENGTH_BYTE_ARRAY page: lengths total " + std::to_string(total) +
+           " bytes, the page holds " + std::to_string((size_t)(end - bytes));
+  out.resize_uninit((size_t)num_values * 4 + total);
+  uint8_t *w = out.data();
+  for (int32_t len : lengths) {
+    std::memcpy(w, &len, 4);  // PLAIN length prefix
+    std::memcpy(w + 4, bytes, (size_t)len);
+    w += 4 + (size_t)len;
+    bytes += len;
+  }
+  return std::string();
+}

@@ -397,27 +397,15 @@ std::string ResolvePageValuesRegion(const PageHeader& h, int32_t codec,
   return std::string();
 }
 
-// Value encodings no walk can decode. An unhandled encoding is not a no-op —
-// read as PLAIN its bytes produce plausible garbage with success=true — so it
-// is refused by name. Empty when the encoding is admitted.
-//   6 = DELTA_LENGTH_BYTE_ARRAY, 9 = BYTE_STREAM_SPLIT: real encodings we do
-//       not implement.
-//   1 = GROUP_VAR_INT (obsolete), 4 = BIT_PACKED (deprecated, levels only):
-//       never valid as a data-page value encoding.
-// 2/8 (dictionary) reach the value decoders only for the all-null dictionary
-// page shape of the sequential walk, so they stay admitted.
-std::string PageValueEncodingError(int32_t encoding, const std::string& col_name) {
-  if (encoding == 0 || encoding == 2 || encoding == 3 || encoding == 5 ||
-      encoding == 7 || encoding == 8) {
-    return std::string();
-  }
-  const char* enc_name = encoding == 6   ? "DELTA_LENGTH_BYTE_ARRAY"
-                         : encoding == 9 ? "BYTE_STREAM_SPLIT"
-                         : encoding == 1 ? "GROUP_VAR_INT"
-                         : encoding == 4 ? "BIT_PACKED"
-                                         : "unknown";
-  return "unsupported page encoding " + std::to_string(encoding) + " (" + enc_name +
-         ") for column '" + col_name + "'";
+// Value encodings no walk can decode for this column's physical type, refused
+// by name (ValueEncodingRefusal, decode_page.hpp). Empty when admitted.
+std::string PageValueEncodingError(int32_t encoding, const std::string& physical_type,
+                                   const std::string& col_name) {
+  const char* reason = ValueEncodingRefusal(encoding, physical_type);
+  if (reason == nullptr) return std::string();
+  return "unsupported page encoding " + std::to_string(encoding) + " (" +
+         EncodingToString(encoding) + ") for " + physical_type + " column '" + col_name +
+         "': " + reason;
 }
 
 // A fixed-width page read value-by-value (anything but DELTA_BINARY_PACKED)
@@ -446,6 +434,7 @@ int32_t PreScanPages(
     const uint8_t* cursor,
     const uint8_t* chunk_limit,
     int32_t codec,
+    const std::string& physical_type,
     const std::string& col_name,
     std::vector<PageTask>& pages_out)
 {
@@ -488,7 +477,7 @@ int32_t PreScanPages(
     PageValuesRegion region;
     std::string page_error =
         ResolvePageValuesRegion(page_header, codec, compressed_size, region);
-    if (page_error.empty()) page_error = PageValueEncodingError(page_header.encoding, col_name);
+    if (page_error.empty()) page_error = PageValueEncodingError(page_header.encoding, physical_type, col_name);
     if (!page_error.empty()) throw std::runtime_error(page_error);
     const int64_t values_usize =
         (int64_t)page_header.uncompressed_page_size - (int64_t)region.levels_len;
@@ -1001,18 +990,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       return;
     }
 
-    // Guard: at least one supported encoding.
-    // IDs use Parquet spec values (post ZigZag-decode fix in metadata.cpp):
-    //   0=PLAIN, 2=PLAIN_DICTIONARY, 3=RLE, 5=DELTA_BINARY_PACKED,
-    //   7=DELTA_BYTE_ARRAY, 8=RLE_DICTIONARY.
-    // This set MUST match the CanDecode admission gate (decode.cpp) and the
-    // per-page value-encoding gate below — a column whose ONLY listed encoding
-    // is delta (5/7), as emitted for DELTA-encoded OPTIONAL columns, must clear
-    // this guard too. Omitting 5/7 here silently returned an empty (success=false,
-    // no error_message) column for such files, dropping it from the result.
+    // Guard: at least one listed encoding decodes this column's values
+    // (ValueEncodingRefusal, decode_page.hpp — the rule CanDecode and the
+    // per-page check also apply). A column whose ONLY listed encoding is delta,
+    // as emitted for DELTA-encoded OPTIONAL columns, clears it.
     bool has_supported_encoding = false;
     for (int32_t enc : target_col->encodings) {
-      if (enc == 0 || enc == 2 || enc == 3 || enc == 5 || enc == 7 || enc == 8) {
+      if (ValueEncodingRefusal(enc, target_col->physical_type) == nullptr) {
         has_supported_encoding = true;
         break;
       }
@@ -1021,13 +1005,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       std::string listed;
       for (int32_t enc : target_col->encodings) {
         if (!listed.empty()) listed += ", ";
-        listed += std::to_string(enc);
+        listed += std::to_string(enc) + " " + EncodingToString(enc);
       }
       result.error_message =
-          "column declares no decodable encoding (parquet encoding ids: " +
-          (listed.empty() ? std::string("none") : listed) +
-          "); supported ids are 0 PLAIN, 2 PLAIN_DICTIONARY, 3 RLE, "
-          "5 DELTA_BINARY_PACKED, 7 DELTA_BYTE_ARRAY, 8 RLE_DICTIONARY";
+          "column declares no encoding decodable for " + target_col->physical_type +
+          " (parquet encodings: " + (listed.empty() ? std::string("none") : listed) + ")";
       return;
     }
 
@@ -1877,6 +1859,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // clear()s before writing (see the references inside the page loop).
     draken::AppendBuffer<int32_t> _page_rep_levels;
     draken::AppendBuffer<int32_t> _page_def_levels;
+    // A DELTA_LENGTH_BYTE_ARRAY / BYTE_STREAM_SPLIT / ALP page decoded into
+    // PLAIN layout; chunk-scoped for its capacity, like the level buffers.
+    draken::AppendBuffer<uint8_t> _page_plain;
     draken::AppendBuffer<int32_t> _page_dict_indices;
     draken::AppendBuffer<uint8_t> _page_vsel;  // sel_mode: one 0/1 byte per PRESENT value of the page
     // Page search scratch (search_on): per-PRESENT-value verdict, per-row
@@ -1944,8 +1929,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         std::vector<PageTask> page_tasks;
         page_tasks.reserve(64);
         const int32_t prescan_total = PreScanPages(cursor, chunk_limit,
-                                                   target_col->codec, target_col->name,
-                                                   page_tasks);
+                                                   target_col->codec,
+                                                   target_col->physical_type,
+                                                   target_col->name, page_tasks);
         RUGO_TEL_ACCUM(rugo_tel::prescan_ns, _ps_t0);
 
         if (page_tasks.size() > 2 && prescan_total > 0) {
@@ -2086,15 +2072,31 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               const size_t  off = (size_t)ptask.out_offset;
               const bool is_int = (col_type == "int32" || col_type == "int64");
               const bool delta  = is_int && ptask.encoding == 5;
-              if (!delta) {
-                const size_t width = (col_type == "int32" || col_type == "float32") ? 4 : 8;
+              // BYTE_STREAM_SPLIT / ALP: decoded (and size-checked) by their own
+              // decoders, straight into this page's output slot.
+              const bool unsplit = ptask.encoding == 9 || ptask.encoding == 10;
+              const size_t width = (col_type == "int32" || col_type == "float32") ? 4 : 8;
+              if (!delta && !unsplit) {
                 if (ds < (size_t)nv * width) {
                   fail_task(FixedWidthPageTooShort(nv, ds, width));
                   return;
                 }
               }
 
-              if (col_type == "int32") {
+              if (unsplit) {
+                uint8_t* dst =
+                    col_type == "int32"   ? reinterpret_cast<uint8_t*>(xint32 ? xint32 + off : ivec_i32 + off)
+                  : col_type == "int64"   ? reinterpret_cast<uint8_t*>(xint64 ? xint64 + off : ivec_i64 + off)
+                  : col_type == "float32" ? reinterpret_cast<uint8_t*>(xfloat32 ? xfloat32 + off : ivec_f32 + off)
+                  :                         reinterpret_cast<uint8_t*>(xfloat64 ? xfloat64 + off : ivec_f64 + off);
+                std::string err = ptask.encoding == 9
+                                      ? DecodeByteStreamSplit(dp, ds, nv, width, dst)
+                                      : DecodeAlp(dp, ds, nv, width, dst);
+                if (!err.empty()) {
+                  fail_task(std::move(err));
+                  return;
+                }
+              } else if (col_type == "int32") {
                 int32_t* dst = xint32 ? (xint32 + off) : (ivec_i32 + off);
                 if (delta) {
                   const int32_t decoded = DecodeDeltaBinaryPacked(dp, ds, nv, dst);
@@ -2496,6 +2498,52 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             break;
           }
         }
+      }
+
+      // ── Value encoding: admit, then decode 6/9/10 into PLAIN layout ──────
+      // The page's encoding is checked against this column's type first
+      // (shared with the parallel walk's pre-scan: PageValueEncodingError).
+      // DELTA_LENGTH_BYTE_ARRAY, BYTE_STREAM_SPLIT and ALP pages are then
+      // decoded into PLAIN layout in page scratch and the page's encoding
+      // becomes PLAIN: from here on the page IS a PLAIN page, so page search,
+      // selective decode, dictionary re-derivation and every value path read
+      // it unchanged.
+      {
+        std::string encoding_error = PageValueEncodingError(
+            page_header.encoding, target_col->physical_type, target_col->name);
+        if (!encoding_error.empty()) {
+          result.error_message = std::move(encoding_error);
+          return;
+        }
+      }
+      if (page_header.encoding == 6 || page_header.encoding == 9 ||
+          page_header.encoding == 10) {
+        int32_t present = page_values;
+        if (!def_levels.empty()) {
+          present = 0;
+          for (int32_t dl : def_levels) present += (dl == target_col->max_definition_level);
+        }
+        std::string encoding_error;
+        if (page_header.encoding == 6) {
+          encoding_error =
+              DecodeDeltaLengthByteArray(data_ptr, data_size, present, _page_plain);
+        } else {
+          const std::string& pt = target_col->physical_type;
+          const size_t width = pt == "fixed_len_byte_array" ? (size_t)target_col->type_length
+                               : (pt == "int32" || pt == "float32") ? 4 : 8;
+          _page_plain.resize_uninit((size_t)present * width);
+          encoding_error =
+              page_header.encoding == 9
+                  ? DecodeByteStreamSplit(data_ptr, data_size, present, width, _page_plain.data())
+                  : DecodeAlp(data_ptr, data_size, present, width, _page_plain.data());
+        }
+        if (!encoding_error.empty()) {
+          result.error_message = "column '" + target_col->name + "': " + encoding_error;
+          return;
+        }
+        data_ptr = _page_plain.data();
+        data_size = _page_plain.size();
+        page_header.encoding = 0;
       }
 
       const uint8_t *data_end = data_ptr + data_size;
@@ -3069,17 +3117,6 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       } else {
         // PLAIN or DELTA encoding
         int32_t page_encoding = page_header.encoding;
-
-        // Reject value encodings no walk can decode (shared with the parallel
-        // walk's pre-scan: PageValueEncodingError).
-        {
-          std::string encoding_error =
-              PageValueEncodingError(page_encoding, target_col->name);
-          if (!encoding_error.empty()) {
-            result.error_message = std::move(encoding_error);
-            return;
-          }
-        }
 
         // ── Mixed-encoding transition ──────────────────────────────────────
         // When a column starts with dict-encoded pages and then switches to

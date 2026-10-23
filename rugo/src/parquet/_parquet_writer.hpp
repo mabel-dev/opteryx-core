@@ -22,6 +22,7 @@
 #include "_bloom_writer.hpp"
 #include "../_writer_pool.hpp"   // shared writer pool: column chunks encode in parallel
 #include "chunk_sum.hpp"
+#include "file_ndv.hpp"
 
 #include "core/kmv_sketch.h"  // THE shared KMV sketch (draken, header-only)
 
@@ -91,7 +92,8 @@ enum PType : int32_t {
 };
 
 // Encoding / codec / page / repetition / converted-type enum values.
-enum { ENC_PLAIN = 0, ENC_PLAIN_DICTIONARY = 2, ENC_RLE = 3, ENC_RLE_DICTIONARY = 8 };
+enum { ENC_PLAIN = 0, ENC_PLAIN_DICTIONARY = 2, ENC_RLE = 3, ENC_RLE_DICTIONARY = 8,
+       ENC_ALP = 10 };
 enum { CODEC_UNCOMPRESSED = 0, CODEC_ZSTD = 6 };
 
 // ---- keep-compressed floor ----
@@ -221,6 +223,14 @@ struct ColumnInput {
   int draken_logical_kind = 0;
 
   bool bloom = false;       // emit a split-block bloom filter for this column
+
+  // ---- ALP (parquet encoding 10) ----
+  // Encode this FLOAT/DOUBLE column's data pages with ALP instead of PLAIN
+  // (alp_encode below). Opt-in: ALP is a Preview encoding, and a reader without
+  // it cannot read the column at all. Dictionary pages stay PLAIN (the spec
+  // requires it) and a dictionary-encoded chunk's data pages are codes, so only
+  // a PLAIN chunk changes. Set on any other type it is a hard error.
+  bool alp = false;
 
   // ---- dictionary encoding ----
   //
@@ -518,6 +528,271 @@ inline void encode_values(const ColumnInput &col, size_t num_rows,
   }
 }
 
+// ---- ALP encoding (parquet-format AlpEncoding.md) ----
+//
+// The page is a 7-byte header, a uint32 offset per vector, then the vectors;
+// each vector is (exponent, factor, exception count), (frame of reference, bit
+// width), the FOR deltas bit-packed LSB-first, then the exceptions' positions
+// and raw values. Only the layout and the decode are normative: a value is an
+// exception whenever `encoded * 10^f * 10^-e`, computed exactly as every
+// reader must, does not give back its bits — so the parameter search below
+// affects size, never correctness.
+//
+// Parameter search follows the paper's two levels: up to kAlpSampleVectors
+// vectors spread over the page each try all (e, f) pairs on a sample, and the
+// pairs that win most often (at most kAlpPresetSize) form the page's preset;
+// each vector then picks the preset pair that sizes smallest on its own
+// sample, and is encoded with it.
+static constexpr size_t kAlpLogVectorSize = 10;  // 1024 values, the spec default
+static constexpr size_t kAlpVectorSize = (size_t)1 << kAlpLogVectorSize;
+static constexpr size_t kAlpSampleVectors = 8;
+static constexpr size_t kAlpPresetSampleValues = 256;
+static constexpr size_t kAlpVectorSampleValues = 32;
+static constexpr size_t kAlpPresetSize = 5;
+
+template <typename F> struct AlpWriteTraits;
+template <> struct AlpWriteTraits<float> {
+  using Signed = int32_t;
+  using Unsigned = uint32_t;
+  static constexpr uint8_t kMaxExponent = 10;
+  static constexpr float kMagic = 12582912.0f;  // 2^22 + 2^23: rounds in float precision
+  // One ulp inside int32 so rounding cannot carry a value past it.
+  static constexpr float kUpper = 2147483392.0f;
+  static constexpr float kLower = -2147483392.0f;
+  static constexpr float kPow10[11] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f,
+                                       1e6f, 1e7f, 1e8f, 1e9f, 1e10f};
+  static constexpr float kNegPow10[11] = {1e0f,  1e-1f, 1e-2f, 1e-3f, 1e-4f, 1e-5f,
+                                          1e-6f, 1e-7f, 1e-8f, 1e-9f, 1e-10f};
+};
+template <> struct AlpWriteTraits<double> {
+  using Signed = int64_t;
+  using Unsigned = uint64_t;
+  static constexpr uint8_t kMaxExponent = 18;
+  static constexpr double kMagic = 6755399441055744.0;  // 2^51 + 2^52
+  static constexpr double kUpper = 9223372036854773760.0;  // 2^63 - 2^11
+  static constexpr double kLower = -9223372036854773760.0;
+  static constexpr double kPow10[19] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,
+                                        1e7,  1e8,  1e9,  1e10, 1e11, 1e12, 1e13,
+                                        1e14, 1e15, 1e16, 1e17, 1e18};
+  static constexpr double kNegPow10[19] = {1e0,   1e-1,  1e-2,  1e-3,  1e-4,
+                                           1e-5,  1e-6,  1e-7,  1e-8,  1e-9,
+                                           1e-10, 1e-11, 1e-12, 1e-13, 1e-14,
+                                           1e-15, 1e-16, 1e-17, 1e-18};
+};
+
+// `v` as an integer under (e, f), or false when it must be an exception:
+// NaN, +-Inf, -0.0, out of the integer range, or not bit-exact on decode.
+template <typename F>
+inline bool alp_encode_value(F v, uint8_t e, uint8_t f,
+                             typename AlpWriteTraits<F>::Signed &out) {
+  using T = AlpWriteTraits<F>;
+  using S = typename T::Signed;
+  const F scaled = v * T::kPow10[e] * T::kNegPow10[f];
+  if (!(scaled >= T::kLower && scaled <= T::kUpper)) return false;  // NaN fails both
+  const F rounded = scaled >= 0 ? (scaled + T::kMagic) - T::kMagic
+                                : (scaled - T::kMagic) + T::kMagic;
+  const S enc = static_cast<S>(rounded);
+  const F dec = static_cast<F>(enc) * T::kPow10[f] * T::kNegPow10[e];
+  if (std::memcmp(&dec, &v, sizeof(F)) != 0) return false;
+  out = enc;
+  return true;
+}
+
+inline uint32_t alp_bit_width(uint64_t range) {
+  return range == 0 ? 0u : 64u - (uint32_t)__builtin_clzll(range);
+}
+
+// Estimated bits for `n` sampled values (every `stride`-th from `v`) under (e, f).
+template <typename F>
+inline uint64_t alp_estimate_bits(const F *v, size_t n, size_t stride, uint8_t e,
+                                  uint8_t f) {
+  using S = typename AlpWriteTraits<F>::Signed;
+  using U = typename AlpWriteTraits<F>::Unsigned;
+  S lo = 0, hi = 0;
+  bool any = false;
+  uint64_t exceptions = 0;
+  for (size_t k = 0; k < n; ++k) {
+    S enc;
+    if (!alp_encode_value(v[k * stride], e, f, enc)) {
+      ++exceptions;
+      continue;
+    }
+    if (!any) { lo = hi = enc; any = true; }
+    else { lo = std::min(lo, enc); hi = std::max(hi, enc); }
+  }
+  const uint64_t width = any ? alp_bit_width((uint64_t)((U)hi - (U)lo)) : 0;
+  return n * width + exceptions * (8 * sizeof(F) + 16);
+}
+
+struct AlpPair {
+  uint8_t e, f;
+};
+
+// The page's preset: the (e, f) pairs that win most often over sampled vectors.
+template <typename F>
+inline std::vector<AlpPair> alp_page_preset(const F *v, size_t n) {
+  using T = AlpWriteTraits<F>;
+  const size_t num_vectors = (n + kAlpVectorSize - 1) / kAlpVectorSize;
+  const size_t samples = std::min(num_vectors, kAlpSampleVectors);
+  struct Win { AlpPair p; uint32_t wins; uint64_t bits; };
+  std::vector<Win> wins;
+  for (size_t s = 0; s < samples; ++s) {
+    const size_t vec = s * num_vectors / samples;
+    const size_t start = vec * kAlpVectorSize;
+    const size_t count = std::min(kAlpVectorSize, n - start);
+    const size_t stride = std::max<size_t>(1, count / kAlpPresetSampleValues);
+    const size_t sn = (count + stride - 1) / stride;
+    AlpPair best{0, 0};
+    uint64_t best_bits = UINT64_MAX;
+    for (uint8_t e = 0; e <= T::kMaxExponent; ++e)
+      for (uint8_t f = 0; f <= e; ++f) {
+        const uint64_t bits = alp_estimate_bits(v + start, sn, stride, e, f);
+        // Ties keep the larger exponent, then factor (the paper's order).
+        if (bits <= best_bits) { best_bits = bits; best = AlpPair{e, f}; }
+      }
+    auto it = std::find_if(wins.begin(), wins.end(), [&](const Win &w) {
+      return w.p.e == best.e && w.p.f == best.f;
+    });
+    if (it == wins.end()) wins.push_back(Win{best, 1, best_bits});
+    else { ++it->wins; it->bits = std::min(it->bits, best_bits); }
+  }
+  std::sort(wins.begin(), wins.end(), [](const Win &a, const Win &b) {
+    if (a.wins != b.wins) return a.wins > b.wins;
+    if (a.bits != b.bits) return a.bits < b.bits;
+    if (a.p.e != b.p.e) return a.p.e > b.p.e;
+    return a.p.f > b.p.f;
+  });
+  std::vector<AlpPair> preset;
+  for (size_t k = 0; k < wins.size() && k < kAlpPresetSize; ++k) preset.push_back(wins[k].p);
+  return preset;
+}
+
+// Append `n` values of `bit_width` bits, LSB-first, zero-padded to a byte.
+template <typename U>
+inline void alp_pack(const U *vals, size_t n, uint32_t bit_width, std::vector<uint8_t> &out) {
+  if (bit_width == 0) return;
+  size_t at = out.size();
+  out.resize(at + (n * bit_width + 7) / 8);
+  uint8_t *p = out.data() + at;
+  unsigned __int128 acc = 0;
+  uint32_t fill = 0;
+  for (size_t i = 0; i < n; ++i) {
+    acc |= (unsigned __int128)vals[i] << fill;
+    fill += bit_width;
+    while (fill >= 8) {
+      *p++ = (uint8_t)acc;
+      acc >>= 8;
+      fill -= 8;
+    }
+  }
+  if (fill > 0) *p = (uint8_t)acc;
+}
+
+// One vector of `count` values under (e, f), appended to `out`.
+template <typename F>
+inline void alp_encode_vector(const F *v, size_t count, AlpPair p, std::vector<uint8_t> &out) {
+  using S = typename AlpWriteTraits<F>::Signed;
+  using U = typename AlpWriteTraits<F>::Unsigned;
+  S enc[kAlpVectorSize];
+  uint16_t exc_pos[kAlpVectorSize];
+  size_t num_exc = 0;
+  bool have_first = false;
+  S first = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (alp_encode_value(v[i], p.e, p.f, enc[i])) {
+      if (!have_first) { first = enc[i]; have_first = true; }
+    } else {
+      exc_pos[num_exc++] = (uint16_t)i;
+    }
+  }
+  // Exceptions take the first encodable value as a placeholder so they do not
+  // widen the frame of reference.
+  for (size_t k = 0; k < num_exc; ++k) enc[exc_pos[k]] = first;
+  S lo = count ? enc[0] : 0, hi = lo;
+  for (size_t i = 1; i < count; ++i) { lo = std::min(lo, enc[i]); hi = std::max(hi, enc[i]); }
+  const uint32_t bit_width = alp_bit_width((uint64_t)((U)hi - (U)lo));
+  U deltas[kAlpVectorSize];
+  for (size_t i = 0; i < count; ++i) deltas[i] = (U)enc[i] - (U)lo;
+
+  out.push_back(p.e);
+  out.push_back(p.f);
+  out.push_back((uint8_t)num_exc);
+  out.push_back((uint8_t)(num_exc >> 8));
+  const U frame = (U)lo;
+  const uint8_t *fb = reinterpret_cast<const uint8_t *>(&frame);
+  out.insert(out.end(), fb, fb + sizeof(U));
+  out.push_back((uint8_t)bit_width);
+  alp_pack(deltas, count, bit_width, out);
+  for (size_t k = 0; k < num_exc; ++k) {
+    out.push_back((uint8_t)exc_pos[k]);
+    out.push_back((uint8_t)(exc_pos[k] >> 8));
+  }
+  for (size_t k = 0; k < num_exc; ++k) {
+    const uint8_t *vb = reinterpret_cast<const uint8_t *>(v + exc_pos[k]);
+    out.insert(out.end(), vb, vb + sizeof(F));
+  }
+}
+
+// ALP page body for the present values of `src` (one bit per row in `validity`).
+template <typename F>
+inline void alp_encode(const F *src, const uint8_t *validity, size_t num_rows,
+                       std::vector<uint8_t> &out) {
+  std::vector<F> present;
+  const F *v = src;
+  size_t n = num_rows;
+  if (validity != nullptr) {
+    present.reserve(num_rows);
+    for (size_t i = 0; i < num_rows; i++)
+      if (is_valid(validity, i)) present.push_back(src[i]);
+    v = present.data();
+    n = present.size();
+  }
+  if (n > (size_t)INT32_MAX)
+    throw std::runtime_error("parquet writer: ALP page holds more than INT32_MAX values");
+
+  out.push_back(0);  // compression_mode: ALP
+  out.push_back(0);  // integer_encoding: FOR + bit-packing
+  out.push_back((uint8_t)kAlpLogVectorSize);
+  put_u32_le(out, (uint32_t)n);
+  const size_t num_vectors = (n + kAlpVectorSize - 1) / kAlpVectorSize;
+  const size_t offsets_at = out.size();
+  out.resize(offsets_at + num_vectors * 4);
+  if (n == 0) return;
+
+  const std::vector<AlpPair> preset = alp_page_preset(v, n);
+  for (size_t vec = 0; vec < num_vectors; ++vec) {
+    const size_t start = vec * kAlpVectorSize;
+    const size_t count = std::min(kAlpVectorSize, n - start);
+    AlpPair p = preset[0];
+    if (preset.size() > 1) {
+      const size_t stride = std::max<size_t>(1, count / kAlpVectorSampleValues);
+      const size_t sn = (count + stride - 1) / stride;
+      uint64_t best = UINT64_MAX;
+      for (const AlpPair &c : preset) {
+        const uint64_t bits = alp_estimate_bits(v + start, sn, stride, c.e, c.f);
+        if (bits < best) { best = bits; p = c; }
+      }
+    }
+    const uint32_t off = (uint32_t)(out.size() - offsets_at);
+    std::memcpy(out.data() + offsets_at + vec * 4, &off, 4);
+    alp_encode_vector(v + start, count, p, out);
+  }
+}
+
+// Present values of a FLOAT/DOUBLE column as an ALP page body.
+inline void encode_values_alp(const ColumnInput &col, size_t num_rows,
+                              std::vector<uint8_t> &out) {
+  if (col.type == PT_FLOAT) alp_encode(col.f32, col.validity, num_rows, out);
+  else if (col.type == PT_DOUBLE) alp_encode(col.f64, col.validity, num_rows, out);
+  else throw std::runtime_error("parquet writer: ALP applies to FLOAT and DOUBLE columns only "
+                                "(column '" + col.name + "')");
+}
+
+// The encoding of a non-dictionary chunk's data pages.
+inline int32_t data_page_encoding(const ColumnInput &col) {
+  return col.alp ? ENC_ALP : ENC_PLAIN;
+}
+
 // ---- column statistics ----
 //
 // min_value/max_value are PLAIN-encoded (same byte layout as page values) so
@@ -539,6 +814,15 @@ struct ColumnStats {
   // chunk_sum.hpp). Written as the chunk's `rugo.sum` key_value_metadata entry.
   bool has_sum = false;
   __int128 sum = 0;
+  // SizeStatistics.unencoded_byte_array_data_bytes: summed length of the
+  // chunk's present BYTE_ARRAY values, length prefixes excluded. -1 = not a
+  // BYTE_ARRAY column.
+  int64_t unencoded_ba_bytes = -1;
+  // min_bytes / max_bytes ARE the chunk's min / max. Always true for bounds
+  // this writer computes; the patch path carries a source file's flags, whose
+  // bounds may already be truncated. write_column_chunk ANDs in its own cut.
+  bool min_exact = true;
+  bool max_exact = true;
 };
 
 // Does this column chunk get a `rugo.sum`? A scalar INT32/INT64 chunk with no
@@ -767,11 +1051,13 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
   }
   case PT_BYTE_ARRAY: {
     bool any = false;
+    int64_t value_bytes = 0;
     StrSlice lo{nullptr, 0}, hi{nullptr, 0};
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
       const StrSlice &s = col.strs[codes ? codes[i] : i];
+      value_bytes += (int64_t)s.len;
       if (!any) {
         lo = hi = s;
         any = true;
@@ -785,6 +1071,7 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
       st.min_bytes.assign(lo.ptr, lo.ptr + lo.len);
       st.max_bytes.assign(hi.ptr, hi.ptr + hi.len);
     }
+    st.unencoded_ba_bytes = value_bytes;
     break;
   }
   default:
@@ -957,6 +1244,9 @@ struct PageBuild {
   // One entry per data page in `bytes` / `plain_bytes`, in order. Empty unless
   // a page index was requested.
   std::vector<PageMeta> pages;
+  // Data pages in `bytes`, counted whether or not a page index was requested:
+  // ColumnMetaData.encoding_stats states it. The single-page builds keep 1.
+  uint32_t data_pages = 1;
 };
 
 // Per-page bounds/null state for one page, from that page's own column slice.
@@ -1058,7 +1348,8 @@ inline PageBuild build_data_page(const ColumnInput &col, size_t num_rows,
   std::vector<uint8_t> def = encode_def_levels(col.validity, num_rows);
   put_u32_le(body, (uint32_t)def.size());
   body.insert(body.end(), def.begin(), def.end());
-  encode_values(col, num_rows, body);
+  if (col.alp) encode_values_alp(col, num_rows, body);
+  else encode_values(col, num_rows, body);
 
   size_t uncompressed_body = body.size();
 
@@ -1073,7 +1364,7 @@ inline PageBuild build_data_page(const ColumnInput &col, size_t num_rows,
     h.writeFieldHeader(CT_STRUCT, 5);                 // data_page_header
     h.structBegin();
     h.writeI32Field(1, (int32_t)num_rows);            // num_values (incl. nulls)
-    h.writeI32Field(2, ENC_PLAIN);                    // encoding
+    h.writeI32Field(2, data_page_encoding(col));      // encoding
     h.writeI32Field(3, ENC_RLE);                      // definition_level_encoding
     h.writeI32Field(4, ENC_RLE);                      // repetition_level_encoding (required)
     h.structEnd();
@@ -1121,7 +1412,8 @@ inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
   elem.is_utf8 = col.elem_is_utf8;
   elem.validity = nullptr; // present-only; nullity is in the def levels
   elem.logical = LK_NONE;
-  encode_values(elem, col.num_elements, body);
+  if (elem.alp) encode_values_alp(elem, col.num_elements, body);
+  else encode_values(elem, col.num_elements, body);
 
   size_t uncompressed_body = body.size();
 
@@ -1134,7 +1426,7 @@ inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
     h.writeFieldHeader(CT_STRUCT, 5); // data_page_header
     h.structBegin();
     h.writeI32Field(1, (int32_t)col.num_levels); // num_values = level count
-    h.writeI32Field(2, ENC_PLAIN);
+    h.writeI32Field(2, data_page_encoding(col));
     h.writeI32Field(3, ENC_RLE); // definition_level_encoding
     h.writeI32Field(4, ENC_RLE); // repetition_level_encoding
     h.structEnd();
@@ -1213,6 +1505,7 @@ inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
   result.plain_bytes = std::move(plain_out);
   result.uncompressed_total = total_uncompressed;
   result.pages = std::move(pages);
+  result.data_pages = (uint32_t)((rg_rows + rows_per_page - 1) / rows_per_page);
   return result;
 }
 
@@ -1296,6 +1589,7 @@ inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
   result.bytes = std::move(out);
   result.plain_bytes = std::move(plain_out);
   result.uncompressed_total = total_uncompressed;
+  result.data_pages = (uint32_t)((rg_rows + rows_per_page - 1) / rows_per_page);
   return result;
 }
 
@@ -1539,43 +1833,49 @@ inline std::vector<uint8_t> encode_dict_indices(const uint32_t *codes, size_t n,
 // mode, which bypasses this gate entirely) measured 44.15 -> 31.83 B/row,
 // -27.9%, ~4.1 GB on that one dataset.
 //
-// K=1024, the transient width: this sketch dies at the end of the column, so
-// its only cost is 8KB and it buys ~3% relative standard error against ~18.9%
-// at K=32. Measured against true NDV on that same row group: actor_login
-// 61,450 vs 60,171 true; repo_id 74,494 vs 73,432; type 16 vs 16 (EXACT, the
-// sketch never filled); id 263,037 vs 262,144.
+// The distinct count itself is no longer estimated here: every hashable
+// chunk counts its distinct hashes exactly (encode_column_chunk), and the
+// gate below receives that count.
+
+// ── File-level NDV (FileMetaData key_value_metadata `rugo.ndv.<column>`) ──
 //
-// The family tag is DECISION-ONLY and that is the point: this sketch is never
-// stored anywhere, so it is bound by nothing except being consistent with
-// itself for one column, and tagging it means it can never be merged with a
-// STORED skene or ANALYZE sketch (which would be meaningless — see
-// draken/core/kmv_sketch.h).
-using DictDecisionSketch =
+// The per-chunk distinct_count is exact, but a FILE's NDV cannot be derived
+// from per-chunk counts once a mid-cardinality column is spread unsorted over
+// many row groups: the reader's merge (AggregateColumnStats) brackets it
+// between the max and the sum, and measured 5-50x LOW on TPC-DS key columns
+// (ss_customer_sk 90,858 true -> 5,366), which flipped Q72's join order. So
+// every chunk feeds the SAME XXH64-of-PLAIN hashes it already computed into a
+// K=1024 sketch, the file's sketches are merged as row groups are encoded
+// (FileNdv), and the footer stores ONE scalar per column: the exact count
+// while the merged sketch holds fewer than K hashes, else the KMV estimate
+// (~3% relative standard error).
+//
+// Only the count is stored, never the sketch, so the family tag binds nothing
+// outside this writer: it keeps these XXH64 sketches from ever being merged
+// with a stored draken-hash (family 2) sketch, which would be meaningless —
+// see draken/core/kmv_sketch.h.
+using FileNdvSketch =
     draken::KmvSketch<1024u, draken::KmvHashFamily::kRugoWriterDecision>;
 
-// Estimated distinct count over the present rows, from hashes already computed.
-inline double dict_estimated_ndv(const std::vector<uint64_t> &row_hashes,
-                                 const uint8_t *validity, size_t num_rows) {
-  DictDecisionSketch sketch;
-  for (size_t i = 0; i < num_rows; i++) {
-    if (!is_valid(validity, i))
-      continue;
-    sketch.add(row_hashes[i]);
-  }
-  return sketch.estimate();
-}
+// One column chunk's input to FileNdv. `tracked` is false for a type with no
+// value hash (bool) and for arrays; one untracked chunk drops the column from
+// the file-level NDV (a partial sketch would under-count).
+struct ColumnKmv {
+  bool tracked = false;
+  uint64_t present = 0; // non-null rows the sketch covers
+  FileNdvSketch sketch;
+};
 
-// How far over the budget the ESTIMATE must sit before the build is skipped.
+// How far over the budget a BYTE_ARRAY dictionary's PREDICTED size must sit
+// before the build is skipped.
 //
 // This is a skip-the-work threshold, not the gate. The gate is the BYTE budget,
 // enforced exactly, per value, inside the builders below — this only decides
-// whether attempting the build is worth the pass. The margin exists so the
-// estimator's own error cannot decline a column the builder would have
-// accepted: at K=1024 the relative standard error is ~3%, so 1.25x is beyond 8
-// sigma. It carries a second job for BYTE_ARRAY, where the DISTINCT values'
-// byte size is unknowable before the build and is priced at the mean
-// present-value length — the margin absorbs that length skew too.
-static const double DICT_ESTIMATE_SKIP_MARGIN = 1.25;
+// whether attempting the build is worth the pass. The distinct COUNT is exact,
+// but the DISTINCT values' byte size is unknowable before the build and is
+// priced at the mean present-value length; the margin absorbs that length
+// skew so it cannot decline a column the builder would have accepted.
+static const double DICT_STRING_SKIP_MARGIN = 1.25;
 
 // Total PLAIN bytes the present values of this column chunk would occupy. For
 // BYTE_ARRAY this walks the lengths only — the payload bytes are never touched.
@@ -1596,29 +1896,21 @@ inline size_t dict_plain_bytes(const ColumnInput &col, size_t num_rows,
 }
 
 // The byte budget a dictionary build must stay inside, plus whether attempting
-// the build is worth the pass at all.
-//
-// `ndv_lo` / `ndv_hi` bracket the distinct count: equal when the bloom filter
-// handed us an exact one, spread by the estimator's margin otherwise. They are
-// used in the directions that keep each decision honest — the HIGH count sets
-// the code bit width (more code bytes => tighter budget, never optimistic), the
-// LOW count decides whether to attempt (never skips a column the builder might
-// have accepted).
+// the build is worth the pass at all. `ndv` is the chunk's EXACT distinct
+// count of present values (encode_column_chunk counts it from the hashes).
 struct DictBudget {
   bool worth_attempting = false;
   size_t byte_budget = 0; // dictionary-page bytes the build may not exceed
 };
 
 inline DictBudget dict_byte_budget(const ColumnInput &col, size_t num_rows,
-                                   size_t present, size_t ndv_lo,
-                                   size_t ndv_hi) {
+                                   size_t present, size_t ndv) {
   DictBudget out;
   const size_t plain_bytes = dict_plain_bytes(col, num_rows, present);
-  if (plain_bytes == 0 || present == 0 || ndv_lo == 0)
+  if (plain_bytes == 0 || present == 0 || ndv == 0)
     return out;
 
-  const uint32_t bw_ndv =
-      (uint32_t)std::min<size_t>(ndv_hi ? ndv_hi : 1u, 0xFFFFFFFFu);
+  const uint32_t bw_ndv = (uint32_t)std::min<size_t>(ndv, 0xFFFFFFFFu);
   const size_t code_bytes =
       (present * (size_t)dict_bit_width(bw_ndv) + 7u) / 8u;
 
@@ -1632,19 +1924,19 @@ inline DictBudget dict_byte_budget(const ColumnInput &col, size_t num_rows,
   out.byte_budget = std::min<size_t>(out.byte_budget, DICT_MAX_BUDGET_BYTES);
 
   // Skip-the-work prediction. For a fixed width the dictionary's byte size is
-  // known exactly from the distinct count, so this is the real answer when the
-  // count is exact. For BYTE_ARRAY the DISTINCT values' byte size is unknowable
-  // until they are seen, so this prices them at the mean present-value length
-  // and leans generous by the same margin — the running budget inside
+  // known exactly from the distinct count, so this is the real answer. For
+  // BYTE_ARRAY the DISTINCT values' byte size is unknowable until they are
+  // seen, so this prices them at the mean present-value length and leans
+  // generous by DICT_STRING_SKIP_MARGIN — the running budget inside
   // build_string_dict is what actually enforces the gate, per value.
   const size_t w = dict_fixed_value_bytes(col);
   double predicted;
   double ceiling = (double)out.byte_budget;
   if (w != 0) {
-    predicted = (double)ndv_lo * (double)w;
+    predicted = (double)ndv * (double)w;
   } else {
-    predicted = (double)ndv_lo * ((double)plain_bytes / (double)present);
-    ceiling *= DICT_ESTIMATE_SKIP_MARGIN;
+    predicted = (double)ndv * ((double)plain_bytes / (double)present);
+    ceiling *= DICT_STRING_SKIP_MARGIN;
   }
   out.worth_attempting = predicted <= ceiling;
   return out;
@@ -1857,6 +2149,8 @@ struct DictColumnBuild {
   // One entry per DATA page (the dictionary page is not listed). Empty unless
   // a page index was requested.
   std::vector<PageMeta> pages;
+  // DATA pages after the dictionary page, always counted (encoding_stats).
+  uint32_t data_pages = 0;
 };
 
 inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows,
@@ -2045,9 +2339,11 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
   std::vector<PageMeta> pages;
   // A zero-row chunk still emits one (empty) data page, as the single-page
   // build always did — rows_per_page is 0 there and the loop runs exactly once.
+  uint32_t n_data_pages = 0;
   for (size_t start = 0;;) {
     const size_t count = (rows_per_page == 0) ? 0 : std::min(rows_per_page, num_rows - start);
     PageBuild pb = build_one(start, count);
+    ++n_data_pages;
     if (want_index) {
       ColumnInput sub = slice_rows(col, start);
       pages.push_back(make_page_meta(sub, count, (int64_t)start, pb, codec));
@@ -2073,6 +2369,7 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
   out.dict_page_len = dh_buf.size() + dict_stored.size();
   out.bytes = assemble(dh_buf, dict_stored, data_stored_all);
   out.pages = std::move(pages);
+  out.data_pages = n_data_pages;
   if (codec == CODEC_ZSTD) {
     std::vector<uint8_t> pdh = dict_header(dict_uncompressed);
     out.plain_dict_page_len = pdh.size() + dict_uncompressed;
@@ -2293,6 +2590,76 @@ inline bool page_index_bound_kind(const ColumnInput &c, PageBoundKind &kind) {
   }
 }
 
+// ---- ColumnMetaData.encoding_stats ----
+//
+// One parquet PageEncodingStats: how many pages of `page_type` use `encoding`.
+struct PageEncStat {
+  int32_t page_type;
+  int32_t encoding;
+  int32_t count;
+};
+
+// What this writer's chunk holds: a dictionary chunk (`data_encoding` ==
+// RLE_DICTIONARY) is ONE PLAIN dictionary page then `data_pages` RLE_DICTIONARY
+// data pages (never a PLAIN fallback); any other chunk is `data_pages` data
+// pages in `data_encoding` (PLAIN, or ALP when the column asks for it). Stating
+// it lets a reader know from the footer alone whether every data page is
+// dictionary-encoded.
+inline std::vector<PageEncStat> chunk_encoding_stats(int32_t data_encoding,
+                                                     uint32_t data_pages) {
+  std::vector<PageEncStat> out;
+  if (data_encoding == ENC_RLE_DICTIONARY)
+    out.push_back(PageEncStat{PAGE_DICTIONARY, ENC_PLAIN, 1});
+  out.push_back(PageEncStat{PAGE_DATA, data_encoding, (int32_t)data_pages});
+  return out;
+}
+
+// ---- BYTE_ARRAY bound truncation ----
+//
+// A chunk's min/max are bounds, and parquet lets a writer store shorter ones
+// than the values (is_min/max_value_exact = false). Long strings (URLs, titles,
+// free text) are most of a footer's statistics bytes, and 16 bytes already
+// separates the values that prune: an id, a CVE number, a URL's scheme+host.
+// Both cuts keep the bound sound under unsigned-byte lexicographic order (the
+// order rugo's reader prunes with), and a UTF-8 column's cut stays valid UTF-8:
+//
+//   lower: the value cut at the longest prefix <= 16 bytes that ends on a
+//          character boundary. A prefix sorts at or before the value.
+//   upper: the value cut after its last byte j < 16 that can be incremented
+//          (UTF-8: an ASCII byte below 0x7F; binary: any byte below 0xFF),
+//          with that byte incremented. It agrees with the value up to j and is
+//          greater at j, so it sorts after the value.
+//
+// A value of at most 16 bytes, or one with no incrementable byte in its first
+// 16, is written whole and stays exact. A truncated min can never equal a
+// truncated or exact max (the upper cut is strictly greater than its value),
+// so `min == max` keeps meaning "constant chunk".
+static const size_t kStatTruncateBytes = 16;
+
+inline bool truncate_stat_lower(const std::vector<uint8_t> &v, bool utf8,
+                                std::vector<uint8_t> &out) {
+  if (v.size() <= kStatTruncateBytes) return false;
+  size_t cut = kStatTruncateBytes;
+  if (utf8)
+    while (cut > 0 && (v[cut] & 0xC0) == 0x80) cut--; // back off a continuation byte
+  out.assign(v.begin(), v.begin() + (std::ptrdiff_t)cut);
+  return true;
+}
+
+inline bool truncate_stat_upper(const std::vector<uint8_t> &v, bool utf8,
+                                std::vector<uint8_t> &out) {
+  if (v.size() <= kStatTruncateBytes) return false;
+  for (size_t j = kStatTruncateBytes; j-- > 0;) {
+    const uint8_t b = v[j];
+    if (utf8 ? b < 0x7F : b != 0xFF) {
+      out.assign(v.begin(), v.begin() + (std::ptrdiff_t)j);
+      out.push_back((uint8_t)(b + 1));
+      return true;
+    }
+  }
+  return false;
+}
+
 // ---- ColumnMetaData / ColumnChunk / RowGroup ----
 
 inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
@@ -2302,7 +2669,8 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
                                int codec, const ColumnStats &stats,
                                int64_t bloom_offset, int32_t bloom_length,
                                int64_t oi_offset, int32_t oi_length,
-                               int64_t ci_offset, int32_t ci_length) {
+                               int64_t ci_offset, int32_t ci_length,
+                               const std::vector<PageEncStat> &encoding_stats) {
   w.structBegin(); // ColumnChunk
   // file_offset points at the first page of the chunk (the dictionary page
   // when present, otherwise the data page).
@@ -2312,7 +2680,7 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     w.structBegin(); // ColumnMetaData
     w.writeI32Field(1, (int32_t)(c.is_array ? c.elem_type : c.type)); // type
     // encodings: dict chunks declare [RLE_DICTIONARY, PLAIN, RLE] (data page,
-    // dict page, def levels); plain chunks declare [PLAIN, RLE].
+    // dict page, def levels); other chunks declare [PLAIN or ALP, RLE].
     if (dict_page_offset >= 0) {
       w.writeFieldHeader(CT_LIST, 2);
       w.writeListHeader(CT_I32, 3);
@@ -2322,7 +2690,7 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     } else {
       w.writeFieldHeader(CT_LIST, 2);
       w.writeListHeader(CT_I32, 2);
-      w.writeListI32(ENC_PLAIN);
+      w.writeListI32(data_page_encoding(c));
       w.writeListI32(ENC_RLE);
     }
     // path_in_schema: [name] for primitives; for a list nested `array_depth`
@@ -2366,17 +2734,49 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
       if (stats.distinct_count >= 0)
         w.writeI64Field(4, stats.distinct_count); // hash-derived NDV
       if (stats.has_minmax) {
-        w.writeBinaryField(5, stats.max_bytes.data(), stats.max_bytes.size());
-        w.writeBinaryField(6, stats.min_bytes.data(), stats.min_bytes.size());
-        w.writeBoolField(7, true); // exact: PLAIN values, not truncated
-        w.writeBoolField(8, true);
+        // BYTE_ARRAY bounds are cut to kStatTruncateBytes (truncate_stat_*);
+        // every other type's bound is its PLAIN value, exact.
+        std::vector<uint8_t> max_cut, min_cut;
+        const bool is_ba = c.type == PT_BYTE_ARRAY;
+        const bool max_truncated =
+            is_ba && truncate_stat_upper(stats.max_bytes, c.is_utf8, max_cut);
+        const bool min_truncated =
+            is_ba && truncate_stat_lower(stats.min_bytes, c.is_utf8, min_cut);
+        const std::vector<uint8_t> &max_out = max_truncated ? max_cut : stats.max_bytes;
+        const std::vector<uint8_t> &min_out = min_truncated ? min_cut : stats.min_bytes;
+        w.writeBinaryField(5, max_out.data(), max_out.size());
+        w.writeBinaryField(6, min_out.data(), min_out.size());
+        w.writeBoolField(7, stats.max_exact && !max_truncated); // is_max_value_exact
+        w.writeBoolField(8, stats.min_exact && !min_truncated); // is_min_value_exact
       }
       w.structEnd();
     }
-    // bloom_filter_offset(14) / bloom_filter_length(15) — ascending after 12.
+    // encoding_stats (field 13), verbatim (see chunk_encoding_stats); omitted
+    // when not stated.
+    if (!encoding_stats.empty()) {
+      w.writeFieldHeader(CT_LIST, 13);
+      w.writeListHeader(CT_STRUCT, (uint32_t)encoding_stats.size());
+      for (const PageEncStat &s : encoding_stats) {
+        w.structBegin();                // PageEncodingStats
+        w.writeI32Field(1, s.page_type); //   page_type
+        w.writeI32Field(2, s.encoding);  //   encoding
+        w.writeI32Field(3, s.count);     //   count
+        w.structEnd();
+      }
+    }
+    // bloom_filter_offset(14) / bloom_filter_length(15) — ascending after 13.
     if (bloom_offset >= 0) {
       w.writeI64Field(14, bloom_offset);
       w.writeI32Field(15, bloom_length);
+    }
+    // size_statistics (field 16): only unencoded_byte_array_data_bytes (1).
+    // The level histograms (2, 3) carry nothing for a flat column that
+    // null_count does not, and the spec lets them be omitted there.
+    if (!c.is_array && stats.unencoded_ba_bytes >= 0) {
+      w.writeFieldHeader(CT_STRUCT, 16);
+      w.structBegin(); // SizeStatistics
+      w.writeI64Field(1, stats.unencoded_ba_bytes);
+      w.structEnd();
     }
     w.structEnd();
   }
@@ -2410,6 +2810,10 @@ struct RGMeta {
   // here. Parquet declares the codec in ColumnMetaData, so this is legal and
   // every conforming reader dispatches on it (rugo's own does).
   std::vector<int32_t>     codecs;
+  // Per-chunk ColumnMetaData.encoding_stats, written verbatim. Filled by
+  // encode_column_chunk from the pages it built (chunk_encoding_stats), or
+  // carried from a source footer by the patch path; empty = not stated.
+  std::vector<std::vector<PageEncStat>> encoding_stats;
   // Per-column data-page metadata for the PageIndex. Empty (per column, or
   // entirely) when no page index was requested or the column carries none
   // (arrays). ci_*/oi_* are filled by write_page_index once the tail is laid
@@ -2435,6 +2839,7 @@ struct RGMeta {
     bloom_offset.assign(ncols, -1);
     bloom_length.assign(ncols, 0);
     codecs.assign(ncols, codec);
+    encoding_stats.assign(ncols, std::vector<PageEncStat>{});
     pages.assign(ncols, std::vector<PageMeta>{});
     ci_offset.assign(ncols, -1);
     ci_length.assign(ncols, 0);
@@ -2464,7 +2869,61 @@ struct EncodedRowGroup {
   size_t rows = 0;
   std::vector<EncodedChunk> chunks;            // per column, schema order
   std::vector<std::vector<uint8_t>> blooms;    // per column; empty = no filter
+  std::vector<ColumnKmv> kmv;                  // per column; FileNdv's input
   RGMeta meta;                                 // offsets are filled by placement
+};
+
+// The file's per-column NDV, merged one row group at a time as row groups are
+// encoded (the chunk sketches die with their EncodedRowGroup), and stated once
+// in the footer as `rugo.ndv.<column>` (file_ndv.hpp). Memory: one K=1024
+// sketch per column, whatever the file's size.
+struct FileNdv {
+  struct Col {
+    bool poisoned = false; // some chunk had no sketch: the column is not stated
+    uint64_t present = 0;  // non-null rows merged
+    FileNdvSketch sketch;
+  };
+  std::vector<Col> cols;
+
+  void add(const EncodedRowGroup &erg) {
+    if (cols.empty()) cols.resize(erg.kmv.size());
+    if (cols.size() != erg.kmv.size())
+      throw std::logic_error("FileNdv: row groups disagree on the column count");
+    for (size_t i = 0; i < cols.size(); i++) {
+      Col &c = cols[i];
+      if (c.poisoned) continue;
+      const ColumnKmv &k = erg.kmv[i];
+      if (!k.tracked) {
+        c.poisoned = true;
+        c.sketch = FileNdvSketch{};
+        continue;
+      }
+      c.present += k.present;
+      c.sketch.merge(k.sketch);
+    }
+  }
+
+  // Footer values, one per column, "" when the column is not stated
+  // (untracked, or no non-null value in the whole file). Below K distinct the
+  // sketch holds every distinct hash, so the count is exact. Above it the KMV
+  // estimate is clamped to what is certain: at least the K distinct hashes
+  // held, at most the non-null rows.
+  std::vector<std::string> values() const {
+    std::vector<std::string> out(cols.size());
+    for (size_t i = 0; i < cols.size(); i++) {
+      const Col &c = cols[i];
+      if (c.poisoned || c.sketch.size() == 0) continue;
+      if (c.sketch.is_exact()) {
+        out[i] = rugo_parquet::format_file_ndv(true, (uint64_t)c.sketch.size());
+        continue;
+      }
+      uint64_t n = (uint64_t)std::llround(c.sketch.estimate());
+      n = std::max<uint64_t>(n, (uint64_t)c.sketch.size());
+      n = std::min<uint64_t>(n, c.present);
+      out[i] = rugo_parquet::format_file_ndv(false, n);
+    }
+    return out;
+  }
 };
 
 // An empty EncodedRowGroup for `ncols` columns of `rg_rows` rows: every
@@ -2476,6 +2935,7 @@ inline EncodedRowGroup init_encoded_row_group(size_t ncols, size_t rg_rows,
   erg.rows = rg_rows;
   erg.chunks.resize(ncols);
   erg.blooms.resize(ncols);
+  erg.kmv.resize(ncols);
   erg.meta.row_count = rg_rows;
   erg.meta.init_columns(ncols, codec);
   return erg;
@@ -2535,38 +2995,44 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
       keep_compressed(pb, i);
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
+      meta.encoding_stats[i] = chunk_encoding_stats(data_page_encoding(rg_cols[i]), pb.data_pages);
       erg.chunks[i].bytes  = std::move(pb.bytes);
       return;   // arrays carry no statistics, no bloom and no page index
     }
 
     meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
 
-    // ONE XXH64 pass per column, shared by the bloom filter and the
-    // dictionary-encoding decision below — see hash_column_rows. Skipped
-    // entirely when neither consumer wants it.
+    // ONE XXH64 pass per column, shared by every consumer of a value hash:
+    // the chunk's distinct_count, the file-level NDV (FileNdv), the bloom
+    // filter and the dictionary-encoding decision — see hash_column_rows.
+    // Always taken for a hashable type: the NDV statistics are written whether
+    // or not the column carries a bloom filter (a bloom-less column used to
+    // lose its distinct_count with it).
     const size_t present_rows = rg_rows - (size_t)meta.stats[i].null_count;
-    const bool wants_dict_decision = rg_cols[i].codes == nullptr &&
-                                     rg_cols[i].dict_enabled && present_rows > 0;
     std::vector<uint64_t> row_hashes;
-    bool have_row_hashes = false;
-    if (rg_cols[i].bloom || wants_dict_decision)
-      have_row_hashes = hash_column_rows(rg_cols[i], rg_rows, row_hashes);
+    const bool have_row_hashes = hash_column_rows(rg_cols[i], rg_rows, row_hashes);
 
-    // Set by the bloom block below, which counts the distinct hashes and therefore knows
-    // the distinct count EXACTLY. The dictionary decision reuses it rather than
-    // estimating a number it has already been handed.
+    // Set below from the distinct hashes, so it is EXACT; the dictionary
+    // decision reuses it.
     size_t exact_ndv = 0;
-    bool have_exact_ndv = false;
 
-    if (rg_cols[i].bloom && have_row_hashes) {
+    if (have_row_hashes) {
       std::vector<uint64_t> hashes =
           compact_present_hashes(row_hashes, rg_cols[i].validity, rg_rows);
+      ColumnKmv &kmv = erg.kmv[i];
+      kmv.tracked = true;
+      kmv.present = (uint64_t)hashes.size();
+      for (uint64_t h : hashes) kmv.sketch.add(h);
       if (!hashes.empty()) {
-        size_t ndv = bloom_ndv(hashes);
+        // Below K distinct the sketch already holds every distinct hash, so
+        // its size IS the count; only a wider chunk pays the counting pass.
+        const size_t ndv = kmv.sketch.is_exact() ? kmv.sketch.size()
+                                                 : bloom_ndv(hashes);
         meta.stats[i].distinct_count = (int64_t)ndv;
         exact_ndv = ndv;
-        have_exact_ndv = true;
-        BloomFilter bf = bloom_build(hashes, ndv, 0.01);
+      }
+      if (rg_cols[i].bloom && !hashes.empty()) {
+        BloomFilter bf = bloom_build(hashes, exact_ndv, 0.01);
         std::vector<uint8_t> hdr = build_bloom_header((int32_t)bf.bitset.size());
         std::vector<uint8_t> &bloom = erg.blooms[i];
         bloom.reserve(hdr.size() + bf.bitset.size());
@@ -2588,23 +3054,11 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
       ColumnInput dcol = rg_cols[i];
       bool built = false;
       if (have_row_hashes) {
-        // Bracket the distinct count. With an EXACT one in hand (the bloom
-        // filter already counted these hashes) the bracket collapses to a point
-        // and no margin is bought; otherwise the KMV sketch estimates it and
-        // the bracket spans the estimator's error. dict_byte_budget uses the
-        // two ends in the directions that keep it honest.
-        size_t ndv_lo, ndv_hi, expected;
-        if (have_exact_ndv) {
-          ndv_lo = ndv_hi = expected = exact_ndv;
-        } else {
-          const double estimate =
-              dict_estimated_ndv(row_hashes, rg_cols[i].validity, rg_rows);
-          ndv_lo = (size_t)(estimate / DICT_ESTIMATE_SKIP_MARGIN);
-          ndv_hi = (size_t)(estimate * DICT_ESTIMATE_SKIP_MARGIN) + 1u;
-          expected = (size_t)estimate + 1u;
-        }
+        // exact_ndv is the chunk's distinct count; an all-null chunk leaves it
+        // 0, which dict_byte_budget declines.
+        const size_t expected = exact_ndv;
         const DictBudget budget = dict_byte_budget(rg_cols[i], rg_rows, present,
-                                                   ndv_lo, ndv_hi);
+                                                   exact_ndv);
         const size_t byte_budget = budget.byte_budget;
         if (budget.worth_attempting) {
           switch (rg_cols[i].type) {
@@ -2672,6 +3126,7 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
         meta.codecs[i] = CODEC_UNCOMPRESSED;
       }
       erg.chunks[i].dict_len = (int64_t)dcb.dict_page_len;
+      meta.encoding_stats[i] = chunk_encoding_stats(ENC_RLE_DICTIONARY, dcb.data_pages);
       meta.sizes[i]        = dcb.bytes.size();
       meta.uncompressed[i] = dcb.uncompressed_total;
       relativise_pages(i, std::move(dcb.pages), (int64_t)dcb.dict_page_len);
@@ -2682,6 +3137,7 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
       keep_compressed(pb, i);
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
+      meta.encoding_stats[i] = chunk_encoding_stats(data_page_encoding(rg_cols[i]), pb.data_pages);
       relativise_pages(i, std::move(pb.pages), 0);
       erg.chunks[i].bytes = std::move(pb.bytes);
     }
@@ -2951,25 +3407,46 @@ inline void write_sorting_columns(TCompactWriter &fm,
 // a chunk-level annotation would be invisible to exactly the type-discovery
 // read that needs it.
 //
-// Emitted only when at least one column carries a descriptor, matching the
+// Emitted only for columns that carry a descriptor, matching the
 // optional-field-by-omission pattern used for sorting_columns and the bloom
-// filter offsets: an unannotated file is byte-identical to one written before
-// this existed.
-inline void write_draken_logical_kv(TCompactWriter &fm,
-                                    const std::vector<ColumnInput> &schema_cols) {
-  std::vector<size_t> idxs;
-  for (size_t i = 0; i < schema_cols.size(); i++)
-    if (schema_cols[i].draken_logical_kind != 0) idxs.push_back(i);
-  if (idxs.empty())
-    return;
+// filter offsets.
+//
+// FileMetaData has ONE key_value_metadata list, so every file-level entry —
+// these and the `rugo.ndv.<column>` counts (file_ndv.hpp, FileNdv) — is
+// collected first and written once by write_file_kv; the field is omitted
+// when there is nothing to say.
+inline void append_draken_logical_kv(
+    std::vector<std::pair<std::string, std::string>> &kv,
+    const std::vector<ColumnInput> &schema_cols) {
+  for (const ColumnInput &c : schema_cols)
+    if (c.draken_logical_kind != 0)
+      kv.emplace_back("draken.logical." + c.name,
+                      "kind=" + std::to_string(c.draken_logical_kind));
+}
 
+// `file_ndv`: one `rugo.ndv` value per schema column ("" = not stated), from
+// FileNdv::values() or carried over by the patch path; nullptr = none.
+inline void write_file_kv(TCompactWriter &fm,
+                          const std::vector<ColumnInput> &schema_cols,
+                          const std::vector<std::string> *file_ndv) {
+  std::vector<std::pair<std::string, std::string>> kv;
+  append_draken_logical_kv(kv, schema_cols);
+  if (file_ndv != nullptr) {
+    if (file_ndv->size() != schema_cols.size())
+      throw std::logic_error("write_file_kv: file NDV values do not match the schema");
+    for (size_t i = 0; i < schema_cols.size(); i++)
+      if (!(*file_ndv)[i].empty())
+        kv.emplace_back(std::string(rugo_parquet::kFileNdvKeyPrefix) + schema_cols[i].name,
+                        (*file_ndv)[i]);
+  }
+  if (kv.empty())
+    return;
   fm.writeFieldHeader(CT_LIST, 5);
-  fm.writeListHeader(CT_STRUCT, (uint32_t)idxs.size());
-  for (size_t i : idxs) {
+  fm.writeListHeader(CT_STRUCT, (uint32_t)kv.size());
+  for (const auto &e : kv) {
     fm.structBegin(); // KeyValue
-    fm.writeStringField(1, "draken.logical." + schema_cols[i].name); // key
-    fm.writeStringField(
-        2, "kind=" + std::to_string(schema_cols[i].draken_logical_kind)); // value
+    fm.writeStringField(1, e.first);  // key
+    fm.writeStringField(2, e.second); // value
     fm.structEnd();
   }
 }
@@ -3042,7 +3519,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                                  const std::vector<ColumnInput> &schema_cols,
                                  size_t total_rows,
                                  const std::vector<RGMeta> &rg_meta,
-                                 const std::vector<std::vector<ColumnInput>> &all_rg_cols) {
+                                 const std::vector<std::vector<ColumnInput>> &all_rg_cols,
+                                 const std::vector<std::string> *file_ndv = nullptr) {
   const char *MAGIC = "PAR1";
   TCompactWriter fm;
   fm.structBegin();
@@ -3062,7 +3540,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                          meta.dict_offsets[i], meta.sizes[i], meta.uncompressed[i],
                          meta.codecs[i], meta.stats[i], meta.bloom_offset[i],
                          meta.bloom_length[i], meta.oi_offset[i], meta.oi_length[i],
-                         meta.ci_offset[i], meta.ci_length[i]);
+                         meta.ci_offset[i], meta.ci_length[i], meta.encoding_stats[i]);
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size
     fm.writeI64Field(3, (int64_t)meta.row_count);       // num_rows
     write_sorting_columns(fm, all_rg_cols[rg]);         // sorting_columns (field 4, optional)
@@ -3083,7 +3561,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     fm.writeI64Field(6, rg_compressed);                 // total_compressed_size
     fm.structEnd();
   }
-  write_draken_logical_kv(fm, schema_cols);        // key_value_metadata (field 5, optional)
+  write_file_kv(fm, schema_cols, file_ndv);        // key_value_metadata (field 5, optional)
   fm.writeStringField(6, RUGO_PARQUET_CREATED_BY); // created_by
   // column_orders (field 7): one TypeDefinedOrder per leaf column.
   fm.writeFieldHeader(CT_LIST, 7);
@@ -3162,6 +3640,8 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   // `cols[i]` — the footer loop below must read from here, never from `cols`.
   std::vector<std::vector<ColumnInput>> all_rg_cols(n_rg);
 
+  FileNdv ndv; // merged per row group below, stated in the footer
+
   std::vector<uint8_t> file;
   file.reserve(1024);
   const char *MAGIC = "PAR1";
@@ -3189,6 +3669,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     // leading PAR1, so file.size() is the absolute position.
     write_block(file, /*base_offset=*/0, block);
     for (size_t k = 0; k < block.size(); k++) {
+      ndv.add(block[k]);
       rg_meta[block_first + k] = std::move(block[k].meta);
       blooms[block_first + k]  = std::move(block[k].blooms);
     }
@@ -3197,7 +3678,8 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   write_bloom_tail(file, /*base_offset=*/0, rg_meta, blooms);
   if (want_index)
     write_page_index(file, /*base_offset=*/0, rg_meta, all_rg_cols);
-  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols);
+  const std::vector<std::string> ndv_values = ndv.values();
+  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, &ndv_values);
 
   if (out_stats) {
     // One pool task per column: each is an independent pass over its whole
@@ -3304,8 +3786,9 @@ class StreamingParquetWriter {
     write_bloom_tail(buf_, abs_offset_, rg_meta_, blooms_);
     if (want_index_)
       write_page_index(buf_, abs_offset_, rg_meta_, all_rg_cols_);
+    const std::vector<std::string> ndv_values = ndv_.values();
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
-                         all_rg_cols_);
+                         all_rg_cols_, &ndv_values);
     return take_pending();
   }
 
@@ -3313,6 +3796,7 @@ class StreamingParquetWriter {
   void flush_block() {
     write_block(buf_, abs_offset_, block_);
     for (EncodedRowGroup &erg : block_) {
+      ndv_.add(erg);
       rg_meta_.push_back(std::move(erg.meta));
       blooms_.push_back(std::move(erg.blooms));
     }
@@ -3347,6 +3831,7 @@ class StreamingParquetWriter {
   std::vector<ColumnInput> schema_cols_;
   std::vector<EncodedRowGroup> block_; // encoded, not yet placed
   std::vector<RGMeta> rg_meta_;
+  FileNdv ndv_;                        // one sketch per column, until finish()
   std::vector<std::vector<std::vector<uint8_t>>> blooms_;   // [rg][col], until finish()
   std::vector<std::vector<ColumnInput>> all_rg_cols_;
 };

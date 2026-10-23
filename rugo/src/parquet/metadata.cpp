@@ -1,6 +1,7 @@
 #include "metadata.hpp"
 #include "thrift.hpp"
 #include "chunk_sum.hpp"
+#include "file_ndv.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -142,6 +143,8 @@ const char *EncodingToString(int32_t enc) {
     return "RLE_DICTIONARY";
   case 9:
     return "BYTE_STREAM_SPLIT";
+  case 10:
+    return "ALP";
   default:
     return "UNKNOWN";
   }
@@ -483,6 +486,8 @@ static SchemaElement ParseSchemaElement(TInput &in) {
 // 4: optional i64 distinct_count
 // 5: optional binary max_value
 // 6: optional binary min_value
+// 7: optional bool is_max_value_exact
+// 8: optional bool is_min_value_exact
 static void ParseStatistics(TInput &in, ColumnStats &cs) {
   // Hold string_views into the (still-live) footer buffer; only the chosen
   // version is materialized as std::string at the end. Avoids allocating both
@@ -492,6 +497,8 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
   bool legacy_max_set = false;
   bool v2_min_set = false;
   bool v2_max_set = false;
+  bool v2_max_exact = false;
+  bool v2_min_exact = false;
   int16_t last_id = 0;
   while (true) {
     auto fh = ReadFieldHeader(in, last_id);
@@ -520,11 +527,20 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
       v2_min = ReadStringView(in);
       v2_min_set = true;
       break;
+    case 7:
+      v2_max_exact = ReadBool(fh.type);
+      break;
+    case 8:
+      v2_min_exact = ReadBool(fh.type);
+      break;
     default:
       SkipField(in, fh.type);
       break;
     }
   }
+  // The exactness flags describe max_value / min_value only.
+  cs.max_exact = v2_max_set && v2_max_exact;
+  cs.min_exact = v2_min_set && v2_min_exact;
   if (v2_min_set) {
     cs.min.assign(v2_min.data(), v2_min.size());
     cs.has_min = true;
@@ -685,6 +701,30 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
       }
       break;
     } // statistics
+    case 13: { // encoding_stats: list<PageEncodingStats>
+      if (!opts.include_statistics) {
+        SkipField(in, fh.type);
+        break;
+      }
+      auto lh = ReadListHeader(in);
+      cs.encoding_stats.reserve(lh.size);
+      for (uint32_t i = 0; i < lh.size; i++) {
+        PageEncodingStat s;
+        int16_t sid = 0;
+        while (true) {
+          auto sfh = ReadFieldHeader(in, sid);
+          if (sfh.type == 0) break;
+          switch (sfh.id) {
+          case 1: s.page_type = ReadI32(in); break;
+          case 2: s.encoding = ReadI32(in); break;
+          case 3: s.count = ReadI32(in); break;
+          default: SkipField(in, sfh.type); break;
+          }
+        }
+        cs.encoding_stats.push_back(s);
+      }
+      break;
+    }
     case 14: {
       if (opts.include_statistics) {
         cs.bloom_offset = ReadI64(in);
@@ -701,6 +741,22 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
       }
       break;
     } // bloom_filter_length (common)
+    case 16: { // size_statistics: SizeStatistics
+      if (!opts.include_statistics) {
+        SkipField(in, fh.type);
+        break;
+      }
+      int16_t sid = 0;
+      while (true) {
+        auto sfh = ReadFieldHeader(in, sid);
+        if (sfh.type == 0) break;
+        if (sfh.id == 1)
+          cs.unencoded_byte_array_data_bytes = ReadI64(in);
+        else
+          SkipField(in, sfh.type); // level histograms: not used here
+      }
+      break;
+    }
     default:
       SkipField(in, fh.type);
       break;
@@ -1556,6 +1612,12 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
   std::vector<int64_t> distinct_ceiling(result.size(), 0);
   std::vector<int64_t> distinct_rows(result.size(), 0);
   std::vector<int64_t> distinct_groups(result.size(), 0);
+  // Whether any two row groups' ranges OVERLAPPED during the merge (or a range
+  // was unknown). Without an overlap the merge is exact up to the boundary
+  // values touching row groups may share — tighter than any sketch — so the
+  // file-level KMV estimate below is applied only where an overlap left the
+  // merge a bracket.
+  std::vector<uint8_t> distinct_overlapped(result.size(), 0);
   // Same idea for the sum: poisoned by any chunk without one (or a nested leaf,
   // or an overflowing fold). `sum_seen` starts every column unknown until its
   // first chunk contributes.
@@ -1620,8 +1682,10 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
               agg.distinct_count += col.distinct_count;
             } else if (touching) {
               agg.distinct_count += std::max<int64_t>(0, col.distinct_count - 1);
-            } else if (col.distinct_count > agg.distinct_count) {
-              agg.distinct_count = col.distinct_count;
+            } else {
+              distinct_overlapped[it->second] = 1;
+              if (col.distinct_count > agg.distinct_count)
+                agg.distinct_count = col.distinct_count;
             }
           }
         }
@@ -1698,6 +1762,40 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
         std::min(expected, static_cast<double>(distinct_ceiling[i]));
     agg.distinct_estimate = std::max(agg.distinct_count,
                                      static_cast<int64_t>(std::llround(estimate)));
+  }
+
+  // The writer's file-level count (`rugo.ndv.<column>`, file_ndv.hpp)
+  // supersedes the row-group merge above, which can only bracket an unsorted
+  // column's NDV between the max and the sum of its row groups' counts.
+  // Trusted only from a file rugo wrote (the created_by gate every row-group
+  // column records); a malformed value there is an error, not a guess.
+  const bool rugo_writer = !fs.row_groups.empty() && !fs.row_groups[0].columns.empty() &&
+                           fs.row_groups[0].columns[0].writer_is_rugo;
+  if (rugo_writer) {
+    for (size_t i = 0; i < result.size(); ++i) {
+      AggColumnStat &agg = result[i];
+      auto it = fs.key_value_metadata.find(
+          std::string(rugo_parquet::kFileNdvKeyPrefix) + agg.name);
+      if (it == fs.key_value_metadata.end()) continue;
+      bool exact = false;
+      int64_t count = 0;
+      if (!rugo_parquet::parse_file_ndv(it->second, &exact, &count))
+        throw std::runtime_error("parquet footer: malformed " + it->first + " value '" +
+                                 it->second + "'");
+      if (exact) {
+        // Exact: both the floor and the estimate.
+        agg.distinct_count = count;
+        agg.distinct_estimate = count;
+      } else if (agg.distinct_count >= 0 && distinct_overlapped[i]) {
+        // Estimate, where the merge could only bracket the count: kept inside
+        // what the row groups make certain — at least the merged floor, at
+        // most the sum of their exact counts. Without a floor it is not
+        // applied, keeping distinct_estimate -1 exactly when distinct_count is
+        // (AggColumnStat's contract).
+        agg.distinct_estimate = std::min(std::max(count, agg.distinct_count),
+                                         distinct_ceiling[i]);
+      }
+    }
   }
 
   return result;

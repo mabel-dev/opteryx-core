@@ -15,6 +15,15 @@ struct LogicalTypeInfo {
   // Additional logical type parameters could be added here if needed
 };
 
+// One ColumnMetaData.encoding_stats entry (parquet.thrift PageEncodingStats):
+// `count` pages of `page_type` (0 DATA_PAGE, 2 DICTIONARY_PAGE, 3 DATA_PAGE_V2)
+// use `encoding`.
+struct PageEncodingStat {
+  int32_t page_type = -1;
+  int32_t encoding = -1;
+  int32_t count = 0;
+};
+
 struct ColumnStats {
   std::string name;          // joined path_in_schema: "a.b.c"
   std::string physical_type; // e.g. "INT64", "BYTE_ARRAY"
@@ -111,6 +120,22 @@ struct ColumnStats {
   // metadata (0 = the file carries no annotation for this column, which means
   // "don't know", NEVER "no descriptor"). See ApplyDrakenLogicalKV.
   int draken_logical_kind = 0;
+
+  // Statistics.is_min_value_exact / is_max_value_exact (fields 8 / 7): `min` /
+  // `max` ARE the chunk's values rather than bounds. False when the writer did
+  // not say, or when only the legacy min/max (fields 1 / 2) were present —
+  // unknown is not exact. Every pruning use treats min/max as bounds and is
+  // sound either way; a consumer that returns them AS values must check these.
+  // Appended last: every field above keeps its offset.
+  bool min_exact = false;
+  bool max_exact = false;
+
+  // ColumnMetaData.encoding_stats (field 13), verbatim; empty when the writer
+  // stated none. Parsed under include_statistics, like the bloom location.
+  std::vector<PageEncodingStat> encoding_stats;
+  // SizeStatistics.unencoded_byte_array_data_bytes (field 16, member 1): the
+  // chunk's BYTE_ARRAY payload bytes, length prefixes excluded. -1 = not stated.
+  int64_t unencoded_byte_array_data_bytes = -1;
 };
 
 struct RowGroupStats {

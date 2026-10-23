@@ -46,6 +46,14 @@ inline std::atomic<long long> da_layouts_prescan {0};  // ...fixed from a first-
 inline std::atomic<long long> da_rejects {0};          // layout over the slot budget: worker hashes
 inline std::atomic<long long> da_fallbacks {0};        // key outside the layout: state spilled to hashing
 inline std::atomic<long long> dict_codepass {0};       // dict-path morsels aggregated through codes
+// R4 cardinality signal (docs/GROUPBY_REDESIGN_2026_10_12.md): per-event counters plus the
+// LAST finalize's estimate vs the planner's, for the estimate-vs-truth check.
+inline std::atomic<long long> raw_from_plan {0};   // workers that started raw on the planner's estimate
+inline std::atomic<long long> mid_skipped {0};     // workers that never armed medius (estimate far above it)
+inline std::atomic<long long> est_groups {0};      // merged per-worker KMV estimate at the last finalize
+inline std::atomic<long long> planner_ndv {-1};    // the planner's estimate handed to the last sink
+inline std::atomic<long long> ticket_sinks {0};    // R9: locals that ran the shared ticket table
+inline std::atomic<long long> ticket_spills {0};   // R9: ticket tables that overflowed into the partitions
 
 inline void reset() {
     hash_ns.store(0, std::memory_order_relaxed);
@@ -67,6 +75,12 @@ inline void reset() {
     da_rejects.store(0, std::memory_order_relaxed);
     da_fallbacks.store(0, std::memory_order_relaxed);
     dict_codepass.store(0, std::memory_order_relaxed);
+    raw_from_plan.store(0, std::memory_order_relaxed);
+    mid_skipped.store(0, std::memory_order_relaxed);
+    est_groups.store(0, std::memory_order_relaxed);
+    planner_ndv.store(-1, std::memory_order_relaxed);
+    ticket_sinks.store(0, std::memory_order_relaxed);
+    ticket_spills.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -98,6 +112,12 @@ inline long long da_layouts_prescan_count() { return da_layouts_prescan.load(std
 inline long long da_rejects_count()         { return da_rejects.load(std::memory_order_relaxed); }
 inline long long da_fallbacks_count()       { return da_fallbacks.load(std::memory_order_relaxed); }
 inline long long dict_codepass_count()      { return dict_codepass.load(std::memory_order_relaxed); }
+inline long long raw_from_plan_count()      { return raw_from_plan.load(std::memory_order_relaxed); }
+inline long long mid_skipped_count()        { return mid_skipped.load(std::memory_order_relaxed); }
+inline long long est_groups_count()         { return est_groups.load(std::memory_order_relaxed); }
+inline long long planner_ndv_count()        { return planner_ndv.load(std::memory_order_relaxed); }
+inline long long ticket_sinks_count()       { return ticket_sinks.load(std::memory_order_relaxed); }
+inline long long ticket_spills_count()      { return ticket_spills.load(std::memory_order_relaxed); }
 // GROUP BY block pool (gb_block_store.hpp) — defined there, read here for the Cython
 // surface. Declared, not included, so this header stays dependency-free.
 inline long long gb_pool_hits_count();

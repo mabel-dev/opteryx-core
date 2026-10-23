@@ -190,7 +190,10 @@ def machine_probes(reps: int = 5) -> dict:
 def environment() -> dict:
     def sha(p: Path) -> str:
         return hashlib.sha256(p.read_bytes()).hexdigest()[:16] if p.exists() else "missing"
-    head = (REPO / ".git/HEAD").read_text().strip()
+    # A benchmark tree made by dev/arch_tree.sh carries no .git — the .so hashes
+    # below are its build identity then.
+    head_path = REPO / ".git/HEAD"
+    head = head_path.read_text().strip() if head_path.exists() else "no-git (benchmark tree)"
     ref = head.split(" ", 1)[1] if head.startswith("ref:") else None
     commit = None
     if ref and (REPO / ".git" / ref).exists():

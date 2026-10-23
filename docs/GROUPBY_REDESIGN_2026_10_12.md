@@ -594,3 +594,63 @@ targets 0.903 (controls 0.993), peak RSS 0.96, TPC-H SF10 0.999, H2O g1 0.89 / g
 g3 1.08 (total 1.042). x86 (.60, vs colouring removed): first-segment change 1.001 / RSS
 1.000, flat combine 0.996 (controls 0.996) — neutral. H2O medium OOMs on the 15 GB x86
 box in every arm, so x86 has no H2O numbers. Open: g3 still 8% behind BASE.
+
+## 10. As built — phase 2: R4, R5, R7, R9 (2026-10-23, uncommitted)
+
+Baselines frozen BEFORE the first edit: x86 `tests/performance/groupby_baseline/20261023-011717_x86_pre_phase2.*`
+(dev/groupby_baseline.py; the tool now tolerates a git-less benchmark tree); Mac base tree built from the
+same sources (run pending the machine being free). Arms differ in `_operators` only and run in the base tree.
+
+### 10.1 What each part is now
+
+- **R4 cardinality signal.** Planner: `group_count_estimate` is the full manifest NDV product capped by the
+  scans' rows (the 64 truncation is gone); a large row count alone is NOT an estimate. Sink: `planner_ndv`;
+  per-worker `draken::KmvSketch1024` fed on locally-new groups on the probe paths, unioned once per worker
+  at combine; raw mode from the first morsel when `planner_ndv >= 0.9 x rows`; medius never armed when
+  `planner_ndv > 65536`; telemetry `est_groups` / `planner_ndv` / `raw_from_plan` / `mid_skipped`.
+  ⛔ **Finding:** rugo-written parquet manifests carry key RANGES but no cardinality sketch, so
+  `planner_ndv == -1` on every ClickBench rugo query (hits_rugo_262k, hits_rg64k_b4, tpch_*_rugo). The
+  planner leg of R4 — and R9's presize — has data only on skene datasets today.
+- **R7 normalised multi-int keys.** Two or more int8/16/32, uint8/16/32, date32 or bool keys whose widths
+  (+1 NULL bit each) fit 64 bits are packed per row into one owned uint64 column, hashed as a single key,
+  stored as one 8-byte key column, unpacked at emit (`GBPackLayout`, `gb_pack_morsel`, `gb_unpack_key`).
+  DA still sees the original keys. (SearchEngineID, ClientIP) packs; anything with a 64-bit key does not.
+- **R5 merge by reference.** Every merge references a new group's key values as (source, row): the
+  single-table merge no longer copies keys through `append_from` (`map_probe<true>` synthesises refs for
+  queued windows), and each emitted chunk gathers each key column with a compile-time element width
+  (`gather_key_column`) instead of a per-row `append_from` into a temporary store.
+- **R9 ticket table.** `GBTicketTable`: one shared linear-probing table, a slot claimed by CAS on its hash
+  word, tickets in 1,024-ranges per worker, the winner writes the key value by ticket, each worker keeps its
+  own lanes by ticket, finalize sums lanes per ticket and emits ticket ranges in parallel with NO partition
+  merge (`ticket_emit`); if anything is pending in partitions (a DA spill, a worker that went partitioned
+  because the table filled) the ticket groups are folded into the partitions (`ticket_collect`) and the
+  ordinary merge runs. Selected per query by R4 from the PLANNER estimate only: row kinds + COUNT(*), no
+  seed, `exec_dop <= 8`, estimate `<= 16M`.
+
+### 10.2 Built and DELETED after the x86 leave-one-out (round 1, 5 rounds, DOP 4, controls ±1%)
+
+| Deleted | Measured |
+|---|---|
+| R9 runtime presize (first flushed window's distinct ratio × scan rows) | admitted Q15 (17.7M groups) and Q35 (9.9M), both tables filled → spill: Q15 **3.49×**, Q35 **2.17×**, peak RSS 1.74× / 1.35× |
+| R5 "buckets carry (hash, ref) only; fold lanes from the sources per source run" | Q32 **+17%**, Q18 +6% — 2,048 buckets × ~1,500 raw windows = a fraction of a row per run; per-run overhead ≫ the lane copy saved. The scatter is the right layout transform there. |
+| R4 per-row sketch feed in raw mode + raw-mode EXIT from a per-window sketch | Q32 +2..6%; the exit flapped on Q18 (18 entries / 18 exits) |
+
+### 10.3 x86 (i5-8500, DOP 4) leave-one-out, round 2 — what stands
+
+ClickBench GROUP BY targets, 5 interleaved rounds, process per query, hits_rugo_262k (planner estimate
+absent) and hits_skene (planner estimate present, 3 rounds); ratio vs pre-edit BASE; controls 1.000/0.993.
+
+| arm | rugo geomean | skene geomean | notes |
+|---|---|---|---|
+| FULL | **0.993** | **0.975** | RSS 1.00 / 1.00 |
+| FULL − R4 | 0.991 | 0.976 | R4 neutral on rugo (no estimate); Q30 skene 0.934 → 0.954 |
+| FULL − R5 | 0.999 | 0.973 | R5 ≈ −0.6% (Q32 .967→.973, Q33 .978→.984, Q35 .998→1.022) |
+| FULL − R7 | 1.000 | 0.995 | Q30 rugo 1.009→1.017; **Q30 skene 0.934→1.021** (one packed key through the ticket table) |
+| FULL − R9 | 1.003 | 1.001 | inert on rugo; skene **Q08 0.948→1.003, Q09 0.946→1.001, Q30 0.934→1.006**, Q35 0.986→0.998 |
+
+TPC-H SF10 (rugo, 3 rounds): FULL 1.002, every arm within ±0.4%. Result digests identical to BASE on every
+query (Q31/Q32 differ only in LIMIT tie order, ORDER BY values identical).
+
+Still open: the Mac arms (both layouts, TPC-H SF10 rugo, H2O groupby g1–g10 where the R5 emit gather targets
+g10's 9 s key emit) — built, not run; the compile-time switches `OPTERYX_GB_NO_R4/R5/R7/R9` stay until ruled.
+Harness: `dev/groupby_baseline.py` (record), session scratch `ablate.py` (arms × rounds, RSS, digests).

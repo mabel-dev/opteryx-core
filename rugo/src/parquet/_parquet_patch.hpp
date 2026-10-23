@@ -646,9 +646,18 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
       if (st.has_minmax) {
         st.min_bytes.assign(cs.min.begin(), cs.min.end());
         st.max_bytes.assign(cs.max.begin(), cs.max.end());
+        // The source's bounds may be truncated; restating them as exact would
+        // make the patched file lie about itself.
+        st.min_exact = cs.min_exact;
+        st.max_exact = cs.max_exact;
       }
       st.null_count = cs.null_count;
       st.distinct_count = cs.distinct_count;
+      // The pages are copied byte-for-byte, so the source's page census and
+      // payload size still describe them — carried verbatim.
+      st.unencoded_ba_bytes = cs.unencoded_byte_array_data_bytes;
+      for (const ::PageEncodingStat &e : cs.encoding_stats)
+        meta.encoding_stats[j].push_back(PageEncStat{e.page_type, e.encoding, e.count});
       // The pages are copied byte-for-byte, so the source's `rugo.sum` is still
       // the chunk's sum (cs.has_sum is only ever set in a file rugo wrote) -
       // kept when the column, as re-declared, is one that carries a sum.
@@ -827,6 +836,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
         meta.bloom_offset[j] = add_meta.bloom_offset[k];
         meta.bloom_length[j] = add_meta.bloom_length[k];
         meta.codecs[j] = add_meta.codecs[k];
+        meta.encoding_stats[j] = add_meta.encoding_stats[k];
         meta.total_byte_size += add_meta.uncompressed[k];
       }
     }
@@ -835,7 +845,33 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
     all_rg_cols.push_back(std::move(rg_cols));
   }
 
-  write_parquet_footer(out, shapes, (size_t)fs.num_rows, rg_metas, all_rg_cols);
+  // A column whose pages are copied byte-for-byte keeps the source's file-level
+  // NDV (`rugo.ndv`, file_ndv.hpp) under its new name; a synthesised or
+  // re-encoded column is not stated. Carried only from a file rugo wrote —
+  // the patched file's created_by is rugo's, so a foreign key would otherwise
+  // become trusted here — and a malformed value in one is an error, as on read.
+  std::vector<std::string> file_ndv(cols.size());
+  const bool source_is_rugo = !fs.row_groups.empty() &&
+                              !fs.row_groups[0].columns.empty() &&
+                              fs.row_groups[0].columns[0].writer_is_rugo;
+  if (source_is_rugo) {
+    for (size_t j = 0; j < cols.size(); j++) {
+      const int s = cols[j].src_index;
+      if (s < 0 || cols[j].reencode || cols[j].shape.is_array) continue;
+      const std::string &src_name = fs.row_groups[0].columns[(size_t)s].name;
+      auto it = fs.key_value_metadata.find(
+          std::string(rugo_parquet::kFileNdvKeyPrefix) + src_name);
+      if (it == fs.key_value_metadata.end()) continue;
+      bool exact = false;
+      int64_t count = 0;
+      if (!rugo_parquet::parse_file_ndv(it->second, &exact, &count))
+        throw std::runtime_error("parquet patch: malformed " + it->first + " value '" +
+                                 it->second + "'");
+      file_ndv[j] = it->second;
+    }
+  }
+  write_parquet_footer(out, shapes, (size_t)fs.num_rows, rg_metas, all_rg_cols,
+                       &file_ndv);
   return out;
 }
 

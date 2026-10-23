@@ -1,0 +1,4083 @@
+{
+ "label": "20261023-011717_x86_pre_phase2",
+ "runs": 5,
+ "env": {
+  "host": "opteryx-perf",
+  "machine": "x86_64",
+  "system": "Linux-6.1.0-41-amd64-x86_64-with-glibc2.36",
+  "python": "3.14.0",
+  "head": "no-git (benchmark tree)",
+  "so": {
+   "_operators.cpython-314-x86_64-linux-gnu.so": {
+    "sha256_16": "88e02260e6c2a58b",
+    "mtime": "2026-10-23 01:08:39"
+   },
+   "pool_reader.cpython-314-x86_64-linux-gnu.so": {
+    "sha256_16": "99bb9a1400909210",
+    "mtime": "2026-10-23 01:03:13"
+   },
+   "draken_native.cpython-314-x86_64-linux-gnu.so": {
+    "sha256_16": "0ea62a932795b357",
+    "mtime": "2026-10-23 01:09:50"
+   },
+   "rugo_native.cpython-314-x86_64-linux-gnu.so": {
+    "sha256_16": "eb1f2dbe2fa76efc",
+    "mtime": "2026-10-23 00:59:16"
+   },
+   "thread_pool.cpython-314-x86_64-linux-gnu.so": {
+    "sha256_16": "46f06dcf4f67e62a",
+    "mtime": "2026-10-23 00:59:03"
+   }
+  },
+  "loadavg": [
+   0.064453125,
+   0.78759765625,
+   1.5849609375
+  ],
+  "cpu_count": 6,
+  "opteryx_version": "0.9.173",
+  "loadavg_after": [
+   4.2705078125,
+   3.40185546875,
+   2.51416015625
+  ]
+ },
+ "queries": {
+  "rugo:Q08": {
+   "cold_ms": 1922.3428517580032,
+   "hot_ms": [
+    963.5739456862211,
+    948.3177345246077,
+    1006.0085952281952,
+    1007.389853708446,
+    1012.4370604753494
+   ],
+   "rows": 10,
+   "digest": "50510a1ac72a8819",
+   "names": [
+    "RegionID",
+    "u"
+   ],
+   "result": [
+    [
+     "229",
+     "2845673"
+    ],
+    [
+     "2",
+     "1081016"
+    ],
+    [
+     "208",
+     "831676"
+    ],
+    [
+     "169",
+     "604583"
+    ],
+    [
+     "184",
+     "322661"
+    ],
+    [
+     "158",
+     "307152"
+    ],
+    [
+     "34",
+     "299479"
+    ],
+    [
+     "55",
+     "286525"
+    ],
+    [
+     "107",
+     "272448"
+    ],
+    [
+     "42",
+     "243181"
+    ]
+   ],
+   "gb": {
+    "hash_s": 82.99903700000002,
+    "probe_s": 267.001498,
+    "apply_s": 2353.359299,
+    "calls": 1526,
+    "topk_pruned": 64,
+    "pool_hits": 57647,
+    "pool_misses": 17,
+    "pool_os_bytes": 890880,
+    "pool_retained_bytes": 32986880
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 1002.640158,
+     "cpu_ms": 4823.321355
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.175477,
+     "cpu_ms": 0.41375
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.094285,
+     "cpu_ms": 0.037345
+    }
+   },
+   "time_planning_ms": 2.9684180000000002,
+   "time_executing_ms": 1009.4477079999999,
+   "ru_maxrss_mb": 1.74932861328125,
+   "finalize_ms": {
+    "merge": 31.0,
+    "keys": 0.0,
+    "lanes": 0.0
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 08 */ SELECT RegionID, COUNT(DISTINCT UserID) AS u FROM {DATASET} GROUP BY RegionID ORDER BY u DESC LIMIT 10;"
+  },
+  "rugo:Q09": {
+   "cold_ms": 1631.0640824958682,
+   "hot_ms": [
+    1348.190225660801,
+    1265.7967368140817,
+    1295.1529370620847,
+    1347.6676288992167,
+    1274.5323991402984
+   ],
+   "rows": 10,
+   "digest": "3237749ba6e93b8a",
+   "names": [
+    "RegionID",
+    "SUM(AdvEngineID)",
+    "c",
+    "AVG(ResolutionWidth)",
+    "COUNT(DISTINCT UserID)"
+   ],
+   "result": [
+    [
+     "229",
+     "2077656",
+     "18295832",
+     "1506.085243130785",
+     "2845673"
+    ],
+    [
+     "2",
+     "441662",
+     "6687587",
+     "1479.8386542111527",
+     "1081016"
+    ],
+    [
+     "208",
+     "285925",
+     "4261812",
+     "1285.2593246722286",
+     "831676"
+    ],
+    [
+     "169",
+     "100887",
+     "3320229",
+     "1465.9073732564832",
+     "604583"
+    ],
+    [
+     "32",
+     "81498",
+     "1843518",
+     "1538.0376568061718",
+     "216010"
+    ],
+    [
+     "34",
+     "161779",
+     "1792369",
+     "1548.360152401654",
+     "299479"
+    ],
+    [
+     "184",
+     "55526",
+     "1755192",
+     "1506.8082967561384",
+     "322661"
+    ],
+    [
+     "42",
+     "108820",
+     "1542717",
+     "1587.1085208758313",
+     "243181"
+    ],
+    [
+     "107",
+     "120470",
+     "1516690",
+     "1548.6028970982863",
+     "272448"
+    ],
+    [
+     "51",
+     "98212",
+     "1435578",
+     "1579.8860354505293",
+     "211505"
+    ]
+   ],
+   "gb": {
+    "hash_s": 84.13475500000001,
+    "probe_s": 368.97042400000004,
+    "apply_s": 3325.8668660000003,
+    "calls": 1526,
+    "topk_pruned": 64,
+    "pool_hits": 152629,
+    "pool_misses": 11,
+    "pool_os_bytes": 757760,
+    "pool_retained_bytes": 106897408
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 1264.023195,
+     "cpu_ms": 6268.934034
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.142724,
+     "cpu_ms": 0.41323
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.060147,
+     "cpu_ms": 0.032772
+    }
+   },
+   "time_planning_ms": 3.638705,
+   "time_executing_ms": 1270.872891,
+   "ru_maxrss_mb": 2.0669822692871094,
+   "finalize_ms": {
+    "merge": 76.0,
+    "keys": 0.0,
+    "lanes": 0.1
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 09 */ SELECT RegionID, SUM(AdvEngineID), COUNT(*) AS c, AVG(ResolutionWidth), COUNT(DISTINCT UserID) FROM {DATASET} GROUP BY RegionID ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q10": {
+   "cold_ms": 524.4293222203851,
+   "hot_ms": [
+    187.11755145341158,
+    180.4143963381648,
+    180.1297515630722,
+    183.09543561190367,
+    183.4711180999875
+   ],
+   "rows": 10,
+   "digest": "3d309fabee914edd",
+   "names": [
+    "MobilePhoneModel",
+    "u"
+   ],
+   "result": [
+    [
+     "b'iPad'",
+     "1090347"
+    ],
+    [
+     "b'iPhone'",
+     "45758"
+    ],
+    [
+     "b'A500'",
+     "16046"
+    ],
+    [
+     "b'N8-00'",
+     "5565"
+    ],
+    [
+     "b'iPho'",
+     "3300"
+    ],
+    [
+     "b'ONE TOUCH 6030A'",
+     "2759"
+    ],
+    [
+     "b'GT-P7300B'",
+     "1907"
+    ],
+    [
+     "b'3110000'",
+     "1871"
+    ],
+    [
+     "b'GT-I9500'",
+     "1598"
+    ],
+    [
+     "b'eagle75'",
+     "1492"
+    ]
+   ],
+   "gb": {
+    "hash_s": 4.154587,
+    "probe_s": 15.144837,
+    "apply_s": 236.55510400000003,
+    "calls": 1526,
+    "pool_hits": 3291,
+    "pool_misses": 3,
+    "pool_os_bytes": 12288,
+    "pool_retained_bytes": 5878784
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 172.894417,
+     "cpu_ms": 985.118873
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.155652,
+     "cpu_ms": 0.365669
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.067715,
+     "cpu_ms": 0.034603
+    }
+   },
+   "time_planning_ms": 3.658199,
+   "time_executing_ms": 179.79119,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "finalize_ms": {
+    "merge": 1.0,
+    "keys": 0.0,
+    "lanes": 0.0
+   },
+   "finalize_threads": 1,
+   "role": "target",
+   "sql": "/* 10 */ SELECT MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE MobilePhoneModel <> '' GROUP BY MobilePhoneModel ORDER BY u DESC LIMIT 10;"
+  },
+  "rugo:Q12": {
+   "cold_ms": 1329.6506777405739,
+   "hot_ms": [
+    665.9247260540724,
+    662.8816677257419,
+    662.5941758975387,
+    660.1061709225178,
+    657.9793896526098
+   ],
+   "rows": 10,
+   "digest": "ed5dc1cba8738b7c",
+   "names": [
+    "SearchPhrase",
+    "c"
+   ],
+   "result": [
+    [
+     "b'\\xd0\\xba\\xd0\\xb0\\xd1\\x80\\xd0\\xb5\\xd0\\xbb\\xd0\\xba\\xd0\\xb8'",
+     "70263"
+    ],
+    [
+     "b'\\xd0\\xb0\\xd0\\xbb\\xd0\\xb1\\xd0\\xb0\\xd1\\x82\\xd1\\x80\\xd1\\x83\\xd1\\x82\\xd0\\xb4\\xd0\\xb8\\xd0\\xbd'",
+     "34675"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd'",
+     "24580"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd \\xd0\\xb1\\xd0\\xb5\\xd1\\x81\\xd0\\xbf\\xd0\\xbb\\xd0\\xb0\\xd1\\x82\\xd0\\xbd\\xd0\\xbe'",
+     "21647"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c'",
+     "19707"
+    ],
+    [
+     "b'\\xd0\\xbc\\xd0\\xb0\\xd0\\xbd\\xd0\\xb3\\xd1\\x83 \\xd0\\xb2 \\xd0\\xb7\\xd0\\xb0\\xd1\\x80\\xd0\\xb0\\xd0\\xb1\\xd0\\xb5\\xd0\\xb9 \\xd0\\xb3\\xd1\\x80\\xd0\\xb0\\xd0\\xbc\\xd0\\xb0'",
+     "19195"
+    ],
+    [
+     "b'\\xd0\\xb4\\xd1\\x80\\xd1\\x83\\xd0\\xb6\\xd0\\xba\\xd0\\xb5 \\xd0\\xbf\\xd0\\xbe\\xd0\\xbc\\xd0\\xb5\\xd1\\x89\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd0\\xb5'",
+     "17284"
+    ],
+    [
+     "b'galaxy table'",
+     "16746"
+    ],
+    [
+     "b'\\xd1\\x8d\\xd0\\xba\\xd0\\xb7\\xd0\\xbe\\xd0\\xb8\\xd0\\xb4\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5'",
+     "16620"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xba\\xd0\\xbe\\xd0\\xbb\\xd1\\x8c\\xd0\\xba\\xd0\\xbe \\xd0\\xbc\\xd1\\x8b\\xd1\\x82\\xd0\\xb8\\xd1\\x89\\xd0\\xb8'",
+     "12317"
+    ]
+   ],
+   "gb": {
+    "hash_s": 255.28629899999999,
+    "probe_s": 1457.9470290000002,
+    "apply_s": 56.380515,
+    "calls": 1524,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 128,
+    "topk_pruned": 128,
+    "pool_hits": 48454,
+    "pool_misses": 10183,
+    "pool_os_bytes": 286064640,
+    "pool_freed_bytes": 286064640,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 647.39768,
+     "cpu_ms": 3447.107585
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.220968,
+     "cpu_ms": 0.675607
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.096384,
+     "cpu_ms": 0.056834
+    }
+   },
+   "time_planning_ms": 3.6585989999999997,
+   "time_executing_ms": 654.2981639999999,
+   "ru_maxrss_mb": 2.5909461975097656,
+   "finalize_ms": {
+    "merge": 316.7,
+    "keys": 0.1,
+    "lanes": 0.1
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 12 */ SELECT SearchPhrase, COUNT(*) AS c FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q13": {
+   "cold_ms": 1786.5176210179925,
+   "hot_ms": [
+    1095.9633141756058,
+    1104.3753074482083,
+    1086.9073113426566,
+    1090.3208339586854,
+    1095.864619128406
+   ],
+   "rows": 10,
+   "digest": "205d0b6c3f806f46",
+   "names": [
+    "SearchPhrase",
+    "u"
+   ],
+   "result": [
+    [
+     "b'\\xd0\\xba\\xd0\\xb0\\xd1\\x80\\xd0\\xb5\\xd0\\xbb\\xd0\\xba\\xd0\\xb8'",
+     "23673"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd'",
+     "19747"
+    ],
+    [
+     "b'\\xd0\\xb0\\xd0\\xbb\\xd0\\xb1\\xd0\\xb0\\xd1\\x82\\xd1\\x80\\xd1\\x83\\xd1\\x82\\xd0\\xb4\\xd0\\xb8\\xd0\\xbd'",
+     "18394"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd \\xd0\\xb1\\xd0\\xb5\\xd1\\x81\\xd0\\xbf\\xd0\\xbb\\xd0\\xb0\\xd1\\x82\\xd0\\xbd\\xd0\\xbe'",
+     "17553"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c'",
+     "14603"
+    ],
+    [
+     "b'\\xd1\\x8d\\xd0\\xba\\xd0\\xb7\\xd0\\xbe\\xd0\\xb8\\xd0\\xb4\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5'",
+     "14529"
+    ],
+    [
+     "b'\\xd0\\xbc\\xd0\\xb0\\xd0\\xbd\\xd0\\xb3\\xd1\\x83 \\xd0\\xb2 \\xd0\\xb7\\xd0\\xb0\\xd1\\x80\\xd0\\xb0\\xd0\\xb1\\xd0\\xb5\\xd0\\xb9 \\xd0\\xb3\\xd1\\x80\\xd0\\xb0\\xd0\\xbc\\xd0\\xb0'",
+     "14198"
+    ],
+    [
+     "b'\\xd1\\x81\\xd0\\xba\\xd0\\xbe\\xd0\\xbb\\xd1\\x8c\\xd0\\xba\\xd0\\xbe \\xd0\\xbc\\xd1\\x8b\\xd1\\x82\\xd0\\xb8\\xd1\\x89\\xd0\\xb8'",
+     "9007"
+    ],
+    [
+     "b'\\xd0\\xb4\\xd1\\x80\\xd1\\x83\\xd0\\xb6\\xd0\\xba\\xd0\\xb5 \\xd0\\xbf\\xd0\\xbe\\xd0\\xbc\\xd0\\xb5\\xd1\\x89\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd0\\xb5'",
+     "8792"
+    ],
+    [
+     "b'\\xd0\\xba\\xd0\\xbe\\xd0\\xbc\\xd0\\xb1\\xd0\\xb8\\xd0\\xbd\\xd0\\xb8\\xd1\\x80\\xd0\\xbe\\xd0\\xb2\\xd0\\xb0\\xd0\\xbd\\xd0\\xb8\\xd0\\xb5 \\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c'",
+     "7572"
+    ]
+   ],
+   "gb": {
+    "hash_s": 250.82850300000004,
+    "probe_s": 1539.472272,
+    "apply_s": 641.2273240000001,
+    "calls": 1524,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 132,
+    "topk_pruned": 132,
+    "pool_hits": 86462,
+    "pool_misses": 16337,
+    "pool_os_bytes": 269533184,
+    "pool_freed_bytes": 269533184,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 1085.182098,
+     "cpu_ms": 5601.933607
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.225635,
+     "cpu_ms": 0.731129
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.068197,
+     "cpu_ms": 0.052376
+    }
+   },
+   "time_planning_ms": 3.62593,
+   "time_executing_ms": 1092.217094,
+   "ru_maxrss_mb": 3.224132537841797,
+   "finalize_ms": {
+    "merge": 1143.0,
+    "keys": 0.2,
+    "lanes": 0.1
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 13 */ SELECT SearchPhrase, COUNT(DISTINCT UserID) AS u FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY u DESC LIMIT 10;"
+  },
+  "rugo:Q14": {
+   "cold_ms": 1398.5898066312075,
+   "hot_ms": [
+    753.0617071315646,
+    731.8674493581057,
+    751.9669439643621,
+    743.1014589965343,
+    747.1081279218197
+   ],
+   "rows": 10,
+   "digest": "a5f0eb638740132b",
+   "names": [
+    "SearchEngineID",
+    "SearchPhrase",
+    "c"
+   ],
+   "result": [
+    [
+     "2",
+     "b'\\xd0\\xba\\xd0\\xb0\\xd1\\x80\\xd0\\xb5\\xd0\\xbb\\xd0\\xba\\xd0\\xb8'",
+     "46258"
+    ],
+    [
+     "2",
+     "b'\\xd0\\xbc\\xd0\\xb0\\xd0\\xbd\\xd0\\xb3\\xd1\\x83 \\xd0\\xb2 \\xd0\\xb7\\xd0\\xb0\\xd1\\x80\\xd0\\xb0\\xd0\\xb1\\xd0\\xb5\\xd0\\xb9 \\xd0\\xb3\\xd1\\x80\\xd0\\xb0\\xd0\\xbc\\xd0\\xb0'",
+     "18871"
+    ],
+    [
+     "2",
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd'",
+     "16905"
+    ],
+    [
+     "3",
+     "b'\\xd0\\xb0\\xd0\\xbb\\xd0\\xb1\\xd0\\xb0\\xd1\\x82\\xd1\\x80\\xd1\\x83\\xd1\\x82\\xd0\\xb4\\xd0\\xb8\\xd0\\xbd'",
+     "16748"
+    ],
+    [
+     "2",
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd \\xd0\\xb1\\xd0\\xb5\\xd1\\x81\\xd0\\xbf\\xd0\\xbb\\xd0\\xb0\\xd1\\x82\\xd0\\xbd\\xd0\\xbe'",
+     "14909"
+    ],
+    [
+     "2",
+     "b'\\xd0\\xb0\\xd0\\xbb\\xd0\\xb1\\xd0\\xb0\\xd1\\x82\\xd1\\x80\\xd1\\x83\\xd1\\x82\\xd0\\xb4\\xd0\\xb8\\xd0\\xbd'",
+     "13716"
+    ],
+    [
+     "2",
+     "b'\\xd1\\x8d\\xd0\\xba\\xd0\\xb7\\xd0\\xbe\\xd0\\xb8\\xd0\\xb4\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5'",
+     "13414"
+    ],
+    [
+     "2",
+     "b'\\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c'",
+     "13108"
+    ],
+    [
+     "3",
+     "b'\\xd0\\xba\\xd0\\xb0\\xd1\\x80\\xd0\\xb5\\xd0\\xbb\\xd0\\xba\\xd0\\xb8'",
+     "12815"
+    ],
+    [
+     "2",
+     "b'\\xd0\\xb4\\xd1\\x80\\xd1\\x83\\xd0\\xb6\\xd0\\xba\\xd0\\xb5 \\xd0\\xbf\\xd0\\xbe\\xd0\\xbc\\xd0\\xb5\\xd1\\x89\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd0\\xb5'",
+     "11946"
+    ]
+   ],
+   "gb": {
+    "hash_s": 310.76697,
+    "probe_s": 1642.2930450000001,
+    "apply_s": 51.607706,
+    "calls": 1524,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 252,
+    "topk_pruned": 252,
+    "pool_hits": 54647,
+    "pool_misses": 16441,
+    "pool_os_bytes": 505686016,
+    "pool_freed_bytes": 505686016,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 736.03913,
+     "cpu_ms": 3970.12019
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.401245,
+     "cpu_ms": 1.232778
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.091302,
+     "cpu_ms": 0.039491
+    }
+   },
+   "time_planning_ms": 3.7926159999999998,
+   "time_executing_ms": 743.294079,
+   "ru_maxrss_mb": 2.718292236328125,
+   "finalize_ms": {
+    "merge": 302.8,
+    "keys": 0.4,
+    "lanes": 0.3
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 14 */ SELECT SearchEngineID, SearchPhrase, COUNT(*) AS c FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchEngineID, SearchPhrase ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q15": {
+   "cold_ms": 1129.5690098777413,
+   "hot_ms": [
+    790.91477394104,
+    798.2130097225308,
+    820.7413274794817,
+    819.4829551503062,
+    811.3576024770737
+   ],
+   "rows": 10,
+   "digest": "14667b741506631d",
+   "names": [
+    "UserID",
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "1313338681122956954",
+     "29097"
+    ],
+    [
+     "1907779576417363396",
+     "25333"
+    ],
+    [
+     "2305303682471783379",
+     "10597"
+    ],
+    [
+     "7982623143712728547",
+     "7584"
+    ],
+    [
+     "6018350421959114808",
+     "6678"
+    ],
+    [
+     "7280399273658728997",
+     "6411"
+    ],
+    [
+     "1090981537032625727",
+     "6197"
+    ],
+    [
+     "5730251990344211405",
+     "6019"
+    ],
+    [
+     "835157184735512989",
+     "5211"
+    ],
+    [
+     "770542365400669095",
+     "4906"
+    ]
+   ],
+   "gb": {
+    "hash_s": 132.000905,
+    "probe_s": 1702.1986840000002,
+    "apply_s": 228.54062100000002,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 512,
+    "topk_pruned": 512,
+    "da_rejects": 4,
+    "pool_hits": 61085,
+    "pool_retained_bytes": 989118464
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 800.421797,
+     "cpu_ms": 3668.930042
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.613811,
+     "cpu_ms": 2.306467
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.099848,
+     "cpu_ms": 0.043761
+    }
+   },
+   "time_planning_ms": 3.176319,
+   "time_executing_ms": 808.1607250000001,
+   "ru_maxrss_mb": 1.6913719177246094,
+   "finalize_ms": {
+    "merge": 772.9,
+    "keys": 0.3,
+    "lanes": 0.3
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 15 */ SELECT UserID, COUNT(*) FROM {DATASET} GROUP BY UserID ORDER BY COUNT(*) DESC LIMIT 10;"
+  },
+  "rugo:Q16": {
+   "cold_ms": 2514.1051579266787,
+   "hot_ms": [
+    1872.819835320115,
+    1826.5630435198545,
+    1831.8302519619465,
+    1805.5612072348595,
+    1814.815410412848
+   ],
+   "rows": 10,
+   "digest": "3f3445285e3004d8",
+   "names": [
+    "UserID",
+    "SearchPhrase",
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "1313338681122956954",
+     "b''",
+     "29097"
+    ],
+    [
+     "1907779576417363396",
+     "b''",
+     "25333"
+    ],
+    [
+     "2305303682471783379",
+     "b''",
+     "10597"
+    ],
+    [
+     "7982623143712728547",
+     "b''",
+     "6669"
+    ],
+    [
+     "7280399273658728997",
+     "b''",
+     "6408"
+    ],
+    [
+     "1090981537032625727",
+     "b''",
+     "6196"
+    ],
+    [
+     "5730251990344211405",
+     "b''",
+     "6019"
+    ],
+    [
+     "6018350421959114808",
+     "b''",
+     "5990"
+    ],
+    [
+     "835157184735512989",
+     "b''",
+     "5209"
+    ],
+    [
+     "770542365400669095",
+     "b''",
+     "4906"
+    ]
+   ],
+   "gb": {
+    "hash_s": 890.6743210000001,
+    "probe_s": 4533.530366,
+    "apply_s": 260.526003,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 512,
+    "topk_pruned": 512,
+    "pool_hits": 67177,
+    "pool_misses": 98605,
+    "pool_os_bytes": 2567127040,
+    "pool_freed_bytes": 2567127040,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 1804.254388,
+     "cpu_ms": 8785.215444
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.649479,
+     "cpu_ms": 2.3621
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.06756,
+     "cpu_ms": 0.035011
+    }
+   },
+   "time_planning_ms": 3.119372,
+   "time_executing_ms": 1811.676053,
+   "ru_maxrss_mb": 4.222454071044922,
+   "finalize_ms": {
+    "merge": 1018.3,
+    "keys": 1.1,
+    "lanes": 0.8
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 16 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;"
+  },
+  "rugo:Q17": {
+   "cold_ms": 243.81100479513407,
+   "hot_ms": [
+    25.322196073830128,
+    24.853158742189407,
+    25.357957929372787,
+    23.945034481585026,
+    24.29748233407736
+   ],
+   "rows": 10,
+   "digest": "b37fdda7f18ee74b",
+   "names": [
+    "UserID",
+    "SearchPhrase",
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "9223363230269068491",
+     "b''",
+     "3"
+    ],
+    [
+     "9223368541671164629",
+     "b'\\xd1\\x80\\xd0\\xb0\\xd0\\xbd\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd1\\x8f \\xd1\\x81\\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xbd\\xd0\\xb0'",
+     "1"
+    ],
+    [
+     "9223357935871703344",
+     "b'\\xd1\\x8d\\xd0\\xba\\xd0\\xb7\\xd0\\xb0\\xd0\\xbc\\xd0\\xb5\\xd1\\x80\\xd0\\xb5\\xd0\\xbd\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5 \\xd0\\xbc\\xd0\\xbe\\xd1\\x82\\xd0\\xbe\\xd1\\x86\\xd0\\xb8\\xd0\\xba\\xd0\\xbb\\xd0\\xbe\\xd0\\xb2 \\xd0\\xb2 \\xd1\\x82\\xd1\\x83\\xd1\\x80\\xd1\\x81'",
+     "1"
+    ],
+    [
+     "9223364125493659818",
+     "b''",
+     "6"
+    ],
+    [
+     "9223359462963489282",
+     "b''",
+     "1"
+    ],
+    [
+     "9223370512262829419",
+     "b'\\xd0\\xb0\\xd0\\xb2\\xd1\\x82\\xd0\\xbe\\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd1\\x82\\xd1\\x8c \\xd0\\xb1\\xd0\\xb5\\xd1\\x81\\xd0\\xbf\\xd0\\xbb\\xd0\\xb0\\xd1\\x82\\xd0\\xbd\\xd0\\xbe \\xd0\\xb2 \\xd1\\x81\\xd0\\xbf\\xd0\\xb1 \\xd0\\xb4\\xd0\\xbe\\xd0\\xbc\\xd0\\xb0\\xd1\\x88\\xd0\\xbd\\xd0\\xb8\\xd1\\x85 \\xd1\\x81\\xd0\\xbe\\xd0\\xb4\\xd0\\xb5\\xd1\\x80\\xd0\\xb6\\xd0\\xb8\\xd0\\xb2\\xd0\\xb0\\xd1\\x8e\\xd1\\x89\\xd0\\xb8\\xd1\\x85 \\xd0\\xb6\\xd0\\xb5\\xd0\\xbd\\xd1\\x89\\xd0\\xb8\\xd0\\xbd\\xd1\\x8b'",
+     "1"
+    ],
+    [
+     "9223357935871703344",
+     "b''",
+     "1"
+    ],
+    [
+     "9223356725095033231",
+     "b'\\xd0\\xbc\\xd1\\x83\\xd0\\xbb\\xd1\\x8c\\xd1\\x82\\xd0\\xb8\\xd0\\xba \\xd0\\xbd\\xd0\\xb0\\xd1\\x87\\xd0\\xb0\\xd0\\xbb\\xd1\\x8c\\xd0\\xbd\\xd0\\xbe'",
+     "1"
+    ],
+    [
+     "9223357816360387857",
+     "b''",
+     "1"
+    ],
+    [
+     "9223356537478078323",
+     "b''",
+     "7"
+    ]
+   ],
+   "gb": {
+    "hash_s": 0.030303,
+    "probe_s": 0.058483,
+    "apply_s": 0.013441,
+    "calls": 11,
+    "pool_hits": 121,
+    "pool_misses": 1,
+    "pool_os_bytes": 8192,
+    "pool_retained_bytes": 551424
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 5.826662,
+     "cpu_ms": 14.218752
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.234261,
+     "cpu_ms": 0.302834
+    }
+   },
+   "time_planning_ms": 16.397904,
+   "time_executing_ms": 7.877926,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "finalize_ms": {
+    "merge": 0.0,
+    "keys": 0.0,
+    "lanes": 0.0
+   },
+   "finalize_threads": 1,
+   "role": "target",
+   "sql": "/* 17 */ SELECT UserID, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, SearchPhrase LIMIT 10;"
+  },
+  "rugo:Q18": {
+   "cold_ms": 6096.86906542629,
+   "hot_ms": [
+    3738.3472435176373,
+    3745.701923035085,
+    3946.4053558185697,
+    3862.693849951029,
+    3912.383271381259
+   ],
+   "rows": 10,
+   "digest": "539d218310c5f88e",
+   "names": [
+    "UserID",
+    "m",
+    "SearchPhrase",
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "1313338681122956954",
+     "31",
+     "b''",
+     "589"
+    ],
+    [
+     "1313338681122956954",
+     "28",
+     "b''",
+     "578"
+    ],
+    [
+     "1313338681122956954",
+     "29",
+     "b''",
+     "572"
+    ],
+    [
+     "1313338681122956954",
+     "33",
+     "b''",
+     "567"
+    ],
+    [
+     "1313338681122956954",
+     "27",
+     "b''",
+     "557"
+    ],
+    [
+     "1313338681122956954",
+     "32",
+     "b''",
+     "554"
+    ],
+    [
+     "1313338681122956954",
+     "30",
+     "b''",
+     "552"
+    ],
+    [
+     "1313338681122956954",
+     "34",
+     "b''",
+     "546"
+    ],
+    [
+     "1313338681122956954",
+     "26",
+     "b''",
+     "540"
+    ],
+    [
+     "1313338681122956954",
+     "10",
+     "b''",
+     "539"
+    ]
+   ],
+   "gb": {
+    "hash_s": 1232.8315280000002,
+    "probe_s": 7861.660831000001,
+    "apply_s": 271.170497,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "raw_switches": 4,
+    "merge_bucketed": 64,
+    "merge_buckets": 2048,
+    "topk_pruned": 2048,
+    "pool_hits": 70927,
+    "pool_misses": 359612,
+    "pool_os_bytes": 11369439232,
+    "pool_freed_bytes": 11369439232,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 3898.164033,
+     "cpu_ms": 17677.577984
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 2.264099,
+     "cpu_ms": 8.877945
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.107957,
+     "cpu_ms": 0.048422
+    }
+   },
+   "time_planning_ms": 4.030303,
+   "time_executing_ms": 3908.331274,
+   "ru_maxrss_mb": 8.951560974121094,
+   "finalize_ms": {
+    "merge": 3247.2,
+    "keys": 5.2,
+    "lanes": 1.1
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 18 */ SELECT UserID, extract(minute FROM EventTime::TIMESTAMP[s]) AS m, SearchPhrase, COUNT(*) FROM {DATASET} GROUP BY UserID, extract(minute FROM EventTime::TIMESTAMP[s]), SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10;"
+  },
+  "rugo:Q19": {
+   "cold_ms": 257.240348495543,
+   "hot_ms": [
+    15.11647179722786,
+    13.025900349020958,
+    12.453271076083183,
+    13.191725127398968,
+    12.49837875366211
+   ],
+   "rows": 4,
+   "digest": "b4ee734eb182cc63",
+   "names": [
+    "UserID"
+   ],
+   "result": [
+    [
+     "435090932899640449"
+    ],
+    [
+     "435090932899640449"
+    ],
+    [
+     "435090932899640449"
+    ],
+    [
+     "435090932899640449"
+    ]
+   ],
+   "gb": {},
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 0.902291,
+     "cpu_ms": 1.149309
+    }
+   },
+   "time_planning_ms": 2.801012,
+   "time_executing_ms": 9.678525,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "role": "target",
+   "sql": "/* 19 */ SELECT UserID FROM {DATASET} WHERE UserID::INT64 = 435090932899640449;"
+  },
+  "rugo:Q27": {
+   "cold_ms": 2693.581278435886,
+   "hot_ms": [
+    893.2448020204902,
+    828.7909710779786,
+    834.379555657506,
+    833.9159321039915,
+    826.2137956917286
+   ],
+   "rows": 25,
+   "digest": "c437d191232d8509",
+   "names": [
+    "CounterID",
+    "l",
+    "c"
+   ],
+   "result": [
+    [
+     "233773",
+     "469.14923754578723",
+     "2938865"
+    ],
+    [
+     "245438",
+     "271.7841243964889",
+     "2510103"
+    ],
+    [
+     "122612",
+     "238.63801917567594",
+     "3574007"
+    ],
+    [
+     "234004",
+     "204.27746585100144",
+     "238660"
+    ],
+    [
+     "1634",
+     "197.83080416670535",
+     "323229"
+    ],
+    [
+     "786",
+     "186.7507135271472",
+     "120528"
+    ],
+    [
+     "114157",
+     "142.91444863406159",
+     "216408"
+    ],
+    [
+     "515",
+     "126.22595247333346",
+     "146907"
+    ],
+    [
+     "256004",
+     "125.36714011543154",
+     "858171"
+    ],
+    [
+     "95427",
+     "120.2657237661165",
+     "374306"
+    ],
+    [
+     "199550",
+     "109.81266990405194",
+     "7115413"
+    ],
+    [
+     "220992",
+     "105.85395075756044",
+     "494614"
+    ],
+    [
+     "196239",
+     "98.34849844624749",
+     "163797"
+    ],
+    [
+     "62",
+     "93.15621079726343",
+     "738150"
+    ],
+    [
+     "96948",
+     "92.74209592191733",
+     "396093"
+    ],
+    [
+     "188878",
+     "91.98110564811313",
+     "311998"
+    ],
+    [
+     "249603",
+     "91.87807188863495",
+     "120325"
+    ],
+    [
+     "3922",
+     "87.83657514674738",
+     "8527069"
+    ],
+    [
+     "191697",
+     "86.95676378104345",
+     "124664"
+    ],
+    [
+     "97467",
+     "84.2939822226288",
+     "131178"
+    ],
+    [
+     "186300",
+     "83.97100407321064",
+     "802561"
+    ],
+    [
+     "146891",
+     "77.77413321966806",
+     "605286"
+    ],
+    [
+     "38",
+     "76.43665636016307",
+     "507770"
+    ],
+    [
+     "230962",
+     "76.30301436565952",
+     "169223"
+    ],
+    [
+     "77639",
+     "75.38479530321585",
+     "253961"
+    ]
+   ],
+   "gb": {
+    "hash_s": 283.877551,
+    "apply_s": 525.114986,
+    "calls": 1526,
+    "da_morsels": 1526,
+    "da_layouts_stats": 4,
+    "pool_hits": 1612,
+    "pool_retained_bytes": 39327232
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 814.53844,
+     "cpu_ms": 4803.79339
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.198529,
+     "cpu_ms": 0.567351
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.104014,
+     "cpu_ms": 0.057178
+    }
+   },
+   "time_planning_ms": 4.5159329999999995,
+   "time_executing_ms": 821.6770740000001,
+   "ru_maxrss_mb": 6.231330871582031,
+   "finalize_ms": {
+    "merge": 0.6,
+    "keys": 0.0,
+    "lanes": 0.1
+   },
+   "finalize_threads": 1,
+   "role": "target",
+   "sql": "/* 27 */ SELECT CounterID, AVG(length(URL)) AS l, COUNT(*) AS c FROM {DATASET} WHERE URL <> '' GROUP BY CounterID HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;"
+  },
+  "rugo:Q28": {
+   "cold_ms": 6039.411891251802,
+   "hot_ms": [
+    4413.021340034902,
+    4413.603222928941,
+    4413.003291934729,
+    4458.08230061084,
+    4436.7396626621485
+   ],
+   "rows": 25,
+   "digest": "dce83c12491af186",
+   "names": [
+    "k",
+    "l",
+    "c",
+    "MIN(Referer)"
+   ],
+   "result": [
+    [
+     "'svpressa.ru'",
+     "308.0116580684803",
+     "242493",
+     "b'http://svpressa.ru/02.php?gidcar=0&adk'"
+    ],
+    [
+     "'msuzie-showforumdisplay'",
+     "263.3198055218298",
+     "183671",
+     "b'http://msuzie-showforumdisplay/63/~2/?name=&cost_neu%3D400%26retpath=default777TWCWkI9lalUwTXpJMU1q'"
+    ],
+    [
+     "'saint-peters-total=\u043c\u0435\u043d\u044c\u0448\u0435 80'",
+     "242.5211649710752",
+     "200520",
+     "b'http://saint-peters-total=\\xd0\\xbc\\xd0\\xb5\\xd0\\xbd\\xd1\\x8c\\xd1\\x88\\xd0\\xb5 80/cash/station=search&input_age1=&int[2274/trashbox.ru/details&cad=rjt&fu=0&input_who1=2&input_who1=2&input_city-4400047.html?1=1&price_ot=&price_ot=&price=\\xd0\\xbc\\xd0\\xb5\\xd0\\xbd\\xd1\\x8c&clid=143431512&s_yers=0&model&desc=&name=1&markett.ru%2Frenazheltyj-95692465&text=\\xd0\\xbf\\xd0\\xbe\\xd0\\xb7\\xd0\\xb4\\xd1\\x80\\xd0\\xb0\\xd0\\xb2\\xd1\\x81\\xd1\\x82\\xd1\\x80\\xd0\\xb0\\xd0\\xbd\\xd0\\xb8\\xd1\\x86\\xd1\\x83&clid=4405404/menu_29.html&ei=UIX1UZTFNJTI0ci8guSn3tW.pl?cmd=showthreadreplies=978-4121-469171&history47/11/?from=&district'"
+    ],
+    [
+     "'domics'",
+     "212.92406790679988",
+     "326094",
+     "b'http://domics/825179.11931861234499792'"
+    ],
+    [
+     "'e96.ru'",
+     "210.08653357481904",
+     "1019246",
+     "b'http://e96.ru/%3Ffrom]=&input_act[count_num=0&dff=arian-carrina1201517&cad=rjt&fu=0&input_state/apartments-sale/list.htm?size=30&input_with_photo-takovo-zuevo-shpilki.ru/real.nn.ru/yandex.ua/searchAuto=on&input_who1=2&input_online.ru/clck/51cbd&ll=&top=http://loveplane=42621/page9'"
+    ],
+    [
+     "'gadgets.irr.ru'",
+     "131.95758485602357",
+     "349710",
+     "b'https://gadgets.irr.ru/2jmj7l5rSw0yVb'"
+    ],
+    [
+     "'google.ru'",
+     "109.3158151472085",
+     "2156635",
+     "b'http://google.ru/%3Fev_sid=188200/women.aspx?page_4.html%3Fev'"
+    ],
+    [
+     "'go.mail'",
+     "108.63706955917424",
+     "8227786",
+     "b'http://go.mail/04/detskaia-moda-zhiensmed'"
+    ],
+    [
+     "'msouz.ru'",
+     "106.10463459410022",
+     "301774",
+     "b'http://msouz.ru/?ffshop'"
+    ],
+    [
+     "'state=19945206'",
+     "105.64521656316963",
+     "512414",
+     "b'http://state=19945206/foto-4/login%20NoTs3M&where=all&filmId=u8aGGqtWs3M&where=all&server=sc.cheloveplanet.ru/forum.little&categoriya/muzhskaya_istory.com/demii-malchik_148_4055074241537][to]=&input_activalry: A Love&where=all&text=\\xd0\\xba\\xd1\\x83\\xd0\\xbf\\xd0\\xb8\\xd1\\x82\\xd1\\x8c florer&aktion/loansert \\xd0\\xbf\\xd0\\xb5\\xd1\\x80\\xd0\\xb5\\xd0\\xb2\\xd0\\xbe\\xd0\\xb7\\xd0\\xbe\\xd0\\xb1\\xd0\\xbd\\xd0\\xbe\\xd1\\x81\\xd1\\x82\\xd0\\xb8&site_id=197&text=\\xd0\\xb4\\xd0\\xbe\\xd0\\xb1\\xd0\\xb0\\xd0\\xb2\\xd1\\x8c   \\xd0\\xbb\\xd0\\xb0\\xd0\\xb7\\xd0\\xb5\\xd1\\x80\\xd0\\xbd\\xd0\\xbe\\xd0\\xb3\\xd0\\xbe\\xd1\\x80\\xd1\\x81\\xd0\\xba\\xd0\\xb8\\xd0\\xb9  \\xd1\\x82\\xd0\\xb0\\xd0\\xb9\\xd1\\x81\\xd0\\xba\\xd0\\xb0\\xd1\\x8f \\xd0\\xbf\\xd0\\xbe\\xd0\\xbb\\xd1\\x83\\xd0\\xbf\\xd0\\xb0\\xd1\\x8f \\xd0\\xb0\\xd0\\xb2\\xd1\\x82\\xd0\\xbe\\xd0\\xbc\\xd0\\xbe\\xd0\\xb1\\xd0\\xb8\\xd0\\xbb\\xd1\\x8c\\xd0\\xbd\\xd0\\xb8\\xd0\\xba\\xd0\\xb0&v=1414-resp_desyachnyeprague'"
+    ],
+    [
+     "'loveplanet.ru'",
+     "104.60039684260745",
+     "461140",
+     "b'http://loveplanet.ru/%3Faw_opel/page=2013'"
+    ],
+    [
+     "'bonprix.ru'",
+     "104.4309916275365",
+     "1124878",
+     "b'http://bonprix.ru/#!/search&input_state=20041732844/chishes-fronto.ria.ua/user.php?galle/1008ip30/'"
+    ],
+    [
+     "'novjob.ru'",
+     "96.80069940588102",
+     "132970",
+     "b'http://novjob.ru/1.1236&lr=143&tail'"
+    ],
+    [
+     "'cn.ru'",
+     "95.63003809905754",
+     "124675",
+     "b'http://cn.ru/GameMain.aspx#catalog/100523&tails.xml?market_pc.html?pid=9403&lr=47&msgid=36305f39386'"
+    ],
+    [
+     "'geomethiettai.ru'",
+     "94.78713161708883",
+     "115912",
+     "b'https://geomethiettai.ru/GameMain.aspx?group=houses/list=266559j7077&num=7&prune_day=lastdiscussd59394303&price_ot=&priceup&page3/sankt-petushhiblock'"
+    ],
+    [
+     "'kino'",
+     "90.27436552659836",
+     "120139",
+     "b'http://kino/6/21/2/women.asp?whichpage4/#oversion=unreadm&uid'"
+    ],
+    [
+     "'yaroslavens.ru'",
+     "90.17111441069063",
+     "124595",
+     "b'http://yaroslavens.ru/main.aspx#catalog%2F1004-1100000147-otvet/actions/dislocal'"
+    ],
+    [
+     "'mysw.info'",
+     "89.6901095284578",
+     "984493",
+     "b'http://mysw.info/1002.html%3futm_source'"
+    ],
+    [
+     "'m.myloveplanet.ru'",
+     "88.73515068728182",
+     "151539",
+     "b'http://m.myloveplanet.ru//search?clid=4112274][101][from]=&int[1414&biw=144106&price=&maxprice_do=0&lang=all&filmId'"
+    ],
+    [
+     "'povarenok.ru'",
+     "83.97890723742826",
+     "144789",
+     "b'http://povarenok.ru/ \\xd1\\x82\\xd0\\xbe\\xd1\\x87\\xd0\\xb8\\xd0\\xba | \\xd0\\xbc\\xd0\\xb8\\xd0\\xba\\xd0\\xb8\\xd0\\xbc\\xd0\\xb0\\xd1\\x83/'"
+    ],
+    [
+     "'gorod'",
+     "80.3309761846704",
+     "110727",
+     "b'http://gorod/%3Fauto.ria.ua%2Fjob'"
+    ],
+    [
+     "'yandsearch'",
+     "80.24370769881557",
+     "245856",
+     "b'http://www.yandsearch/rooms=1/page2'"
+    ],
+    [
+     "'myloveplanet.ru'",
+     "80.08091732831745",
+     "110582",
+     "b'http://myloveplanet.ru/#associety/auto'"
+    ],
+    [
+     "'tambov.irr.ru'",
+     "77.86451772496336",
+     "315318",
+     "b'http://tambov.irr.ru/0/c1/tgFtaeLDK0yb01A7xvQF08sjCFqQxn51'"
+    ],
+    [
+     "'kurortmag.ru'",
+     "75.74921904688296",
+     "155259",
+     "b'http://kurortmag.ru/02.php?f=48a48831/'"
+    ]
+   ],
+   "gb": {
+    "hash_s": 881.8823060000001,
+    "probe_s": 2181.211432,
+    "apply_s": 4061.370472,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "merge_bucketed": 62,
+    "merge_buckets": 124,
+    "pool_hits": 49924,
+    "pool_misses": 2249,
+    "pool_os_bytes": 90963968,
+    "pool_freed_bytes": 90963968,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 4420.917514,
+     "cpu_ms": 21318.608149
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 2.294101,
+     "cpu_ms": 6.62708
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.099171,
+     "cpu_ms": 0.040626
+    }
+   },
+   "time_planning_ms": 6.079618999999999,
+   "time_executing_ms": 4430.638403,
+   "ru_maxrss_mb": 7.931602478027344,
+   "finalize_ms": {
+    "merge": 1879.3,
+    "keys": 432.9,
+    "lanes": 364.0
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 28 */ SELECT REGEXP_REPLACE(Referer, b'^https?://(?:www\\.)?([^/]+)/.*$', r'\\1') AS k, AVG(length(Referer)) AS l, COUNT(*) AS c, MIN(Referer) FROM {DATASET} WHERE Referer <> '' GROUP BY REGEXP_REPLACE(Referer, b'^https?://(?:www\\.)?([^/]+)/.*$', r'\\1') HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;"
+  },
+  "rugo:Q30": {
+   "cold_ms": 1470.3966472297907,
+   "hot_ms": [
+    806.3126662746072,
+    790.024746209383,
+    807.1474134922028,
+    796.0627051070333,
+    802.5318142026663
+   ],
+   "rows": 10,
+   "digest": "8d2e2523a88741c0",
+   "names": [
+    "SearchEngineID",
+    "ClientIP",
+    "c",
+    "SUM(IsRefresh)",
+    "AVG(ResolutionWidth)"
+   ],
+   "result": [
+    [
+     "2",
+     "1138507705",
+     "1633",
+     "35",
+     "1408.0122473974282"
+    ],
+    [
+     "2",
+     "1740861572",
+     "1331",
+     "28",
+     "1577.945905334335"
+    ],
+    [
+     "2",
+     "-807147100",
+     "1144",
+     "35",
+     "1553.1984265734266"
+    ],
+    [
+     "2",
+     "-497906719",
+     "1140",
+     "36",
+     "1543.4140350877192"
+    ],
+    [
+     "2",
+     "-1945757555",
+     "1105",
+     "30",
+     "1557.387330316742"
+    ],
+    [
+     "2",
+     "-1870623097",
+     "1102",
+     "31",
+     "1555.6588021778584"
+    ],
+    [
+     "2",
+     "-631062503",
+     "1083",
+     "31",
+     "1581.8171745152354"
+    ],
+    [
+     "2",
+     "-465813166",
+     "1082",
+     "30",
+     "1541.253234750462"
+    ],
+    [
+     "2",
+     "-1743596151",
+     "1080",
+     "24",
+     "1559.8092592592593"
+    ],
+    [
+     "2",
+     "-265917476",
+     "1058",
+     "32",
+     "1556.2003780718337"
+    ]
+   ],
+   "gb": {
+    "hash_s": 121.11802,
+    "probe_s": 994.108276,
+    "apply_s": 333.04519600000003,
+    "calls": 1524,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 256,
+    "topk_pruned": 256,
+    "da_rejects": 4,
+    "pool_hits": 71896,
+    "pool_misses": 296,
+    "pool_os_bytes": 41324544,
+    "pool_freed_bytes": 41324544,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 790.793756,
+     "cpu_ms": 4317.905115
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.347048,
+     "cpu_ms": 1.242967
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.100448,
+     "cpu_ms": 0.042705
+    }
+   },
+   "time_planning_ms": 4.230411,
+   "time_executing_ms": 798.279893,
+   "ru_maxrss_mb": 2.5579986572265625,
+   "finalize_ms": {
+    "merge": 581.5,
+    "keys": 0.3,
+    "lanes": 0.6
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 30 */ SELECT SearchEngineID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY SearchEngineID, ClientIP ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q31": {
+   "cold_ms": 1734.9390992894769,
+   "hot_ms": [
+    940.1945853605866,
+    964.0206750482321,
+    921.2892660871148,
+    922.6182596758008,
+    912.4259827658534
+   ],
+   "rows": 10,
+   "digest": "2512a2e5835d9984",
+   "names": [
+    "WatchID",
+    "ClientIP",
+    "c",
+    "SUM(IsRefresh)",
+    "AVG(ResolutionWidth)"
+   ],
+   "result": [
+    [
+     "5078431712204184269",
+     "-1686742731",
+     "1",
+     "1",
+     "508.0"
+    ],
+    [
+     "8091227343716518641",
+     "-517159730",
+     "1",
+     "0",
+     "1638.0"
+    ],
+    [
+     "8933310968076907182",
+     "-1404106550",
+     "1",
+     "1",
+     "1304.0"
+    ],
+    [
+     "4880834997799233182",
+     "731292813",
+     "1",
+     "0",
+     "1638.0"
+    ],
+    [
+     "8336965419691987749",
+     "1388696273",
+     "1",
+     "0",
+     "1917.0"
+    ],
+    [
+     "5167096779073426962",
+     "2004540669",
+     "1",
+     "0",
+     "1368.0"
+    ],
+    [
+     "7159435153301072830",
+     "573203641",
+     "1",
+     "0",
+     "1750.0"
+    ],
+    [
+     "5876231306575499295",
+     "1760151079",
+     "1",
+     "1",
+     "1638.0"
+    ],
+    [
+     "7396970237159854886",
+     "1576872321",
+     "1",
+     "1",
+     "1638.0"
+    ],
+    [
+     "5877573544945039235",
+     "1773482586",
+     "1",
+     "0",
+     "1828.0"
+    ]
+   ],
+   "gb": {
+    "hash_s": 148.847007,
+    "probe_s": 698.815348,
+    "apply_s": 341.850118,
+    "calls": 1524,
+    "mid_promotes": 256,
+    "raw_switches": 4,
+    "merge_bucketed": 64,
+    "merge_buckets": 256,
+    "topk_pruned": 256,
+    "da_rejects": 4,
+    "pool_hits": 66931,
+    "pool_misses": 33421,
+    "pool_os_bytes": 1294999552,
+    "pool_freed_bytes": 1294999552,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 900.222261,
+     "cpu_ms": 4778.254338
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.338826,
+     "cpu_ms": 1.241989
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.094918,
+     "cpu_ms": 0.049547
+    }
+   },
+   "time_planning_ms": 4.322023000000001,
+   "time_executing_ms": 908.082591,
+   "ru_maxrss_mb": 3.883586883544922,
+   "finalize_ms": {
+    "merge": 979.4,
+    "keys": 0.4,
+    "lanes": 1.2
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 31 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q32": {
+   "cold_ms": 7423.580406233668,
+   "hot_ms": [
+    5849.403670988977,
+    5266.654504463077,
+    5001.879595220089,
+    5009.435890242457,
+    5027.042325586081
+   ],
+   "rows": 10,
+   "digest": "80ac736bde50574b",
+   "names": [
+    "WatchID",
+    "ClientIP",
+    "c",
+    "SUM(IsRefresh)",
+    "AVG(ResolutionWidth)"
+   ],
+   "result": [
+    [
+     "6655575552203051303",
+     "1611957945",
+     "2",
+     "0",
+     "1638.0"
+    ],
+    [
+     "7904046282518428963",
+     "1509330109",
+     "2",
+     "0",
+     "1368.0"
+    ],
+    [
+     "8566928176839891583",
+     "-1402644643",
+     "2",
+     "0",
+     "1368.0"
+    ],
+    [
+     "7224410078130478461",
+     "-776509581",
+     "2",
+     "0",
+     "1368.0"
+    ],
+    [
+     "5238126449013453612",
+     "-840635649",
+     "1",
+     "0",
+     "1480.0"
+    ],
+    [
+     "6590977431830430644",
+     "340118302",
+     "1",
+     "0",
+     "1828.0"
+    ],
+    [
+     "8158707830032437199",
+     "898648863",
+     "1",
+     "1",
+     "1953.0"
+    ],
+    [
+     "8544631070640396747",
+     "1645836779",
+     "1",
+     "0",
+     "1368.0"
+    ],
+    [
+     "5715189859443092641",
+     "430376111",
+     "1",
+     "1",
+     "1368.0"
+    ],
+    [
+     "6470890269138417594",
+     "-1319697794",
+     "1",
+     "0",
+     "1638.0"
+    ]
+   ],
+   "gb": {
+    "hash_s": 797.189578,
+    "probe_s": 6080.358363,
+    "apply_s": 2402.017212,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "raw_switches": 4,
+    "merge_bucketed": 64,
+    "merge_buckets": 2048,
+    "topk_pruned": 2048,
+    "da_rejects": 4,
+    "pool_hits": 65463,
+    "pool_misses": 554601,
+    "pool_os_bytes": 24776091648,
+    "pool_freed_bytes": 24776091648,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 5011.928736,
+     "cpu_ms": 21342.809567
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 2.254599,
+     "cpu_ms": 8.894775
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.102606,
+     "cpu_ms": 0.05323
+    }
+   },
+   "time_planning_ms": 3.60914,
+   "time_executing_ms": 5023.410293000001,
+   "ru_maxrss_mb": 10.965557098388672,
+   "finalize_ms": {
+    "merge": 8797.6,
+    "keys": 3.4,
+    "lanes": 8.1
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 32 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q33": {
+   "cold_ms": 6919.338072650135,
+   "hot_ms": [
+    3840.6016677618027,
+    2979.463379830122,
+    2857.297989539802,
+    2855.5027209222317,
+    2786.5597549825907
+   ],
+   "rows": 10,
+   "digest": "b69566ce4c6fa44a",
+   "names": [
+    "URL",
+    "c"
+   ],
+   "result": [
+    [
+     "b'http://liver.ru/belgorod/page/1006.j\\xd0\\xba\\xd0\\xb8/\\xd0\\xb4\\xd0\\xbe\\xd0\\xbf_\\xd0\\xbf\\xd1\\x80\\xd0\\xb8\\xd0\\xb1\\xd0\\xbe\\xd1\\x80\\xd1\\x8b'",
+     "3288173"
+    ],
+    [
+     "b'http://kinopoisk.ru'",
+     "1625250"
+    ],
+    [
+     "b'http://bdsm_po_yers=0&with_video'",
+     "791465"
+    ],
+    [
+     "b'http://video.yandex'",
+     "582400"
+    ],
+    [
+     "b'http://smeshariki.ru/region'",
+     "514984"
+    ],
+    [
+     "b'http://auto_fiat_dlya-bluzki%2F8536.30.18&he=900&with'",
+     "507995"
+    ],
+    [
+     "b'http://liver.ru/place_rukodel=365115eb7bbb90'",
+     "359893"
+    ],
+    [
+     "b'http://kinopoisk.ru/vladimir.irr.ru'",
+     "354690"
+    ],
+    [
+     "b'http://video.yandex.ru/search/?jenre=50&s_yers'",
+     "318979"
+    ],
+    [
+     "b'http://tienskaia-moda'",
+     "289355"
+    ]
+   ],
+   "gb": {
+    "hash_s": 252.027446,
+    "probe_s": 7538.021321,
+    "apply_s": 378.92564500000003,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 512,
+    "topk_pruned": 512,
+    "pool_hits": 35536,
+    "pool_misses": 161871,
+    "pool_os_bytes": 7583563776,
+    "pool_freed_bytes": 7583563776,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 2776.181173,
+     "cpu_ms": 14868.212569
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.638228,
+     "cpu_ms": 2.292188
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.10618,
+     "cpu_ms": 0.045041
+    }
+   },
+   "time_planning_ms": 2.999097,
+   "time_executing_ms": 2783.53809,
+   "ru_maxrss_mb": 12.120922088623047,
+   "finalize_ms": {
+    "merge": 1041.4,
+    "keys": 1.0,
+    "lanes": 0.5
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 33 */ SELECT URL, COUNT(*) AS c FROM {DATASET} GROUP BY URL ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q34": {
+   "cold_ms": 5961.7054192349315,
+   "hot_ms": [
+    3364.392075687647,
+    3045.9571620449424,
+    2889.2459645867348,
+    2863.6253410950303,
+    2876.4361748471856
+   ],
+   "rows": 10,
+   "digest": "c167d6f2defe1633",
+   "names": [
+    "1",
+    "URL",
+    "c"
+   ],
+   "result": [
+    [
+     "1",
+     "b'http://liver.ru/belgorod/page/1006.j\\xd0\\xba\\xd0\\xb8/\\xd0\\xb4\\xd0\\xbe\\xd0\\xbf_\\xd0\\xbf\\xd1\\x80\\xd0\\xb8\\xd0\\xb1\\xd0\\xbe\\xd1\\x80\\xd1\\x8b'",
+     "3288173"
+    ],
+    [
+     "1",
+     "b'http://kinopoisk.ru'",
+     "1625250"
+    ],
+    [
+     "1",
+     "b'http://bdsm_po_yers=0&with_video'",
+     "791465"
+    ],
+    [
+     "1",
+     "b'http://video.yandex'",
+     "582400"
+    ],
+    [
+     "1",
+     "b'http://smeshariki.ru/region'",
+     "514984"
+    ],
+    [
+     "1",
+     "b'http://auto_fiat_dlya-bluzki%2F8536.30.18&he=900&with'",
+     "507995"
+    ],
+    [
+     "1",
+     "b'http://liver.ru/place_rukodel=365115eb7bbb90'",
+     "359893"
+    ],
+    [
+     "1",
+     "b'http://kinopoisk.ru/vladimir.irr.ru'",
+     "354690"
+    ],
+    [
+     "1",
+     "b'http://video.yandex.ru/search/?jenre=50&s_yers'",
+     "318979"
+    ],
+    [
+     "1",
+     "b'http://tienskaia-moda'",
+     "289355"
+    ]
+   ],
+   "gb": {
+    "hash_s": 211.51245400000002,
+    "probe_s": 7566.506764000001,
+    "apply_s": 375.70324700000003,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 512,
+    "topk_pruned": 512,
+    "pool_hits": 36562,
+    "pool_misses": 161610,
+    "pool_os_bytes": 7664238592,
+    "pool_freed_bytes": 7664238592,
+    "pool_retained_bytes": 1073741824
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 2865.136995,
+     "cpu_ms": 15254.896242
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 1.270887,
+     "cpu_ms": 4.832951
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.098652,
+     "cpu_ms": 0.050764
+    }
+   },
+   "time_planning_ms": 3.122637,
+   "time_executing_ms": 2873.2921579999997,
+   "ru_maxrss_mb": 13.227657318115234,
+   "finalize_ms": {
+    "merge": 1213.5,
+    "keys": 1.2,
+    "lanes": 0.4
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 34 */ SELECT 1, URL, COUNT(*) AS c FROM {DATASET} GROUP BY 1, URL ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q35": {
+   "cold_ms": 1188.8625249266624,
+   "hot_ms": [
+    856.8574888631701,
+    855.9574233368039,
+    861.626485362649,
+    871.3688245043159,
+    877.2959159687161
+   ],
+   "rows": 10,
+   "digest": "9592f23fc58c0605",
+   "names": [
+    "ClientIP",
+    "ClientIP - 1",
+    "ClientIP - 2",
+    "ClientIP - 3",
+    "c"
+   ],
+   "result": [
+    [
+     "-39921974",
+     "-39921975",
+     "-39921976",
+     "-39921977",
+     "47008"
+    ],
+    [
+     "-1698104457",
+     "-1698104458",
+     "-1698104459",
+     "-1698104460",
+     "29121"
+    ],
+    [
+     "-1175819552",
+     "-1175819553",
+     "-1175819554",
+     "-1175819555",
+     "25333"
+    ],
+    [
+     "1696638182",
+     "1696638181",
+     "1696638180",
+     "1696638179",
+     "20220"
+    ],
+    [
+     "1138507705",
+     "1138507704",
+     "1138507703",
+     "1138507702",
+     "15778"
+    ],
+    [
+     "-927025522",
+     "-927025523",
+     "-927025524",
+     "-927025525",
+     "12768"
+    ],
+    [
+     "-1262139876",
+     "-1262139877",
+     "-1262139878",
+     "-1262139879",
+     "11348"
+    ],
+    [
+     "1740861572",
+     "1740861571",
+     "1740861570",
+     "1740861569",
+     "11314"
+    ],
+    [
+     "-807147100",
+     "-807147101",
+     "-807147102",
+     "-807147103",
+     "9880"
+    ],
+    [
+     "-631062503",
+     "-631062504",
+     "-631062505",
+     "-631062506",
+     "9718"
+    ]
+   ],
+   "gb": {
+    "hash_s": 113.47597,
+    "probe_s": 1802.6893140000002,
+    "apply_s": 283.38824,
+    "calls": 1526,
+    "mid_promotes": 256,
+    "merge_bucketed": 64,
+    "merge_buckets": 512,
+    "da_rejects": 4,
+    "pool_hits": 61924,
+    "pool_misses": 10,
+    "pool_os_bytes": 303104,
+    "pool_retained_bytes": 802766848
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 809.849929,
+     "cpu_ms": 3698.814761
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 55.781808,
+     "cpu_ms": 228.797056
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.110294,
+     "cpu_ms": 0.064057
+    }
+   },
+   "time_planning_ms": 4.113341,
+   "time_executing_ms": 873.160166,
+   "ru_maxrss_mb": 1.4736366271972656,
+   "finalize_ms": {
+    "merge": 708.1,
+    "keys": 179.9,
+    "lanes": 19.0
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 35 */ SELECT ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3, COUNT(*) AS c FROM {DATASET} GROUP BY ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3 ORDER BY c DESC LIMIT 10;"
+  },
+  "rugo:Q36": {
+   "cold_ms": 305.5732985958457,
+   "hot_ms": [
+    56.97355046868324,
+    53.81308309733868,
+    55.1951639354229,
+    53.73669695109129,
+    54.0158050134778
+   ],
+   "rows": 10,
+   "digest": "b0ebf7565ab4245d",
+   "names": [
+    "URL",
+    "PageViews"
+   ],
+   "result": [
+    [
+     "b'http://irr.ru/index.php?showalbum/login-leniya7777294,938303130'",
+     "102341"
+    ],
+    [
+     "b'http://komme%2F27.0.1453.116'",
+     "51218"
+    ],
+    [
+     "b'http://irr.ru/index.php?showalbum/login-kapusta-advert2668]=0&order_by=0'",
+     "18315"
+    ],
+    [
+     "b'http://irr.ru/index.php?showalbum/login-kapustic/product_name'",
+     "16461"
+    ],
+    [
+     "b'http://irr.ru/index.php'",
+     "12577"
+    ],
+    [
+     "b'http://irr.ru/index.php?showalbum/login'",
+     "10880"
+    ],
+    [
+     "b'http://komme%2F27.0.1453.116 Safari%2F5.0 (compatible; MSIE 9.0;'",
+     "7627"
+    ],
+    [
+     "b'http://irr.ru/index.php?showalbum/login-kupalnik'",
+     "4369"
+    ],
+    [
+     "b'http://irr.ru/index.php?showalbum/login-kapusta-advert27256.html_params'",
+     "4058"
+    ],
+    [
+     "b'http://komme%2F27.0.1453.116 Safari'",
+     "3021"
+    ]
+   ],
+   "gb": {
+    "hash_s": 15.480263,
+    "probe_s": 72.68106900000001,
+    "apply_s": 6.280384,
+    "calls": 14,
+    "mid_promotes": 256,
+    "topk_pruned": 64,
+    "pool_hits": 4713,
+    "pool_misses": 21,
+    "pool_os_bytes": 2691072,
+    "pool_retained_bytes": 99266560
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 46.080301,
+     "cpu_ms": 221.028108
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.181039,
+     "cpu_ms": 0.413319
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.09591,
+     "cpu_ms": 0.049454
+    }
+   },
+   "time_planning_ms": 5.585477999999999,
+   "time_executing_ms": 48.409681000000006,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "finalize_ms": {
+    "merge": 16.0,
+    "keys": 0.0,
+    "lanes": 0.0
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 36 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND DontCountHits = 0 AND IsRefresh = 0 AND URL <> '' GROUP BY URL ORDER BY PageViews DESC LIMIT 10;"
+  },
+  "rugo:Q39": {
+   "cold_ms": 411.49853728711605,
+   "hot_ms": [
+    133.64789728075266,
+    139.63317219167948,
+    135.38644555956125,
+    130.9461323544383,
+    133.60922504216433
+   ],
+   "rows": 10,
+   "digest": "1b361d396f5ce7d8",
+   "names": [
+    "TraficSourceID",
+    "SearchEngineID",
+    "AdvEngineID",
+    "Src",
+    "Dst",
+    "PageViews"
+   ],
+   "result": [
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2491724/?bundlers/search?text'",
+     "b'http://irr.ru/index.php?showalbum/login-kapusta-advert26406956/?_h=search/roomer/rnd/event=big&marka'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-olga664.1721/deti74.ru/animals-planet.ru'",
+     "b'http://irr.ru/index.php?showalbum/login=K-SR-B-13-9635095,9661/9#f'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2006/makumirostova.ru/doc.ru/belgorod.irr.ru/albumfotographic'",
+     "b'http://irr.ru/index.php?showalbum/login-leniya7777294,938303130'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-11925.17661-sh-93861361091_27_iyunya_5_iyunya_5_iyunya_5_iyulyanovskii_interval=&only_owners'",
+     "b'http://irr.ru/index.php?showalbum/login=int[2364][from=29&modelove.ru/ru/index.php?vacancies/toolin_MP50807/details'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2006/makumirostova.ru/yandex.ru/gamemain.aspx?size=13&msid'",
+     "b'http://irr.ru/index.php?showalbum/login-leniya7777294,938303130'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2491724/?bundlers/search?text'",
+     "b'http://irr.ru/index.php?showalbum/login-kapusta-advert26605566254/room=1.6&where=all&filmId=szhatisting'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2006/makumiroshoowbiz/photo=on&input_onlineradio/chasti.ria.ua/search;weUsyw&bvm=bv.48705608'",
+     "b'http://irr.ru/index.php?showalbum/login.html%26custom%3D%26CompPath.2; WOW64; rv:22.0&he=100&currency=1&target=search?text=\\xd1\\x84\\xd0\\xbe\\xd1\\x80\\xd1\\x81-\\xd1\\x83\\xd1\\x84\\xd0\\xb0-\\xd0\\xb1\\xd0\\xb0\\xd1\\x82\\xd0\\xb0\\xd0\\xb9 (\\xd1\\x80\\xd0\\xb0\\xd0\\xb7\\xd0\\xbc\\xd0\\xb5\\xd1\\x80\\xd1\\x8b - \\xd0\\x9e\\xd0\\xb1\\xd1\\x83\\xd0\\xb2\\xd1\\x8c - bonprix colleux/frl-29/1096157291&from=&engineVolumeFrom=trudovodstview.php?r=10985.html?1=1&cid=732-receptik'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2006/makum'",
+     "b'http://irr.ru/index.php?showalbum/login/?do=ready-mansion%3D0%26url%3D%26bn%3D0%26ref%3D%26custom=0'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2491724/?bundlers/search?text'",
+     "b'http://irr.ru/index.php?showalbum/login-kapusta-advert262997385f32313335781094&op_seo_entry=-1&OnlyAvailFlight'",
+     "15"
+    ],
+    [
+     "-1",
+     "0",
+     "0",
+     "'http://state=19945206/foto-4/login-2006/makumiroshoowbiz/down%2Fholodilnik.ru/76/~4/'",
+     "b'http://irr.ru/index.php'",
+     "15"
+    ]
+   ],
+   "gb": {
+    "hash_s": 22.889826000000003,
+    "probe_s": 175.19591400000002,
+    "apply_s": 3.2085190000000003,
+    "calls": 14,
+    "mid_promotes": 256,
+    "topk_pruned": 64,
+    "pool_hits": 14927,
+    "pool_misses": 29,
+    "pool_os_bytes": 3145728,
+    "pool_retained_bytes": 262864896
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 122.81386,
+     "cpu_ms": 565.538815
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 1.655556,
+     "cpu_ms": 4.569242
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.105256,
+     "cpu_ms": 0.058943
+    }
+   },
+   "time_planning_ms": 6.669278,
+   "time_executing_ms": 126.91892499999999,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "finalize_ms": {
+    "merge": 57.7,
+    "keys": 2.2,
+    "lanes": 0.2
+   },
+   "finalize_threads": 4,
+   "role": "target",
+   "sql": "/* 39 */ SELECT TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END AS Src, URL AS Dst, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 GROUP BY TraficSourceID, SearchEngineID, AdvEngineID, CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END, URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000;"
+  },
+  "rugo:Q40": {
+   "cold_ms": 253.78974620252848,
+   "hot_ms": [
+    22.372317500412464,
+    20.60689590871334,
+    20.3824108466506,
+    21.181502379477024,
+    20.922526717185974
+   ],
+   "rows": 10,
+   "digest": "761c9b5f7243639d",
+   "names": [
+    "URLHash",
+    "EventDate",
+    "PageViews"
+   ],
+   "result": [
+    [
+     "-303827618430024948",
+     "15901",
+     "27"
+    ],
+    [
+     "2054727273000865689",
+     "15901",
+     "27"
+    ],
+    [
+     "2512899255762264913",
+     "15901",
+     "26"
+    ],
+    [
+     "-8505838588544217213",
+     "15901",
+     "26"
+    ],
+    [
+     "-6025761452198030778",
+     "15901",
+     "25"
+    ],
+    [
+     "-3611962581960090019",
+     "15901",
+     "25"
+    ],
+    [
+     "-6048157399675510565",
+     "15901",
+     "25"
+    ],
+    [
+     "6943133878034238200",
+     "15901",
+     "24"
+    ],
+    [
+     "1045132364006275583",
+     "15901",
+     "24"
+    ],
+    [
+     "5381918128490835791",
+     "15901",
+     "24"
+    ]
+   ],
+   "gb": {
+    "hash_s": 1.0369380000000001,
+    "probe_s": 5.124586000000001,
+    "apply_s": 0.29158900000000004,
+    "calls": 14,
+    "mid_promotes": 192,
+    "topk_pruned": 64,
+    "da_rejects": 4,
+    "pool_hits": 1408,
+    "pool_retained_bytes": 3434496
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 12.200981,
+     "cpu_ms": 37.9392
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 0.304966,
+     "cpu_ms": 0.710303
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.099826,
+     "cpu_ms": 0.05314
+    }
+   },
+   "time_planning_ms": 5.815074,
+   "time_executing_ms": 15.086306,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "finalize_ms": {
+    "merge": 1.6,
+    "keys": 0.0,
+    "lanes": 0.0
+   },
+   "finalize_threads": 1,
+   "role": "target",
+   "sql": "/* 40 */ SELECT URLHash, EventDate, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND TraficSourceID IN (-1, 6) AND RefererHash::INT64 = 3594120000172545465 GROUP BY URLHash, EventDate ORDER BY PageViews DESC LIMIT 10 OFFSET 100;"
+  },
+  "rugo:Q41": {
+   "cold_ms": 244.2428357899189,
+   "hot_ms": [
+    18.88482552021742,
+    17.136464826762676,
+    18.133935518562794,
+    17.762272618710995,
+    17.893466167151928
+   ],
+   "rows": 10,
+   "digest": "6120d5a6d2471cf6",
+   "names": [
+    "WindowClientWidth",
+    "WindowClientHeight",
+    "PageViews"
+   ],
+   "result": [
+    [
+     "1696",
+     "1467",
+     "1"
+    ],
+    [
+     "539",
+     "1971",
+     "1"
+    ],
+    [
+     "1692",
+     "667",
+     "1"
+    ],
+    [
+     "1031",
+     "701",
+     "1"
+    ],
+    [
+     "1647",
+     "531",
+     "1"
+    ],
+    [
+     "1238",
+     "632",
+     "1"
+    ],
+    [
+     "1789",
+     "622",
+     "1"
+    ],
+    [
+     "1201",
+     "967",
+     "1"
+    ],
+    [
+     "540",
+     "726",
+     "1"
+    ],
+    [
+     "1854",
+     "757",
+     "1"
+    ]
+   ],
+   "gb": {
+    "hash_s": 0.647497,
+    "probe_s": 2.29757,
+    "apply_s": 0.211453,
+    "calls": 14,
+    "da_rejects": 4,
+    "pool_hits": 1280,
+    "pool_retained_bytes": 2636800
+   },
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 7.819408,
+     "cpu_ms": 28.345038
+    },
+    "GroupedAggregateHashedNode": {
+     "wall_ms": 1.748084,
+     "cpu_ms": 2.103909
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.109704,
+     "cpu_ms": 0.052917
+    }
+   },
+   "time_planning_ms": 5.614144,
+   "time_executing_ms": 12.258263,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "finalize_ms": {
+    "merge": 0.7,
+    "keys": 0.0,
+    "lanes": 0.0
+   },
+   "finalize_threads": 1,
+   "role": "target",
+   "sql": "/* 41 */ SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND DontCountHits = 0 AND URLHash::INT64 = 2868770270353813622 GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000;"
+  },
+  "rugo:Q00": {
+   "cold_ms": 209.02122743427753,
+   "hot_ms": [
+    3.7729982286691666,
+    3.4603774547576904,
+    3.4382781013846397,
+    3.4876540303230286,
+    3.4434646368026733
+   ],
+   "rows": 1,
+   "digest": "fbf1ea97e0792533",
+   "names": [
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "99997497"
+    ]
+   ],
+   "gb": {},
+   "pipelines": {
+    "ReaderNode": {
+     "wall_ms": 0.123753,
+     "cpu_ms": 0.169673
+    }
+   },
+   "time_planning_ms": 2.693405,
+   "time_executing_ms": 0.732641,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "role": "control",
+   "sql": "/* 00 */ SELECT COUNT(*) FROM {DATASET};"
+  },
+  "rugo:Q01": {
+   "cold_ms": 258.27967189252377,
+   "hot_ms": [
+    22.95761927962303,
+    23.288140073418617,
+    21.672070026397705,
+    22.132503800094128,
+    22.71104883402586
+   ],
+   "rows": 1,
+   "digest": "c362da338beedfa2",
+   "names": [
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "630500"
+    ]
+   ],
+   "gb": {},
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 16.588238,
+     "cpu_ms": 76.982016
+    },
+    "UngroupedAggregateNode": {
+     "wall_ms": 0.089927,
+     "cpu_ms": 0.083742
+    }
+   },
+   "time_planning_ms": 2.9799100000000003,
+   "time_executing_ms": 19.70981,
+   "ru_maxrss_mb": 1.0662498474121094,
+   "role": "control",
+   "sql": "/* 01 */ SELECT COUNT(*) FROM {DATASET} WHERE AdvEngineID <> 0;"
+  },
+  "rugo:Q20": {
+   "cold_ms": 2113.1002278998494,
+   "hot_ms": [
+    497.12736066430807,
+    481.5173540264368,
+    477.40672156214714,
+    479.4185571372509,
+    474.40876066684723
+   ],
+   "rows": 1,
+   "digest": "3337c6ac364bed47",
+   "names": [
+    "COUNT(*)"
+   ],
+   "result": [
+    [
+     "15911"
+    ]
+   ],
+   "gb": {},
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 462.41157,
+     "cpu_ms": 2756.026243
+    },
+    "UngroupedAggregateNode": {
+     "wall_ms": 0.155981,
+     "cpu_ms": 0.165843
+    }
+   },
+   "time_planning_ms": 3.006413,
+   "time_executing_ms": 471.38129000000004,
+   "ru_maxrss_mb": 5.606166839599609,
+   "role": "control",
+   "sql": "/* 20 */ SELECT COUNT(*) FROM {DATASET} WHERE URL LIKE '%google%';"
+  },
+  "rugo:Q23": {
+   "cold_ms": 733.7295236065984,
+   "hot_ms": [
+    255.60398865491152,
+    252.6800138875842,
+    251.968989148736,
+    261.8275620043278,
+    258.12514405697584
+   ],
+   "rows": 10,
+   "digest": "263bd97aec030e87",
+   "names": [
+    "WatchID",
+    "JavaEnable",
+    "Title",
+    "GoodEvent",
+    "EventTime",
+    "EventDate",
+    "CounterID",
+    "ClientIP",
+    "RegionID",
+    "UserID",
+    "CounterClass",
+    "OS",
+    "UserAgent",
+    "URL",
+    "Referer",
+    "IsRefresh",
+    "RefererCategoryID",
+    "RefererRegionID",
+    "URLCategoryID",
+    "URLRegionID",
+    "ResolutionWidth",
+    "ResolutionHeight",
+    "ResolutionDepth",
+    "FlashMajor",
+    "FlashMinor",
+    "FlashMinor2",
+    "NetMajor",
+    "NetMinor",
+    "UserAgentMajor",
+    "UserAgentMinor",
+    "CookieEnable",
+    "JavascriptEnable",
+    "IsMobile",
+    "MobilePhone",
+    "MobilePhoneModel",
+    "Params",
+    "IPNetworkID",
+    "TraficSourceID",
+    "SearchEngineID",
+    "SearchPhrase",
+    "AdvEngineID",
+    "IsArtifical",
+    "WindowClientWidth",
+    "WindowClientHeight",
+    "ClientTimeZone",
+    "ClientEventTime",
+    "SilverlightVersion1",
+    "SilverlightVersion2",
+    "SilverlightVersion3",
+    "SilverlightVersion4",
+    "PageCharset",
+    "CodeVersion",
+    "IsLink",
+    "IsDownload",
+    "IsNotBounce",
+    "FUniqID",
+    "OriginalURL",
+    "HID",
+    "IsOldCounter",
+    "IsEvent",
+    "IsParameter",
+    "DontCountHits",
+    "WithHash",
+    "HitColor",
+    "LocalEventTime",
+    "Age",
+    "Sex",
+    "Income",
+    "Interests",
+    "Robotness",
+    "RemoteIP",
+    "WindowName",
+    "OpenerName",
+    "HistoryLength",
+    "BrowserLanguage",
+    "BrowserCountry",
+    "SocialNetwork",
+    "SocialAction",
+    "HTTPError",
+    "SendTiming",
+    "DNSTiming",
+    "ConnectTiming",
+    "ResponseStartTiming",
+    "ResponseEndTiming",
+    "FetchTiming",
+    "SocialSourceNetworkID",
+    "SocialSourcePage",
+    "ParamPrice",
+    "ParamOrderID",
+    "ParamCurrency",
+    "ParamCurrencyID",
+    "OpenstatServiceName",
+    "OpenstatCampaignID",
+    "OpenstatAdID",
+    "OpenstatSourceID",
+    "UTMSource",
+    "UTMMedium",
+    "UTMCampaign",
+    "UTMContent",
+    "UTMTerm",
+    "FromTag",
+    "HasGCLID",
+    "RefererHash",
+    "URLHash",
+    "CLID"
+   ],
+   "result": [
+    [
+     "7675678523794456216",
+     "1",
+     "b'Glavnaya gorand. \\xd0\\xa6\\xd0\\xb2\\xd0\\xb5\\xd1\\x82\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5 \\xd0\\xbe\\xd0\\xb1\\xd1\\x8a\\xd1\\x8f\\xd0\\xb2\\xd0\\xbb\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd0\\xb9 \\xd1\\x80\\xd0\\xb0\\xd0\\xb9\\xd0\\xbe\\xd0\\xbd\\xd0\\xb5, \\xd0\\xb2\\xd0\\xb5\\xd1\\x80\\xd0\\xbe\\xd0\\xbc'",
+     "1",
+     "1372708869",
+     "15888",
+     "64469",
+     "1840073959",
+     "2",
+     "3714843517822510735",
+     "0",
+     "44",
+     "5",
+     "b'http://e96.ru/search/page.googleTBR%26ad%3D0%26rnd%3D158197%26anbietersburg'",
+     "b'http://bdsmpeople.ru/obrazom_position/?page'",
+     "0",
+     "13593",
+     "158",
+     "13606",
+     "216",
+     "1638",
+     "1658",
+     "22",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "22",
+     "b'nA'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "4005373",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1052",
+     "775",
+     "135",
+     "1372760422",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'windows'",
+     "1601",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "213893614",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'6'",
+     "1372766291",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "1412515749",
+     "63522",
+     "-1",
+     "12",
+     "b'S0'",
+     "b'\\xef\\xbf\\xbd\\x0c'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "445",
+     "1234",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "5972490271588207794",
+     "1369713899219085694",
+     "0"
+    ],
+    [
+     "6147260061318473746",
+     "1",
+     "b'Glavnaya gorand. \\xd0\\xa6\\xd0\\xb2\\xd0\\xb5\\xd1\\x82\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5 \\xd0\\xbe\\xd0\\xb1\\xd1\\x8a\\xd1\\x8f\\xd0\\xb2\\xd0\\xbb\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd0\\xb9 \\xd1\\x80\\xd0\\xb0\\xd0\\xb9\\xd0\\xbe\\xd0\\xbd\\xd0\\xb5, \\xd0\\xb2\\xd0\\xb5\\xd1\\x80\\xd0\\xbe\\xd0\\xbc'",
+     "1",
+     "1372708889",
+     "15888",
+     "64469",
+     "1840073959",
+     "2",
+     "3714843517822510735",
+     "0",
+     "44",
+     "5",
+     "b'http://e96.ru/search/page.googleTBR%26ad%3D0%26rnd%3D158197%26anbietersburg'",
+     "b'http://bdsmpeople.ru/obrazom_position/?page'",
+     "0",
+     "13593",
+     "158",
+     "13606",
+     "216",
+     "1638",
+     "1658",
+     "22",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "22",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "4005373",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1052",
+     "775",
+     "135",
+     "1372760442",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'windows'",
+     "1601",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "810892658",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'6'",
+     "1372766305",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "1412515749",
+     "63522",
+     "-1",
+     "13",
+     "b'S0'",
+     "b'\\xef\\xbf\\xbd\\x0c'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "16",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "5972490271588207794",
+     "1369713899219085694",
+     "0"
+    ],
+    [
+     "5972689683963797854",
+     "1",
+     "b'Glavnaya gorand. \\xd0\\xa6\\xd0\\xb2\\xd0\\xb5\\xd1\\x82\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5 \\xd0\\xbe\\xd0\\xb1\\xd1\\x8a\\xd1\\x8f\\xd0\\xb2\\xd0\\xbb\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd0\\xb9 \\xd1\\x80\\xd0\\xb0\\xd0\\xb9\\xd0\\xbe\\xd0\\xbd\\xd0\\xb5, \\xd0\\xb2\\xd0\\xb5\\xd1\\x80\\xd0\\xbe\\xd0\\xbc'",
+     "1",
+     "1372708931",
+     "15888",
+     "64469",
+     "1840073959",
+     "2",
+     "3714843517822510735",
+     "0",
+     "44",
+     "5",
+     "b'http://e96.ru/search/page.googleTBR%26ad%3D0%26rnd%3D158197%26anbietersburg'",
+     "b'http://bdsmpeople.ru/obrazom_position/?page'",
+     "0",
+     "13593",
+     "158",
+     "13606",
+     "216",
+     "1638",
+     "1658",
+     "22",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "22",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "4005373",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1052",
+     "775",
+     "135",
+     "1372760476",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'windows'",
+     "1601",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "47015096",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'6'",
+     "1372766330",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "1412515749",
+     "63522",
+     "-1",
+     "13",
+     "b'S0'",
+     "b'h1'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "5972490271588207794",
+     "1369713899219085694",
+     "0"
+    ],
+    [
+     "8008688361303225116",
+     "1",
+     "b'\\xd0\\xa1\\xd0\\xba\\xd0\\xb0\\xd1\\x87\\xd0\\xb0\\xd1\\x82\\xd1\\x8c \\xd0\\xbe\\xd0\\xbd\\xd0\\xbb\\xd0\\xb0\\xd0\\xb9\\xd0\\xbd \\xd0\\xb8\\xd0\\xb3\\xd1\\x80\\xd0\\xb0\\xd0\\xb9! - \\xd0\\xa2\\xd1\\x83\\xd1\\x80\\xd0\\xb8\\xd0\\xb7\\xd0\\xbc\\xd0\\xb0 - \\xd0\\x9a\\xd1\\x80\\xd1\\x8b\\xd0\\xbc\\xd1\\x81\\xd0\\xba\\xd0\\xb8\\xd0\\xb9 \\xd1\\x82\\xd1\\x80\\xd0\\xb5\\xd0\\xbd\\xd1\\x87\\xd0\\xba\\xd0\\xbe\\xd1\\x82\\xd1\\x8b \\xd0\\xb2 \\xd0\\xb8\\xd0\\xbd\\xd1\\x82\\xd0\\xb5\\xd1\\x80\\xd0\\xbd\\xd0\\xb5\\xd1\\x82 \\xd0\\xbc\\xd0\\xb0\\xd0\\xb3\\xd0\\xb0\\xd0\\xb7\\xd0\\xb8\\xd0\\xbd Wildberries.ru (\\xd0\\xa0\\xd0\\xb0\\xd0\\xb1\\xd0\\xbe\\xd1\\x82\\xd0\\xb0 - IRR.ru - \\xd0\\xbc\\xd0\\xbe\\xd0\\xb4\\xd0\\xbd\\xd1\\x8b\\xd1\\x85 \\xd1\\x81\\xd0\\xbb\\xd0\\xbe\\xd0\\xb2\\xd0\\xb0\\xd1\\x80\\xd0\\xb8\\xd1\\x83\\xd0\\xbc\\xd0\\xbd\\xd1\\x8b\\xd1\\x85'",
+     "1",
+     "1372709521",
+     "15888",
+     "63217",
+     "1975817788",
+     "229",
+     "804133623150786791",
+     "1",
+     "44",
+     "7",
+     "b'http://bjdswaps.google-photo'",
+     "b'http://loveche.html?ctid'",
+     "0",
+     "12409",
+     "20",
+     "10093",
+     "22",
+     "1749",
+     "867",
+     "23",
+     "15",
+     "3",
+     "b'700.224'",
+     "0",
+     "0",
+     "15",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "3056753",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1608",
+     "662",
+     "135",
+     "1372745995",
+     "4",
+     "1",
+     "16561",
+     "0",
+     "b'windows'",
+     "1",
+     "0",
+     "0",
+     "0",
+     "5347008031302181363",
+     "b''",
+     "766531830",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'5'",
+     "1372766425",
+     "31",
+     "1",
+     "3",
+     "11237",
+     "31",
+     "1870660671",
+     "-1",
+     "-1",
+     "-1",
+     "b'E3'",
+     "b'_i'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "-2736470446903004689",
+     "7116991598850737408",
+     "0"
+    ],
+    [
+     "7436461208655480623",
+     "1",
+     "b'\\xd0\\x9a\\xd0\\xbe\\xd0\\xbc\\xd0\\xbf\\xd0\\xb0\\xd0\\xbd\\xd0\\xb8\\xd0\\xb8 \\xd0\\x92\\xd0\\xb8\\xd0\\xbd\\xd0\\xbe \\xd0\\xb2 \\xd1\\x85\\xd0\\xbe\\xd1\\x80\\xd0\\xbe\\xd1\\x88\\xd0\\xb8\\xd0\\xb5'",
+     "1",
+     "1372710744",
+     "15888",
+     "35534",
+     "1741555497",
+     "39",
+     "7082047337377160280",
+     "0",
+     "44",
+     "5",
+     "b'http://rsdn.ru/catalog/cifrovye-advertisement=little&category=22&input_bdsmpeople.ru/index,google.ru/news/39826'",
+     "b'http://kalina?block/?inst_the_book.php?cPath=40_57470493958402/'",
+     "0",
+     "10634",
+     "20",
+     "0",
+     "0",
+     "1996",
+     "1781",
+     "37",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "22",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "808950",
+     "5",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1261",
+     "1017",
+     "433",
+     "1372791792",
+     "4",
+     "1",
+     "16561",
+     "0",
+     "b'windows-1251;charset'",
+     "1601",
+     "1",
+     "0",
+     "0",
+     "6804199628189316872",
+     "b''",
+     "626511463",
+     "0",
+     "0",
+     "0",
+     "1",
+     "0",
+     "b'5'",
+     "1372732542",
+     "31",
+     "2",
+     "3",
+     "694",
+     "57",
+     "1448806868",
+     "-1",
+     "-1",
+     "-1",
+     "b'E3'",
+     "b'_i'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "3",
+     "345",
+     "147",
+     "239",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "8931346360692564721",
+     "1971436513446935197",
+     "0"
+    ],
+    [
+     "5564518777317455184",
+     "0",
+     "b'\\xc2\\xabset\\xc2\\xbb \\xd0\\xb2 \\xd0\\xbf\\xd1\\x80\\xd0\\xbe\\xd0\\xb1\\xd0\\xb5\\xd0\\xb3 \\xd0\\xb0\\xd0\\xbf\\xd0\\xbf\\xd0\\xb0\\xd1\\x85 \\xd0\\xb8 \\xd0\\xbe\\xd0\\xb1\\xd1\\x81\\xd0\\xbb\\xd1\\x83\\xd0\\xb6\\xd0\\xb8\\xd0\\xb2\\xd0\\xb0\\xd1\\x82\\xd0\\xb8\\xd0\\xb7\\xd0\\xb8\\xd1\\x80\\xd0\\xbe\\xd0\\xb2'",
+     "1",
+     "1372711469",
+     "15888",
+     "5822",
+     "1920787234",
+     "32",
+     "3712346975274085073",
+     "1",
+     "2",
+     "3",
+     "b'http://auto_gruppy/christikha/hotel=-1&trafkey=605&from=&power_name=\\xd0\\x9f\\xd0\\xbb\\xd0\\xb0\\xd1\\x82\\xd1\\x8c\\xd1\\x8f&produkty%2Furl.google.ru/index'",
+     "b'http://rmnt.ru/cars/passenger/hellardous/42/~37/?suggest&id=3869551753&custom=0&undefined/undefined/under=28036,5;362;108;16762643539'",
+     "0",
+     "8563",
+     "21482",
+     "9822",
+     "18528",
+     "1638",
+     "1658",
+     "23",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "16",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "207348",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1509",
+     "733",
+     "135",
+     "1372750392",
+     "4",
+     "1",
+     "15738",
+     "0",
+     "b'windows-1251;charset'",
+     "1",
+     "0",
+     "0",
+     "0",
+     "8007561756096276896",
+     "b''",
+     "1034507462",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'5'",
+     "1372759436",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "2016848722",
+     "-1",
+     "-1",
+     "-1",
+     "b'S0'",
+     "b'h1'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "7820066807630413322",
+     "-3258566084785303139",
+     "0"
+    ],
+    [
+     "7381524648140977766",
+     "1",
+     "b\"Ploshchad' stolitsi zwy 110911923, \\xd0\\x93 \\xd0\\xbe\\xd1\\x84\\xd0\\xb8\\xd1\\x86\\xd0\\xb8\\xd0\\xb0\\xd0\\xbb\\xd1\\x8c\\xd0\\xbd\\xd0\\xb0\\xd1\\x8f \\xd0\\x9f\\xd1\\x80\\xd0\\xb5\\xd1\\x81\\xd1\\x81\\xd1\\x8b \\xd0\\xb8 \\xd0\\x9e\\xd0\\xb3\\xd0\\xbe\\xd0\\xbd\\xd0\\xb5\\xd0\\xba\"",
+     "1",
+     "1372712506",
+     "15888",
+     "63217",
+     "1638850281",
+     "59",
+     "1564939829982760596",
+     "1",
+     "44",
+     "5",
+     "b'http://bjdleaksbrand=bpc bonprix%2F12.02&he=1024&location=pm;f=inbox;pmsg_1733/page.google'",
+     "b'http://loveplanet.ru/url?sa=t&rct'",
+     "0",
+     "12409",
+     "20",
+     "10093",
+     "22",
+     "1996",
+     "1666",
+     "37",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "22",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "2059788",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "1261",
+     "1206",
+     "433",
+     "1372759478",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'windows'",
+     "1",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "827020970",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'5'",
+     "1372791236",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "2001459352",
+     "-1",
+     "-1",
+     "-1",
+     "b'S0'",
+     "b'\\xef\\xbf\\xbd\\x0c'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "1384301141639030267",
+     "9047048983006699504",
+     "0"
+    ],
+    [
+     "8614832219462424183",
+     "1",
+     "b'\\xd0\\x9c\\xd0\\xbe\\xd0\\xb4\\xd0\\xb5\\xd0\\xbb\\xd1\\x8c \\xd0\\xb4\\xd0\\xbb\\xd1\\x8f \\xd1\\x81\\xd1\\x83\\xd0\\xbc\\xd0\\xba\\xd0\\xb8 - \\xd1\\x80\\xd0\\xb5\\xd0\\xb3\\xd0\\xb5\\xd1\\x88 (\\xd0\\xa0\\xd0\\xbe\\xd1\\x81\\xd1\\x81\\xd0\\xb8\\xd1\\x8f)'",
+     "1",
+     "1372713563",
+     "15888",
+     "3035",
+     "2022088895",
+     "38",
+     "2590751384199385434",
+     "1",
+     "2",
+     "88",
+     "b'http://smeshariki.ru/googleTBR%26ar_ntype=citykurortmag'",
+     "b'http://holodilnik.ru/GameMain.aspx?color=0&choos&source=web&cd'",
+     "0",
+     "10271",
+     "158",
+     "13384",
+     "216",
+     "1917",
+     "879",
+     "37",
+     "15",
+     "7",
+     "b'700'",
+     "0",
+     "0",
+     "1",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "3991944",
+     "-1",
+     "0",
+     "b''",
+     "0",
+     "0",
+     "746",
+     "464",
+     "322",
+     "1372754670",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'windows-1251;charset'",
+     "1",
+     "0",
+     "0",
+     "0",
+     "7607749204513951316",
+     "b''",
+     "427646581",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'5'",
+     "1372720757",
+     "50",
+     "2",
+     "3",
+     "0",
+     "30",
+     "1146019198",
+     "-1",
+     "-1",
+     "-1",
+     "b'S0'",
+     "b'\\xef\\xbf\\xbd\\x0c'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "1157471009075867478",
+     "1000799766482180932",
+     "0"
+    ],
+    [
+     "7168314068394418899",
+     "1",
+     "b'\\xd0\\xbf\\xd0\\xbe \\xd0\\xbf\\xd0\\xbe\\xd0\\xbb\\xd0\\xb8\\xd1\\x86\\xd0\\xb8\\xd1\\x8f +\\xd0\\xbe\\xd0\\xbf\\xd1\\x8b\\xd1\\x82\\xd0\\xbe\\xd0\\xb2\\xd0\\xbe\\xd0\\xb9 \\xd1\\x80\\xd0\\xb5\\xd1\\x86\\xd0\\xb5\\xd0\\xbd\\xd0\\xb7\\xd0\\xb8\\xd0\\xb8,'",
+     "1",
+     "1372713760",
+     "15888",
+     "35534",
+     "-1420082055",
+     "11579",
+     "4822773326251181180",
+     "0",
+     "2",
+     "7",
+     "b'http:%2F%2Fsapozhki-advertime-2/#page.google/dodge'",
+     "b'http://saint-peters-total=\\xd0\\xbc\\xd0\\xb5\\xd0\\xbd\\xd1\\x8c\\xd1\\x88\\xd0\\xb5 100007&text=b.akhua_deckaya-look/time-2/#page=3&oprnd=6817922197946&ei=JtHTUYWRCqXA&bvm=bv.49784469,d.ZWU&cad=rjt&fu=0&type_id=172&msid=1&marka=88&text=krasnaia-moda'",
+     "0",
+     "14550",
+     "952",
+     "8565",
+     "375",
+     "1304",
+     "978",
+     "37",
+     "15",
+     "4",
+     "b'700.224'",
+     "2",
+     "7",
+     "13",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "2675432",
+     "3",
+     "3",
+     "b'dave kino 2013 \\xd0\\xb3\\xd0\\xbe\\xd0\\xb4\\xd0\\xb0 \\xd0\\xb2 \\xd1\\x80\\xd0\\xbe\\xd1\\x81\\xd1\\x82\\xd0\\xbe\\xd0\\xbf\\xd1\\x80\\xd0\\xb8\\xd0\\xbc\\xd0\\xb5\\xd1\\x87\\xd0\\xb0'",
+     "0",
+     "0",
+     "1972",
+     "778",
+     "135",
+     "1372712707",
+     "4",
+     "1",
+     "16561",
+     "0",
+     "b'windows'",
+     "1601",
+     "0",
+     "0",
+     "0",
+     "6494516778257365839",
+     "b''",
+     "393719418",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b'5'",
+     "1372782490",
+     "31",
+     "2",
+     "2",
+     "14851",
+     "1",
+     "-1016483843",
+     "61823",
+     "-1",
+     "1",
+     "b'S0'",
+     "b'\\xef\\xbf\\xbd\\x0c'",
+     "b''",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "-4470345086215748575",
+     "-5322637665780806659",
+     "0"
+    ],
+    [
+     "8235569889353442646",
+     "1",
+     "b''",
+     "1",
+     "1372713773",
+     "15888",
+     "35534",
+     "-1420082055",
+     "11579",
+     "4822773326251181180",
+     "0",
+     "2",
+     "7",
+     "b'http:%2F%2Fsapozhki-advertime-2/#page.google/dodge'",
+     "b''",
+     "0",
+     "0",
+     "0",
+     "8565",
+     "375",
+     "1304",
+     "978",
+     "37",
+     "15",
+     "4",
+     "b'700.224'",
+     "2",
+     "7",
+     "13",
+     "b'D\\xef\\xbf\\xbd'",
+     "1",
+     "1",
+     "0",
+     "0",
+     "b''",
+     "b''",
+     "2675432",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "1",
+     "1972",
+     "778",
+     "135",
+     "1372712722",
+     "4",
+     "1",
+     "16561",
+     "0",
+     "b'windows'",
+     "1601",
+     "0",
+     "0",
+     "1",
+     "6494516778257365839",
+     "b''",
+     "393719418",
+     "0",
+     "0",
+     "0",
+     "1",
+     "0",
+     "b'5'",
+     "1372782504",
+     "31",
+     "2",
+     "2",
+     "14851",
+     "1",
+     "-1016483843",
+     "61823",
+     "-1",
+     "2",
+     "b'S0'",
+     "b'\\xef\\xbf\\xbd\\x0c'",
+     "b''",
+     "b''",
+     "0",
+     "318",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "0",
+     "b''",
+     "0",
+     "b''",
+     "b'NH\\x1c'",
+     "0",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "b''",
+     "0",
+     "-296158784638538920",
+     "-5322637665780806659",
+     "0"
+    ]
+   ],
+   "gb": {},
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 239.376882,
+     "cpu_ms": 1034.981312
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.084758,
+     "cpu_ms": 0.045752
+    }
+   },
+   "time_planning_ms": 3.882857,
+   "time_executing_ms": 254.218676,
+   "ru_maxrss_mb": 1.2240486145019531,
+   "role": "control",
+   "sql": "/* 23 */ SELECT * FROM {DATASET} WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10;"
+  },
+  "rugo:Q25": {
+   "cold_ms": 827.0758930593729,
+   "hot_ms": [
+    329.92286421358585,
+    327.086104080081,
+    330.6687166914344,
+    332.27634709328413,
+    324.8465061187744
+   ],
+   "rows": 10,
+   "digest": "74fe26d1cf9c9dd5",
+   "names": [
+    "SearchPhrase"
+   ],
+   "result": [
+    [
+     "b' \\xd0\\xb1\\xd0\\xb5\\xd1\\x80\\xd0\\xb5\\xd0\\xb6'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xb0 \\xd1\\x80\\xd1\\x83\\xd1\\x81\\xd1\\x81\\xd0\\xba\\xd0\\xb8\\xd0\\xb9 \\xd1\\x81\\xd1\\x82\\xd0\\xb8\\xd0\\xbb \\xd0\\xb2\\xd0\\xb8\\xd0\\xb4\\xd0\\xb5\\xd0\\xbe \\xd0\\xba\\xd0\\xb0\\xd0\\xba\\xd0\\xbe\\xd0\\xb9'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xb0\\xd0\\xb2\\xd0\\xbe\\xd0\\xb4 \\xd1\\x82\\xd0\\xb0\\xd0\\xbd\\xd0\\xb4\\xd0\\xb0\\xd0\\xbb\\xd0\\xb8\\xd1\\x89\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5 \\xd0\\xbf\\xd1\\x80\\xd0\\xbe\\xd0\\xb4\\xd0\\xb0'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xb0\\xd0\\xbe\\xd1\\x87\\xd0\\xbd\\xd0\\xbe\\xd0\\xb5 \\xd0\\xbf\\xd0\\xbe \\xd0\\xb7\\xd0\\xb5\\xd0\\xbc\\xd0\\xbb\\xd0\\xb8 \\xd0\\xb2 \\xd0\\xbe\\xd0\\xb1\\xd1\\x80\\xd0\\xb5\\xd0\\xb7\\xd0\\xbd\\xd0\\xb8 \\xd0\\xb8 \\xd0\\xbc\\xd0\\xb5\\xd1\\x82\\xd1\\x80\\xd0\\xbe'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xb0\\xd0\\xbe\\xd1\\x87\\xd0\\xbd\\xd0\\xbe\\xd0\\xb5 \\xd1\\x81\\xd0\\xb0\\xd0\\xb4 \\xd1\\x86\\xd0\\xb5\\xd0\\xbd\\xd1\\x8b \\xd0\\xbd\\xd0\\xb0\\xd1\\x80\\xd0\\xbe\\xd1\\x89\\xd0\\xb5\\xd0\\xbd\\xd0\\xb8\\xd1\\x8f \\xd0\\xbc\\xd1\\x83\\xd0\\xb7\\xd1\\x8b\\xd0\\xba\\xd0\\xb0 \\xd0\\xb2\\xd0\\xb8\\xd0\\xb7\\xd1\\x83'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xb2\\xd0\\xb5'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xb5\\xd0\\xbc\\xd0\\xbd\\xd1\\x8b\\xd0\\xb5 \\xd0\\xbe\\xd0\\xb3\\xd1\\x83\\xd1\\x80\\xd1\\x86\\xd1\\x8b \\xd1\\x80\\xd0\\xb0\\xd0\\xb1'"
+    ],
+    [
+     "b' \\xd0\\xb7\\xd0\\xbe\\xd0\\xbb\\xd0\\xbe\\xd1\\x82\\xd0\\xbe\\xd0\\xb9 \\xd1\\x81\\xd0\\xb0\\xd0\\xb9\\xd1\\x82 samsung'"
+    ],
+    [
+     "b' \\xd0\\xbf\\xd1\\x80\\xd0\\xb0\\xd0\\xb2'"
+    ],
+    [
+     "b' \\xd1\\x81\\xd0\\xb2\\xd0\\xb5\\xd1\\x82\\xd1\\x8b \\xd0\\xb6\\xd0\\xb5\\xd0\\xbd\\xd1\\x81\\xd0\\xba\\xd0\\xb5 2 \\xd1\\x81\\xd0\\xb5\\xd0\\xb7\\xd0\\xbe\\xd0\\xbd'"
+    ]
+   ],
+   "gb": {},
+   "pipelines": {
+    "ParquetReadNode": {
+     "wall_ms": 315.180798,
+     "cpu_ms": 1808.267937
+    },
+    "HeapSortNode": {
+     "wall_ms": 0.072125,
+     "cpu_ms": 0.053912
+    }
+   },
+   "time_planning_ms": 3.129087,
+   "time_executing_ms": 321.69667000000004,
+   "ru_maxrss_mb": 1.2421798706054688,
+   "role": "control",
+   "sql": "/* 25 */ SELECT SearchPhrase FROM {DATASET} WHERE SearchPhrase <> '' ORDER BY SearchPhrase LIMIT 10;"
+  }
+ },
+ "probes": {
+  "before": {
+   "py_sort_5m_ms": 3094.2082507535815,
+   "blake2b_256mb_ms": 383.2913674414158,
+   "page_touch_512mb_ms": 64.23086300492287
+  },
+  "after": {
+   "py_sort_5m_ms": 3101.138354279101,
+   "blake2b_256mb_ms": 383.1014661118388,
+   "page_touch_512mb_ms": 65.89849572628736
+  }
+ }
+}

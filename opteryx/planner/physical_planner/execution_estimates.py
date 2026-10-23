@@ -38,10 +38,14 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import LogicalCategory
 
-# The highest group count any consumer compares against (the native GroupBySink's
-# gate). The NDV product below stops multiplying once past it: a larger number is
-# only ever compared as "above the gate".
-NATIVE_GB_GATE = 64
+# Ceiling on the NDV product so a many-key GROUP BY cannot leave int64 (the sink
+# takes the estimate as int64_t; _estimate_to_int64 refuses anything larger). The
+# product is a REAL estimate now (GROUP BY redesign R4, docs/GROUPBY_REDESIGN_2026_10_12.md):
+# it used to stop multiplying at 64, the parvi gate, which left the sink with a
+# truncated lower bound it could use for exactly one decision.
+_NDV_PRODUCT_CAP = 1 << 62
+# A scan this small IS its own group-count bound (the parvi gate's reach).
+_ROWS_ARE_THE_ESTIMATE = 64
 
 # Join types whose probe gathers a build-side payload per output row. SEMI/ANTI
 # emit probe rows collapsed to existence and drop the build payload (compiler.py's
@@ -78,10 +82,11 @@ def group_count_estimate(plan: LogicalPlan, nid: str, node: PlanStep) -> Optiona
     None when neither signal resolves.
 
     Two signals: the total record count of every upstream scan (output groups
-    cannot exceed input rows — a provable bound, used only when it is small), and
-    the product of the group columns' manifest NDVs. Values above NATIVE_GB_GATE
-    may be truncated lower bounds (the product stops early) — only comparisons at
-    or below the gate are valid, which is all any sink does.
+    cannot exceed input rows — a provable bound), and the product of the group
+    columns' manifest NDVs. The estimate is the smaller of the two when both
+    resolve. The product OVERESTIMATES correlated keys (SearchEngineID x ClientIP
+    is far more than the pairs that occur), so a consumer sizing anything from it
+    must treat it as an upper bound; the sink's own runtime sketch is the truth.
     """
     scans = [
         plan[source]
@@ -91,11 +96,16 @@ def group_count_estimate(plan: LogicalPlan, nid: str, node: PlanStep) -> Optiona
     if not scans:
         return None
 
+    # The row count alone is an estimate only when it is tiny (a 40-row table has at
+    # most 40 groups); a large row count says nothing about the group count, and a
+    # consumer could not tell "100M rows, product unknown" from "100M distinct keys".
     estimate = None
     total_rows = _total_record_count(scans)
-    if total_rows is not None and total_rows <= NATIVE_GB_GATE:
+    if total_rows is not None and total_rows <= _ROWS_ARE_THE_ESTIMATE:
         estimate = total_rows
     ndv_product = _ndv_product(node, scans)
+    if ndv_product is not None and total_rows is not None:
+        ndv_product = min(ndv_product, total_rows)
     if ndv_product is not None:
         estimate = ndv_product if estimate is None else min(estimate, ndv_product)
     return estimate
@@ -177,8 +187,8 @@ def _ndv_product(node: PlanStep, scans: list) -> Optional[int]:
         if ndv is None:
             return None
         product *= max(1, ndv)
-        if product > NATIVE_GB_GATE:
-            return product
+        if product > _NDV_PRODUCT_CAP:
+            return _NDV_PRODUCT_CAP
     return product
 
 

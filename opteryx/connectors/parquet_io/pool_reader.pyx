@@ -1414,31 +1414,9 @@ cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path
     if bloom_path is None or not keep or not predicates:
         return keep
 
-    cdef const RowGroupStats* rgp
-    cdef const ColumnStats* csp
-    cdef string col_str
-    cdef list probes = []          # (keep position, offset, length, needles)
-    cdef list unsized = []         # (keep position, offset, needles)
+    cdef list probes, unsized
     cdef Py_ssize_t pos
-    for pred in predicates:
-        col_name, op, value = pred
-        if op != "Eq" and op != "InList":
-            continue
-        col_str = col_name.encode('utf-8')
-        for pos in range(len(keep)):
-            rgp = &fs.row_groups[<size_t>keep[pos]]
-            for ci in range(rgp.columns.size()):
-                csp = &rgp.columns[ci]
-                if csp.name != col_str:
-                    continue
-                if csp.bloom_offset >= 0:
-                    needles = _bloom_needles(csp.physical_type, op, value)
-                    if needles is not None:
-                        if csp.bloom_length > 0:
-                            probes.append((pos, csp.bloom_offset, csp.bloom_length, needles))
-                        else:
-                            unsized.append((pos, csp.bloom_offset, needles))
-                break
+    probes, unsized = _bloom_probe_list(fs, keep, predicates)
     if not probes and not unsized:
         return keep
 
@@ -1477,6 +1455,82 @@ cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path
             if absent:
                 dropped[pos] = 1
     return [keep[pos] for pos in range(len(keep)) if not dropped[pos]]
+
+
+cdef tuple _bloom_probe_list(const FileStats& fs, list keep, list predicates):
+    """The bloom tests the Eq/InList `predicates` ask of `fs`'s `keep` row groups:
+    (sized, unsized) — sized = [(keep position, offset, length, needles)], unsized =
+    [(keep position, offset, needles)] for a bloom whose length the footer omits.
+    A column without a bloom, or a literal that cannot be encoded byte-identically
+    (`_bloom_needles`), contributes no test."""
+    cdef const RowGroupStats* rgp
+    cdef const ColumnStats* csp
+    cdef string col_str
+    cdef size_t ci
+    cdef Py_ssize_t pos
+    cdef list probes = []
+    cdef list unsized = []
+    for pred in predicates:
+        col_name, op, value = pred
+        if op != "Eq" and op != "InList":
+            continue
+        col_str = col_name.encode('utf-8')
+        for pos in range(len(keep)):
+            rgp = &fs.row_groups[<size_t>keep[pos]]
+            for ci in range(rgp.columns.size()):
+                csp = &rgp.columns[ci]
+                if csp.name != col_str:
+                    continue
+                if csp.bloom_offset >= 0:
+                    needles = _bloom_needles(csp.physical_type, op, value)
+                    if needles is not None:
+                        if csp.bloom_length > 0:
+                            probes.append((pos, csp.bloom_offset, csp.bloom_length, needles))
+                        else:
+                            unsized.append((pos, csp.bloom_offset, needles))
+                break
+    return probes, unsized
+
+
+# Remote bloom membership (docs/PARQUET_WRITE_FOR_READ_SPEED.md §3.3b): a REMOTE
+# file's bloom bytes are read by the native scan in its first fetch round, so the
+# only cost they add is their own bytes, competing with the data for bandwidth —
+# never a serial round trip. This caps that cost: a file's blooms are read only
+# when their bytes are at most this fraction of the projected chunk bytes of the
+# row groups they guard, i.e. a bloom that rejects nothing costs at most a
+# quarter more bytes. MEASURED on ClickBench hits (64k row groups, blocks of 4):
+# the Q20 UserID point lookup — 834 row groups after min/max, 6 after the bloom
+# — sits at 0.150 per file at the median and 0.189 at the maximum; the CounterID
+# / flag predicates of Q37-Q43, which reject nothing, at 0.000-0.154.
+cdef double _REMOTE_BLOOM_MAX_COST_RATIO = 0.25
+
+
+cdef list _remote_bloom_probes(const FileStats& fs, list keep, list predicates, set projected):
+    """[(row group, offset, length, needles)] the native scan should test for the
+    REMOTE file `fs`'s `keep` row groups, or [] when the file's bloom bytes exceed
+    _REMOTE_BLOOM_MAX_COST_RATIO x the projected chunk bytes of the row groups they
+    test. A bloom the footer does not size cannot be planned into a range read
+    and is not tested."""
+    if not keep or not predicates:
+        return []
+    cdef list probes, unsized
+    probes, unsized = _bloom_probe_list(fs, keep, predicates)
+    if not probes:
+        return []
+    cdef int64_t bloom_bytes = 0
+    cdef int64_t guarded = 0
+    cdef const RowGroupStats* rgp
+    cdef size_t ci
+    for off, length in {(p[1], p[2]) for p in probes}:
+        bloom_bytes += length
+    for pos in {p[0] for p in probes}:
+        rgp = &fs.row_groups[<size_t>keep[pos]]
+        for ci in range(rgp.columns.size()):
+            if <bytes>rgp.columns[ci].name in projected and rgp.columns[ci].total_compressed_size > 0:
+                guarded += rgp.columns[ci].total_compressed_size
+    if bloom_bytes > _REMOTE_BLOOM_MAX_COST_RATIO * guarded:
+        return []
+    return [(keep[p[0]], p[1], p[2], p[3]) for p in probes]
 
 
 cdef list _coalesce_bloom_ranges(list ranges, double waste_ratio, int64_t max_bytes):
@@ -3098,6 +3152,8 @@ cdef class NativeScanPlan:
         self.pruned_items = 0
         # -1 = no runtime bound wired (see the pxd). Only the Source overwrites it.
         self.row_groups_pruned_runtime = -1
+        # -1 = no bloom probe planned (see the pxd). Only the Source overwrites it.
+        self.row_groups_pruned_bloom = -1
         self.cache_fill_bytes = 0
         self.scan_identity = None
         self._closed = False
@@ -3127,6 +3183,17 @@ cdef class NativeScanPlan:
         """C7: chunk-cache bytes this scan would add by filling every chunk it can
         fill (see the pxd). Admission compares it with the cache's headroom."""
         return self.cache_fill_bytes
+
+    @property
+    def bloom_pruned_row_groups(self):
+        """Row groups the run-time REMOTE bloom round excluded (units the scan walked
+        past unsubmitted because a landed bloom proved them empty), or None when no
+        probe was planned for this scan. None and 0 differ, as for the runtime
+        bound: 0 means the round ran and excluded nothing (or landed after every
+        unit had been submitted)."""
+        if self.row_groups_pruned_bloom < 0:
+            return None
+        return int(self.row_groups_pruned_bloom)
 
     @property
     def runtime_pruned_row_groups(self):
@@ -3508,6 +3575,14 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef double bloom_waste_ratio
     cdef int64_t bloom_max_bytes
     bloom_waste_ratio, bloom_max_bytes = _bloom_coalesce_policy(coalesce_tuning)
+    # Remote bloom membership: the chunk names whose bytes a remote file's blooms
+    # are weighed against (the projection plus the predicate columns, which the
+    # scan reads too), and the probe being filled.
+    cdef set bloom_projected = {c.encode('utf-8') for c in column_names}
+    for pred in (predicates or []):
+        bloom_projected.add(pred[0].encode('utf-8'))
+    cdef ParquetBloomProbe bprobe
+    cdef dict remote_probes
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
         path_bytes_cpp = fetch_url.encode('utf-8')
@@ -3536,6 +3611,16 @@ cpdef NativeScanPlan open_native_scan_plan(
         kept = _prune_row_groups(deref(fsp), predicates or [], bloom_path,
                                  bloom_waste_ratio, bloom_max_bytes)
         plan.pruned_items += <int>fsp.row_groups.size() - len(kept)
+        # A REMOTE file's blooms are not read here (that would be a serial round
+        # trip before the data plan): the tests are attached to its work items and
+        # the native scan issues them in its first fetch round.
+        remote_probes = None
+        if predicates and _is_remote_url(fetch_url):
+            for rg_b, b_off, b_len, b_needles in _remote_bloom_probes(
+                    deref(fsp), kept, predicates, bloom_projected):
+                if remote_probes is None:
+                    remote_probes = {}
+                remote_probes.setdefault(rg_b, []).append((b_off, b_len, b_needles))
         for rg_i in kept:
             if request is not None:
                 verdict = parquet_cover_row_group(deref(fsp), <size_t>rg_i, request.req.spec,
@@ -3546,6 +3631,15 @@ cpdef NativeScanPlan open_native_scan_plan(
                 if verdict == 0:
                     plan.coverage_disjoint_items += 1
                     continue
+            if remote_probes is not None and rg_i in remote_probes:
+                for b_off, b_len, b_needles in remote_probes[rg_i]:
+                    bprobe.item = <int32_t>plan.work_items.size()
+                    bprobe.offset = b_off
+                    bprobe.length = b_len
+                    bprobe.needles.clear()
+                    for b_needle in b_needles:
+                        bprobe.needles.push_back(<bytes>b_needle)
+                    plan.bloom_probes.push_back(bprobe)
             # Both work-item lists carry the FETCH url: the Python one is re-encoded
             # below to index footer_map, the C++ one is what the Source fetches.
             work_items.append((fetch_url, rg_i))

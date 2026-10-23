@@ -680,6 +680,19 @@ public:
         src->set_runtime_pruned_counter(pruned_slot);
     }
 
+    // Remote bloom membership (parquet_bloom_probe.hpp): pipeline `p`'s native
+    // parquet scan issues `probes`' bloom bytes in its first fetch round and skips
+    // the units they exclude; `pruned_slot` receives how many. Both borrowed from
+    // the scan's NativeScanPlan, which outlives the run.
+    void set_parquet_bloom_probes(size_t p, const std::vector<ParquetBloomProbe>* probes,
+                                  int64_t* pruned_slot) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "set_parquet_bloom_probes: pipeline source is not a native parquet scan");
+        src->set_bloom_probes(probes, pruned_slot);
+    }
+
     // ── Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md) ──────────────
     // A fresh boundary for a Top-N whose LEADING key sorts `ascending`. Unpublished,
     // it skips nothing (topn_boundary.hpp).

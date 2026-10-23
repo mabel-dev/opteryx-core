@@ -84,6 +84,31 @@ static inline bool Int96ToUnixNanos(const uint8_t *p, int64_t *out) {
 }
 
 // ---------------------------------------------------------------------------
+// LSB-first bit-packed reader
+// ---------------------------------------------------------------------------
+// The `i`-th `bit_width`-bit value of a buffer packed LSB-first — the order of
+// the RLE/bit-packing hybrid, DELTA_BINARY_PACKED miniblocks and ALP. Widths
+// 1..64. A value can straddle 9 bytes (bit offset 1..7 with width 58..64), so
+// the ninth byte is folded in explicitly. The caller guarantees
+// `nbytes >= ceil((i + 1) * bit_width / 8)`.
+static inline uint64_t ReadPackedLSB(const uint8_t *p, size_t nbytes, uint64_t i,
+                                     uint32_t bit_width) {
+  const uint64_t bit = i * bit_width;
+  const size_t byte = (size_t)(bit >> 3);
+  const uint32_t off = (uint32_t)(bit & 7);
+  uint64_t word;
+  if (byte + 8 <= nbytes) {
+    word = ReadLE64U(p + byte);
+  } else {
+    word = 0;
+    for (size_t b = 0; byte + b < nbytes; ++b) word |= (uint64_t)p[byte + b] << (8 * b);
+  }
+  uint64_t v = word >> off;
+  if (off + bit_width > 64) v |= (uint64_t)p[byte + 8] << (64 - off);
+  return bit_width == 64 ? v : v & ((1ULL << bit_width) - 1);
+}
+
+// ---------------------------------------------------------------------------
 // Varint readers
 // ---------------------------------------------------------------------------
 

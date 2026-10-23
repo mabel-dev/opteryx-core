@@ -491,6 +491,13 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                             node_stat["row_groups_pruned_topn"] = facts[
                                 "row_groups_pruned_topn"
                             ]
+                        # REMOTE BLOOM ROUND: same contract — present only when a
+                        # probe was planned for THIS scan, and then only the row
+                        # groups its landed blooms let the scan walk past.
+                        if "row_groups_pruned_bloom" in facts:
+                            node_stat["row_groups_pruned_bloom"] = facts[
+                                "row_groups_pruned_bloom"
+                            ]
                         # Statistics coverage (P3): row groups answered from their
                         # footer statistics and never read, and row groups its exact
                         # terms proved empty - present only when coverage was asked

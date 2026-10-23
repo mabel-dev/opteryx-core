@@ -121,14 +121,16 @@ def test_a_same_length_rename_changes_only_the_name(sample):
 
 def test_a_longer_rename_grows_only_the_footer(sample):
     """The pages are untouched, so a longer column name can only make the FOOTER
-    bigger - by the extra characters, which parquet stores twice (the schema
-    element and the chunk's path_in_schema)."""
+    bigger - by the extra characters, which the footer stores three times: the
+    schema element, the chunk's path_in_schema, and the column's file-level NDV
+    key (`rugo.ndv.<column>` in FileMetaData key_value_metadata)."""
     _, _, src = sample
 
     out = rp.patch_columns(src, rename={"i64": "renamed"})
 
     assert _page_region(out) == _page_region(src)
-    assert len(out) - len(src) == 2 * (len("renamed") - len("i64"))
+    assert len(out) - len(src) == 3 * (len("renamed") - len("i64"))
+    assert b"rugo.ndv.renamed" in out and b"rugo.ndv.i64" not in out
 
 
 def test_drop_last_column_leaves_a_prefix(sample):

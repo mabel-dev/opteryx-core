@@ -189,6 +189,16 @@ cdef tuple _read_footer_payload(
 
 
 
+# Remote bloom membership (src/cpp/engine/parquet_bloom_probe.hpp): one bloom
+# test planned for one work item; the native scan issues and applies them.
+cdef extern from "engine/parquet_bloom_probe.hpp" nogil:
+    cdef cppclass ParquetBloomProbe:
+        int32_t item
+        int64_t offset
+        int64_t length
+        vector[string] needles
+
+
 # NativeScanPlan — planning-time output for the fully-native (zero-Python)
 # scan-pull path (src/cpp/engine/native_parquet_scan_source.hpp). See the class
 # docstring in pool_reader.pyx for the scope boundary (first landing).
@@ -240,6 +250,13 @@ cdef class NativeScanPlan:
     # pruned nothing". Written once by the Source in make_global, on the driver
     # thread, and read by Python only after the driver has finished.
     cdef int64_t row_groups_pruned_runtime
+    # Remote bloom membership: the bloom tests planned for this scan's REMOTE
+    # work items (empty = none), and how many units they excluded at run time.
+    # -1 = no probe was planned, so "did not fire" stays distinguishable from
+    # "fired and excluded nothing". Written by the Source under its lock; read by
+    # Python only after the driver has finished.
+    cdef vector[ParquetBloomProbe] bloom_probes
+    cdef int64_t row_groups_pruned_bloom
     # C7 scan-resistant admission: the bytes this scan would add to the chunk
     # cache if it filled every chunk it can fill — the projected chunks' footer
     # total_uncompressed_size (the size of a cached chunk image), counting only

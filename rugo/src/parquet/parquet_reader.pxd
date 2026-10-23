@@ -83,6 +83,11 @@ cdef extern from "metadata.hpp":
         # 0 = the file says nothing ("don't know"). See metadata.cpp.
         int draken_logical_kind
 
+        # Statistics.is_min/max_value_exact: min/max ARE the values, not
+        # bounds. False when the writer did not say. See metadata.hpp.
+        bint min_exact
+        bint max_exact
+
     cdef cppclass RowGroupStats:
         long long num_rows
         long long total_byte_size

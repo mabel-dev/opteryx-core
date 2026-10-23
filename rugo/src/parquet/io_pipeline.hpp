@@ -2728,6 +2728,16 @@ class ParquetIOPipeline {
                         pp.extents[i][k].first, pp.extents[i][k].second, slot});
             }
         }
+        coalesce_into(plan);
+        blk.planned = true;
+    }
+
+    // The coalescer: `plan.extents` (any order) into `plan.groups`, merging while
+    // a group's span stays <= coalesce_max_bytes_ and either the gap is within
+    // coalesce_gap_bytes_ or its cumulative waste stays <= coalesce_waste_ratio_
+    // x its useful bytes. ONE copy of the rule, shared by every remote fetch the
+    // pipeline plans (plan_block, coalesce_ranges).
+    void coalesce_into(RemotePlan& plan) const {
         std::vector<size_t> order(plan.extents.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
         std::sort(order.begin(), order.end(),
@@ -2758,7 +2768,6 @@ class ParquetIOPipeline {
             if (!merged)
                 plan.groups.push_back(RemotePlan::Group{st, e, len, {x}});
         }
-        blk.planned = true;
     }
 
     // Compressed bytes of member `m`'s chunks that plan_block pinned from the C7
@@ -4298,6 +4307,129 @@ class ParquetIOPipeline {
     }
 
  public:
+    // [start, end) byte ranges of ONE file merged under this pipeline's coalescer
+    // (coalesce_into) — the runs a remote fetch of those ranges would issue.
+    std::vector<std::pair<int64_t, int64_t>> coalesce_ranges(
+            const std::vector<std::pair<int64_t, int64_t>>& ranges) const {
+        RemotePlan plan;
+        plan.extents.reserve(ranges.size());
+        for (size_t i = 0; i < ranges.size(); ++i)
+            plan.extents.push_back(RemotePlan::Extent{ranges[i].first, ranges[i].second, i});
+        coalesce_into(plan);
+        std::vector<std::pair<int64_t, int64_t>> out;
+        out.reserve(plan.groups.size());
+        for (const auto& g : plan.groups) out.emplace_back(g.start, g.end);
+        return out;
+    }
+
+    // One byte range of one REMOTE file.
+    struct RangeRequest { std::string path; int64_t start; int64_t end; };
+    // A batch of range reads in flight. `state` is 0 while in flight, then 1
+    // (every buffer in `bufs` holds exactly its request's bytes, in request
+    // order) or 2 (`error` says why). Published with release ordering once EVERY
+    // part has finished: a reader that sees 1 or 2 with acquire may read `bufs`
+    // / `error`, and no part writes either afterwards.
+    struct RangeFetch {
+        std::atomic<int> state{0};
+        std::vector<std::vector<uint8_t>> bufs;
+        std::string error;
+        std::atomic<int> parts_left{0};
+        std::atomic<bool> failed{false};
+        std::mutex error_mtx;
+    };
+
+    // Issue the requests and return at once; the caller polls `state`. One pool
+    // ticket PER FILE, each a concurrent get_many on its own worker's HTTP client
+    // — the data path's fan-out. One get_many for every file would funnel them
+    // all through one client's per-host connection cap (every file of a
+    // dataset is on one object-store host). Tickets run on the fetch-ahead pool
+    // when it exists (dedicated IO workers), else the decode pool, and are
+    // counted in tickets_inflight_ like every other ticket, so wait_shutdown
+    // cannot return while one still touches the pipeline. A local path is a
+    // caller error: local ranges are a pread.
+    std::shared_ptr<RangeFetch> fetch_ranges_async(std::vector<RangeRequest> reqs) {
+        auto fetch = std::make_shared<RangeFetch>();
+        for (const auto& r : reqs) {
+            const bool remote = r.path.compare(0, 5, "gs://") == 0 ||
+                                r.path.compare(0, 7, "http://") == 0 ||
+                                r.path.compare(0, 8, "https://") == 0;
+            if (!remote)
+                throw std::logic_error("fetch_ranges_async: not a remote path: " + r.path);
+            if (r.end <= r.start)
+                throw std::logic_error("fetch_ranges_async: empty range for " + r.path);
+        }
+        if (reqs.empty()) {
+            fetch->state.store(1, std::memory_order_release);
+            return fetch;
+        }
+#ifndef RUGO_ENABLE_HTTP
+        reject_remote_path(reqs.front().path);
+#else
+        // Parts: the request indices of each file, in first-appearance order.
+        std::vector<std::vector<size_t>> parts;
+        {
+            std::unordered_map<std::string, size_t> part_of;
+            for (size_t i = 0; i < reqs.size(); ++i) {
+                auto it = part_of.find(reqs[i].path);
+                if (it == part_of.end()) {
+                    it = part_of.emplace(reqs[i].path, parts.size()).first;
+                    parts.emplace_back();
+                }
+                parts[it->second].push_back(i);
+            }
+        }
+        fetch->bufs.resize(reqs.size());
+        fetch->parts_left.store(static_cast<int>(parts.size()), std::memory_order_relaxed);
+        auto shared_reqs = std::make_shared<const std::vector<RangeRequest>>(std::move(reqs));
+        for (auto& idx : parts) {
+            auto task = [this, fetch, shared_reqs, ix = std::move(idx)]() {
+                const std::vector<RangeRequest>& rq = *shared_reqs;
+                try {
+                    std::vector<std::pair<std::string, std::map<std::string, std::string>>> http;
+                    http.reserve(ix.size());
+                    for (size_t i : ix)
+                        http.emplace_back(fetch_url_for(rq[i].path), http_headers_(
+                            "bytes=" + std::to_string(rq[i].start) + "-" +
+                            std::to_string(rq[i].end - 1)));
+                    const auto t0 = std::chrono::steady_clock::now();
+                    std::vector<std::vector<uint8_t>> bufs =
+                        tl_http_client().get_many(http, http_tuning_set_ ? &http_tuning_ : nullptr);
+                    record_http_fetch(static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - t0).count()), ix.size());
+                    if (bufs.size() != ix.size())
+                        throw std::runtime_error("fetch_ranges_async: " + std::to_string(bufs.size()) +
+                                                 " responses for " + std::to_string(ix.size()) + " requests");
+                    for (size_t k = 0; k < ix.size(); ++k) {
+                        const RangeRequest& r = rq[ix[k]];
+                        if (static_cast<int64_t>(bufs[k].size()) != r.end - r.start)
+                            throw std::runtime_error(
+                                "Short range read of " + r.path + " at offset " +
+                                std::to_string(r.start) + ": expected " +
+                                std::to_string(r.end - r.start) + " bytes, got " +
+                                std::to_string(bufs[k].size()));
+                        bytes_fetched_.fetch_add(bufs[k].size(), std::memory_order_relaxed);
+                        fetch->bufs[ix[k]] = std::move(bufs[k]);
+                    }
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lk(fetch->error_mtx);
+                    if (!fetch->failed.exchange(true)) fetch->error = e.what();
+                }
+                if (fetch->parts_left.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    fetch->state.store(fetch->failed.load() ? 2 : 1, std::memory_order_release);
+            };
+            tickets_inflight_.fetch_add(1, std::memory_order_relaxed);
+            auto ticket = [this, task = std::move(task)]() mutable {
+                task();
+                tickets_inflight_.fetch_sub(1, std::memory_order_release);
+            };
+            if (fetch_pool_) fetch_pool_->detach_task(std::move(ticket), BS::pr::high);
+            else decode_pool_->detach_task(std::move(ticket), BS::pr::high);
+        }
+        return fetch;
+#endif
+    }
+
     // E37: per-projected-column key flag (parallel to the scan's column order).
     // 1 = build the hash seed for this string column (it is a downstream GROUP BY/
     // JOIN/DISTINCT key); 0 (default when unset) = cheap slot build, NO XXH3. Set

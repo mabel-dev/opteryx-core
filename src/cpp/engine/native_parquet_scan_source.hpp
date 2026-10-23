@@ -111,6 +111,7 @@
 #include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
 #include "parquet_stat_ordinal.hpp"  // stat_bytes_to_ordinal — footer stats -> draken ordinal
 #include "topn_boundary.hpp"         // TopNBoundary — Top-N runtime boundary
+#include "parquet_bloom_probe.hpp"   // ParquetBloomProbe — remote bloom membership
 #include "core/vector_alloc.h"    // draken_vector_from_dense / draken_vector_from_dict
 #include "core/vector_owner.h"    // VectorOwner, OwnedBuffer
 #include "memory_pool.hpp"        // opteryx::MemoryPool
@@ -783,16 +784,26 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     // size 0 with `pruned_applied` set. Read-only after make_global.
     std::vector<int> kept;
     bool pruned_applied = false;
-    // Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §4.1): one flag
-    // per submittable unit the boundary excluded, and how many. EMPTY when no
-    // boundary is armed. A skipped unit is walked past but never submitted, so it
+    // Units excluded AS THEY ARE WALKED — by the Top-N runtime boundary
+    // (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §4.1) or by a landed bloom round
+    // (bloom_drop below): one flag per submittable unit, and how many. EMPTY when
+    // neither is armed. A skipped unit is walked past but never submitted, so it
     // produces no result: the in-flight window and the FINISHED test count
-    // `next_to_submit - topn_skipped`, never `next_to_submit` alone — counting a
+    // `next_to_submit - units_skipped`, never `next_to_submit` alone — counting a
     // skipped unit as outstanding would wait forever for a result that never comes.
     // Entries are written under `mtx` by the worker that walks that unit, and read
     // back (outside the lock) only by that same worker when it submits its range.
-    std::vector<uint8_t> topn_skip;
-    int topn_skipped = 0;
+    std::vector<uint8_t> unit_skip;
+    int units_skipped = 0;
+    // Remote bloom membership (parquet_bloom_probe.hpp): the round issued at
+    // make_global; once it lands, `bloom_drop` flags (per submittable unit) every
+    // unit some bloom proved holds no match. A flag only becomes a skip when the
+    // walk reaches that unit, so a unit already submitted is read as before and
+    // the counters above stay exact. All under `mtx`.
+    std::unique_ptr<ParquetBloomRound> bloom;
+    std::vector<uint8_t> bloom_drop;
+    int64_t bloom_skipped = 0;
+    std::string bloom_error;
     // Fetch-block id of every work item (parallel to `work_items`), inferred per
     // file from the chunk offsets (rugo::ParquetIOPipeline::infer_fetch_blocks):
     // consecutive submittable units with the same path and block id are one
@@ -864,6 +875,37 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     }
 
     void set_runtime_pruned_counter(int64_t* slot) { row_groups_pruned_runtime_ = slot; }
+
+    // Remote bloom membership: the plan's probes (borrowed; the plan outlives the
+    // run) and the plan's slot for how many units they excluded. Plan-time only,
+    // on the compiler's thread, before run() is entered.
+    const std::vector<ParquetBloomProbe>* bloom_probes_ = nullptr;
+    int64_t* bloom_pruned_slot_ = nullptr;
+    void set_bloom_probes(const std::vector<ParquetBloomProbe>* probes, int64_t* slot) {
+        bloom_probes_ = probes;
+        bloom_pruned_slot_ = slot;
+    }
+
+    // Under g.mtx: if the bloom round has landed and not been applied, flag every
+    // unit it excludes. A failed fetch is the scan failing (the plan-time local
+    // read raises the same way): the scan was going to read these files.
+    void poll_bloom_round(NativeParquetScanGlobal& g) const {
+        if (!g.bloom || g.bloom->applied) return;
+        const int state = g.bloom->fetch->state.load(std::memory_order_acquire);
+        if (state == 0) return;
+        g.bloom->applied = true;
+        if (state == 2) {
+            g.bloom_error = "remote bloom filter read failed: " + g.bloom->fetch->error;
+            return;
+        }
+        const std::vector<uint8_t> excluded =
+            bloom_excluded_items(*g.bloom, *bloom_probes_, work_items->size());
+        const int n = g.item_count(work_items->size());
+        for (int u = 0; u < n; ++u)
+            if (excluded[static_cast<size_t>(g.item_index(u))]) g.bloom_drop[static_cast<size_t>(u)] = 1u;
+        g.bloom->fetch->bufs.clear();
+        g.bloom->fetch->bufs.shrink_to_fit();
+    }
 
     // Row admission (see RowAdmission). Borrowed; outlives the run. nullptr = admit all.
     RowAdmission* admission_ = nullptr;
@@ -1240,8 +1282,17 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         // The Top-N boundary is NOT applied here: it does not exist yet — the sink
         // this scan feeds produces it while the scan runs. It is tested per unit in
         // get_morsel's submit loop, over whatever the runtime bound kept.
-        if (topn_boundary_ != nullptr)
-            g->topn_skip.assign(static_cast<size_t>(g->item_count(work_items->size())), 0u);
+        const bool bloom_armed = bloom_probes_ != nullptr && !bloom_probes_->empty() &&
+                                 pipeline != nullptr;
+        if (topn_boundary_ != nullptr || bloom_armed)
+            g->unit_skip.assign(static_cast<size_t>(g->item_count(work_items->size())), 0u);
+        // Remote bloom membership: issued NOW, on a pipeline worker, so its round
+        // trip runs alongside the first fetch blocks rather than ahead of them.
+        if (bloom_armed) {
+            g->bloom_drop.assign(static_cast<size_t>(g->item_count(work_items->size())), 0u);
+            g->bloom = start_bloom_round(*pipeline, *bloom_probes_, *work_items);
+            if (bloom_pruned_slot_ != nullptr) *bloom_pruned_slot_ = 0;
+        }
         return g;
     }
 
@@ -1370,14 +1421,14 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         std::vector<int> rg_idxs;
         rg_idxs.reserve(static_cast<size_t>(last - first));
         for (int u = first; u < last; ++u) {
-            // Excluded by the Top-N boundary when this unit was walked: never
+            // Excluded (Top-N boundary or bloom) when this unit was walked: never
             // submitted, so it produces no result (see NativeParquetScanGlobal::
-            // topn_skip for why the counters already exclude it).
-            if (!g.topn_skip.empty() && g.topn_skip[static_cast<size_t>(u)] != 0u) continue;
+            // unit_skip for why the counters already exclude it).
+            if (!g.unit_skip.empty() && g.unit_skip[static_cast<size_t>(u)] != 0u) continue;
             const size_t idx = static_cast<size_t>(g.item_index(u));
             rg_idxs.push_back((*work_items)[idx].second);
         }
-        if (rg_idxs.empty()) return;   // every member skipped by the Top-N boundary
+        if (rg_idxs.empty()) return;   // every member skipped when walked
         // Row admission: one mask per member, parallel to rg_idxs (empty = every row).
         std::vector<std::vector<uint8_t>> masks;
         if (admission_ != nullptr) {
@@ -1561,20 +1612,41 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 const bool topn_armed = topn_boundary_ != nullptr;
                 const int64_t topn_b = topn_armed ? topn_boundary_->load() : 0;
                 int64_t topn_skipped_now = 0;
+                // Remote bloom membership: apply the round if it has landed. Its
+                // flags become skips as the walk below reaches each unit.
+                poll_bloom_round(g);
+                if (!g.bloom_error.empty()) {
+                    static thread_local std::string bloom_err_buf;
+                    bloom_err_buf = "NativeParquetScanSource: " + g.bloom_error;
+                    err.code = kErrCodeReadError;
+                    err.msg = bloom_err_buf.c_str();
+                    return SourceResult::FINISHED;
+                }
+                const bool bloom_landed = !g.bloom_drop.empty() && g.bloom && g.bloom->applied;
+                int64_t bloom_skipped_now = 0;
                 while (!limit_met && submit_end < n_items &&
-                       (submit_end - g.topn_skipped - g.results_received) < in_flight_limit) {
+                       (submit_end - g.units_skipped - g.results_received) < in_flight_limit) {
                     int e = submit_end + 1;
                     while (e < n_items && same_block(g, e - 1, e)) ++e;
-                    if (topn_armed) {
-                        for (int u = submit_end; u < e; ++u) {
-                            if (topn_unit_excluded(g, u, topn_b)) {
-                                g.topn_skip[static_cast<size_t>(u)] = 1u;
-                                g.topn_skipped += 1;
-                                topn_skipped_now += 1;
-                            }
+                    for (int u = submit_end; u < e; ++u) {
+                        const size_t su = static_cast<size_t>(u);
+                        if (bloom_landed && g.bloom_drop[su] != 0u) {
+                            g.unit_skip[su] = 1u;
+                            g.units_skipped += 1;
+                            bloom_skipped_now += 1;
+                            continue;
+                        }
+                        if (topn_armed && topn_unit_excluded(g, u, topn_b)) {
+                            g.unit_skip[su] = 1u;
+                            g.units_skipped += 1;
+                            topn_skipped_now += 1;
                         }
                     }
                     submit_end = e;
+                }
+                if (bloom_skipped_now != 0) {
+                    g.bloom_skipped += bloom_skipped_now;
+                    if (bloom_pruned_slot_ != nullptr) *bloom_pruned_slot_ = g.bloom_skipped;
                 }
                 g.next_to_submit = submit_end;
                 if (topn_skipped_now != 0)
@@ -1585,8 +1657,8 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 // so this is identical to the pre-R2 `results_received >= n_items`;
                 // with a limit it also terminates on the frozen submit frontier.
                 // Units the Top-N boundary skipped were never submitted and are
-                // excluded (topn_skipped is 0 when no boundary is armed).
-                if (g.results_received >= g.next_to_submit - g.topn_skipped) {
+                // excluded (units_skipped is 0 when neither is armed).
+                if (g.results_received >= g.next_to_submit - g.units_skipped) {
                     return SourceResult::FINISHED;
                 }
                 g.results_received += 1;
