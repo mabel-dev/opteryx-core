@@ -980,6 +980,9 @@ clickbench-interleave: ## Interleaved Opteryx vs DuckDB ClickBench (O,D / D,O pe
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
+clickbench-duckdb-extended: ## DuckDB ClickBench calibration with the 15 ClickBench#1489 queries appended (regenerates duckdb/results.local.extended.json, the baseline for clickbench-rugo-extended)
+	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --extended
+
 clickbench-duckdb-avro: ## DuckDB (avro extension) over the clickbench-avro shards (regenerates duckdb/results.local.avro.json; run `make clickbench-avro` first to build scratch/hits_avro)
 	@test -f scratch/hits_avro.deflate-rugo-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --avro-dir scratch/hits_avro

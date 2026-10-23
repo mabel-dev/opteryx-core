@@ -134,6 +134,45 @@ QUERIES = [
     "SELECT DATE_TRUNC('minute', toDateTime(EventTime)) AS M, COUNT(*) AS PageViews FROM hits WHERE CounterID = 62 AND EventDate >= '2013-07-14' AND EventDate <= '2013-07-15' AND IsRefresh = 0 AND DontCountHits = 0 GROUP BY DATE_TRUNC('minute', toDateTime(EventTime)) ORDER BY DATE_TRUNC('minute', toDateTime(EventTime)) LIMIT 10 OFFSET 1000",
 ]
 
+# ---------------------------------------------------------------------------
+# The 15 queries proposed in ClickHouse/ClickBench#1489 (OPEN, not merged as of
+# 2026-10-23), verbatim from its duckdb-parquet/queries.sql. The PR numbers them
+# Q44-Q58 (1-based); here they continue the 0-based numbering, as in
+# opteryx/runner.py's EXTENDED_STATEMENTS. `--extended` appends them.
+# ---------------------------------------------------------------------------
+EXTENDED_QUERIES = [
+    # 43
+    "SELECT UserID, RANK() OVER (ORDER BY EventTime) AS r FROM hits ORDER BY r DESC LIMIT 10",
+    # 44
+    "SELECT * FROM hits ORDER BY ClientIP, EventTime LIMIT 100",
+    # 45
+    "SELECT CounterID, avg(length(Referer)) AS l FROM hits WHERE Referer <> '' GROUP BY CounterID HAVING count(*) > 100000 ORDER BY l DESC LIMIT 25",
+    # 46
+    "SELECT BrowserCountry, BrowserLanguage, count(*) AS c FROM hits GROUP BY BrowserCountry, BrowserLanguage ORDER BY c DESC LIMIT 10",
+    # 47
+    "SELECT Title, URL, count(*) AS c FROM hits GROUP BY Title, URL ORDER BY c DESC LIMIT 10",
+    # 48
+    "SELECT count(*) FILTER (WHERE NOT REGEXP_MATCHES(URL, '^https')) FROM hits",
+    # 49
+    "SELECT count(*) FILTER (WHERE strpos(URL, 'google') > 0) FROM hits",
+    # 50
+    "SELECT CounterID, COALESCE(EventTime - lag(EventTime) OVER (PARTITION BY CounterID ORDER BY EventTime), EventTime) AS dt FROM hits WHERE CounterID = 62 ORDER BY dt DESC LIMIT 10",
+    # 51
+    "SELECT min(URL), max(URL) FROM hits",
+    # 52
+    "SELECT URL, length(URL) AS l FROM hits ORDER BY l DESC LIMIT 10",
+    # 53
+    "SELECT substr(URL, 1, 8) AS p, count(*) AS c FROM hits GROUP BY p ORDER BY c DESC LIMIT 10",
+    # 54
+    "SELECT percentile_cont(0.1) WITHIN GROUP (ORDER BY ResponseEndTiming), percentile_cont(0.5) WITHIN GROUP (ORDER BY ResponseEndTiming), percentile_cont(0.9) WITHIN GROUP (ORDER BY ResponseEndTiming) FROM hits WHERE ResponseEndTiming > 0",
+    # 55
+    "SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY ResponseEndTiming) FROM hits WHERE ResponseEndTiming > 0",
+    # 56
+    "SELECT hour(toDateTime(EventTime)) AS h, count(*) AS c FROM hits GROUP BY h ORDER BY h",
+    # 57
+    "SELECT EventTime, count(*) AS c FROM hits GROUP BY EventTime ORDER BY c DESC LIMIT 10",
+]
+
 TRIES = 3
 
 
@@ -179,7 +218,7 @@ def resolve_aistor_table(table_name: str) -> tuple[str, int]:
     return table.metadata_location, data_size
 
 
-def run_benchmark(parquet_glob: str = None, avro_glob: str = None, iceberg_metadata: str = None) -> list:
+def run_benchmark(queries: list, parquet_glob: str = None, avro_glob: str = None, iceberg_metadata: str = None) -> list:
     """
     Run all queries TRIES times each, over the parquet, the Avro files, OR the
     AIStor Iceberg table whose metadata JSON is `iceberg_metadata`.
@@ -238,9 +277,9 @@ def run_benchmark(parquet_glob: str = None, avro_glob: str = None, iceberg_metad
     con.execute(f"CREATE MACRO toDateTime(t) AS {to_date_time}")
 
     results = []
-    total = len(QUERIES)
+    total = len(queries)
 
-    for idx, query in enumerate(QUERIES):
+    for idx, query in enumerate(queries):
         times = []
         print(f"  Q{idx:02d}/{total} ", end="", flush=True)
         for attempt in range(TRIES):
@@ -284,7 +323,18 @@ def main():
         help="Read Iceberg table clickbench.<name> on AIStor (e.g. hits_rugo_typed_split_10) instead of parquet "
         "(default output: results.aistor.<name>.json)",
     )
+    parser.add_argument(
+        "--extended",
+        action="store_true",
+        default=False,
+        help="Append the 15 queries proposed in ClickHouse/ClickBench#1489 (Q43-Q57); parquet only "
+        "(default output: results.local.extended.json)",
+    )
     args = parser.parse_args()
+
+    if args.extended and (args.aistor_table is not None or args.avro_dir is not None):
+        parser.error("--extended is parquet only: it is the baseline for opteryx `--extended` on the local split")
+    queries = QUERIES + EXTENDED_QUERIES if args.extended else QUERIES
 
     if args.aistor_table is not None:
         import dotenv
@@ -304,7 +354,7 @@ def main():
         print(f"  Output         : {output_path}")
         print()
         start = time.monotonic()
-        results = run_benchmark(iceberg_metadata=metadata_location)
+        results = run_benchmark(queries, iceberg_metadata=metadata_location)
         print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
         payload = {
             "system": "DuckDB (Iceberg on AIStor, iceberg_scan)",
@@ -341,7 +391,7 @@ def main():
         print(f"  Output         : {output_path}")
         print()
         start = time.monotonic()
-        results = run_benchmark(avro_glob=os.path.join(avro_dir, "hits_*.avro"))
+        results = run_benchmark(queries, avro_glob=os.path.join(avro_dir, "hits_*.avro"))
         print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
         payload = {
             "system": "DuckDB (Avro, avro extension)",
@@ -385,7 +435,9 @@ def main():
 
     data_size = sum(os.path.getsize(os.path.join(parquet_dir, f)) for f in parquet_files)
 
-    output_path = args.output or os.path.join(os.path.dirname(__file__), "results.local.json")
+    output_path = args.output or os.path.join(
+        os.path.dirname(__file__), "results.local.extended.json" if args.extended else "results.local.json"
+    )
 
     print(f"DuckDB ClickBench — local benchmark")
     print(f"  DuckDB version : {duckdb.__version__}")
@@ -393,12 +445,13 @@ def main():
     print(
         f"  Parquet dir    : {parquet_dir}  ({len(parquet_files)} files, {data_size / 1e9:.1f} GB)"
     )
+    print(f"  Queries        : {len(queries)}{' (extended, ClickBench#1489)' if args.extended else ''}")
     print(f"  Tries per query: {TRIES}")
     print(f"  Output         : {output_path}")
     print()
 
     start = time.monotonic()
-    results = run_benchmark(parquet_glob=parquet_glob)
+    results = run_benchmark(queries, parquet_glob=parquet_glob)
     total_elapsed = time.monotonic() - start
 
     print(f"\nTotal benchmark time: {total_elapsed:.1f}s")

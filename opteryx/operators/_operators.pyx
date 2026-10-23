@@ -168,7 +168,7 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         CountDistinct "opteryx::engine::AggFn::CountDistinct"
         ArrayAgg "opteryx::engine::AggFn::ArrayAgg"
         Stddev "opteryx::engine::AggFn::Stddev"
-        Median "opteryx::engine::AggFn::Median"
+        Quantile "opteryx::engine::AggFn::Quantile"
         AnyValue "opteryx::engine::AggFn::AnyValue"
         ApproxCountDistinct "opteryx::engine::AggFn::ApproxCountDistinct"
         ApproxPercentile "opteryx::engine::AggFn::ApproxPercentile"
@@ -187,6 +187,8 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         bint aa_descending
         int64_t aa_limit
         double percentile
+        bint quantile_descending
+        int quantile_owner
         bint distinct_operand
 
 cdef extern from "core/alloc.h" nogil:
@@ -4233,9 +4235,11 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
     named sentinels compiler.py mirrors from native_group_sinks.hpp:
     ``_AGG_NO_OPERAND`` (-1, CountStar) / ``_AGG_WHOLE_ROW`` (-2, whole-row
     CountDistinct — COUNT(DISTINCT *)). ``options`` carries the per-function
-    extras: ARRAY_AGG's modifiers, APPROX_PERCENTILE's ``percentile``, CORR's
-    second operand column index (``col_idx2``), and ``distinct_operand`` for
-    SUM/AVG/STDDEV family/MEDIAN(DISTINCT ...); every other function ignores it.
+    extras: ARRAY_AGG's modifiers, APPROX_PERCENTILE's ``percentile``, the exact
+    quantile's (MEDIAN / PERCENTILE_CONT) ``percentile``, ``quantile_descending``
+    and ``quantile_owner`` (all three required), CORR's second operand column
+    index (``col_idx2``), and ``distinct_operand`` for SUM/AVG/STDDEV
+    family/MEDIAN(DISTINCT ...); every other function ignores it.
     """
     cdef cppvector[AggSpec2] out
     cdef AggSpec2 s
@@ -4269,8 +4273,8 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.fn = AggFn.VarPop
         elif fn == "VarSamp":
             s.fn = AggFn.VarSamp
-        elif fn == "Median":
-            s.fn = AggFn.Median
+        elif fn == "Quantile":
+            s.fn = AggFn.Quantile
         elif fn == "AnyValue":
             s.fn = AggFn.AnyValue
         elif fn == "ApproxCountDistinct":
@@ -4303,6 +4307,18 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_limit = <int64_t>(-1 if opts.get("limit") is None else opts["limit"])
             s.percentile = <double>opts.get("percentile", 0.5)
             s.distinct_operand = <bint>bool(opts.get("distinct_operand", False))
+        if fn == "Quantile":
+            # The exact quantile's p, direction and shared-buffer owner are always
+            # stated by the compiler — never defaulted here, so MEDIAN's 0.5 is a
+            # decision made in one place (compiler._parse_aggregates).
+            if opts is None:
+                raise ValueError("Quantile aggregate spec without its options")
+            s.percentile = <double>opts["percentile"]
+            s.quantile_descending = <bint>bool(opts["quantile_descending"])
+            s.quantile_owner = <int>opts["quantile_owner"]
+        else:
+            s.quantile_descending = False
+            s.quantile_owner = -1
         out.push_back(s)
     return out
 

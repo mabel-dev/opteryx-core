@@ -2012,7 +2012,11 @@ class _Compiler:
 
     _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG", "STDDEV", "MEDIAN",
                 "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "CORR",
-                "CIDR_AGG", "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP"}
+                "CIDR_AGG", "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP",
+                "PERCENTILE_CONT"}
+    # The exact-quantile family: one native aggregate (AggFn::Quantile), MEDIAN being
+    # PERCENTILE_CONT(0.5). Specs of it over the same column share one buffer.
+    _QUANTILE_FUNCS = frozenset({"MEDIAN", "PERCENTILE_CONT"})
     # STDDEV_POP is a pure alias for STDDEV (population stddev, N denominator);
     # STDDEV_SAMP/VAR_POP/VAR_SAMP are real new finalizations, but all five
     # accumulate the identical Σx/Σx²/count lanes (agg2_update_stddev in
@@ -2121,7 +2125,7 @@ class _Compiler:
         computed = []
         for agg in aggregates:
             params = agg.parameters or []
-            if agg.value == "APPROX_PERCENTILE":
+            if agg.value in ("APPROX_PERCENTILE", "PERCENTILE_CONT"):
                 # 2 params: the column expression + a percentile literal —
                 # only params[0] is a projectable operand.
                 if len(params) != 2:
@@ -2155,6 +2159,12 @@ class _Compiler:
         if not aggs:
             _unsupported("an aggregate node with no aggregates")
         specs = []
+        # Exact-quantile buffers: operand column index -> position of the spec that
+        # owns that column's buffer. Every later non-DISTINCT MEDIAN/PERCENTILE_CONT
+        # over the same column reads it instead of buffering the column again
+        # (AggSpec2::quantile_owner) — `p50, p90, p99 of one column` holds the values
+        # once. Positions are the native spec indices: specs is passed in order.
+        quantile_buffers = {}
         for agg in aggs:
             func = agg.value
             sc = agg.schema_column
@@ -2164,7 +2174,25 @@ class _Compiler:
                 _unsupported(f"the aggregate function {func}")
             params = agg.parameters or []
             percentile = None
-            if func == "APPROX_PERCENTILE":
+            descending = False
+            if func == "MEDIAN":
+                percentile = 0.5
+            elif func == "PERCENTILE_CONT":
+                # PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr [DESC]) — the builder
+                # lowers it to parameters [expr, p] with the direction on `order`
+                # (logical_planner_builders._ordered_set_aggregate).
+                if len(params) != 2 or not agg.order or len(agg.order) != 1:
+                    _unsupported("PERCENTILE_CONT without its fraction and its "
+                                 "WITHIN GROUP (ORDER BY ...) operand")
+                pct_node = params[1]
+                if pct_node.node_type != NodeType.LITERAL:
+                    _unsupported("PERCENTILE_CONT fraction must be a literal")
+                percentile = float(pct_node.value)
+                if not (0.0 <= percentile <= 1.0):
+                    _unsupported("PERCENTILE_CONT fraction must be between 0 and 1")
+                descending = not agg.order[0][1]
+                params = [params[0]]
+            elif func == "APPROX_PERCENTILE":
                 # APPROX_PERCENTILE(expr, percentile) — a second, query-time-
                 # constant argument (not a second operand column — CORR is the
                 # only aggregate with one of those). Matches the legacy Cython

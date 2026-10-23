@@ -402,7 +402,13 @@ if __name__ == "__main__":  # pragma: no cover
     _local = os.path.join(_duckdb_dir, "results.local.json")
     # _local = os.path.join(_duckdb_dir, "results.local.single_thread.json")
     _remote = os.path.join(_duckdb_dir, "results.c6a.4xlarge.json")
-    if args.duckdb_baseline is None:
+    if args.duckdb_baseline is None and args.extended:
+        # One DuckDB run of all 58 (`make clickbench-duckdb-extended`), never the
+        # 43-query file: a ratio column drawn from two DuckDB sessions would put
+        # the new queries on a different machine state from the old. Missing
+        # file = no ratio column.
+        args.duckdb_baseline = os.path.join(_duckdb_dir, "results.local.extended.json")
+    elif args.duckdb_baseline is None:
         if os.path.exists(_local):
             args.duckdb_baseline = _local
         else:

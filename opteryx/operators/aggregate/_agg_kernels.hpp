@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -16,7 +17,7 @@
 
 #include "engine/agg_budgets.hpp"   // kMedianBytes — shared with variables.py's report
 #include "ops/float_ops.h"          // draken::ops::fp_total_lt — THE ratified float order,
-                                    // imported not re-derived (see finalize_median)
+                                    // imported not re-derived (see finalize_quantile)
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #  include <arm_neon.h>
@@ -276,11 +277,12 @@ struct CountState {
 };
 
 // ---------------------------------------------------------------------------
-// MedianState — buffers non-null doubles, computes exact median via
-// std::nth_element on finalize.
+// QuantileState — buffers non-null doubles, computes an exact quantile via
+// std::nth_element on finalize. The one state behind the exact-quantile family:
+// MEDIAN (p = 0.5) and PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x [DESC]).
 //
-// Memory guard: a GLOBAL byte budget across every MedianState buffer, not a
-// per-group value cap. Exact MEDIAN inherently buffers every non-null input
+// Memory guard: a GLOBAL byte budget across every QuantileState buffer, not a
+// per-group value cap. An exact quantile inherently buffers every non-null input
 // value, so the real OOM risk is the TOTAL across all groups — a per-group
 // cap bounded nothing (group count is unbounded) while refusing ordinary
 // group sizes. The budget is charged on capacity growth (amortized — one
@@ -291,8 +293,9 @@ struct CountState {
 //
 // The counter is a per-shared-object static (inline function local). The
 // native engine is the only thing that compiles this header, so there is
-// exactly one instance and every MEDIAN buffer in the process accounts
-// against it. A second .so including this header would get its own counter
+// exactly one instance and every exact-quantile buffer in the process accounts
+// against it. The budget is the family's, not MEDIAN's alone: MEDIAN is
+// PERCENTILE_CONT(0.5) under another spelling, and one buffer may serve both. A second .so including this header would get its own counter
 // and its own budget — check that before adding an includer.
 // ---------------------------------------------------------------------------
 constexpr int64_t kMedianBudgetFloorBytes = opteryx::agg_budgets::kMedianFloorBytes;  // 256MB
@@ -335,22 +338,22 @@ inline bool median_budget_escalate(int64_t needed) noexcept {
     return true;
 }
 
-struct MedianState {
+struct QuantileState {
     double* buf = nullptr;
     size_t  size = 0;
     size_t  cap = 0;
     bool    overflowed = false;
 
-    MedianState() noexcept = default;
-    MedianState(const MedianState&) = delete;
-    MedianState& operator=(const MedianState&) = delete;
+    QuantileState() noexcept = default;
+    QuantileState(const QuantileState&) = delete;
+    QuantileState& operator=(const QuantileState&) = delete;
 
-    MedianState(MedianState&& o) noexcept
+    QuantileState(QuantileState&& o) noexcept
         : buf(o.buf), size(o.size), cap(o.cap), overflowed(o.overflowed) {
         o.buf = nullptr; o.size = 0; o.cap = 0;
     }
 
-    MedianState& operator=(MedianState&& o) noexcept {
+    QuantileState& operator=(QuantileState&& o) noexcept {
         if (this != &o) {
             _release();
             buf = o.buf; size = o.size; cap = o.cap;
@@ -360,7 +363,7 @@ struct MedianState {
         return *this;
     }
 
-    ~MedianState() noexcept { _release(); }
+    ~QuantileState() noexcept { _release(); }
 
     inline void _release() noexcept {
         if (buf) {
@@ -433,42 +436,62 @@ struct MedianState {
         return true;
     }
 
-    // Compute median in place. Mutates buf via std::nth_element.
+    // Compute the p-quantile in place. Mutates buf via std::nth_element, but every
+    // call selects over the WHOLE buffer, so one buffer may answer several
+    // quantiles, in any order (the shared-buffer specs rely on this).
     // Returns 0.0 if size==0; caller must check size first.
     //
-    // MEDIAN OVER NaN — RATIFIED SEMANTICS.
-    // MEDIAN is an ORDER STATISTIC, and the order is the one float_ops.h
+    // CONTINUOUS (linear) interpolation — PERCENTILE_CONT, and MEDIAN at p = 0.5 —
+    // written with DuckDB's quantile_cont arithmetic so the two agree to the bit:
+    //     RN = p * (n - 1);   lo = value at rank floor(RN);   hi = at rank ceil(RN)
+    //     result = lo + (RN - floor(RN)) * (hi - lo)
+    // where rank counts in the requested order. `descending` (ORDER BY x DESC)
+    // ranks from the top, NOT by rewriting p as 1 - p: (1 - p) * (n - 1) and
+    // (n - 1) - p * (n - 1) round differently, and the answer would move.
+    // MEDIAN's former `(lo + hi) * 0.5` is replaced by the formula above (an
+    // architect decision, 2026-10-23): at most an ulp apart, and now DuckDB's.
+    //
+    // QUANTILES OVER NaN — RATIFIED SEMANTICS.
+    // A quantile is an ORDER STATISTIC, and the order is the one float_ops.h
     // locked on 2026-05-22 and MIN/MAX already answer under: NaN is a VALUE
     // (validity bit set, not a null) that ranks above every other value,
     // including +inf. So a NaN in the input does NOT poison the result — it
     // sorts to the top and reaches the answer only when it is genuinely one
     // of the middle elements. 2000 values of which 24 are NaN: the 24 sit at
-    // the top and the median is the mean of the 1000th and 1001st smallest,
-    // exactly as if they were any other large values. For an even count where
-    // exactly one of the two middles is NaN, the mean of the two selected
-    // values is NaN — that is IEEE arithmetic on the selected pair, not NaN
-    // propagation through the selection.
+    // the top and the median interpolates the 1000th and 1001st smallest,
+    // exactly as if they were any other large values. When exactly one of the
+    // two selected values is NaN the interpolation is NaN — that is IEEE
+    // arithmetic on the selected pair, not NaN propagation through the selection.
+    // DESC ranks from the top, so there the NaNs come first.
     //
     // The comparator MUST be fp_total_lt. Raw `<` is not a strict weak
     // ordering in the presence of NaN (every comparison with NaN is false),
     // so std::nth_element's precondition is violated and the partition
     // depends on the order values happened to arrive in — which varies with
     // morsel scheduling. That produced a silently wrong AND unstable MEDIAN.
-    inline double finalize_median() noexcept {
+    //
+    // `p` is in [0, 1]; the sinks refuse anything else before a value is buffered.
+    inline double finalize_quantile(double p, bool descending) noexcept {
         if (size == 0) return 0.0;
         constexpr auto total_lt = [](double a, double b) noexcept {
             return draken::ops::fp_total_lt<double>(a, b);
         };
-        size_t mid = size / 2;
-        std::nth_element(buf, buf + mid, buf + size, total_lt);
-        double upper = buf[mid];
-        if (size % 2 == 1) return upper;
-        // Even count: lower middle is the max of the lower partition.
-        // Partition [0, mid) was left after the first nth_element; the
-        // largest element in it is the (mid-1)-th order statistic.
-        std::nth_element(buf, buf + mid - 1, buf + mid, total_lt);
-        double lower = buf[mid - 1];
-        return (lower + upper) * 0.5;
+        const double rn = p * static_cast<double>(size - 1);
+        const double frn = std::floor(rn);
+        const double crn = std::ceil(rn);
+        const size_t lo_rank = static_cast<size_t>(frn);
+        const size_t lo_idx = descending ? size - 1 - lo_rank : lo_rank;
+        std::nth_element(buf, buf + lo_idx, buf + size, total_lt);
+        const double lo = buf[lo_idx];
+        if (crn == frn) return lo;
+        // hi is the NEXT value in the requested order. nth_element left every value
+        // ranked below lo_idx in [0, lo_idx) and every value above it after, so hi is
+        // the smallest of the upper partition (ascending) or the largest of the lower
+        // one (descending). Both partitions are non-empty: crn > frn means lo_rank < n-1.
+        const double hi = descending
+            ? *std::max_element(buf, buf + lo_idx, total_lt)
+            : *std::min_element(buf + lo_idx + 1, buf + size, total_lt);
+        return lo + (rn - frn) * (hi - lo);
     }
 };
 

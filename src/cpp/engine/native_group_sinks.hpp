@@ -20,14 +20,17 @@
 //     DECIMAL operands are rejected on all four (CAST to DOUBLE first): reading
 //     the unscaled raw integer as a double would silently compute the wrong
 //     numbers' variance.
-//   - MEDIAN buffers every non-null value per group (MedianState — see
-//     _agg_kernels.hpp), bounded by a global 512MB byte budget across all
-//     groups (fails loud past the budget: use APPROX_PERCENTILE for larger
-//     inputs), and computes the exact median via std::nth_element at
-//     finalize (even counts interpolate). Always FLOAT64, numeric-only
-//     (unlike STDDEV/SUM/AVG — no BOOL/DATE32/TIMESTAMP64/TIME32/TIME64/
-//     DECIMAL; see median_operand_supported for why). NaN participates as a
-//     value ranked above everything else, per draken's total order.
+//   - MEDIAN and PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x [DESC]) are one
+//     exact-quantile aggregate (AggFn::Quantile; MEDIAN is p = 0.5). It buffers
+//     every non-null value per group (QuantileState — see _agg_kernels.hpp),
+//     bounded by a global byte budget across all groups (256MB, escalating on
+//     measured demand to 2GB; fails loud past it: use APPROX_PERCENTILE for
+//     larger inputs), and selects via std::nth_element at finalize with linear
+//     interpolation. Quantile specs over the same column share ONE buffer (see
+//     AggSpec2::quantile_owner). Always FLOAT64, numeric-only (unlike
+//     STDDEV/SUM/AVG — no BOOL/DATE32/TIMESTAMP64/TIME32/TIME64/DECIMAL; see
+//     median_operand_supported for why). NaN participates as a value ranked
+//     above everything else, per draken's total order.
 //   - MIN/MAX compare via the same normalized order keys the sort uses
 //     (native_sort.hpp): NULLs skipped, NaN highest, -0.0 == +0.0; the OUTPUT is
 //     the raw value at the operand's own type/width, logical descriptor carried.
@@ -88,7 +91,7 @@
 #include "medius.hpp"            // opteryx::medius::MediusMap — bounded middle tier
 #include "parvi.hpp"             // opteryx::parvi::ParviMap — 64-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
-#include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — MEDIAN's per-group
+#include "_agg_kernels.hpp"      // opteryx::ungrouped::QuantileState — MEDIAN's per-group
                                  // value buffer, and the global byte budget that bounds it
 #include "hllpp.h"               // HllppSketch — APPROX_COUNT_DISTINCT, global namespace
 #include "tdigest.h"             // td_histogram_t — APPROX_PERCENTILE, C API (third_party/tdigest-c)
@@ -312,7 +315,7 @@ struct GroupKeyColumn {
 // RAII wrapper over td_histogram_t* (third_party/tdigest-c — a plain C API, no
 // C++ lifecycle of its own). Default-constructs a fresh digest so
 // std::vector<TDigestPtr>::resize(n) "just works" for per-group growth, same
-// as MedianState's resize contract.
+// as QuantileState's resize contract.
 struct TDigestPtr {
     td_histogram_t* h = nullptr;
     TDigestPtr() : h(td_new(100.0)) {}
@@ -333,7 +336,10 @@ enum class AggFn : uint8_t {
     CountDistinct = 6,   // COUNT(DISTINCT col): dedup on serialized value bytes
     ArrayAgg = 7,        // ARRAY_AGG(col): one ARRAY per group; GROUP BY only
     Stddev = 8,          // STDDEV(col): population stddev (N denominator), always DOUBLE
-    Median = 9,          // MEDIAN(col): exact median via MedianState (std::nth_element)
+    Quantile = 9,        // exact quantile via QuantileState (std::nth_element): MEDIAN(col)
+                         // (p = 0.5) and PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY col
+                         // [DESC]). p is AggSpec2::percentile, the direction
+                         // AggSpec2::quantile_descending.
     AnyValue = 10,       // ANY_VALUE(col): any real non-null value — implemented by
                          // reusing the MIN machinery unchanged (always the minimum is
                          // A valid ANY_VALUE answer per SQL's contract — "unspecified
@@ -388,6 +394,7 @@ enum class AggFn : uint8_t {
 constexpr int kAggNoOperand = -1;   // CountStar: no operand column
 constexpr int kAggWholeRow  = -2;   // CountDistinct: dedup over EVERY column in
                                      // the stream (COUNT(DISTINCT *))
+constexpr int kQuantileOwnsBuffer = -1;   // AggSpec2::quantile_owner: buffers its own
 
 struct AggSpec2 {
     AggFn fn;
@@ -408,9 +415,18 @@ struct AggSpec2 {
     // budget (kArrayAggBudgetBytes, below), the same guard shape MEDIAN uses.
     // A per-group count bounded nothing — the group count is unbounded — while
     // refusing ordinary group sizes.
-    // APPROX_PERCENTILE's second argument — a query-time constant (0.0-1.0),
-    // validated at plan time (compiler.py). Ignored by every other fn.
+    // The quantile p of APPROX_PERCENTILE and Quantile (MEDIAN passes 0.5) — a
+    // query-time constant in [0, 1], validated at plan time (compiler.py) and again
+    // at capture (quantile_spec_check). Ignored by every other fn.
     double  percentile = 0.5;
+    // Quantile only: WITHIN GROUP (ORDER BY col DESC) — rank from the top.
+    bool    quantile_descending = false;
+    // Quantile only: the buffer this spec reads. kQuantileOwnsBuffer (-1) means the
+    // spec buffers its own operand; otherwise it is the index of an EARLIER Quantile
+    // spec over the same column (neither DISTINCT), whose buffer it reads at
+    // finalize and which it never appends to. The compiler assigns it; the sinks
+    // check it (quantile_spec_check) — a mis-assigned owner fails, never answers.
+    int     quantile_owner = -1;
     // SUM/AVG/STDDEV family/MEDIAN(DISTINCT col) — see agg_fn_takes_distinct_operand.
     // The operand is deduped exactly as COUNT(DISTINCT col) dedups it (draken value
     // hash, 64-bit hash identity, NULLs excluded) and each distinct VALUE is carried
@@ -473,22 +489,23 @@ inline bool agg2_operand_supported(DrakenType t) {
 // this set is a design decision, not a gap to be quietly filled: MEDIAN
 // returns FLOAT64, so admitting a temporal or DECIMAL operand would answer in
 // a type the caller never asked for. Refuse loudly instead.
-// Single source of truth for the MEDIAN budget-overflow message — four call
-// sites (ungrouped accumulate/merge, grouped accumulate/merge) all fail loud
-// with the exact same text, never a silent approximate fallback (a query
-// author who wants approximate opts in by name via APPROX_PERCENTILE, the
-// budget never silently decides for them). The limit is a GLOBAL byte budget
-// across all groups (kMedianBudgetBytes, _agg_kernels.hpp), not a per-group
-// value cap — exact MEDIAN buffers every non-null input value, so total
-// memory is what needs bounding.
+// Single source of truth for the exact-quantile budget-overflow message — every
+// call site (ungrouped accumulate/merge, grouped accumulate/merge, the DISTINCT
+// folds) fails loud with the exact same text, never a silent approximate
+// fallback (a query author who wants approximate opts in by name via
+// APPROX_PERCENTILE, the budget never silently decides for them). The limit is a
+// GLOBAL byte budget across all groups (kMedianBudgetBytes, _agg_kernels.hpp),
+// not a per-group value cap — an exact quantile buffers every non-null input
+// value, so total memory is what needs bounding. It names the family, because
+// one buffer may serve a MEDIAN and a PERCENTILE_CONT at once.
 // Names the budget, quotes no figure. A literal here is a SECOND copy of the
 // limit, which a build with a different kMedianBytes silently falsifies —
 // sending the reader to reason about a number nothing enforces. The variable is
 // the discoverable value, and it reads the native constant so it cannot drift.
-inline constexpr const char* kMedianCapExceededMsg =
-    "MEDIAN — buffered values exceeded the memory budget (see "
-    "@@median_memory_budget_bytes). Use APPROX_PERCENTILE(x, 0.5) for "
-    "approximate median over large sets of values.";
+inline constexpr const char* kQuantileCapExceededMsg =
+    "MEDIAN/PERCENTILE_CONT — buffered values exceeded the memory budget (see "
+    "@@median_memory_budget_bytes). Use APPROX_PERCENTILE(x, p) for an "
+    "approximate percentile over large sets of values.";
 
 // HllppSketch::register_index/rho (hllpp.cpp) read the hash's raw top/bottom
 // bits directly — the standard HLL algorithm, correct ONLY if the hash has
@@ -519,6 +536,33 @@ inline bool median_operand_supported(DrakenType t) {
         default:
             return false;
     }
+}
+
+// Quantile spec s, checked at capture by both sinks before a value is buffered:
+// p within [0, 1] (finalize_quantile indexes by it), and a shared-buffer owner that
+// really is an earlier, non-DISTINCT Quantile over the SAME column — reading any
+// other buffer would be a confident answer about the wrong values.
+inline bool quantile_spec_check(const std::vector<AggSpec2>& specs, size_t s, ErrCtx& err) {
+    const AggSpec2& sp = specs[s];
+    if (!(sp.percentile >= 0.0 && sp.percentile <= 1.0)) {
+        err.code = 1;
+        err.msg = "PERCENTILE_CONT percentile outside [0, 1] reached the engine — "
+                  "fail loud, never an out-of-range selection";
+        return false;
+    }
+    if (sp.quantile_owner == kQuantileOwnsBuffer) return true;
+    const int o = sp.quantile_owner;
+    if (o < 0 || static_cast<size_t>(o) >= s || specs[static_cast<size_t>(o)].fn != AggFn::Quantile
+            || specs[static_cast<size_t>(o)].quantile_owner != kQuantileOwnsBuffer
+            || specs[static_cast<size_t>(o)].col_idx != sp.col_idx
+            || specs[static_cast<size_t>(o)].distinct_operand || sp.distinct_operand) {
+        err.code = 1;
+        err.msg = "exact-quantile spec names a shared buffer that is not an earlier "
+                  "non-DISTINCT quantile over the same column — fail loud, never a "
+                  "silent wrong answer";
+        return false;
+    }
+    return true;
 }
 
 // CORR operand capture, shared by the grouped and ungrouped sinks' capture_meta:
@@ -767,7 +811,7 @@ inline bool agg_fn_is_stddev_family(AggFn fn) noexcept {
 // APPROX_PERCENTILE refuse DISTINCT at plan time. A spec outside this set carrying
 // the flag is refused at capture — never silently aggregated with duplicates.
 inline bool agg_fn_takes_distinct_operand(AggFn fn) noexcept {
-    return fn == AggFn::Sum || fn == AggFn::Avg || fn == AggFn::Median
+    return fn == AggFn::Sum || fn == AggFn::Avg || fn == AggFn::Quantile
         || agg_fn_is_stddev_family(fn);
 }
 
@@ -1082,8 +1126,12 @@ enum class GBKind : uint8_t {
                  // NULL below 2 valid rows (see AggFn::StddevSamp)
     VarPop,      // population variance — Stddev's lanes/NULL rule, no final sqrt
     VarSamp,     // sample variance — StddevSamp's lanes/NULL rule, no final sqrt
-    Median,      // exact median — buffers per-group values (MedianState), sorts
-                 // and interpolates at finalize; always double, numeric-only
+    Quantile,    // exact quantile (MEDIAN / PERCENTILE_CONT) — buffers per-group
+                 // values (QuantileState), selects and interpolates at finalize;
+                 // always double, numeric-only
+    QuantileShared,  // a Quantile spec reading another spec's buffer
+                     // (AggSpec2::quantile_owner): NO lanes of its own, nothing to
+                     // accumulate or merge — emit reads the owner's lanes
     ApproxCountDistinct,  // HyperLogLog++ sketch per group; always INT64, never NULL
                           // (matches CountDistinct: 0 for an empty group, not NULL)
     ApproxPercentile,     // t-digest sketch per group; always DOUBLE, numeric-only
@@ -1136,7 +1184,7 @@ inline bool cidr_operand_supported(DrakenType t, const LogicalType* logical) noe
 
 // ---------------------------------------------------------------------------
 // ARRAY_AGG memory guard — a GLOBAL byte budget across every GBArrayAggState,
-// the same shape MedianState uses (see _agg_kernels.hpp). ARRAY_AGG buffers
+// the same shape QuantileState uses (see _agg_kernels.hpp). ARRAY_AGG buffers
 // every input row (NULLs included) into some group's list, so the real OOM risk
 // is the TOTAL across all groups: the per-group element cap this replaced
 // bounded nothing, because the group count is unbounded, while still refusing
@@ -1147,7 +1195,7 @@ inline bool cidr_operand_supported(DrakenType t, const LogicalType* logical) noe
 // shape of a right one.
 //
 // The counter is a per-shared-object static (inline function local), matching
-// the MedianState convention: the native engine is the only thing that
+// the QuantileState convention: the native engine is the only thing that
 // compiles this header, so there is exactly one instance and every ARRAY_AGG
 // buffer in the process accounts against it. A second .so including this
 // header would get its own counter and its own budget.
@@ -1199,7 +1247,7 @@ inline int64_t aa_string_heap_bytes(uint32_t len) noexcept {
 //
 // Non-copyable and move-only: the destructor returns this state's charge to the
 // global budget, so a copy would double-release. (GBLanes, which holds these,
-// is already move-only for the same reason via MedianState.)
+// is already move-only for the same reason via QuantileState.)
 struct GBArrayAggState {
     std::vector<int64_t>     raws;
     std::vector<__int128>    i128s;
@@ -1372,8 +1420,9 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
             return GBKind::VarPop;
         case AggFn::VarSamp:
             return GBKind::VarSamp;
-        case AggFn::Median:
-            return GBKind::Median;
+        case AggFn::Quantile:
+            return sp.quantile_owner == kQuantileOwnsBuffer ? GBKind::Quantile
+                                                            : GBKind::QuantileShared;
         case AggFn::ApproxCountDistinct:
             return GBKind::ApproxCountDistinct;
         case AggFn::ApproxPercentile:
@@ -1440,10 +1489,10 @@ struct GBLaneView {
     GBArrayAggState*   aa    = nullptr;   // ARRAY_AGG element lists
     const AggSpec2*    aa_spec = nullptr; // ARRAY_AGG DISTINCT/ORDER BY/LIMIT modifiers
     opteryx::roaring32::Roaring32* cidr = nullptr;   // CIDR_AGG per-group address sets
-    opteryx::ungrouped::MedianState* median = nullptr;   // MEDIAN per-group buffers
+    opteryx::ungrouped::QuantileState* quantile = nullptr;   // MEDIAN/PERCENTILE_CONT per-group buffers
     const HllppSketch* hll = nullptr;     // APPROX_COUNT_DISTINCT per-group sketches
     TDigestPtr* td = nullptr;             // APPROX_PERCENTILE per-group sketches
-    const AggSpec2* pct_spec = nullptr;   // APPROX_PERCENTILE's percentile parameter
+    const AggSpec2* pct_spec = nullptr;   // APPROX_PERCENTILE / Quantile p (+ direction)
 };
 
 // Steal a freshly-built column's owner into a unique_ptr for VectorOwner::child_owner.
@@ -1548,7 +1597,7 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
         // element has been buffered, so they reduce the OUTPUT and never the
         // memory this budget guards. Only reading fewer rows into the aggregate
         // does that.
-        // Names the budget, quotes no figure — see kMedianCapExceededMsg for why
+        // Names the budget, quotes no figure — see kQuantileCapExceededMsg for why
         // a literal limit in the text is a copy that a differently-configured
         // build silently falsifies.
         err.msg = "ARRAY_AGG — buffered elements exceeded the memory "
@@ -1852,17 +1901,23 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             }
             return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
         }
-        case GBKind::Median: {
+        case GBKind::Quantile:
+        case GBKind::QuantileShared: {
             // Per-group state, not a fixed lane — null-ness is the state's own
             // `size == 0` (zero non-null values seen), not a parallel valid[]
-            // array (Median never allocates one — see gb_lanes_resize).
+            // array (Quantile never allocates one — see gb_lanes_resize). A
+            // QuantileShared view points at its owner's states (lane_view); the
+            // selection reorders them, which a later read of the same buffer
+            // tolerates (finalize_quantile selects over the whole buffer).
+            const double p = L.pct_spec->percentile;
+            const bool desc = L.pct_spec->quantile_descending;
             std::vector<int64_t> raws(n, 0);
             std::vector<uint8_t> okp(n, 0);
             for (uint32_t i = 0; i < n; ++i) {
-                if (L.median[i].size == 0) continue;
+                if (L.quantile[i].size == 0) continue;
                 okp[i] = 1;
-                double med = L.median[i].finalize_median();
-                std::memcpy(&raws[i], &med, sizeof(double));
+                double q = L.quantile[i].finalize_quantile(p, desc);
+                std::memcpy(&raws[i], &q, sizeof(double));
             }
             return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
         }
@@ -2435,10 +2490,10 @@ struct UCDPartition {
 
 // AggSpec2::distinct_operand, ungrouped: fold one partition's distinct values into
 // the spec's cell (or MEDIAN state) with the SAME arithmetic the per-row paths use
-// (agg2_update's non-extreme branch, agg2_update_stddev, MedianState::append), so
+// (agg2_update's non-extreme branch, agg2_update_stddev, QuantileState::append), so
 // the emitters read the cell exactly as they would for the non-DISTINCT aggregate.
 // Only MEDIAN can fail (its value cap).
-inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
+inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::QuantileState& med,
                                AggFn fn, bool is_float, bool is_u64,
                                const UCDPartition& d, ErrCtx& err) {
     if (!d.raw128.empty()) {   // DECIMAL128: SUM/AVG only (exact int128 lane)
@@ -2449,10 +2504,10 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
     const bool stddev = agg_fn_is_stddev_family(fn);
     for (int64_t r : d.raw) {
         double x = agg2_raw_as_double(r, is_float, is_u64);
-        if (fn == AggFn::Median) {
+        if (fn == AggFn::Quantile) {
             if (!med.append(x)) {
                 err.code = 1;
-                err.msg = kMedianCapExceededMsg;
+                err.msg = kQuantileCapExceededMsg;
                 return false;
             }
             continue;
@@ -2466,7 +2521,7 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
             c.isum += agg2_raw_as_i128(r, is_u64);
         }
     }
-    if (fn != AggFn::Median) c.valid += static_cast<int64_t>(d.raw.size());
+    if (fn != AggFn::Quantile) c.valid += static_cast<int64_t>(d.raw.size());
     return true;
 }
 
@@ -2475,7 +2530,7 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
 struct UngroupedAggLocal : LocalSinkState {
     std::vector<AggCell> cells;
     std::vector<std::string> strs;   // string MIN/MAX extremes, parallel to cells
-    std::vector<opteryx::ungrouped::MedianState> medians;  // MEDIAN buffers, parallel to cells
+    std::vector<opteryx::ungrouped::QuantileState> quantiles;  // MEDIAN/PERCENTILE_CONT buffers, parallel to cells (empty for a shared-buffer spec)
     std::vector<opteryx::roaring32::Roaring32> cidrs;  // CIDR_AGG address sets, parallel to cells
     std::vector<HllppSketch> hlls;  // APPROX_COUNT_DISTINCT sketches, parallel to cells
     std::vector<TDigestPtr> tds;    // APPROX_PERCENTILE sketches, parallel to cells
@@ -2491,7 +2546,7 @@ struct UngroupedAggGlobal : GlobalSinkState {
     std::mutex mtx;
     std::vector<AggCell> cells;
     std::vector<std::string> strs;
-    std::vector<opteryx::ungrouped::MedianState> medians;
+    std::vector<opteryx::ungrouped::QuantileState> quantiles;
     std::vector<opteryx::roaring32::Roaring32> cidrs;
     std::vector<HllppSketch> hlls;
     std::vector<TDigestPtr> tds;
@@ -2637,16 +2692,18 @@ struct UngroupedAggSink : Sink {
                           "mis-scaled variance";
                 return false;
             }
-            // MEDIAN is numeric-only (see median_operand_supported) — DECIMAL
-            // included, unlike STDDEV's DECIMAL-only rejection above.
-            if ((specs[s].fn == AggFn::Median || specs[s].fn == AggFn::ApproxPercentile)
+            // MEDIAN/PERCENTILE_CONT are numeric-only (see median_operand_supported)
+            // — DECIMAL included, unlike STDDEV's DECIMAL-only rejection above.
+            if ((specs[s].fn == AggFn::Quantile || specs[s].fn == AggFn::ApproxPercentile)
                     && !median_operand_supported(t)) {
                 err.code = 1;
-                err.msg = "MEDIAN/APPROX_PERCENTILE over this column "
+                err.msg = "MEDIAN/PERCENTILE_CONT/APPROX_PERCENTILE over this column "
                           "type is not supported — only numeric inputs are accepted "
                           "(CAST DECIMAL to DOUBLE first)";
                 return false;
             }
+            if (specs[s].fn == AggFn::Quantile && !quantile_spec_check(specs, s, err))
+                return false;
             // CORR: both operands numeric — captures the second operand's
             // type/floatness into meta[s] (type2/is_float2).
             if (specs[s].fn == AggFn::Corr
@@ -2689,7 +2746,7 @@ struct UngroupedAggSink : Sink {
             if (!capture_meta(l.meta, in, err)) return SinkResult::CONTINUE;
             l.cells.assign(specs.size(), AggCell{});
             l.strs.assign(specs.size(), std::string());
-            l.medians.resize(specs.size());   // MedianState: not copyable, resize (not assign)
+            l.quantiles.resize(specs.size());   // QuantileState: not copyable, resize (not assign)
             l.cidrs.resize(specs.size());     // Roaring32: likewise move-only
             l.hlls.resize(specs.size());
             l.tds.resize(specs.size());
@@ -2788,16 +2845,19 @@ struct UngroupedAggSink : Sink {
                     if (!sort_row_valid(v, i)) continue;
                     (void)R.add(static_cast<uint32_t>(agg2_read_raw(v, i, false)));
                 }
-            } else if (specs[s].fn == AggFn::Median) {
+            } else if (specs[s].fn == AggFn::Quantile) {
+                // A shared-buffer spec reads its owner's buffer at finalize and
+                // buffers nothing itself (AggSpec2::quantile_owner).
+                if (specs[s].quantile_owner != kQuantileOwnsBuffer) continue;
                 bool is_f = l.meta[s].is_float;
-                opteryx::ungrouped::MedianState& st = l.medians[s];
+                opteryx::ungrouped::QuantileState& st = l.quantiles[s];
                 const bool is_u64 = v.type == DRAKEN_UINT64;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (!sort_row_valid(v, i)) continue;
                     double d = agg2_raw_as_double(agg2_read_raw(v, i, is_f), is_f, is_u64);
                     if (!st.append(d)) {
                         err.code = 1;
-                        err.msg = kMedianCapExceededMsg;
+                        err.msg = kQuantileCapExceededMsg;
                         return SinkResult::CONTINUE;
                     }
                 }
@@ -2850,7 +2910,7 @@ struct UngroupedAggSink : Sink {
         if (!g.init) {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
-            g.medians.resize(specs.size());
+            g.quantiles.resize(specs.size());
             g.cidrs.resize(specs.size());
             g.hlls.resize(specs.size());
             g.tds.resize(specs.size());
@@ -2865,12 +2925,12 @@ struct UngroupedAggSink : Sink {
                     agg2_merge_str(g.cells[s], l.cells[s], g.strs[s], l.strs[s],
                                    specs[s].fn == AggFn::Max);
                 agg2_merge(g.cells[s], l.cells[s]);
-                if (specs[s].fn == AggFn::Median) {
-                    opteryx::ungrouped::MedianState& src_st = l.medians[s];
+                if (specs[s].fn == AggFn::Quantile) {
+                    opteryx::ungrouped::QuantileState& src_st = l.quantiles[s];
                     for (size_t k = 0; k < src_st.size; ++k) {
-                        if (!g.medians[s].append(src_st.buf[k])) {
+                        if (!g.quantiles[s].append(src_st.buf[k])) {
                             err.code = 1;
-                            err.msg = kMedianCapExceededMsg;
+                            err.msg = kQuantileCapExceededMsg;
                             return;
                         }
                     }
@@ -2920,7 +2980,7 @@ struct UngroupedAggSink : Sink {
             // zero morsels ever arrived: COUNT()=0, SUM/AVG/MIN/MAX=NULL
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
-            g.medians.resize(specs.size());
+            g.quantiles.resize(specs.size());
             g.cidrs.resize(specs.size());
             g.hlls.resize(specs.size());
             g.tds.resize(specs.size());
@@ -3011,7 +3071,7 @@ struct UngroupedAggSink : Sink {
         for (size_t it = 0; it < items.size(); ++it) {
             size_t sp = items[it].first;
             if (!specs[sp].distinct_operand) continue;
-            if (!agg2_fold_distinct(g.cells[sp], g.medians[sp], specs[sp].fn,
+            if (!agg2_fold_distinct(g.cells[sp], g.quantiles[sp], specs[sp].fn,
                                     g.meta[sp].is_float,
                                     g.meta[sp].type == DRAKEN_UINT64,
                                     item_sets[it], err))
@@ -3062,7 +3122,9 @@ struct UngroupedAggSink : Sink {
             lv.rows = &rows1; lv.valid = &valid1; lv.i64 = &i641;
             lv.f64 = &f641; lv.f64sq = &f64sq1; lv.i128 = &i1281; lv.sval = &g.strs[s];
             lv.f64y = &f64y1; lv.f64yy = &f64yy1; lv.f64xy = &f64xy1;
-            lv.median = &g.medians[s];
+            // A shared-buffer quantile reads its owner's (checked at capture).
+            lv.quantile = &g.quantiles[specs[s].quantile_owner == kQuantileOwnsBuffer
+                                           ? s : static_cast<size_t>(specs[s].quantile_owner)];
             lv.cidr = &g.cidrs[s];   // one "group": the whole column
             lv.hll = &g.hlls[s];
             lv.td = &g.tds[s];
@@ -3119,7 +3181,7 @@ struct GBLanes {
     std::vector<std::string> sval; // MinMaxStr extremes
     std::vector<GBArrayAggState> aa;  // ArrayAgg per-group element lists
     std::vector<opteryx::roaring32::Roaring32> cidr;  // CidrAgg per-group address sets
-    std::vector<opteryx::ungrouped::MedianState> median;  // Median per-group buffers
+    std::vector<opteryx::ungrouped::QuantileState> quantile;  // Quantile per-group buffers (MEDIAN / PERCENTILE_CONT)
     std::vector<HllppSketch> hll;  // ApproxCountDistinct per-group sketches
     std::vector<TDigestPtr> td;    // ApproxPercentile per-group sketches
 
@@ -3140,7 +3202,7 @@ inline void gb_lanes_swap(GBLanes& L, size_t a, size_t b) {
     auto sw = [a, b](auto& lane) { if (!lane.empty()) std::swap(lane[a], lane[b]); };
     sw(L.valid); sw(L.i64); sw(L.f64); sw(L.f64sq); sw(L.f64y); sw(L.f64yy);
     sw(L.f64xy); sw(L.mkey); sw(L.i128); sw(L.sval); sw(L.aa); sw(L.cidr);
-    sw(L.median); sw(L.hll); sw(L.td);
+    sw(L.quantile); sw(L.hll); sw(L.td);
 }
 
 inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
@@ -3188,16 +3250,18 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             // No `valid` lane: a CIDR_AGG row is never NULL — a group holding no
             // non-NULL addresses is the EMPTY set, which emits an empty array.
             // resize() default-constructs empty Roaring32s, the right initial
-            // state for a new group (they are move-only, like MedianState, so a
+            // state for a new group (they are move-only, like QuantileState, so a
             // copy cannot double-release their budget charge).
             L.cidr.resize(n);
             return;
-        case GBKind::Median:
+        case GBKind::Quantile:
             // No `valid` lane: null-ness is the state's own size==0 (see
-            // emit_lane_column). resize() default-constructs new MedianStates
+            // emit_lane_column). resize() default-constructs new QuantileStates
             // (empty, size==0) — the correct initial state for a new group.
-            L.median.resize(n);
+            L.quantile.resize(n);
             return;
+        case GBKind::QuantileShared:
+            return;   // no lanes: emit reads the owner spec's (see lane_view)
         case GBKind::ApproxCountDistinct:
             // No `valid` lane: never NULL (see emit_lane_column). resize()
             // default-constructs new HllppSketches (precision 14, matching the
@@ -3257,7 +3321,7 @@ struct GBFlatLanes {
     std::string* sval = nullptr;
     GBArrayAggState* aa = nullptr;
     opteryx::roaring32::Roaring32* cidr = nullptr;
-    opteryx::ungrouped::MedianState* median = nullptr;
+    opteryx::ungrouped::QuantileState* quantile = nullptr;
     HllppSketch* hll = nullptr;
     TDigestPtr* td = nullptr;
 };
@@ -3275,7 +3339,7 @@ inline bool gb_flat_lanes(GBLanes& L, size_t n, GBFlatLanes& f) {
     take(L.f64y, f.f64y); take(L.f64yy, f.f64yy); take(L.f64xy, f.f64xy);
     take(L.mkey, f.mkey); take(L.i128, f.i128);
     f.sval = L.sval.data(); f.aa = L.aa.data(); f.cidr = L.cidr.data();
-    f.median = L.median.data(); f.hll = L.hll.data(); f.td = L.td.data();
+    f.quantile = L.quantile.data(); f.hll = L.hll.data(); f.td = L.td.data();
     return ok;
 }
 
@@ -3530,11 +3594,11 @@ inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float, bool is_u64
                 L.valid[e] += 1;
             }
             return true;
-        case GBKind::Median:
+        case GBKind::Quantile:
             for (size_t k = 0; k < n; ++k) {
-                if (!L.median[D.pair_gid[k]].append(as_double(D.pair_raw[k]))) {
+                if (!L.quantile[D.pair_gid[k]].append(as_double(D.pair_raw[k]))) {
                     err.code = 1;
-                    err.msg = kMedianCapExceededMsg;
+                    err.msg = kQuantileCapExceededMsg;
                     return false;
                 }
             }
@@ -4224,16 +4288,18 @@ struct GroupBySink : Sink {
                           "mis-scaled variance";
                 return false;
             }
-            // MEDIAN is numeric-only (see median_operand_supported) — DECIMAL
-            // included, unlike STDDEV's DECIMAL-only rejection above.
-            if ((specs[s].fn == AggFn::Median || specs[s].fn == AggFn::ApproxPercentile)
+            // MEDIAN/PERCENTILE_CONT are numeric-only (see median_operand_supported)
+            // — DECIMAL included, unlike STDDEV's DECIMAL-only rejection above.
+            if ((specs[s].fn == AggFn::Quantile || specs[s].fn == AggFn::ApproxPercentile)
                     && !median_operand_supported(t)) {
                 err.code = 1;
-                err.msg = "MEDIAN/APPROX_PERCENTILE over this column "
+                err.msg = "MEDIAN/PERCENTILE_CONT/APPROX_PERCENTILE over this column "
                           "type is not supported — only numeric inputs are accepted "
                           "(CAST DECIMAL to DOUBLE first)";
                 return false;
             }
+            if (specs[s].fn == AggFn::Quantile && !quantile_spec_check(specs, s, err))
+                return false;
             // CORR: both operands numeric — captures the second operand's
             // type/floatness into meta[s] (type2/is_float2).
             if (specs[s].fn == AggFn::Corr
@@ -4619,20 +4685,22 @@ struct GroupBySink : Sink {
                 });
                 break;
             }
-            case GBKind::Median:
+            case GBKind::Quantile:
                 for (uint32_t i = 0; i < rows; ++i) {
                     if (!row_ok(i)) continue;
                     auto& L = lanes_of(gb_part(mkh[i]));
                     uint32_t e = l.mk_ent[i];
                     double d = agg2_raw_as_double(
                         RD::at(vdata, vsel[i]), is_f, is_u64);
-                    if (!L.median[e].append(d)) {
+                    if (!L.quantile[e].append(d)) {
                         err.code = 1;
-                        err.msg = kMedianCapExceededMsg;
+                        err.msg = kQuantileCapExceededMsg;
                         return false;
                     }
                 }
                 break;
+            case GBKind::QuantileShared:
+                break;   // the owner spec buffers these values (AggSpec2::quantile_owner)
             case GBKind::SumD128:
             case GBKind::AvgD128:
                 for (uint32_t i = 0; i < rows; ++i) {
@@ -5439,7 +5507,7 @@ struct GroupBySink : Sink {
     // sel[0..n); ge is read only at those, and COUNT(DISTINCT) pairs come from
     // psel[s]. The per-kind arms are the merge's own, unchanged — the scatter is a
     // combine into freshly zeroed groups, which is exactly a copy. Consumes src's
-    // element states where the kind moves them (ArrayAgg, Median, t-digest).
+    // element states where the kind moves them (ArrayAgg, Quantile, t-digest).
     template <bool kSel>
     bool combine_into(GroupByGlobal& g, GBPartData& dst, GBPartData& src,
                       const uint32_t* ge, const uint32_t* sel, uint32_t n,
@@ -5553,25 +5621,28 @@ struct GroupBySink : Sink {
                         D.valid[m] += S.valid[e];
                     }
                     break;
-                case GBKind::Median: {
-                    // MedianState has no merge-by-move (unlike ArrayAgg's element
+                case GBKind::Quantile: {
+                    // QuantileState has no merge-by-move (unlike ArrayAgg's element
                     // lists) — append each source value into the dest group's
-                    // state. Total buffered values are budget-bounded (512MB
-                    // global), so this is bounded work, not a hot-path concern.
+                    // state. Total buffered values are budget-bounded (the
+                    // global exact-quantile budget), so this is bounded work, not
+                    // a hot-path concern.
                     GBLanes& SL = src.lanes[s];
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
-                        opteryx::ungrouped::MedianState& src_st = SL.median[e];
-                        opteryx::ungrouped::MedianState& dst_st = D.median[ge[e]];
+                        opteryx::ungrouped::QuantileState& src_st = SL.quantile[e];
+                        opteryx::ungrouped::QuantileState& dst_st = D.quantile[ge[e]];
                         for (size_t k = 0; k < src_st.size; ++k) {
                             if (!dst_st.append(src_st.buf[k])) {
                                 err.code = 1;
-                                err.msg = kMedianCapExceededMsg;
+                                err.msg = kQuantileCapExceededMsg;
                                 return false;
                             }
                         }
                     }
                     break;
                 }
+                case GBKind::QuantileShared:
+                    break;   // no lanes — the owner spec's merge carries the values
                 case GBKind::SumD128:
                 case GBKind::AvgD128:
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
@@ -5661,7 +5732,7 @@ struct GroupBySink : Sink {
                     break;
                 case GBKind::ApproxPercentile: {
                     // td_merge's `from` isn't const in the vendored C API —
-                    // mutable alias, like Median's src-consuming merge.
+                    // mutable alias, like Quantile's src-consuming merge.
                     GBLanes& SL = src.lanes[s];
                     for (uint32_t ii = 0; ii < n; ++ii) {
                         const uint32_t e = pick(ii);
@@ -5962,11 +6033,20 @@ struct GroupBySink : Sink {
         } else if (kind == GBKind::CidrAgg) {
             // No `valid` lane (see gb_lanes_resize) — never NULL.
             lv.cidr = const_cast<opteryx::roaring32::Roaring32*>(L.cidr.data()) + start;
-        } else if (kind == GBKind::Median) {
-            // No `valid` lane (Median never allocates one — see
+        } else if (kind == GBKind::Quantile) {
+            // No `valid` lane (Quantile never allocates one — see
             // gb_lanes_resize); null-ness is each state's own size==0.
-            lv.median = const_cast<opteryx::ungrouped::MedianState*>(
-                L.median.data()) + start;
+            lv.quantile = const_cast<opteryx::ungrouped::QuantileState*>(
+                L.quantile.data()) + start;
+            lv.pct_spec = &specs[s];
+        } else if (kind == GBKind::QuantileShared) {
+            // The owner spec's buffers in this same partition (quantile_owner,
+            // checked at capture), read with THIS spec's p and direction. Specs
+            // emit one after another per chunk, so the reads never overlap.
+            const GBLanes& O = P.lanes[static_cast<size_t>(specs[s].quantile_owner)];
+            lv.quantile = const_cast<opteryx::ungrouped::QuantileState*>(
+                O.quantile.data()) + start;
+            lv.pct_spec = &specs[s];
         } else if (kind == GBKind::ApproxCountDistinct) {
             // No `valid` lane either — never NULL (see emit_lane_column).
             lv.hll = L.hll.data() + start;
@@ -5994,7 +6074,8 @@ struct GroupBySink : Sink {
     // allowed — and none of them is an ORDER BY key the compiler arms.
     static bool topk_key_kind_pure(GBKind k) {
         switch (k) {
-            case GBKind::ArrayAgg: case GBKind::CidrAgg: case GBKind::Median:
+            case GBKind::ArrayAgg: case GBKind::CidrAgg: case GBKind::Quantile:
+            case GBKind::QuantileShared:
             case GBKind::ApproxCountDistinct: case GBKind::ApproxPercentile:
                 return false;
             default:

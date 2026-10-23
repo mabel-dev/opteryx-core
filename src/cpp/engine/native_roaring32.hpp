@@ -39,7 +39,7 @@
 // only when the whole IPv4 space is present. That bound is PER SET, not per
 // query: a GROUP BY produces one set per group and the group count is
 // unbounded, so the real exposure is the total. This charges a global byte
-// budget in the same shape MedianState uses (see _agg_kernels.hpp) — charged
+// budget in the same shape QuantileState uses (see _agg_kernels.hpp) — charged
 // on capacity growth, released on free, latching `overflowed` and refusing
 // further inserts past the ceiling so the sink can raise at finalize. Silent
 // truncation would report a smaller set than the data holds, which is a wrong
@@ -85,7 +85,7 @@ struct CidrSetBudget {
     static constexpr int64_t ceiling() noexcept {
         return opteryx::agg_budgets::kCidrAggStateBytes;
     }
-    // Per-shared-object counter, matching the MedianState convention: the one
+    // Per-shared-object counter, matching the QuantileState convention: the one
     // extension that actually executes the aggregate accounts against a single
     // instance.
     static std::atomic<int64_t>& used() noexcept {
