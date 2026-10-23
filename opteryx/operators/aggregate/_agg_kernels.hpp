@@ -411,6 +411,11 @@ struct QuantileState {
     inline bool _grow(size_t need) noexcept {
         size_t new_cap = _next_cap(cap);
         while (new_cap < need) new_cap = _next_cap(new_cap);
+        return _set_cap(new_cap);
+    }
+
+    // Reallocate to exactly `new_cap` (> cap) slots, charging the budget first.
+    inline bool _set_cap(size_t new_cap) noexcept {
         int64_t delta = static_cast<int64_t>(new_cap - cap)
                         * static_cast<int64_t>(sizeof(double));
         const int64_t used = median_budget_used().fetch_add(delta) + delta;
@@ -434,6 +439,20 @@ struct QuantileState {
         if (size >= cap && !_grow(size + 1)) return false;
         buf[size++] = v;
         return true;
+    }
+
+    // Room for exactly `need` values in ONE reallocation — the bulk merge's reserve,
+    // sized from the buffers it is about to copy, never the geometric curve above.
+    inline bool reserve_exact(size_t need) noexcept {
+        return need <= cap || _set_cap(need);
+    }
+
+    // Append every value of `src` with one memcpy. The caller has reserved the room
+    // (reserve_exact), so this never allocates; `src` is left as it was.
+    inline void append_reserved(const QuantileState& src) noexcept {
+        if (src.size == 0) return;
+        std::memcpy(buf + size, src.buf, src.size * sizeof(double));
+        size += src.size;
     }
 
     // Compute the p-quantile in place. Mutates buf via std::nth_element, but every

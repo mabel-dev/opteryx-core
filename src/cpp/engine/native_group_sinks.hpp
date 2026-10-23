@@ -2547,6 +2547,11 @@ struct UngroupedAggGlobal : GlobalSinkState {
     std::vector<AggCell> cells;
     std::vector<std::string> strs;
     std::vector<opteryx::ungrouped::QuantileState> quantiles;
+    // Per spec: the workers' exact-quantile buffers, MOVED here by combine (no copy
+    // under the mutex) and merged once at finalize into `quantiles`, reserved at the
+    // exact total. Copying value by value under the lock was serial and ~20x
+    // DuckDB's combine (ClickBench-extended Q55, 25.4M values: ~120 ms vs ~6 ms).
+    std::vector<std::vector<opteryx::ungrouped::QuantileState>> quantile_parts;
     std::vector<opteryx::roaring32::Roaring32> cidrs;
     std::vector<HllppSketch> hlls;
     std::vector<TDigestPtr> tds;
@@ -2911,6 +2916,7 @@ struct UngroupedAggSink : Sink {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
             g.quantiles.resize(specs.size());
+            g.quantile_parts.resize(specs.size());
             g.cidrs.resize(specs.size());
             g.hlls.resize(specs.size());
             g.tds.resize(specs.size());
@@ -2925,15 +2931,10 @@ struct UngroupedAggSink : Sink {
                     agg2_merge_str(g.cells[s], l.cells[s], g.strs[s], l.strs[s],
                                    specs[s].fn == AggFn::Max);
                 agg2_merge(g.cells[s], l.cells[s]);
-                if (specs[s].fn == AggFn::Quantile) {
-                    opteryx::ungrouped::QuantileState& src_st = l.quantiles[s];
-                    for (size_t k = 0; k < src_st.size; ++k) {
-                        if (!g.quantiles[s].append(src_st.buf[k])) {
-                            err.code = 1;
-                            err.msg = kQuantileCapExceededMsg;
-                            return;
-                        }
-                    }
+                if (specs[s].fn == AggFn::Quantile && l.quantiles[s].size > 0) {
+                    // Parked, not copied: the move hands over the buffer and its
+                    // budget charge together. Merged once in finalize.
+                    g.quantile_parts[s].push_back(std::move(l.quantiles[s]));
                 }
                 if (specs[s].fn == AggFn::CidrAgg) {
                     // Union: order- and duplication-insensitive, so the worker
@@ -2981,11 +2982,44 @@ struct UngroupedAggSink : Sink {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
             g.quantiles.resize(specs.size());
+            g.quantile_parts.resize(specs.size());
             g.cidrs.resize(specs.size());
             g.hlls.resize(specs.size());
             g.tds.resize(specs.size());
             g.dpending.resize(specs.size());
             g.meta.resize(specs.size());
+        }
+        // Exact quantiles: merge the workers' parked buffers into ONE, reserved at the
+        // exact total in a single reallocation. The largest is adopted, not copied
+        // (realloc may extend it in place); every other one is memcpy'd and freed at
+        // once, so the peak is the total plus the buffers not yet copied.
+        for (size_t s = 0; s < specs.size(); ++s) {
+            std::vector<opteryx::ungrouped::QuantileState>& parts = g.quantile_parts[s];
+            if (parts.empty()) continue;
+            if (g.quantiles[s].size != 0) {
+                err.code = 1;
+                err.msg = "exact-quantile merge found values already in the global "
+                          "buffer — fail loud, never a silently dropped buffer";
+                return;
+            }
+            size_t total = 0, largest = 0;
+            for (size_t k = 0; k < parts.size(); ++k) {
+                total += parts[k].size;
+                if (parts[k].size > parts[largest].size) largest = k;
+            }
+            opteryx::ungrouped::QuantileState& dst = g.quantiles[s];
+            dst = std::move(parts[largest]);
+            if (!dst.reserve_exact(total)) {
+                err.code = 1;
+                err.msg = kQuantileCapExceededMsg;
+                return;
+            }
+            for (size_t k = 0; k < parts.size(); ++k) {
+                if (k == largest) continue;
+                dst.append_reserved(parts[k]);
+                parts[k] = opteryx::ungrouped::QuantileState{};   // free it now
+            }
+            parts.clear();
         }
         // The planner's statistics seed: covered row groups' partials, merged as if
         // their rows had been sunk. The seed's operand type IS the scan's decoded
