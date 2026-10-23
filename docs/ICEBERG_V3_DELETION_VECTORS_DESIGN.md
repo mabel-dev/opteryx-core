@@ -1,6 +1,6 @@
 # Iceberg v3 deletion vectors (Puffin) — read support
 
-Status: DESIGN — awaiting ratification. Nothing is built.
+Status: DESIGN — D0, D1, D1b ruled 2026-10-23 (support it; our own Puffin reader; a full Puffin file reader with the DV decoder on top). D2–D8 open. Nothing is built.
 Date: 2026-10-23
 Repos: `opteryx-iceberg` (planning), `rugo` (native decoder), `opteryx-core` (handoff — only if D3/D4 say so)
 Spec: Iceberg table spec (`format/spec.md`, "Deletion Vectors", "Scan Planning"), Puffin spec
@@ -19,6 +19,8 @@ Today a v3 table that has had a merge-on-read DELETE/UPDATE/MERGE (Trino always;
 - (a) Reading v3 merge-on-read tables is a goal now → build this doc.
 - (b) No v3 table we need to read has deletes → do not build; the refusal stands and is correct.
 
+**RULED 2026-10-23: (a), support it.** Still open: whether DVs ship alone or as part of a v3-read programme (below).
+
 **Deletion vectors alone do not make v3 tables readable** (see §9, found while reading).
 D0 also decides whether DVs ship on their own, with every other v3 feature refused loudly, or
 as one piece of a "v3 read" programme. My recommendation: DVs on their own, *plus* a
@@ -32,7 +34,8 @@ table that has no deletes is read today with no gate at all.
 **In:**
 - Planning: recognise DV entries in v3 delete manifests and match them to data files using the
   spec's rules (§3).
-- A native `deletion-vector-v1` blob decoder in rugo, written in C++, with no Python on the decode path (§4).
+- Our own Puffin file reader in rugo (C++, no Python on the decode path): footer, blob directory,
+  compressed footer and blobs (§4.1). The `deletion-vector-v1` decoder sits on top of it (§4).
 - Handing the decoded positions to the existing merge-on-read machinery in core, which already
   subtracts per-file deleted ordinals natively (`src/cpp/engine/delete_admission.hpp`).
 
@@ -130,15 +133,19 @@ itself: a length prefix, magic and CRC (§4), checked against the manifest's car
 
 ---
 
-## 4. Native decoder — `rugo/src/puffin/`
+## 4. Native reader — `rugo/src/puffin/`
 
 Puffin is a file format. That puts it in rugo's charter, next to the Avro reader. It must stay
 opteryx-free: the standalone `rugo` wheel ships it.
 
+Two layers, both ours (D1, D1b ruled): a **full Puffin file reader** (§4.1), and the
+`deletion-vector-v1` decoder on top of it (this section). No vendored CRoaring or third-party Puffin code.
+
 `rugo/src/puffin/deletion_vector.{hpp,cpp}` exposes one function. It takes a blob span and the
-expected cardinality and returns ascending positions or an error string. Python edge: a
-`rugo.puffin` module with `read_deletion_vector(blob: bytes, cardinality: int)`, which drops the GIL
-for the decode. No vendored CRoaring: that would be a dependency, and the read side is small.
+expected cardinality and returns ascending positions or an error string. Python edge: the
+`rugo.puffin` module, `read_deletion_vector(blob: bytes, cardinality: int)`, which drops the GIL for
+the decode. The blob it takes is the uncompressed blob payload: `deletion-vector-v1` is never
+compressed, and if the footer says it is, §4.1 raises.
 
 **Blob layout** (Puffin spec, `deletion-vector-v1`):
 
@@ -177,6 +184,76 @@ portable layout:
   it first, with a message that names the cause.
 
 Positions are emitted ascending: keys ascending × containers ascending × values ascending, so no sort.
+
+### 4.1 The Puffin file reader (D1b — RULED 2026-10-23: full reader)
+
+The architect ruled for a full Puffin file reader, not a DV-blob-only decoder. The DV decoder above
+is one blob type on top of it. The same reader later serves `apache-datasketches-theta-v1`
+statistics, which are out of this doc's scope.
+
+`rugo/src/puffin/puffin_reader.{hpp,cpp}`. **Bytes in, no IO**, the same as `rugo.avro.read_avro(data)`:
+the caller (opteryx-iceberg, through the table's FileIO) fetches the bytes, and the reader parses them.
+
+**File layout** (Puffin spec, version 1):
+
+```
+Magic  Blob₁ … Blobₙ  Footer
+Footer = Magic  FooterPayload  FooterPayloadSize  Flags  Magic
+Magic  = 50 46 41 31 ("PFA1")
+```
+
+`FooterPayloadSize` is a 4-byte signed little-endian integer, the payload length after compression.
+`Flags` is 4 bytes, and byte 0 bit 0 means the payload is compressed. The footer is
+`12 + FooterPayloadSize + 4` bytes, read from the end of the file.
+
+**Surface:**
+- `read_footer(tail: bytes, file_size: int) -> FileMetadata`. `tail` is any suffix of the file
+  that contains the whole footer. Steps:
+  - check the trailing magic, then read `FooterPayloadSize` and `Flags`
+  - if `tail` is too short, raise with the exact byte count needed, so the caller re-fetches once
+    with no guessing loop
+  - check the footer's leading magic
+  - decompress the payload when flag bit 0 is set: a single LZ4 frame with content size present,
+    per the spec
+  - parse the JSON with yyjson
+- `FileMetadata`: `blobs: list[BlobMetadata]` and `properties: dict[str, str]`.
+  `BlobMetadata` has `type`, `fields: list[int]`, `snapshot_id`, `sequence_number`, `offset`,
+  `length`, `compression_codec: str | None` and `properties: dict[str, str]`.
+- `read_blob(data: bytes, blob: BlobMetadata) -> bytes`. `data` is exactly the blob's
+  `[offset, offset + length)`. The result is decompressed per `compression_codec`: none, `lz4`
+  (a single LZ4 frame) or `zstd` (a single zstd frame).
+- `read_deletion_vector(blob, cardinality)` (§4), applied to the `read_blob` result.
+
+**Validation, every failure raises with a named reason:**
+- both footer magics; `FooterPayloadSize` ≥ 0; the footer fits inside `file_size` with the leading
+  file magic before it
+- **unknown `Flags` bits set → raise.** Reserved bits mean a writer feature we don't understand.
+  Ignoring them could misparse the footer silently.
+- the JSON is a `FileMetadata` object: `blobs` is required, and so is every required `BlobMetadata`
+  field, with the right JSON type. Unknown keys are ignored, because the spec lets writers add properties.
+- every blob range is inside `[4, footer_start)`
+- `compression-codec` is absent, `lz4` or `zstd`; anything else raises. The spec says
+  "other codecs are not supported".
+- decompressed sizes must match the frames' declared content size, and the frame checksums are
+  verified by the existing stream decoders
+- a `deletion-vector-v1` blob with any `compression-codec` raises (the spec: "not compressed")
+- an unknown blob `type` is **not** an error at this layer. `read_blob` returns its bytes, and
+  callers dispatch on `type`.
+
+**How the DV path uses it.** The manifest gives each DV's `content_offset` and
+`content_size_in_bytes`, which the spec says exactly match the footer's `offset` and `length`. So a
+DV can be read without the footer: one ranged read per blob (or per coalesced group), then
+`read_deletion_vector`. Whether the DV path *also* reads the footer to cross-check offset, length,
+type, codec and `referenced-data-file` is D2. The full reader makes that cross-check possible; it
+doesn't make it mandatory.
+
+Everything the full reader needs is already in rugo. It needs no new vendoring:
+
+| Need | Where |
+|---|---|
+| CRC-32 (IEEE) | `crc32_update`, `rugo/src/compression/stream_decompress.hpp` |
+| LZ4 **frame** and zstd frame decode | `stream_decompress.hpp` (frame format, content checksums verified) |
+| JSON | yyjson, `third_party/yyjson`, already built for rugo |
 
 ---
 
@@ -247,11 +324,18 @@ ordinary).
 The decoder must be tested against bytes from a **real writer**, not only bytes we produced.
 Otherwise our reading of the spec is only being checked against itself.
 
-- **rugo unit tests** (`tests/rugo/test_puffin_deletion_vector.py`):
+- **rugo Puffin reader tests** (`tests/rugo/test_puffin_reader.py`):
+  - footer uncompressed and LZ4-compressed
+  - a short `tail` raises with the exact byte count needed
+  - blobs uncompressed, `lz4` and `zstd`
+  - unknown blob type returned raw
+  - one test per §4.1 validation failure (unknown flag bits, unknown codec, a compressed DV, an
+    out-of-range blob, a missing required field)
+- **rugo DV decoder tests** (`tests/rugo/test_puffin_deletion_vector.py`):
   - hand-built blobs for array, bitset and run containers, both cookies, and the n ≥ 4 offset-header
     case, with empty and full-container edges
   - one test per §4 validation failure
-  - no numpy
+- No numpy in either.
 - **Golden interop files** (D8): a small set of Puffin files plus expected positions, written by
   Iceberg Java/Spark (the reference writer) and checked in as fixtures.
 - **Planning tests** (`opteryx-iceberg/tests/`):
@@ -276,9 +360,10 @@ Otherwise our reading of the spec is only being checked against itself.
 
 | # | Decision | Recommendation |
 |---|---|---|
-| **D0** | Build at all: is reading v3 MOR tables a goal now? DVs alone, or as part of a v3-read programme? | Build if a v3 table is in sight; DVs alone, with the §9 format-version gate |
-| **D1** | Decoder home and form: `rugo/src/puffin/`, hand-written, no CRoaring | Yes as written |
-| **D2** | Trust manifest offset/length + blob self-checks, no Puffin footer read | Yes, no footer read |
+| **D0** | Build at all: is reading v3 MOR tables a goal now? DVs alone, or as part of a v3-read programme? | **RULED: build.** Still open: alone vs programme. Recommend DVs alone, with the §9 format-version gate |
+| **D1** | Decoder home and form: `rugo/src/puffin/`, hand-written, no CRoaring | **RULED 2026-10-23: our own Puffin reader** |
+| **D1b** | Reader scope: DV blob only, or a full Puffin file reader (§4.1) | **RULED 2026-10-23: full Puffin file reader** (magic, footer, compressed footer JSON, blob directory, compressed blobs), DV decoder on top |
+| **D2** | DV path: read blobs by manifest offset/length with blob self-checks, or also read each Puffin footer to cross-check | Direct read, no footer read on the DV path. The blob's length prefix, magic, CRC and cardinality already pin it, and a footer read is one more round trip per Puffin file |
 | **D3** | Puffin coordinates across `delete_vectors_for`: side map / manifest columns / string | (b) manifest columns: the side map is wrong across snapshots |
 | **D4** | Position transport: boxed Python ints / native buffer | (b) native buffer |
 | **D5** | v2 position-delete files (no DV) in upgraded tables | Keep refusing; separate doc if ever needed |
