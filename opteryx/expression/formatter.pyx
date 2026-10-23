@@ -322,6 +322,12 @@ def _format_expression_inner(root, qualify, cache):
                     + (" DESC" if not item[1] else "")
                     for item in (root.order or [])
                 )
+            if root.value == "PERCENTILE_CONT":
+                # The ordered-set spelling the caller wrote. The node carries
+                # [operand, fraction] with the direction on `order`
+                # (logical_planner_builders._ordered_set_aggregate).
+                fraction = format_expression(root.parameters[1], qualify_b, cache)
+                return f"PERCENTILE_CONT({fraction}) WITHIN GROUP ({order.strip()})"
             if root.value == "ARRAY_AGG":
                 limit = f" LIMIT {root.limit}" if root.limit else ""
                 return (

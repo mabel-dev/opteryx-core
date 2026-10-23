@@ -397,6 +397,12 @@
                 "over_order_by": true,
                 "over_frame": true
             },
+            "PERCENTILE_CONT": {
+                "over_empty": false,
+                "over_partition_by": false,
+                "over_order_by": false,
+                "over_frame": false
+            },
             "STDDEV": {
                 "over_empty": true,
                 "over_partition_by": true,

@@ -392,6 +392,35 @@
             "strict_grouped": true
         }
     },
+    "PERCENTILE_CONT": {
+        "ast_symbol": "PERCENTILE_CONT",
+        "friendly_name": "Percentile Cont",
+        "kernel_name": "percentile_cont",
+        "category": "other",
+        "status": "unsupported",
+        "summary": "PERCENTILE_CONT",
+        "description": "PERCENTILE_CONT",
+        "documentation": "PERCENTILE_CONT",
+        "sql_forms": [
+            "PERCENTILE_CONT(expr)"
+        ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
+        "support": {
+            "global": false,
+            "grouped": false,
+            "strict_grouped": false
+        }
+    },
     "STDDEV": {
         "ast_symbol": "STDDEV",
         "friendly_name": "Standard Deviation",

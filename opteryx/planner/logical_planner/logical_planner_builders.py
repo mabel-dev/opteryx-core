@@ -2094,6 +2094,120 @@ def _validate_window_int_literal(func: str, node, role: str, minimum: int) -> No
         raise UnsupportedSyntaxError(f"{func}()'s {role} must be a {bound}.")
 
 
+#: Ordered-set aggregates: the argument list carries only the fraction, and the
+#: values arrive through WITHIN GROUP (ORDER BY ...).
+_ORDERED_SET_AGGREGATES = frozenset({"PERCENTILE_CONT"})
+
+
+def _ordered_set_aggregate(
+    func,
+    args,
+    branch,
+    alias,
+    name_span,
+    *,
+    duplicate_treatment,
+    null_treatment,
+    order_by,
+    limit,
+    inline_filter,
+    plan_context,
+):
+    """`PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr [ASC|DESC])`.
+
+    Lowered to the shape the rest of the planner already reads for a percentile:
+    parameters `[expr, p]` - the operand first, as every aggregate carries it, then
+    the fraction, as `APPROX_PERCENTILE(expr, p)` carries it - with the direction on
+    `order`, the field the dedup key (logical_planner_rewriter._aggregate_key) and
+    the column name (format_expression) already read. The operand is the same node
+    in both places. The physical compiler lowers it to the exact-quantile aggregate
+    MEDIAN uses.
+    """
+    if func == "PERCENTILE_DISC":
+        # Not an oversight: the discrete form must return a value of the INPUT type,
+        # and the exact-quantile buffer holds doubles, which cannot carry a 64-bit
+        # integer above 2^53 exactly. It needs its own typed buffer.
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{md_syntax('PERCENTILE_DISC')} is not supported",
+                f"{md_syntax('PERCENTILE_CONT')} computes the exact, interpolated percentile, "
+                f"for example {md_code('PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY column)')}",
+            )
+        )
+    if func not in _ORDERED_SET_AGGREGATES:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{md_syntax('WITHIN GROUP (ORDER BY ...)')} is only meaningful for an ordered-set "
+                f"aggregate such as {md_syntax('PERCENTILE_CONT')}, and {func} is not one",
+                f"Remove the {md_syntax('WITHIN GROUP')} clause",
+            )
+        )
+    within_group = branch.get("within_group") or []
+    example = md_code(f"{func}(0.5) WITHIN GROUP (ORDER BY column)")
+    if not within_group:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax(func)} takes the values it ranks from **WITHIN GROUP (ORDER BY ...)**, "
+            f"and its only argument is the fraction: {example}."
+        )
+    if len(within_group) != 1:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax(func)} ranks exactly one expression: **WITHIN GROUP (ORDER BY ...)** "
+            f"takes a single item, as in {example}."
+        )
+    # Each of these shapes the input of an ordinary aggregate; none has a meaning
+    # here that we implement, so each is refused rather than dropped.
+    modifiers = [
+        spelling
+        for spelling, present in (
+            ("DISTINCT", duplicate_treatment is not None),
+            ("ORDER BY inside the arguments", bool(order_by)),
+            ("LIMIT", limit is not None),
+            ("IGNORE/RESPECT NULLS", null_treatment is not None or branch.get("null_treatment") is not None),
+            ("WHERE inside the arguments", inline_filter is not None),
+            ("FILTER (WHERE ...)", branch.get("filter") is not None),
+            ("OVER (...)", branch.get("over") is not None),
+        )
+        if present
+    ]
+    if modifiers:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"**{' / '.join(modifiers)}** is not supported with {md_syntax(func)}",
+                f"Filter rows in the query's **WHERE** clause instead, and write the aggregate as {example}",
+            )
+        )
+    if len(args) != 1:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax(func)} takes exactly one argument, the fraction to find: {example}."
+        )
+    fraction = args[0]
+    if (
+        fraction.node_type != NodeType.LITERAL
+        or fraction.value is None
+        or fraction.type.category not in (LogicalCategory.INTEGER, LogicalCategory.FLOAT)
+        or not 0.0 <= float(fraction.value) <= 1.0
+    ):
+        raise UnsupportedSyntaxError(
+            f"{md_syntax(func)}'s fraction must be a numeric literal between 0 and 1, as in {example}."
+        )
+    item = within_group[0]
+    if item.get("with_fill") is not None:
+        raise UnsupportedSyntaxError(f"**WITH FILL** is not supported in {func}'s **WITHIN GROUP (ORDER BY ...)**.")
+    refuse_non_default_nulls(item["options"], f"{func}'s **WITHIN GROUP (ORDER BY ...)**")
+    ascending = sort_is_ascending(item["options"])
+    operand = build(item["expr"], plan_context=plan_context)
+    node = Aggregator(
+        value=func,
+        parameters=[operand, fraction],
+        alias=alias,
+        order=[(operand, ascending)],
+        span=name_span,
+        arena=plan_context.expressions,
+    )
+    node.qualified_name = format_expression(node)
+    return node
+
+
 def function(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     func = ".".join(build(p, plan_context=plan_context).value for p in branch["name"]).upper()
     # The whole dotted name, first part to last - that is what the error names.
