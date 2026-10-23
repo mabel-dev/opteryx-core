@@ -865,10 +865,23 @@ clickbench-rugo:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
+clickbench-rugo-extended: ## Run ClickBench on the rugo 262k mirror with the 15 queries proposed in ClickHouse/ClickBench#1489 appended (Q43-Q57; Q54/Q55 need an exact percentile we do not have, and fail)
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (extended) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --extended
+
 clickbench-canon: ## Run ClickBench on the upstream 100-file split (scratch/hits) instead of the rugo 262k mirror
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (canon) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon
+
+clickbench-canon-single: ## Run ClickBench on upstream's single hits.parquet (downloads 14 GiB to scratch/hits_single on first run)
+	@# Downloaded to a .partial name and renamed only on success, so an
+	@# interrupted download is never mistaken for the dataset.
+	@test -f scratch/hits_single/hits.parquet || { mkdir -p scratch/hits_single && curl -fL --retry 3 -o scratch/hits_single/hits.parquet.partial https://datasets.clickhouse.com/hits_compatible/hits.parquet && mv scratch/hits_single/hits.parquet.partial scratch/hits_single/hits.parquet; }
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (canon single) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon-single
 
 clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, lz4 (performance posture), from scratch/hits_rugo_262k on first run)
 	$(call print_blue,"Running ClickBench benchmark on skene...")

@@ -167,6 +167,9 @@ cdef extern from "filesystem.hpp" namespace "rugo":
     vector[ParquetFooterResult] FetchParquetFootersMany(
         const vector[string]& paths, const vector[int64_t]& file_sizes,
         const string& auth_header) except + nogil
+    # Bytes to read from a file's end to reach its footer in one request — the
+    # single sizing rule for every footer read (filesystem.hpp).
+    int64_t footer_suffix_bytes(int64_t file_size) nogil
 
 cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:

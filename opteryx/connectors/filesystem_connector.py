@@ -65,17 +65,15 @@ _SCHEMA_CACHE_MAX = _MANIFEST_CACHE_MAX
 
 
 
-# Bytes read from the end of a Parquet file to reach its footer in one request;
-# the same suffix the native pipeline uses (filesystem.hpp kFooterSuffixPrefetch).
-_FOOTER_SUFFIX_BYTES = 65536
-
-
 def _read_parquet_footer_envelope(filesystem, path: str, size: int) -> bytes:
     """`PAR1` + footer + length + `PAR1` for the Parquet file at `path` (`size`
     bytes), read with at most two ranged reads — the only bytes a schema needs."""
+    from opteryx.connectors.parquet_io.pool_reader import footer_suffix_bytes
+
     if size < 12:
         raise DataError(f"{md_code(path)} is too small to be a Parquet file ({size} bytes).")
-    tail_len = min(size, _FOOTER_SUFFIX_BYTES)
+    # The native footer readers' own sizing rule, so this read and theirs agree.
+    tail_len = min(size, footer_suffix_bytes(size))
     tail = bytes(filesystem.read_ranges(path, [(size - tail_len, tail_len)])[0])
     if len(tail) != tail_len or tail[-4:] != b"PAR1":
         raise DataError(f"{md_code(path)} does not end with a Parquet footer.")

@@ -179,6 +179,7 @@ from posix.types cimport off_t
 from posix.unistd cimport close as posix_close, pread
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
 from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchParquetFootersMany
+from rugo.parquet_reader cimport footer_suffix_bytes as _cpp_footer_suffix_bytes
 
 # Cross-instance footer cache: one batched MGET serves footers another instance already
 # fetched, keyed by data-file path. Envelope bytes only — reconstructed through the same
@@ -2630,6 +2631,14 @@ cdef ParquetFooterRef _footer_after_acquire(
         footer = _PARSED_FOOTER_CACHE.put(
             path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
     return footer
+
+
+cpdef int64_t footer_suffix_bytes(int64_t file_size):
+    """Bytes to read from the end of a `file_size`-byte Parquet file to reach its
+    whole footer in one request (-1 = size unknown). The native rule
+    (rugo/src/parquet/filesystem.hpp `footer_suffix_bytes`), exposed so a Python
+    footer read sizes its tail exactly as the native readers do."""
+    return _cpp_footer_suffix_bytes(file_size)
 
 
 cpdef list fetch_column_stats_many(

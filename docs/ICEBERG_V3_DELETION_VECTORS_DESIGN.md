@@ -1,6 +1,6 @@
 # Iceberg v3 deletion vectors (Puffin) — read support
 
-Status: DESIGN — D0, D1, D1b ruled 2026-10-23 (support it; our own Puffin reader; a full Puffin file reader with the DV decoder on top). D2–D8 open. Nothing is built.
+Status: DESIGN — D0, D1, D1b, D2 ruled 2026-10-23 (support it; our own Puffin reader; a full Puffin file reader with the DV decoder on top; no footer read on the DV path). D3–D8 open. Nothing is built.
 Date: 2026-10-23
 Repos: `opteryx-iceberg` (planning), `rugo` (native decoder), `opteryx-core` (handoff — only if D3/D4 say so)
 Spec: Iceberg table spec (`format/spec.md`, "Deletion Vectors", "Scan Planning"), Puffin spec
@@ -127,7 +127,7 @@ IO default (a perf choice, not a ruling): group by Puffin path, coalesce adjacen
 and fetch the groups in parallel on a `ThreadPoolExecutor`, as manifests already are. To measure
 before tuning: binding latency against DV count on a Spark-written table.
 
-**No Puffin footer read** (D2). The spec requires the manifest's `content_offset`/`content_size_in_bytes`
+**No Puffin footer read** (D2, RULED 2026-10-23: the fastest option). The spec requires the manifest's `content_offset`/`content_size_in_bytes`
 to "exactly match the `offset` and `length` stored in the Puffin footer". The blob also verifies
 itself: a length prefix, magic and CRC (§4), checked against the manifest's cardinality.
 
@@ -243,9 +243,11 @@ Magic  = 50 46 41 31 ("PFA1")
 **How the DV path uses it.** The manifest gives each DV's `content_offset` and
 `content_size_in_bytes`, which the spec says exactly match the footer's `offset` and `length`. So a
 DV can be read without the footer: one ranged read per blob (or per coalesced group), then
-`read_deletion_vector`. Whether the DV path *also* reads the footer to cross-check offset, length,
-type, codec and `referenced-data-file` is D2. The full reader makes that cross-check possible; it
-doesn't make it mandatory.
+`read_deletion_vector`. **D2 RULED 2026-10-23: the fastest option.** The DV path does not read the
+footer, which saves at least one round trip per Puffin file. The DV path passes the ranged bytes
+straight to `read_deletion_vector`, and the codec is never consulted. A compressed or misaddressed
+blob still raises, because the blob's own length prefix, magic, CRC and cardinality checks fail
+on it. The footer path exists for blob consumers that have no manifest coordinates, such as statistics.
 
 Everything the full reader needs is already in rugo. It needs no new vendoring:
 
@@ -363,7 +365,7 @@ Otherwise our reading of the spec is only being checked against itself.
 | **D0** | Build at all: is reading v3 MOR tables a goal now? DVs alone, or as part of a v3-read programme? | **RULED: build.** Still open: alone vs programme. Recommend DVs alone, with the §9 format-version gate |
 | **D1** | Decoder home and form: `rugo/src/puffin/`, hand-written, no CRoaring | **RULED 2026-10-23: our own Puffin reader** |
 | **D1b** | Reader scope: DV blob only, or a full Puffin file reader (§4.1) | **RULED 2026-10-23: full Puffin file reader** (magic, footer, compressed footer JSON, blob directory, compressed blobs), DV decoder on top |
-| **D2** | DV path: read blobs by manifest offset/length with blob self-checks, or also read each Puffin footer to cross-check | Direct read, no footer read on the DV path. The blob's length prefix, magic, CRC and cardinality already pin it, and a footer read is one more round trip per Puffin file |
+| **D2** | DV path: read blobs by manifest offset/length with blob self-checks, or also read each Puffin footer to cross-check | **RULED 2026-10-23: the fastest option.** Direct read by manifest offset/length, no footer read on the DV path |
 | **D3** | Puffin coordinates across `delete_vectors_for`: side map / manifest columns / string | (b) manifest columns: the side map is wrong across snapshots |
 | **D4** | Position transport: boxed Python ints / native buffer | (b) native buffer |
 | **D5** | v2 position-delete files (no DV) in upgraded tables | Keep refusing; separate doc if ever needed |

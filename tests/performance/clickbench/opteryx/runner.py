@@ -70,6 +70,7 @@ DATASET = Dataset.FULL_SPLIT_RUGO_262K
 VARIANT_DATASETS = {
     "": DATASET,
     "canon": Dataset.FULL_SPLIT,
+    "canon-single": Dataset.FULL_SINGLE,
     "skene": Dataset.FULL_SPLIT_SKENE,
     "json": Dataset.FULL_SPLIT_JSON,
     "avro": Dataset.FULL_SPLIT_AVRO,
@@ -187,6 +188,43 @@ STATEMENTS = [
         ("/* 41 */ SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-01'::DATE AND EventDate::DATE <= '2013-07-31'::DATE AND IsRefresh = 0 AND DontCountHits = 0 AND URLHash::INT64 = 2868770270353813622 GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000;", None),
         ("/* 42 */ SELECT TRUNC(EventTime::TIMESTAMP[s], 'minute') AS M, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::DATE >= '2013-07-14'::DATE AND EventDate::DATE <= '2013-07-15'::DATE AND IsRefresh = 0 AND DontCountHits = 0 GROUP BY TRUNC(EventTime::TIMESTAMP[s], 'minute') ORDER BY M LIMIT 10 OFFSET 1000;", None),
 ]
+
+# The 15 queries proposed upstream in ClickHouse/ClickBench#1489 ("Additional
+# queries for ClickBench", OPEN, not merged as of 2026-10-23), translated from
+# its duckdb-parquet/queries.sql. The PR numbers them Q44-Q58 (1-based); here
+# they continue the 0-based numbering above, so PR Q44 is /* 43 */. Run with
+# `--extended` (`make clickbench-rugo-extended`).
+#
+# Translations:
+#   48, 49  count(*) FILTER (WHERE ...) -> COUNT(* WHERE ...), the only spelling
+#           we accept; REGEXP_MATCHES -> RLIKE, strpos -> POSITION(... IN ...).
+#   50      upstream's EventTime is BIGINT epoch seconds, so `EventTime - lag(...)`
+#           is an integer and COALESCE falls back to EventTime. Ours is typed
+#           (TIMESTAMP on the rugo mirror), where the difference is an INTERVAL
+#           COALESCE refuses - so the arithmetic is done on EXTRACT(epoch ...),
+#           which keeps upstream's integer-seconds answer on every dataset.
+#   53      substr(URL, 1, 8) -> SUBSTRING(URL FROM 1 FOR 8).
+#   54, 55  percentile_cont(...) WITHIN GROUP is EXACT; we have no exact
+#           percentile (MEDIAN and APPROX_PERCENTILE only). Left as written, so
+#           they FAIL - an approximate stand-in would time different work.
+#   56      hour(toDateTime(EventTime)) -> EXTRACT(hour FROM EventTime::TIMESTAMP[s]).
+EXTENDED_STATEMENTS = [
+        ("/* 43 */ SELECT UserID, RANK() OVER (ORDER BY EventTime) AS r FROM {DATASET} ORDER BY r DESC LIMIT 10;", None),
+        ("/* 44 */ SELECT * FROM {DATASET} ORDER BY ClientIP, EventTime LIMIT 100;", None),
+        ("/* 45 */ SELECT CounterID, AVG(length(Referer)) AS l FROM {DATASET} WHERE Referer <> '' GROUP BY CounterID HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;", None),
+        ("/* 46 */ SELECT BrowserCountry, BrowserLanguage, COUNT(*) AS c FROM {DATASET} GROUP BY BrowserCountry, BrowserLanguage ORDER BY c DESC LIMIT 10;", None),
+        ("/* 47 */ SELECT Title, URL, COUNT(*) AS c FROM {DATASET} GROUP BY Title, URL ORDER BY c DESC LIMIT 10;", None),
+        ("/* 48 */ SELECT COUNT(* WHERE NOT URL RLIKE '^https') FROM {DATASET};", None),
+        ("/* 49 */ SELECT COUNT(* WHERE POSITION('google' IN URL) > 0) FROM {DATASET};", None),
+        ("/* 50 */ SELECT CounterID, COALESCE(EXTRACT(epoch FROM EventTime::TIMESTAMP[s]) - LAG(EXTRACT(epoch FROM EventTime::TIMESTAMP[s])) OVER (PARTITION BY CounterID ORDER BY EventTime), EXTRACT(epoch FROM EventTime::TIMESTAMP[s])) AS dt FROM {DATASET} WHERE CounterID = 62 ORDER BY dt DESC LIMIT 10;", None),
+        ("/* 51 */ SELECT MIN(URL), MAX(URL) FROM {DATASET};", None),
+        ("/* 52 */ SELECT URL, length(URL) AS l FROM {DATASET} ORDER BY l DESC LIMIT 10;", None),
+        ("/* 53 */ SELECT SUBSTRING(URL FROM 1 FOR 8) AS p, COUNT(*) AS c FROM {DATASET} GROUP BY p ORDER BY c DESC LIMIT 10;", None),
+        ("/* 54 */ SELECT PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY ResponseEndTiming), PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ResponseEndTiming), PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY ResponseEndTiming) FROM {DATASET} WHERE ResponseEndTiming > 0;", None),
+        ("/* 55 */ SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ResponseEndTiming) FROM {DATASET} WHERE ResponseEndTiming > 0;", None),
+        ("/* 56 */ SELECT EXTRACT(hour FROM EventTime::TIMESTAMP[s]) AS h, COUNT(*) AS c FROM {DATASET} GROUP BY h ORDER BY h;", None),
+        ("/* 57 */ SELECT EventTime, COUNT(*) AS c FROM {DATASET} GROUP BY EventTime ORDER BY c DESC LIMIT 10;", None),
+]
 # fmt:on
 
 
@@ -281,13 +319,24 @@ if __name__ == "__main__":  # pragma: no cover
         default="",
         choices=sorted(VARIANT_DATASETS),
         help="Dataset format variant: `canon` runs against the upstream 100-file "
-        "split (scratch/hits); `skene` runs against the skene mirror; "
+        "split (scratch/hits); `canon-single` against upstream's single hits.parquet "
+        "(scratch/hits_single); `skene` runs against the skene mirror; "
         "`json` runs against upstream's hits.json.gz split into zstd shards (scratch/hits_json); "
         "`avro` runs READ_AVRO over the rugo split converted to deflate Avro shards (scratch/hits_avro); "
         "`aistor-*` against the remote Iceberg tables on AIStor "
         "(default: the rugo 262k-row-group split, scratch/hits_rugo_262k)",
     )
+    parser.add_argument(
+        "--extended",
+        action="store_true",
+        default=False,
+        help="Append the 15 queries proposed in ClickHouse/ClickBench#1489 (Q43-Q57) "
+        "to the standard 43",
+    )
     args = parser.parse_args()
+
+    if args.extended:
+        STATEMENTS = STATEMENTS + EXTENDED_STATEMENTS
 
     DATASET = VARIANT_DATASETS[args.variant]
     if DATASET in REMOTE_DATASETS:
@@ -467,6 +516,7 @@ if __name__ == "__main__":  # pragma: no cover
         "dataset_relation": RELATION,
         "dataset_path": dataset_path,
         "dataset_entries": dataset_entries,
+        "battery": f"{'extended (ClickBench#1489)' if args.extended else 'standard'}, {len(STATEMENTS)} queries",
         "rounds": args.iterations,
         "process": "one per query",
         "preload": os.environ.get("DYLD_INSERT_LIBRARIES") or os.environ.get("LD_PRELOAD") or "none",
@@ -527,9 +577,14 @@ if __name__ == "__main__":  # pragma: no cover
     # queries over different storage, and their totals differ by enough that one
     # pooled directory would invite comparing a run of one against a run of the
     # other. Two directories make that mistake impossible rather than merely
-    # discouraged.
+    # discouraged. The extended battery is split off the same way: its total
+    # covers 58 queries, not 43.
     csv_writer, csv_path, csv_handle = open_results_csv(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", DATASET.name),
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "results",
+            f"{DATASET.name}_EXTENDED" if args.extended else DATASET.name,
+        ),
         fieldnames=["query", "run", "status", "elapsed_ms", "duckdb_min_ms", "error"],
     )
 
@@ -558,6 +613,7 @@ if __name__ == "__main__":  # pragma: no cover
         args.variant,
         "--iterations",
         str(args.iterations),
+        *(["--extended"] if args.extended else []),
         "--query-index",
     ]
     for index, (statement, _err) in enumerate(STATEMENTS):

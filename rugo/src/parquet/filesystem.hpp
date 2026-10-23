@@ -49,17 +49,26 @@ namespace rugo {
 
 static constexpr int64_t  kParquetFooterSuffix  = 8;       // 4-byte len + 4-byte magic
 
-// Adaptive footer prefetch size based on file size.
-// Smaller files have smaller footers; larger files benefit from larger prefetch.
-// - <10MB: 32KB (small files, footers usually <8KB)
-// - 10MB-1GB: 64KB (typical case, ClickBench)
-// - >1GB: 128KB (large files with many row groups)
-inline int64_t adaptive_footer_prefetch_size(int64_t file_size) {
-    if (file_size < 10 * 1024 * 1024)
-        return 32 * 1024;
-    if (file_size < 1024 * 1024 * 1024)
-        return 64 * 1024;
-    return 128 * 1024;
+// How many bytes to read from the END of a Parquet file to reach its whole
+// footer in ONE request — the single sizing rule for every footer read (local
+// and remote, native and the Python schema read via pool_reader's
+// footer_suffix_bytes). A short guess costs a second, dependent request; a
+// long one costs only bytes.
+//
+// A footer's size scales with row groups x columns, so for a fixed row-group
+// size it scales with the FILE size. Measured on rugo's 64k-row-group layout:
+// ClickBench hits, 88 MB files, footers 161-182 KiB (1/500 of the file); the
+// grouped-layout doc's 4 GiB file, 6.2 MiB (1/660). file_size / 256 covers both
+// with at least 2x margin. Floor 64 KiB, the previous fixed suffix; ceiling
+// 8 MiB, the largest single range the IO pipeline plans (coalesce cap). A
+// narrow or wide-value table has a smaller footer per byte, so the over-read is
+// bounded by the rule itself: at most 1/256 of the file. Unknown size (a
+// remote suffix range needs none): 256 KiB.
+inline int64_t footer_suffix_bytes(int64_t file_size) {
+    constexpr int64_t kMinSuffix = 64 * 1024;
+    constexpr int64_t kMaxSuffix = 8 * 1024 * 1024;
+    if (file_size <= 0) return 256 * 1024;
+    return std::min(std::max(file_size / 256, kMinSuffix), kMaxSuffix);
 }
 
 static const uint8_t kParquetMagic[4] = {0x50, 0x41, 0x52, 0x31};  // "PAR1"
@@ -234,7 +243,7 @@ inline ParquetFooterResult FetchParquetFooter(const std::string& path,
     if (file_size < kParquetFooterSuffix)
         throw std::runtime_error("File too small to be valid Parquet: " + path);
 
-    int64_t prefetch_size   = std::min(adaptive_footer_prefetch_size(file_size), file_size);
+    int64_t prefetch_size   = std::min(footer_suffix_bytes(file_size), file_size);
     int64_t prefetch_offset = file_size - prefetch_size;
 
     std::vector<uint8_t> tail = read_range(path, prefetch_offset, prefetch_size);
@@ -259,20 +268,29 @@ inline ParquetFooterResult FetchParquetFooter(const std::string& path,
     return {build_footer_envelope(footer_ptr, footer_length_u32), bytes_fetched};
 }
 
-// First-round suffix-range size: the last N bytes of each file, fetched
-// without knowing the file size or issuing a HEAD. 64KB covers the vast
-// majority of Parquet footers; oversized footers trigger one extra round.
-static constexpr int64_t kFooterSuffixPrefetch = 64 * 1024;
+// The footer batch's own per-host connection cap. The data path's default
+// (OPTERYX_HTTP_MAX_HOST_CONNECTIONS, 3 per thread) is sized for 64 fetch
+// threads sharing one host — the real limit is the TOTAL of simultaneous new
+// connections to a host (dev hardware: clean at 252, failing at 280; see
+// http_max_host_connections_env in src/cpp/http_client.cpp). This batch is ONE
+// thread issuing every footer of a scan before any data is fetched; at 3 it ran
+// 3 footers at a time, measured 14.0 s to bind 100 files at 130 ms RTT on
+// HTTP/1.1 (the released wheels have no HTTP/2) against 2.4 s at 24. 32 keeps
+// the data path's 64 x 3 = 192 plus this batch under that ceiling. Clamped by
+// the client's own pool cap (footer_http_client: 128).
+static constexpr long kFooterMaxHostConnections = 32;
 
 /**
  * Batch-fetch footer envelopes for many files concurrently — no per-file HEAD,
  * no dependency on knowing file sizes.
  *
- * Every remote file's tail is fetched with an HTTP suffix range (bytes=-64k)
- * in a single concurrent get_many() round; files whose footer exceeds 64KB are
- * completed in a second batched suffix-range round. Local files fall back to
- * per-file pread (no network — already cheap). `file_sizes` is only consulted
- * for local files (pass -1 when unknown); it is ignored for remote files.
+ * Every remote file's tail is fetched with an HTTP suffix range sized by
+ * footer_suffix_bytes (from `file_sizes` when known — a suffix range itself
+ * needs no size) in a single concurrent get_many() round, under the batch's own
+ * kFooterMaxHostConnections; files whose footer is still longer are completed
+ * in a second batched suffix-range round. Local files fall back to per-file
+ * pread (no network — already cheap), sized by the same rule. Pass -1 in
+ * `file_sizes` when a size is unknown.
  *
  * Returns one ParquetFooterResult per input path, in input order.
  */
@@ -306,8 +324,11 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
             continue;
         }
         remote_idx.push_back(i);
+        // Sized from the file when the caller knows it (a suffix range itself
+        // needs no size): see footer_suffix_bytes.
+        const int64_t size = (i < file_sizes.size()) ? file_sizes[i] : -1;
         reqs.emplace_back(footer_http_url(paths[i]),
-                          headers_for("bytes=-" + std::to_string(kFooterSuffixPrefetch)));
+                          headers_for("bytes=-" + std::to_string(footer_suffix_bytes(size))));
     }
 
     // PROTOTYPE (2026-08-14, unratified) — H5: local footers in parallel.
@@ -354,7 +375,10 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
 #ifndef RUGO_ENABLE_HTTP
     reject_remote_path(paths[remote_idx[0]]);
 #else
-    std::vector<std::vector<uint8_t>> tails = footer_http_client().get_many(reqs);
+    // Every round runs under the footer batch's own connection cap.
+    HttpTuning tuning = HttpClient::default_tuning();
+    tuning.max_host_connections = kFooterMaxHostConnections;
+    std::vector<std::vector<uint8_t>> tails = footer_http_client().get_many(reqs, &tuning);
 
     // Round 2: footers larger than the 64KB suffix window — fetch footer+suffix
     // exactly, again via a suffix range so no file size is needed.
@@ -380,7 +404,7 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
     }
 
     if (!extra_reqs.empty()) {
-        std::vector<std::vector<uint8_t>> extras = footer_http_client().get_many(extra_reqs);
+        std::vector<std::vector<uint8_t>> extras = footer_http_client().get_many(extra_reqs, &tuning);
         for (size_t e = 0; e < extra_remote.size(); ++e) {
             size_t k = extra_remote[e];
             size_t i = remote_idx[k];

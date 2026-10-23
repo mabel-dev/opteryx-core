@@ -26,6 +26,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.connectors import filesystem_connector
 from opteryx.connectors.filesystem_connector import FileSystemTable
+from opteryx.connectors.parquet_io.pool_reader import footer_suffix_bytes
 from opteryx.connectors.io_systems.local_filesystem import MemoryMappedFile
 from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 from opteryx.models.query_telemetry import QueryTelemetry
@@ -120,7 +121,7 @@ def test_read_blob_reads_only_the_footer():
     for path, off, ln in fs.ranges_read:
         assert path == PARQUET_BLOB
         assert off + ln == size, "every read ends at the end of the file"
-        assert ln <= max(filesystem_connector._FOOTER_SUFFIX_BYTES, footer_len + 8)
+        assert ln <= max(footer_suffix_bytes(size), footer_len + 8)
 
 
 @needs_skene
