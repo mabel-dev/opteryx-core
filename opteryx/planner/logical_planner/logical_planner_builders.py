@@ -2143,6 +2143,26 @@ def function(branch, alias: Optional[List[str]] = None, key=None, *, plan_contex
         duplicate_treatment = branch["args"]["List"].get("duplicate_treatment")
         null_treatment = branch["args"].get("null_treatment")
 
+    # WITHIN GROUP (ORDER BY ...) is the ordered-set aggregates' input. Before the
+    # FILTER refusal below, whose corrective spelling would put the condition among
+    # the fraction's arguments. Anything else carrying the clause is refused there:
+    # it used to be dropped without a word, so `SUM(x) WITHIN GROUP (ORDER BY y)`
+    # answered SUM(x).
+    if branch.get("within_group") or func in _ORDERED_SET_AGGREGATES or func == "PERCENTILE_DISC":
+        return _ordered_set_aggregate(
+            func,
+            args,
+            branch,
+            alias,
+            name_span,
+            duplicate_treatment=duplicate_treatment,
+            null_treatment=null_treatment,
+            order_by=order_by,
+            limit=limit,
+            inline_filter=inline_filter,
+            plan_context=plan_context,
+        )
+
     # `AGG(expr) FILTER (WHERE cond)` is REFUSED; `AGG(expr WHERE cond)` is the
     # spelling we accept. The two mean the same thing, and carrying both would
     # leave two representations of one feature - so the standard form is named

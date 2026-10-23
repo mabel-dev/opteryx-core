@@ -73,10 +73,10 @@ _AGGREGATE_RESULT_INTEGER = frozenset(
     {"COUNT", "COUNT_DISTINCT", "DISTINCT", "APPROX_COUNT_DISTINCT", "GROUPING"}
 )
 _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
-# MEDIAN always returns DOUBLE — the runtime is MedianFloat64Aggregate (column) and
-# float(value) (literal), and non-numeric inputs are rejected outright. Typing it as
-# DOUBLE (not input-passthrough) keeps the binder honest with the runtime, the same
-# way AVG is forced to DOUBLE below.
+# MEDIAN and PERCENTILE_CONT always return DOUBLE — the native exact-quantile sink
+# emits FLOAT64 and non-numeric inputs are rejected outright. Typing them as DOUBLE
+# (not input-passthrough) keeps the binder honest with the runtime, the same way
+# AVG is forced to DOUBLE below.
 # STDDEV/STDDEV_POP/STDDEV_SAMP/VAR_POP/VAR_SAMP: always DOUBLE regardless of
 # input numeric type — the native sink rejects DECIMAL input outright
 # (native_group_sinks.hpp), so there's no AVG-style decimal-passthrough case to
@@ -90,6 +90,7 @@ _AGGREGATE_RESULT_DOUBLE = frozenset(
         "APPROX_PERCENTILE",
         "CORR",
         "MEDIAN",
+        "PERCENTILE_CONT",
         "STDDEV",
         "STDDEV_POP",
         "STDDEV_SAMP",

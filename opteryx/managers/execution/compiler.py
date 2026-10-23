@@ -2370,20 +2370,32 @@ class _Compiler:
                     f"Cast the column to {md_code('DOUBLE')} first, for example "
                     f"{md_code(f'{func}(column::DOUBLE)')}",
                 )
-            if func == "MEDIAN" and pt not in self._MEDIAN_OPERAND_TYPES:
-                # MEDIAN is numeric-only — narrower than the generic operand-type
-                # gate above (which already let DECIMAL/BOOL/temporal through for
-                # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median
-                # collectors' restriction exactly (see median_operand_supported).
-                _unsupported(
-                    f"{md_syntax('MEDIAN')} over a column of type {md_code(_type_name(psc, pt))}",
-                    _NUMERIC_ONLY,
-                )
+            if func in self._QUANTILE_FUNCS:
+                if pt not in self._MEDIAN_OPERAND_TYPES:
+                    # MEDIAN/PERCENTILE_CONT are numeric-only — narrower than the
+                    # generic operand-type gate above (which already let
+                    # DECIMAL/BOOL/temporal through for SUM/AVG/MIN/MAX/STDDEV).
+                    # Matches the sinks' median_operand_supported exactly.
+                    _unsupported(
+                        f"{md_syntax(func)} over a column of type {md_code(_type_name(psc, pt))}",
+                        _NUMERIC_ONLY,
+                    )
+                options = {"percentile": percentile, "quantile_descending": descending,
+                           "quantile_owner": -1}
+                if distinct:
+                    # MEDIAN(DISTINCT x) buffers the deduped values, which are not
+                    # the column's values — it never shares a buffer.
+                    options["distinct_operand"] = True
+                else:
+                    owner = quantile_buffers.setdefault(idx, len(specs))
+                    if owner != len(specs):
+                        options["quantile_owner"] = owner
+                specs.append((sc.identity, "Quantile", idx, options))
+                continue
             fn = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max",
                   "STDDEV": "Stddev", "STDDEV_POP": "Stddev",
                   "STDDEV_SAMP": "StddevSamp", "VAR_POP": "VarPop",
-                  "VAR_SAMP": "VarSamp",
-                  "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
+                  "VAR_SAMP": "VarSamp", "ANY_VALUE": "AnyValue"}[func]
             if distinct:
                 # Dedups the operand exactly as COUNT(DISTINCT col) does (draken
                 # value hash, NULLs excluded) — see AggSpec2::distinct_operand.

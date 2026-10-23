@@ -19,6 +19,7 @@ AGGREGATORS: dict = {
     "MAX": "max",
     "AVG": "mean",
     "MEDIAN": "median",
+    "PERCENTILE_CONT": "percentile_cont",
     "MIN": "min",
     "ANY_VALUE": "any_value",
     "SUM": "sum",

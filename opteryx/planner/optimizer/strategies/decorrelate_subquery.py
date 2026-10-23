@@ -1410,6 +1410,7 @@ _EMPTY_IS_NULL = frozenset(
         "VAR_SAMP",
         "CORR",
         "APPROX_PERCENTILE",
+        "PERCENTILE_CONT",
     }
 )
 
