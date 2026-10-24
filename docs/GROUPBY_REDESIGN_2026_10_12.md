@@ -676,5 +676,18 @@ phase at −1%..+6% on ARM with no part separable: **within the day's noise, not
 2026-10-12 note stands (3-round runs drift ±4%, sub-5% calls need ≥5 rounds, and this box was not free of
 other work). x86 is the arch that resolved the per-part effects.
 
-The compile-time switches `OPTERYX_GB_NO_R4/R5/R7/R9` stay until ruled.
+### 10.5 Ruling applied (2026-10-24)
+
+- **R7 deleted.** Its measured value was 1% on one query on x86 and unresolved on ARM; not enough to carry a
+  second key layout, a per-morsel allocation and a pack/unpack path through the hot loop (the direct-array
+  spill hashing bug came from it).
+- **R4, R5 and R9 are permanent**: the `OPTERYX_GB_NO_R4/R5/R9` switches and the copying arms behind them
+  (`map_probe<false>`, the per-row emit gather) are removed. `map_probe`/`merge_probe` are by-reference only.
+- R9 selects from the PLANNER estimate only. On the benchmark rugo mirrors that estimate is -1 (the manifest
+  path needs per-file sketches or catalog statistics; a file-level scalar cannot be merged across files —
+  measured 2026-08-21, and the footer KMV was built and removed 2026-10-20), so R9 engages there only on
+  skene; in production, tables arrive through the catalog, whose statistics engine stores manifest sketches.
+  No further writer or footer work is proposed from this programme.
+- Final tree: oracle 23/23 vs the pre-edit tree at DOP 16 and DOP 6, `make q` 530 passed, `make slt`
+  66 groups OK. Nothing committed.
 Harness: `dev/groupby_baseline.py` (record), session scratch `ablate.py` (arms × rounds, RSS, digests).

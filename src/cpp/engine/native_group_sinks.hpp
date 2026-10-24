@@ -1963,144 +1963,6 @@ struct KeyColMeta {
     bool captured = false;
 };
 
-// ---- R7: normalised multi-integer keys (docs/GROUPBY_REDESIGN_2026_10_12.md) --------
-// Two or more fixed-width integer keys whose widths (plus one NULL bit each) fit 64
-// bits are packed, per row, into ONE uint64 — key k's value bits zero-extended at
-// `shift[k]`, its NULL flag at `shift[k] + bits[k]` (value bits zero when NULL). From
-// there the query is a single-key GROUP BY: one draken hash over the packed column
-// instead of a per-column hash + mix, ONE 8-byte key store instead of one store per
-// key, and one append per new group. The packing is a bijection on (value, null) per
-// key, so hash identity on the packed word is hash identity on the key tuple; the
-// original columns are rebuilt from the packed words at emit (gb_unpack_key).
-// Velox kNormalizedKey / ClickHouse keys128 / Pivot IntPairKeyExtractor are the same
-// idea. 64-bit keys never pack (no room for a second key), so (WatchID, ClientIP)
-// stays on the generic path; (SearchEngineID, ClientIP) = 16+1+32+1 bits does pack.
-// The direct-array path sees the ORIGINAL keys (its mixed-radix layout wants ranges,
-// not widths) and runs before any packing. OPTERYX_GB_NO_R7=1 (ablation) turns it off.
-#ifndef OPTERYX_GB_NO_R7
-#define OPTERYX_GB_NO_R7 0
-#endif
-struct GBPackLayout {
-    bool on = false;
-    std::vector<uint8_t> shift;   // per key (key_idx order): bit offset of the value
-    std::vector<uint8_t> bits;    // per key: value width in bits; NULL flag at shift+bits
-};
-
-inline int gb_pack_key_bits(DrakenType t) {
-    switch (t) {
-        case DRAKEN_BOOL:                      return 1;
-        case DRAKEN_INT8:  case DRAKEN_UINT8:  return 8;
-        case DRAKEN_INT16: case DRAKEN_UINT16: return 16;
-        case DRAKEN_INT32: case DRAKEN_UINT32:
-        case DRAKEN_DATE32:                    return 32;
-        default:                               return 0;   // not packable
-    }
-}
-
-// The layout for these keys, or `on == false`.
-inline GBPackLayout gb_pack_decide(const std::vector<KeyColMeta>& km) {
-    GBPackLayout L;
-    if (OPTERYX_GB_NO_R7 || km.size() < 2) return L;
-    int off = 0;
-    for (const KeyColMeta& m : km) {
-        const int b = gb_pack_key_bits(m.type);
-        if (b == 0 || off + b + 1 > 64) return L;
-        L.shift.push_back(static_cast<uint8_t>(off));
-        L.bits.push_back(static_cast<uint8_t>(b));
-        off += b + 1;
-    }
-    L.on = true;
-    return L;
-}
-
-// OR key k of `v` into out[0..rows) at its layout position (first key assigns).
-template <typename T, bool kFirst>
-inline void gb_pack_fixed(const DrakenVector& v, uint32_t rows, int shift, int bits,
-                          uint64_t* out) {
-    const T* d = static_cast<const T*>(v.data);
-    const uint32_t* sel = v.selection;
-    const uint8_t* valid = v.validity;
-    const uint64_t nullbit = uint64_t(1) << (shift + bits);
-    const uint64_t mask = bits == 64 ? ~uint64_t(0) : ((uint64_t(1) << bits) - 1u);
-    for (uint32_t i = 0; i < rows; ++i) {
-        uint64_t w;
-        if (valid != nullptr && ((valid[i >> 3] >> (i & 7)) & 1u) == 0) {
-            w = nullbit;
-        } else {
-            uint64_t raw;
-            if constexpr (std::is_same_v<T, bool>) raw = gb_read_bool_bit(v, sel[i]);
-            else raw = static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(d[sel[i]]));
-            w = (raw & mask) << shift;
-        }
-        if constexpr (kFirst) out[i] = w;
-        else out[i] |= w;
-    }
-}
-
-template <bool kFirst>
-inline void gb_pack_key(const DrakenVector& v, uint32_t rows, int shift, int bits, uint64_t* out) {
-    switch (v.type) {
-        case DRAKEN_BOOL:   gb_pack_fixed<bool, kFirst>(v, rows, shift, bits, out); return;
-        case DRAKEN_INT8:   gb_pack_fixed<int8_t, kFirst>(v, rows, shift, bits, out); return;
-        case DRAKEN_UINT8:  gb_pack_fixed<uint8_t, kFirst>(v, rows, shift, bits, out); return;
-        case DRAKEN_INT16:  gb_pack_fixed<int16_t, kFirst>(v, rows, shift, bits, out); return;
-        case DRAKEN_UINT16: gb_pack_fixed<uint16_t, kFirst>(v, rows, shift, bits, out); return;
-        case DRAKEN_INT32:
-        case DRAKEN_DATE32: gb_pack_fixed<int32_t, kFirst>(v, rows, shift, bits, out); return;
-        case DRAKEN_UINT32: gb_pack_fixed<uint32_t, kFirst>(v, rows, shift, bits, out); return;
-        default: return;   // unreachable: gb_pack_decide gates the types
-    }
-}
-
-// Pack the key columns `key_idx` of `in` into the one-column morsel `pk` (column 0, a
-// dense UINT64 with no validity — a NULL key is a value of the word). The column is
-// OWNED (one draken_malloc per morsel): draken's single-key hash resolves the column
-// through its VectorOwner, not its view.
-inline void gb_pack_morsel(const MorselPtr& in, const std::vector<size_t>& key_idx,
-                           const GBPackLayout& L, const MorselPtr& pk) {
-    const uint32_t rows = in->num_rows();
-    auto* vals = static_cast<uint64_t*>(draken_malloc(static_cast<size_t>(rows == 0 ? 1 : rows) * 8u));
-    for (size_t k = 0; k < key_idx.size(); ++k) {
-        const DrakenVector& v = in->columns[key_idx[k]].view;
-        if (k == 0) gb_pack_key<true>(v, rows, L.shift[k], L.bits[k], vals);
-        else gb_pack_key<false>(v, rows, L.shift[k], L.bits[k], vals);
-    }
-    DrakenVector pv;
-    pv.data = vals;
-    pv.selection = draken_identity_sel(rows);
-    pv.data_length = rows;
-    pv.length = rows;
-    pv.validity = nullptr;
-    pv.type = DRAKEN_UINT64;
-    pv.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
-    if (pk->columns.empty()) {
-        pk->columns.resize(1);
-        pk->names.assign(1, std::string());
-    }
-    CxxColumn& c = pk->columns[0];
-    c.own = std::make_shared<VectorOwner>(pv, OwnedBuffer<void>(vals), OwnedBuffer<uint8_t>(nullptr));
-    c.view = c.own->vec;
-}
-
-// Key `k` of `n` packed words back as a typed column (emit).
-inline CxxColumn gb_unpack_key(const uint64_t* packed, uint32_t n, const GBPackLayout& L,
-                               size_t k, DrakenType t, const LogicalType* lt, ErrCtx& err) {
-    const int shift = L.shift[k], bits = L.bits[k];
-    const uint64_t nullbit = uint64_t(1) << (shift + bits);
-    const uint64_t mask = (uint64_t(1) << bits) - 1u;
-    std::vector<int64_t> raws(n);
-    std::vector<uint8_t> valid(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        const uint64_t w = packed[i];
-        valid[i] = (w & nullbit) == 0;
-        // Zero-extended value bits: emit_fixed_column writes the low `width` bytes of
-        // the container, which for a sign-agnostic copy IS the original value.
-        raws[i] = static_cast<int64_t>((w >> shift) & mask);
-    }
-    return emit_fixed_column(raws.data(), valid.data(), n, t, lt, err);
-}
-
-
 // ---- shared partitioned-dedup machinery (GroupBy + ungrouped COUNT DISTINCT) -------
 
 // PARTITION BITS (2026-09-26). The partition is hash bits [32, 38), NOT the top
@@ -2183,21 +2045,14 @@ constexpr double kGBRawSwitchRatio = OPTERYX_GB_STRESS ? 0.0 : 0.9;
 // distinct ratio measured by a probe and by a sketch straddled the two thresholds. The
 // estimate is therefore a LOWER bound once a worker goes raw (the merge's counts are
 // exact and sizing never leans on it). Sink-side tables are never pre-sized from either
-// estimate (feedback_hashtable_sizing). OPTERYX_GB_NO_R4=1 (ablation only) = off.
-#ifndef OPTERYX_GB_NO_R4
-#define OPTERYX_GB_NO_R4 0
-#endif
+// estimate (feedback_hashtable_sizing).
 // 64 partitions x 128 medius slots = 8,192 groups per worker; an estimate past 8x
 // that cannot be a medius-sized column however wrong the manifests are.
 constexpr int64_t kGBMidSkipNDV = 65536;
 using GBKmv = draken::KmvSketch1024<draken::KmvHashFamily::kDrakenVectorHash>;
 // Feed a locally-new group's hash to the worker's sketch: one compare against a
 // register threshold once warm. Probe paths only — never per row in raw mode.
-#if OPTERYX_GB_NO_R4
-#define GB_R4_FEED(l, h) ((void)0)
-#else
 #define GB_R4_FEED(l, h) ((l).kmv.add(h))
-#endif
 // RADIX-PARTITIONED MERGE (2026-09-25). A partition whose queued tables hold more
 // than kGBMergeLeaf entries is merged in 2^k buckets of <= ~kGBMergeLeaf entries,
 // chosen by hash bits [kGBMergeBucketShift, +k): pass 1 scatters every queued entry
@@ -2258,10 +2113,9 @@ constexpr size_t kGBArenaChunk = 1u << 20;   // 1 MiB key-arena chunks (string-k
 // and Pivot's numbers say SMT-wide hosts favour partitioning), estimate <=
 // kGBTicketMaxGroups, no statistics seed, no DISTINCT operand. The dictionary code pass
 // is skipped in this mode (it probes partitions per distinct code). x86 A/B before it
-// is a default anywhere (architect, 2026-10-12). OPTERYX_GB_NO_R9=1 (ablation) = off.
-#ifndef OPTERYX_GB_NO_R9
-#define OPTERYX_GB_NO_R9 0
-#endif
+// is a default anywhere (architect, 2026-10-12): measured 2026-10-23 on the i5-8500 at
+// DOP 4 with a planner estimate (hits_skene): Q08 -5%, Q09 -5.5%, Q30 -7%, Q35 -1%, RSS
+// flat; inert without an estimate and above kGBTicketMaxDop. Kept as the mode R4 selects.
 constexpr int      kGBTicketMaxDop    = 8;
 constexpr uint64_t kGBTicketMaxGroups = uint64_t(16) << 20;
 constexpr uint32_t kGBTicketRange     = 1024;
@@ -3960,10 +3814,6 @@ struct GroupByLocal : LocalSinkState {
     // per-morsel ingest scratch
     std::vector<uint64_t> mk_hash;    // per row: draken key hash
     std::vector<uint32_t> mk_ent;     // per row: group id within its partition
-    // R7: the packed key column of the current morsel (gb_pack_morsel), rebuilt per
-    // morsel (the previous morsel's buffer is released when its owner is replaced).
-    GBPackLayout pack;
-    MorselPtr pk = std::make_shared<CxxMorsel>();
     // H20 compressed-key path: one entry per DISTINCT hash, not per row.
     std::vector<uint32_t> dict_rep;   // per code: first row using it (representative)
     std::vector<uint8_t>  dict_part;  // per code: partition index
@@ -3994,7 +3844,6 @@ struct GroupByGlobal : GlobalSinkState {
     bool has_rows = false;
     bool init = false;
     GBKmv kmv;   // R4: union of every worker's sketch (merged under mtx at flush/combine)
-    GBPackLayout pack;   // R7: the keys' packed layout (decided from key_meta, same everywhere)
     // R9: the shared ticket table (created once, under mtx), the workers' lanes and
     // arenas handed over at combine, and whether the mode was ever decided.
     std::unique_ptr<GBTicketTable> ticket;
@@ -4150,7 +3999,6 @@ struct GroupBySink : Sink {
             for (auto& P : l->parts) P.use_parvi = true;
             groupby_tel::parvi_sinks.fetch_add(1, std::memory_order_relaxed);
         }
-#if !OPTERYX_GB_NO_R4
         groupby_tel::planner_ndv.store(planner_ndv, std::memory_order_relaxed);
         if (planner_ndv > kGBMidSkipNDV) {
             // Far above medius' 8k-per-worker reach: never arm it (see kGBMidSkipNDV).
@@ -4168,7 +4016,6 @@ struct GroupBySink : Sink {
             for (auto& P : l->parts) { P.use_parvi = false; P.use_mid = false; }
             groupby_tel::raw_from_plan.fetch_add(1, std::memory_order_relaxed);
         }
-#endif
         return l;
     }
 
@@ -4176,38 +4023,12 @@ struct GroupBySink : Sink {
     // in capture() for all 64 partitions and again after a partition is reset by an
     // adaptive flush (a fresh GBPartData has no keycol types). `km` is indexed by
     // key_idx position; the store holds only the emitted keys, hence store_key_pos.
-    // R7: with a packed layout the store is ONE uint64 column (when any key is emitted
-    // at all); the typed per-key columns are rebuilt from it at emit.
-    void type_keycols(GBPartData& P, const std::vector<KeyColMeta>& km, const GBPackLayout& pk) {
-        if (pk.on) {
-            P.keycols.resize(store_key_pos.empty() ? 0 : 1);
-            if (!P.keycols.empty()) P.keycols[0].set_type(DRAKEN_UINT64, 8, nullptr);
-            return;
-        }
+    void type_keycols(GBPartData& P, const std::vector<KeyColMeta>& km) {
         P.keycols.resize(store_key_pos.size());
         for (size_t j = 0; j < store_key_pos.size(); ++j) {
             const KeyColMeta& m = km[store_key_pos[j]];
             P.keycols[j].set_type(m.type, gb_key_elem_size(m.type, m.logical), m.logical);
         }
-    }
-
-    // The key column(s) a NEW group stores, and the morsel they come from: the packed
-    // column (index 0 of l.pk) under R7, else the emitted keys of the input morsel.
-    size_t store_count(const GroupByLocal& l) const {
-        return l.pack.on ? (store_key_pos.empty() ? 0 : 1) : store_col_idx.size();
-    }
-    const DrakenVector& store_view(const GroupByLocal& l, const MorselPtr& in, size_t j) const {
-        return l.pack.on ? l.pk->columns[0].view : in->columns[store_col_idx[j]].view;
-    }
-
-    // Pass A's hash over key columns `keys` of `in` (the input morsel's key_idx, or a
-    // rebuilt key morsel's 0..K-1): over the packed column when the keys pack.
-    bool hash_keys(GroupByLocal& l, const MorselPtr& in, const std::vector<size_t>& keys,
-                   std::vector<uint64_t>& out, ErrCtx& err) {
-        if (!l.pack.on) return compute_row_hashes(in, keys, out, err);
-        gb_pack_morsel(in, keys, l.pack, l.pk);
-        static const std::vector<size_t> kZero{0};
-        return compute_row_hashes(l.pk, kZero, out, err);
     }
 
     bool capture(GroupByLocal& l, const MorselPtr& in, ErrCtx& err) {
@@ -4248,9 +4069,8 @@ struct GroupBySink : Sink {
             l.key_meta[k].logical = lt;
             l.key_meta[k].captured = true;
         }
-        l.pack = gb_pack_decide(l.key_meta);
         // Type every partition's per-group key store (GroupKeyColumn per key col).
-        for (size_t p = 0; p < kGBParts; ++p) type_keycols(l.parts[p], l.key_meta, l.pack);
+        for (size_t p = 0; p < kGBParts; ++p) type_keycols(l.parts[p], l.key_meta);
         l.meta.resize(specs.size());
         l.kinds.resize(specs.size());
         l.has_rows = false;
@@ -4501,7 +4321,7 @@ struct GroupBySink : Sink {
                 km->names.push_back("k");
                 kidx[k] = k;
             }
-            if (!hash_keys(l, km, kidx, l.mk_hash, err)) return;
+            if (!compute_row_hashes(km, kidx, l.mk_hash, err)) return;
             std::vector<uint32_t> ge(l.da_slots);
             std::array<std::vector<uint32_t>, kGBParts> psel;
             for (uint32_t j = 0; j < n; ++j) {
@@ -4513,10 +4333,9 @@ struct GroupBySink : Sink {
                 if (is_new) {
                     P.hashes.push_back(h);
                     GB_R4_FEED(l, h);
-                    for (size_t jj = 0; jj < store_count(l); ++jj) {
-                        P.keycols[jj].append_row(
-                            l.pack.on ? l.pk->columns[0].view : km->columns[store_key_pos[jj]].view,
-                            j, err, "GROUP BY key value");
+                    for (size_t jj = 0; jj < store_key_pos.size(); ++jj) {
+                        P.keycols[jj].append_row(km->columns[store_key_pos[jj]].view, j,
+                                                 err, "GROUP BY key value");
                         if (err.code != 0) return;
                     }
                 }
@@ -4568,7 +4387,6 @@ struct GroupBySink : Sink {
         g.meta = l.meta;
         g.kinds = l.kinds;
         g.key_meta = l.key_meta;
-        g.pack = l.pack;
         g.has_rows = l.has_rows;
         g.init = true;
     }
@@ -4600,7 +4418,7 @@ struct GroupBySink : Sink {
 #endif
             P.use_parvi = low_card && !l.raw;        // re-arm the gate
             P.use_mid = !l.mid_disabled && !l.raw;   // ...but never re-arm a lost cause
-            type_keycols(P, l.key_meta, l.pack);
+            type_keycols(P, l.key_meta);
             // The next window is sized like this one (lanes take it in ensure_lanes).
 #if !OPTERYX_GB_NO_SEG_HINT
             // Shrink only: a window that overshot (a flush is checked once per morsel,
@@ -4947,9 +4765,7 @@ struct GroupBySink : Sink {
         for (size_t s = 0; s < nspecs && gb_rows_only; ++s)
             if (l.kinds[s] != GBKind::Rows) gb_rows_only = false;
 
-#if !OPTERYX_GB_NO_R9
         if (l.ticket_mode == 0) ticket_decide(g_, l);
-#endif
         ShapedKeyHash skh;
         bool dict_path = false;
         if (gb_dict_on && key_idx.size() == 1 && l.ticket_mode != 1) {
@@ -4971,7 +4787,7 @@ struct GroupBySink : Sink {
             }
         } else {
             GROUPBY_TEL_START(_gbA_t0);
-            if (!hash_keys(l, in, key_idx, l.mk_hash, err))
+            if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
                 return SinkResult::CONTINUE;
             GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbA_t0);
         }
@@ -5008,9 +4824,9 @@ struct GroupBySink : Sink {
                 if (is_new) {
                     P.hashes.push_back(h);
                     GB_R4_FEED(l, h);
-                    for (size_t j = 0; j < store_count(l); ++j) {
-                        P.keycols[j].append_row(store_view(l, in, j), l.dict_rep[d], err,
-                                                "GROUP BY key value");
+                    for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                        P.keycols[j].append_row(in->columns[store_col_idx[j]].view,
+                                                l.dict_rep[d], err, "GROUP BY key value");
                         if (err.code != 0) return SinkResult::CONTINUE;
                     }
                 }
@@ -5110,7 +4926,6 @@ struct GroupBySink : Sink {
             }
         }
 
-#if !OPTERYX_GB_NO_R9
         if (l.ticket_mode == 1) {
             // R9: tickets instead of partitions. Returns false (mode now -1) when the
             // shared table filled mid-morsel: nothing of this morsel was recorded, so
@@ -5118,7 +4933,6 @@ struct GroupBySink : Sink {
             if (ticket_sink(g_, l, in, rows, err)) return SinkResult::CONTINUE;
             if (err.code != 0) return SinkResult::CONTINUE;
         }
-#endif
         // Pass B: find-or-insert each row's group into its partition (partition =
         // gb_part(hash); group id from CarcharIndex, equality by 64-bit hash
         // identity). A NEW group appends the key VALUES nothing above has finished
@@ -5164,8 +4978,9 @@ struct GroupBySink : Sink {
                 GBPartition& P = l.parts[gb_part(h)];
                 const int64_t gid = static_cast<int64_t>(P.hashes.size());
                 P.hashes.push_back(h);
-                for (size_t j = 0; j < store_count(l); ++j) {
-                    P.keycols[j].append_row(store_view(l, in, j), i, err, "GROUP BY key value");
+                for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                    P.keycols[j].append_row(in->columns[store_col_idx[j]].view, i, err,
+                                            "GROUP BY key value");
                     if (err.code != 0) return SinkResult::CONTINUE;
                 }
                 l.mk_ent[i] = static_cast<uint32_t>(gid);
@@ -5180,8 +4995,9 @@ struct GroupBySink : Sink {
             if (is_new) {
                 P.hashes.push_back(h);
                 GB_R4_FEED(l, h);
-                for (size_t j = 0; j < store_count(l); ++j) {
-                    P.keycols[j].append_row(store_view(l, in, j), i, err, "GROUP BY key value");
+                for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                    P.keycols[j].append_row(in->columns[store_col_idx[j]].view, i, err,
+                                            "GROUP BY key value");
                     if (err.code != 0) return SinkResult::CONTINUE;
                 }
             }
@@ -5329,7 +5145,6 @@ struct GroupBySink : Sink {
             if (err.code != 0) return;
         }
         flush_locals(g, l);
-#if !OPTERYX_GB_NO_R9
         if (l.ticket_mode == 1 || l.tl_rows > 0) {
             std::lock_guard<std::mutex> lk(g.mtx);
             g.ticket_lanes.push_back(std::move(l.tl));
@@ -5337,14 +5152,11 @@ struct GroupBySink : Sink {
             if (g.ticket_arenas.size() <= l.tcur.wid) g.ticket_arenas.resize(size_t(l.tcur.wid) + 1);
             g.ticket_arenas[l.tcur.wid] = std::move(l.tl_arena);
         }
-#endif
-#if !OPTERYX_GB_NO_R4
         // The global estimate is read at finalize only, so the union happens once per
         // worker here — not per flush, where 1,024 ordered inserts under g.mtx would be
         // paid ~1,500 times on a 100M-group query.
         std::lock_guard<std::mutex> lk(g.mtx);
         g.kmv.merge(l.kmv);
-#endif
     }
 
     // ---- finalize merge -----------------------------------------------------------
@@ -5361,11 +5173,8 @@ struct GroupBySink : Sink {
     // buckets over ~1,500 raw windows a run is a fraction of a row, and the per-run
     // overhead (scratch sizing, pair selection, flat-lane checks) dwarfed the lane copy
     // it saved. The scatter IS the efficient layout transform there; it was deleted.
-    // OPTERYX_GB_NO_R5=1 (ablation) keeps the copying single-table merge and the
-    // per-row emit gather.
-#ifndef OPTERYX_GB_NO_R5
-#define OPTERYX_GB_NO_R5 0
-#endif
+    // Measured 2026-10-23 (x86 leave-one-out): -0.6% on the ClickBench GROUP BY targets,
+    // Q18 peak RSS 0.82; neutral on TPC-H.
 
     // Key column `k` of the groups whose references are keyref[start, start+n), gathered
     // from the sources into one output column. One typed loop per width (the memcpy
@@ -5519,7 +5328,7 @@ struct GroupBySink : Sink {
     // distinct-pair store per spec. The merge's fresh (indexed) tables and the
     // scatter's buckets start here.
     void ready_partition(GroupByGlobal& g, GBPartData& P) {
-        type_keycols(P, g.key_meta, g.pack);
+        type_keycols(P, g.key_meta);
         P.lanes.resize(specs.size());
         P.cd.resize(specs.size());
     }
@@ -5818,14 +5627,11 @@ struct GroupBySink : Sink {
     }
 
     // Map every group of src into dst by PROBING dst's index. Fills ge[0..src.size()).
-    // kRef = false: a new dst group copies its key VALUES from src.keycols.
-    // kRef = true (radix merge, pass 2): src is a bucket carrying key REFERENCES; a
-    // new dst group takes the reference, and no key bytes move.
-    // `src_idx` (kRef only): a source carrying no keyref of its own — a queued worker
-    // window — is referenced as (src_idx, row).
-    template <bool kRef>
+    // A new dst group takes a key REFERENCE, never key bytes: src's own keyref when it
+    // is a radix bucket, else (src_idx, row) for a queued worker window (R5).
     bool map_probe(GBPartition& dst, GBPartData& src, std::vector<uint32_t>& ge,
                    ErrCtx& err, uint32_t src_idx = 0) {
+        (void)err;
         const uint32_t sn = static_cast<uint32_t>(src.size());
         ge.resize(sn);
         const bool own_ref = !src.keyref.empty();
@@ -5836,14 +5642,7 @@ struct GroupBySink : Sink {
                 src.hashes[e], static_cast<int64_t>(dst.hashes.size()), mg);
             if (is_new) {
                 dst.hashes.push_back(src.hashes[e]);
-                if constexpr (kRef) {
-                    dst.keyref.push_back(own_ref ? src.keyref[e] : (src_tag | e));
-                } else {
-                    for (size_t k = 0; k < dst.keycols.size(); ++k) {
-                        dst.keycols[k].append_from(src.keycols[k], e, err);
-                        if (err.code != 0) return false;
-                    }
-                }
+                dst.keyref.push_back(own_ref ? src.keyref[e] : (src_tag | e));
             }
             ge[e] = static_cast<uint32_t>(mg);
         }
@@ -5851,10 +5650,9 @@ struct GroupBySink : Sink {
     }
 
     // Probe-merge ALL of src into dst (dst must be indexed; src need not be).
-    template <bool kRef>
     bool merge_probe(GroupByGlobal& g, GBPartition& dst, GBPartData& src,
                      std::vector<uint32_t>& ge, ErrCtx& err) {
-        if (!map_probe<kRef>(dst, src, ge, err)) return false;
+        if (!map_probe(dst, src, ge, err)) return false;
         grow_lanes(g, dst);
         return combine_into<false>(g, dst, src, ge.data(), nullptr,
                                    static_cast<uint32_t>(src.size()), nullptr, err);
@@ -5968,20 +5766,11 @@ struct GroupBySink : Sink {
             ready_partition(g, merged);
             merged.hint_rows(merge_total);
             merged.index.reserve(merge_total);
-#if OPTERYX_GB_NO_R5
-            for (size_t i = 0; i < list.size(); ++i) {
-                if (!merge_probe<false>(g, merged, list[i], ge, err)) return;
-                list[i] = GBPartData();   // release the merged-in worker data
-            }
-            list.clear();
-            if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - t0, std::memory_order_relaxed);
-            finish_and_emit(g, merged, nullptr, out_morsels, err);
-#else
-            // R5: the merged table references each new group's key values in the
-            // source; only the key columns of a source outlive its fold.
+            // The merged table references each new group's key values in the source
+            // (R5); only the key columns of a source outlive its fold.
             std::vector<std::vector<GroupKeyColumn>> key_sources(list.size());
             for (size_t i = 0; i < list.size(); ++i) {
-                if (!map_probe<true>(merged, list[i], ge, err, static_cast<uint32_t>(i))) return;
+                if (!map_probe(merged, list[i], ge, err, static_cast<uint32_t>(i))) return;
                 grow_lanes(g, merged);
                 if (!combine_into<false>(g, merged, list[i], ge.data(), nullptr,
                                          static_cast<uint32_t>(list[i].size()), nullptr, err))
@@ -5992,7 +5781,6 @@ struct GroupBySink : Sink {
             list.clear();
             if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - t0, std::memory_order_relaxed);
             finish_and_emit(g, merged, &key_sources, out_morsels, err);
-#endif
             return;
         }
 
@@ -6034,7 +5822,7 @@ struct GroupBySink : Sink {
             ready_partition(g, merged);
             merged.hint_rows(frag[b].size());
             merged.index.reserve(frag[b].size());
-            if (!merge_probe<true>(g, merged, frag[b], ge, err)) return;
+            if (!merge_probe(g, merged, frag[b], ge, err)) return;
             frag[b] = GBPartData();
             if (prof) merge_ns += gb_prof_now() - t0;
             finish_and_emit(g, merged, &key_sources, out_morsels, err);
@@ -6180,7 +5968,7 @@ struct GroupBySink : Sink {
         const size_t n = win.size();
         // 3. Winners' key values — the only key bytes this partition copies.
         GBPartData gathered;
-        type_keycols(gathered, g.key_meta, g.pack);
+        type_keycols(gathered, g.key_meta);
         for (size_t kc = 0; kc < gathered.keycols.size(); ++kc) {
             GroupKeyColumn& col = gathered.keycols[kc];
             for (uint32_t w : win) {
@@ -6204,35 +5992,6 @@ struct GroupBySink : Sink {
         }
         groupby_tel::topk_pruned.fetch_add(1, std::memory_order_relaxed);
         return n;
-    }
-
-    // Append the emitted key columns to `m`: the stored columns as they are, or (R7)
-    // the one packed column unpacked into each emitted key's typed column.
-    bool emit_key_columns(const GroupByGlobal& g, std::vector<CxxColumn> kcols, uint32_t n,
-                          CxxMorsel& m, ErrCtx& err) {
-        if (!g.pack.on) {
-            for (size_t k = 0; k < kcols.size(); ++k) {
-                m.columns.push_back(std::move(kcols[k]));
-                m.names.push_back(store_names[k]);
-            }
-            return true;
-        }
-        if (store_key_pos.empty()) return true;
-        if (kcols.size() != 1 || kcols[0].view.type != DRAKEN_UINT64
-                || kcols[0].view.length != n || kcols[0].view.validity != nullptr) {
-            err.code = 1;
-            err.msg = "GROUP BY packed key store is not one dense UINT64 column — fail loud";
-            return false;
-        }
-        const uint64_t* packed = static_cast<const uint64_t*>(kcols[0].view.data);
-        for (size_t j = 0; j < store_key_pos.size(); ++j) {
-            const size_t k = store_key_pos[j];
-            m.columns.push_back(gb_unpack_key(packed, n, g.pack, k, g.key_meta[k].type,
-                                              g.key_meta[k].logical, err));
-            if (err.code != 0) return false;
-            m.names.push_back(store_names[j]);
-        }
-        return true;
     }
 
     // Fold the distinct-operand pairs, then emit `merged` in chunk_rows morsels.
@@ -6284,40 +6043,23 @@ struct GroupBySink : Sink {
             // each per-group key store (GroupKeyColumn) into the output morsel. Only
             // the emitted keys have a store — a hash-only key has no column here.
             const uint64_t prof_tk = prof ? gb_prof_now() : 0;
-            std::vector<CxxColumn> kcols;
             if (key_sources == nullptr) {
                 for (size_t k = 0; k < merged.keycols.size(); ++k) {
-                    kcols.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
+                    m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
                     if (err.code != 0) return;
+                    m->names.push_back(store_names[k]);
                 }
             } else {
-#if OPTERYX_GB_NO_R5
-                // Gather this chunk's key values from their sources into typed
-                // stores, then emit those exactly as the copying path does.
-                GBPartData gathered;
-                type_keycols(gathered, g.key_meta, g.pack);
-                for (size_t k = 0; k < gathered.keycols.size(); ++k) {
-                    GroupKeyColumn& col = gathered.keycols[k];
-                    for (uint32_t i = 0; i < n; ++i) {
-                        const uint64_t ref = merged.keyref[start + i];
-                        col.append_from((*key_sources)[ref >> 32][k],
-                                        static_cast<size_t>(ref & 0xFFFFFFFFu), err);
-                        if (err.code != 0) return;
-                    }
-                    kcols.push_back(jpc_emit_range(col, 0, n, err));
-                    if (err.code != 0) return;
-                }
-#else
-                // R5: one typed gather per key column straight into the output.
+                // One typed gather per key column from the sources, straight into the
+                // output (R5).
                 size_t nk = 0;
                 for (const auto& sc : *key_sources) nk = std::max(nk, sc.size());
                 for (size_t k = 0; k < nk; ++k) {
-                    kcols.push_back(gather_key_column(*key_sources, merged.keyref, start, n, k, err));
+                    m->columns.push_back(gather_key_column(*key_sources, merged.keyref, start, n, k, err));
                     if (err.code != 0) return;
+                    m->names.push_back(store_names[k]);
                 }
-#endif
             }
-            if (!emit_key_columns(g, std::move(kcols), n, *m, err)) return;
             const uint64_t prof_tl = prof ? gb_prof_now() : 0;
             if (prof) gb_fin_keys_ns.fetch_add(prof_tl - prof_tk,
                                                std::memory_order_relaxed);
@@ -6374,7 +6116,6 @@ struct GroupBySink : Sink {
                 g.key_meta[k].type = seed.key_types[k];
                 g.key_meta[k].captured = true;
             }
-            g.pack = gb_pack_decide(g.key_meta);
             g.meta = meta;
             g.kinds = kinds;
             g.has_rows = has_rows;
@@ -6413,14 +6154,7 @@ struct GroupBySink : Sink {
         }
         keys->zero_col_rows = static_cast<uint32_t>(G);
         std::vector<uint64_t> hashes;
-        MorselPtr seed_pk = std::make_shared<CxxMorsel>();
-        if (g.pack.on) {
-            gb_pack_morsel(keys, cols, g.pack, seed_pk);
-            static const std::vector<size_t> kZero{0};
-            if (!compute_row_hashes(seed_pk, kZero, hashes, err)) return false;
-        } else if (!compute_row_hashes(keys, cols, hashes, err)) {
-            return false;
-        }
+        if (!compute_row_hashes(keys, cols, hashes, err)) return false;
 
         std::array<GBPartition, kGBParts> parts;
         std::array<bool, kGBParts> touched{};
@@ -6439,10 +6173,10 @@ struct GroupBySink : Sink {
             int64_t gid;
             if (P.index.find_or_insert_id(h, static_cast<int64_t>(P.hashes.size()), gid)) {
                 P.hashes.push_back(h);
-                for (size_t j = 0; j < P.keycols.size(); ++j) {
-                    P.keycols[j].append_row(
-                        g.pack.on ? seed_pk->columns[0].view : keys->columns[store_key_pos[j]].view,
-                        static_cast<uint32_t>(i), err, "GROUP BY statistics seed key");
+                for (size_t j = 0; j < store_key_pos.size(); ++j) {
+                    P.keycols[j].append_row(keys->columns[store_key_pos[j]].view,
+                                            static_cast<uint32_t>(i), err,
+                                            "GROUP BY statistics seed key");
                     if (err.code != 0) return false;
                 }
                 grow_lanes(g, P);
@@ -6548,7 +6282,7 @@ struct GroupBySink : Sink {
                                   uint32_t row, uint32_t t, ErrCtx& err) {
         GBTicketTable& T = *g.ticket;
         for (size_t j = 0; j < T.key_raw.size(); ++j) {
-            const DrakenVector& v = store_view(l, in, j);
+            const DrakenVector& v = in->columns[store_col_idx[j]].view;
             const bool is_null = v.validity != nullptr && !((v.validity[row >> 3] >> (row & 7)) & 1u);
             const size_t es = T.key_es[j];
             uint8_t* dst = T.key_raw[j].get() + static_cast<size_t>(t) * es;
@@ -7023,7 +6757,6 @@ struct GroupBySink : Sink {
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<GroupByGlobal&>(gs);
         if (seed.groups > 0 && !queue_seed(g, err)) return;
-#if !OPTERYX_GB_NO_R9
         if (g.ticket) {
             bool pending = false;
             for (size_t p = 0; p < kGBParts && !pending; ++p) pending = !g.pending[p].empty();
@@ -7036,7 +6769,6 @@ struct GroupBySink : Sink {
             groupby_tel::ticket_spills.fetch_add(1, std::memory_order_relaxed);
             if (!ticket_collect(g, err)) return;
         }
-#endif
         // Adaptive parallelism: thread spawn/join costs ~ms — pure overhead for
         // small aggregations (profiled: sub-50ms queries doubled under 14 idle
         // spawns). Thread only when the queued group count justifies it.
