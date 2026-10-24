@@ -213,6 +213,120 @@ int main() {
           "bit width 33 accepted");
   }
 
+  // ── DecodeRLEBitPackedVerdicts (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11) ──
+  // Reference: the stream's values looked up in the pass table one by one. The
+  // verdict walk must give byte-identical verdicts, the same success verdict,
+  // count every value in exactly one of runs_filled / codes_unpacked, and never
+  // write past num_values.
+  // Random streams at bit widths 0..20 (a pass table sized to the max code; wider
+  // widths would need gigabyte tables — they take the small-value streams below).
+  for (int bw = 0; bw <= 32; bw++) {
+    for (int rep = 0; rep < (bw == 0 ? 1 : 10); rep++) {
+      const int32_t n = 1 + (int32_t)(rng() % 20000);
+      std::vector<uint32_t> truth;
+      std::vector<uint8_t> stream;
+      if (bw == 0) {
+        truth.assign((size_t)n, 0);
+      } else if (bw <= 20) {
+        stream = make_stream(rng, bw, n, truth);
+      } else {
+        // Wide width, small codes: RLE runs and bit-packed groups of values < 4096.
+        int32_t written = 0;
+        while (written < n) {
+          if (rng() % 2 == 0) {
+            const uint32_t count = 1 + (uint32_t)(rng() % 3000), value = (uint32_t)(rng() % 4096);
+            put_rle(stream, count, value, bw);
+            truth.insert(truth.end(), count, value);
+            written += (int32_t)count;
+          } else {
+            std::vector<uint32_t> vals(8 * (1 + rng() % 150));
+            for (auto& v : vals) v = (uint32_t)(rng() % 4096);
+            put_bitpacked(stream, vals, bw);
+            truth.insert(truth.end(), vals.begin(), vals.end());
+            written += (int32_t)vals.size();
+          }
+        }
+      }
+      // A pass table covering every code the DECODE reads (the first n — a
+      // bit-packed run's group padding past n is never read), with a random
+      // verdict per entry.
+      uint32_t max_code = 0;
+      for (int32_t i = 0; i < n; i++) max_code = truth[(size_t)i] > max_code ? truth[(size_t)i] : max_code;
+      const uint32_t nent = max_code + 1 + (uint32_t)(rng() % 3);
+      std::vector<uint8_t> pass(nent);
+      for (auto& p : pass) p = (uint8_t)(rng() & 1);
+      std::vector<uint8_t> got((size_t)n + 16, 0xAB);
+      uint32_t bad = 99;
+      long long runs = 0, unpacked = 0;
+      const int32_t rc = DecodeRLEBitPackedVerdicts(stream.data(), stream.size(), n, bw,
+                                                    pass.data(), nent, got.data(), &bad,
+                                                    &runs, &unpacked);
+      CHECK(rc == n, "verdicts bw=%d n=%d: rc=%d", bw, n, rc);
+      CHECK(runs + unpacked == n, "verdicts bw=%d n=%d: runs %lld + unpacked %lld != n", bw, n,
+            runs, unpacked);
+      CHECK(std::memcmp(got.data() + n, std::vector<uint8_t>(16, 0xAB).data(), 16) == 0,
+            "verdicts bw=%d n=%d: wrote past the end", bw, n);
+      bool same = true;
+      for (int32_t i = 0; i < n && same; i++) same = got[(size_t)i] == pass[truth[(size_t)i]];
+      CHECK(same, "verdicts bw=%d n=%d: verdicts differ from the per-value lookup", bw, n);
+
+      if (bw == 0) continue;
+      // num_values short of the stream: stops mid-run, prefix identical.
+      if (n > 9) {
+        const int32_t m = n - 1 - (int32_t)(rng() % 8);
+        std::vector<uint8_t> got2((size_t)m + 16, 0xAB);
+        long long r2 = 0, u2 = 0;
+        const int32_t rc2 = DecodeRLEBitPackedVerdicts(stream.data(), stream.size(), m, bw,
+                                                       pass.data(), nent, got2.data(), &bad,
+                                                       &r2, &u2);
+        CHECK(rc2 == m && r2 + u2 == m, "verdicts cut bw=%d m=%d: rc=%d", bw, m, rc2);
+        CHECK(std::memcmp(got2.data(), got.data(), (size_t)m) == 0 && got2[(size_t)m] == 0xAB,
+              "verdicts cut bw=%d m=%d: prefix differs or overran", bw, m);
+      }
+      // A code at or above the table size is refused and named.
+      {
+        const uint32_t small = max_code;   // the max code itself is now out of range
+        if (small > 0) {
+          const int32_t rc3 = DecodeRLEBitPackedVerdicts(stream.data(), stream.size(), n, bw,
+                                                         pass.data(), small, got.data(), &bad,
+                                                         &runs, &unpacked);
+          CHECK(rc3 == -2 && bad >= small, "verdicts bw=%d: out-of-range code rc=%d bad=%u",
+                bw, rc3, bad);
+        }
+      }
+      // A bit-packed run one byte short of its payload: refused.
+      {
+        std::vector<uint32_t> vals(8 * (1 + rng() % 40));
+        const uint64_t mask = bw == 32 ? 0xFFFFFFFFull : ((1ull << bw) - 1);
+        for (auto& v : vals) v = (uint32_t)(rng() & mask);
+        std::vector<uint8_t> bp;
+        put_bitpacked(bp, vals, bw);
+        bp.pop_back();
+        uint32_t vmax = 0;
+        for (uint32_t v : vals) vmax = v > vmax ? v : vmax;
+        std::vector<uint8_t> big_pass((size_t)vmax + 1, 1);
+        std::vector<uint8_t> got3(vals.size() + 16, 0xAB);
+        const int32_t rc4 = DecodeRLEBitPackedVerdicts(bp.data(), bp.size(), (int32_t)vals.size(), bw,
+                                                       big_pass.data(), (uint32_t)big_pass.size(),
+                                                       got3.data(), &bad, &runs, &unpacked);
+        CHECK(bw == 32 || rc4 == -1, "verdicts short bw=%d: rc=%d (short stream accepted)", bw, rc4);
+      }
+    }
+  }
+  // A zero-length RLE run is malformed, never absorbed.
+  {
+    std::vector<uint8_t> stream;
+    put_rle(stream, 0, 1, 4);
+    put_rle(stream, 10, 1, 4);
+    uint8_t pass[2] = {0, 1};
+    std::vector<uint8_t> got(10, 0);
+    uint32_t bad = 0;
+    long long r = 0, u = 0;
+    CHECK(DecodeRLEBitPackedVerdicts(stream.data(), stream.size(), 10, 4, pass, 2, got.data(),
+                                     &bad, &r, &u) == -1,
+          "verdicts: zero-length RLE run accepted");
+  }
+
   if (g_failures) {
     std::fprintf(stderr, "packed codes: %d failure(s)\n", g_failures);
     return 1;

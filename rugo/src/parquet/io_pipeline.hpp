@@ -486,6 +486,20 @@ static inline uint32_t survivor_bits_count(const uint8_t* sm, uint32_t n) {
     return c;
 }
 
+// Number of set bytes in a 0/1 byte mask: eight bytes a popcount, no
+// data-dependent branch (a byte-at-a-time sum over a 65k-row mask per row
+// group was 4% of ClickBench Q01's CPU, profile 2026-10-24).
+static inline size_t count_set_bytes(const uint8_t* m, size_t n) {
+    size_t c = 0, i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, m + i, 8);
+        c += static_cast<size_t>(__builtin_popcountll(w));
+    }
+    for (; i < n; ++i) c += m[i];
+    return c;
+}
+
 // Unpack the first n bits of a survivor mask to one 0/1 byte per row. Each mask
 // byte becomes 8 row bytes in one multiply: broadcast, isolate bit j in byte j,
 // then normalise each byte's nonzero to 1 (+0x7F carries into bit 7, never out).
@@ -3963,7 +3977,13 @@ class ParquetIOPipeline {
             // Returns the mask every other column decodes under: `base` when the
             // search dropped nothing (or was declined), else the search's rows.
             // Sets empty_filtered when no row survives. False = stop (error / empty).
-            PageSearchOut search_out;
+            // thread_local: the row mask (one byte per row of the row group) keeps
+            // its capacity across row groups on this worker instead of a malloc /
+            // free pair per row group — on a 16-thread scan those pairs were a
+            // contended malloc-lock round trip each (profile 2026-10-24). The
+            // decoder sets `applied` only when it arms, so it is cleared here.
+            static thread_local PageSearchOut search_out;
+            search_out.applied = false;
             auto decode_search_col = [&](const uint8_t* base, const uint8_t*& rest) -> bool {
                 rest = base;
                 if (!decode_col(search_i, base, &search_out)) return false;
@@ -3971,10 +3991,8 @@ class ParquetIOPipeline {
                 const size_t rows = search_out.row_mask.size();
                 if (base != nullptr && rows != mask_rows)
                     throw std::logic_error("page search: row mask and page mask lengths disagree");
-                size_t kept = 0, base_kept = 0;
-                for (size_t r = 0; r < rows; ++r) kept += search_out.row_mask[r];
-                if (base != nullptr) { for (size_t r = 0; r < rows; ++r) base_kept += base[r]; }
-                else base_kept = rows;
+                const size_t kept = count_set_bytes(search_out.row_mask.data(), rows);
+                const size_t base_kept = base != nullptr ? count_set_bytes(base, rows) : rows;
                 if (kept == 0) {
                     result.empty_filtered = true;
                     result.empty_rows = static_cast<int64_t>(base_kept);
@@ -4157,6 +4175,12 @@ class ParquetIOPipeline {
                             if (kept == 0) {
                                 result.empty_filtered = true;
                                 result.empty_rows = np;
+                            } else if (kept == np && p_mask != nullptr) {
+                                // Every row the page search / page mask let through
+                                // passed the whole predicate (a single-conjunct
+                                // predicate under the search always lands here): the
+                                // mask the other columns want IS p_mask.
+                                d_mask_ptr = p_mask;
                             } else if (kept < np || p_mask != nullptr) {
                                 // Row-group-row mask for the other columns: the survivor
                                 // bit of each row that reached the predicate columns.
@@ -4168,10 +4192,13 @@ class ParquetIOPipeline {
                                     survivor_bits_to_bytes(sm, np, d_mask.data());
                                     rank = np;
                                 } else {
+                                    // Branch-free: a masked-out row reads survivor bit
+                                    // `rank` (the next admitted row's) and ANDs it away.
                                     for (size_t r = 0; r < rg_rows; ++r) {
-                                        if (!p_mask[r]) continue;
-                                        d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
-                                        ++rank;
+                                        const uint8_t in = p_mask[r];
+                                        const uint32_t rk = rank < np ? rank : np - 1;
+                                        d_mask[r] = in & ((sm[rk >> 3] >> (rk & 7)) & 1u);
+                                        rank += in;
                                     }
                                 }
                                 if (rank != np)

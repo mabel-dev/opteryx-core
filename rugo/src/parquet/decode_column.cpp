@@ -32,6 +32,19 @@
 
 namespace {
 
+// Number of set bytes in a 0/1 byte mask: eight bytes a popcount, no
+// data-dependent branch. The page search sums one per searched page.
+inline int32_t count_set_bytes(const uint8_t* m, size_t n) {
+  size_t c = 0, i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    std::memcpy(&w, m + i, 8);
+    c += static_cast<size_t>(__builtin_popcountll(w));
+  }
+  for (; i < n; ++i) c += m[i];
+  return static_cast<int32_t>(c);
+}
+
 inline uint8_t CodeWidthForDictSize(size_t dict_size) {
   if (dict_size <= 256) return 1;
   if (dict_size <= 65536) return 2;
@@ -1918,8 +1931,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // Page search scratch (search_on): per-PRESENT-value verdict and per-row
     // selection. A dict-encoded page's verdicts come straight off its code
     // stream (DecodeRLEBitPackedVerdicts); its codes are never materialised here.
-    std::vector<uint8_t> _page_vpass;
-    std::vector<uint8_t> _page_search_sel;
+    // thread_local (as the decompression scratch below): one 64 KB buffer per
+    // row group, allocated and freed per call, was a malloc-lock round trip on
+    // every row group of a 16-thread scan (profile 2026-10-24); the capacity
+    // now lives with the thread. Every use sizes or assigns before reading.
+    static thread_local std::vector<uint8_t> _page_vpass;
+    static thread_local std::vector<uint8_t> _page_search_sel;
     // Page search counters, flushed once after the page loop.
     long long _ps_pages = 0, _ps_discarded = 0, _ps_fallthrough = 0;
     long long _ps_rows_in = 0, _ps_rows_out = 0;
@@ -2689,27 +2706,46 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           ++_ps_fallthrough;
         }
         if (evaluated) {
-          _page_search_sel.resize((size_t)page_values);
-          uint8_t* sel = _page_search_sel.data();
-          int32_t n = 0;
-          if (def_levels.empty()) {
-            for (int32_t i = 0; i < page_values; ++i) {
-              const uint8_t keep = _page_vpass[i] &
-                  (page_sel_mask != nullptr ? page_sel_mask[i] : uint8_t(1));
-              sel[i] = keep;
-              n += keep;
-            }
+          // The per-row selection. Every path here is a straight pass over
+          // 0/1 bytes with no data-dependent branch: this runs once per row of
+          // every searched page (ClickBench Q01: 70M rows a query), and the
+          // branchy form of it was 22% of the query's CPU (profile 2026-10-24).
+          uint8_t* sel;
+          int32_t n;
+          if (def_levels.empty() && page_sel_mask == nullptr) {
+            // Required column (or all-present page), no mask: the verdicts ARE
+            // the selection — no copy.
+            sel = _page_vpass.data();
+            n = count_set_bytes(sel, (size_t)page_values);
           } else {
-            int32_t vi = 0;
-            for (int32_t i = 0; i < page_values; ++i) {
-              uint8_t keep = 0;
-              if (def_levels[i] == max_def) {
-                keep = _page_vpass[vi++] &
-                    (page_sel_mask != nullptr ? page_sel_mask[i] : uint8_t(1));
+            _page_search_sel.resize((size_t)page_values);
+            sel = _page_search_sel.data();
+            if (def_levels.empty()) {
+              const uint8_t* vp = _page_vpass.data();
+              for (int32_t i = 0; i < page_values; ++i) sel[i] = vp[i] & page_sel_mask[i];
+            } else {
+              // A null row reads verdict slot vi without advancing, then masks
+              // it out; the slot it reads is the next present row's, or one
+              // past the last when the page ends in nulls — so the buffer
+              // holds one spare slot (its value never reaches `sel`).
+              if (_page_vpass.size() < (size_t)pc + 1) _page_vpass.resize((size_t)pc + 1);
+              const uint8_t* vp = _page_vpass.data();
+              int32_t vi = 0;
+              if (page_sel_mask != nullptr) {
+                for (int32_t i = 0; i < page_values; ++i) {
+                  const uint8_t present = def_levels[i] == max_def;
+                  sel[i] = present & vp[vi] & page_sel_mask[i];
+                  vi += present;
+                }
+              } else {
+                for (int32_t i = 0; i < page_values; ++i) {
+                  const uint8_t present = def_levels[i] == max_def;
+                  sel[i] = present & vp[vi];
+                  vi += present;
+                }
               }
-              sel[i] = keep;
-              n += keep;
             }
+            n = count_set_bytes(sel, (size_t)page_values);
           }
           ++_ps_pages;
           _ps_rows_in += page_values;

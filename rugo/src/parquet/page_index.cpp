@@ -1,6 +1,7 @@
 // page_index.cpp — see page_index.hpp.
 
 #include "page_index.hpp"
+#include "metadata.hpp"   // IsPlainIntegerLogical
 #include "thrift.hpp"
 
 #include <algorithm>

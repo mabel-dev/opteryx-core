@@ -1,6 +1,8 @@
 # Run-domain predicate evaluation for dictionary-encoded columns
 
-Status: **ON HOLD — step 0 (2026-10-17) contradicted the premise; see §10. Not built.**
+Status: **v1 (any program, any dict type) ON HOLD — step 0 (2026-10-17) contradicted its
+premise; see §10. The integer-dictionary form (§11) was BUILT 2026-10-24 on the generalised
+page-search path; measurements in §11.6.**
 Date: 2026-10-17. Follows `docs/PARQUET_PACKED_CODES_ONE_PASS_DESIGN.md` (ruled D; one-pass
 kept on both arches, 3d reverted). This is the "count over runs" step of that ruling, written
 up as the general mechanism it turns out to need.
@@ -261,3 +263,109 @@ Probe: the same query with `CAST(0 AS INT16)` runs `fixed_int_compare_vector<sho
 Consequence: run-domain evaluation would cut CPU, but it cannot meet a wall-time keep rule
 on Q1 until the wall is understood. On hold. The next steps are (a) the literal-routing
 fix and (b) Q1's critical path.
+
+## 11. Integer dictionary form (built 2026-10-24)
+
+The routing fix of §10 landed (2026-10-17, Q1 0.756). What remained of Q1/Q7 was
+re-profiled before building anything (§11.1). The build is the brief's scope, not §3's:
+integer dictionary columns under the conjunct kinds the pushed-predicate machinery already
+carries (`=`, `IN`, `<>`, `NOT IN`, ranges), evaluated in the DECODER as the string page
+search is — a pass table per dictionary entry, verdicts per code off the RLE/bit-packed
+stream, rows the conjunct proves dead dropped before they are decoded. The engine's filter
+still runs over the survivors. No per-row kernel work is added anywhere; a bare `COUNT(*)`
+over a filter-only column emits only the survivors to the pass-1 predicate.
+
+### 11.1 Step 0 again: where Q1's work is after the routing fix (Mac, 2026-10-24)
+
+samply, 8 s warm loop of `SELECT COUNT(*) FROM scratch.hits_rg64k_b4 WHERE AdvEngineID <> 0`
+(565 runs, 14.2 ms/run; 1,114 of 1,600 row groups decoded, 73M rows), leaf samples with
+kernel-wait leaves excluded (work = 22,208 samples):
+
+| share | where | what |
+|---|---|---|
+| 21.7% | libsystem_malloc | per-row-group buffers (codes, dict vector, masks) |
+| 15.0% | libsystem_platform | memset / memcpy behind the same buffers |
+| 9.4% | draken `cmp_dict_bool_result` | scatter of the per-entry compare result to every row |
+| 8.4% | `build_direct_narrow_dict` | building the §11 dict-shaped INT16 vector from the packed codes |
+| 7.6% | `survivor_bits_to_bytes` | pass-1 survivor mask bits → one byte per row |
+| 6.0% | draken `mask_indices` | the survivor gather over the predicate column |
+| 4.2% | `DecodeRLEBitPackedCodesPacked` | **the code decode itself** |
+| 2.2% | `set_page_index_extent` | page-index bookkeeping per row group |
+| 1.7% | `lazy_select_column` | the gather |
+
+The decoder is ~4% of the work. Everything above it is per-row machinery over 73M rows that
+exists only to discover that ~630k of them pass: codes → packed array → dict vector → bool
+per row → mask → bytes → gather. The column's own stream is ~0.4 bits per value (3,459
+bytes for 65,536 rows): nearly all RLE runs of code 0. Deciding the predicate per run makes
+the per-row work proportional to survivors.
+
+### 11.2 What was built
+
+- `DecodeRLEBitPackedVerdicts` (`decode_encodings.cpp`): one walk of a page's hybrid code
+  stream writing `vpass[i] = entry_pass[code_i]`. An RLE run is one lookup and a `memset`
+  of its length — its codes are never materialised; a bit-packed run is unpacked through
+  the per-arch group unpackers into an L1 tile and looked up per code, with one bounds
+  check per tile. Short stream → -1, code ≥ dictionary → -2 with the code; both become a
+  named `error_message` on the column. The string page search's dict pages now take the
+  same function (its per-code loop over an int32 index buffer is gone).
+- `decode_column.cpp`: the pushed `ValuePredicate` gains kind 7 (int not-membership) and
+  kind 6 (range) now reaches the decoder. For a scalar `int32`/`int64` column of plain
+  integer logical type (`IsPlainIntegerLogical`, shared with the PageIndex range tests via
+  `metadata.hpp`) under kind 0/6/7, with a dictionary page: the per-entry pass table is
+  computed once per chunk (entries widened by declared signedness, as the materialiser
+  does), the chunk-level skip fires when no entry passes (`dict_all_filtered`, no data page
+  read), the page-level discard fires for dictionary pages when no entry passes, and
+  otherwise each dictionary page is decided by the verdict walk and each PLAIN page (a
+  spilled dictionary) value by value. The search is ARMED only when at least one entry
+  fails: a chunk nothing could be dropped from — the no-prune canary — is declined before
+  any path choice (`sel_mode`, the packed-code reserve, the RLE run path), so it decodes
+  exactly as before. A UINT64 range declines (entries compare as raw int64 bits; equality
+  is exact, order is not) — for the search AND the chunk skip.
+- `io_pipeline.hpp`: integer kinds register the column as a page-search candidate
+  (`add_search_col`; strings are registered first by the callers, since a string column
+  costs more to decode); `add_int_not_needles` (kind 7) added; kind 6 no longer withheld
+  from the decoder; under range settlement a kind-6 column is never the search column
+  (settlement proves rows from statistics without decoding, and runs only when nothing is
+  searched).
+- `pool_reader.pyx`: `_flatten_value_predicates` folds `<>` / `NOT IN` int literals into
+  `int_not_needles` (a conjunction of not-memberships is one not-membership; an
+  unrepresentable member is left out, which drops no row). Registration order: strings,
+  int needles, ranges, not-needles.
+- Telemetry: `ps_runs_filled` (values decided from an RLE run, never unpacked) and
+  `ps_codes_unpacked`, beside the existing `ps_*` counters.
+
+### 11.3 Semantics
+
+- NULL never passes any integer kind (`=`, `<>`, `IN`, `NOT IN`, range are all
+  NULL-rejecting under WHERE), so null rows are dropped when a page is evaluated and kept
+  (for the engine to drop) when it is not. Either is correct: the search only prunes.
+- A dictionary entry no row carries is evaluated but its verdict is never read.
+- `x NOT IN (1, NULL)` arrives as an all-int list only when the planner extracted one; a
+  list with a non-int member is not registered at all.
+- The one-predicate-per-column rule stands: membership or string wins, then range, then
+  not-membership. Any single conjunct is sound for pruning.
+
+### 11.4 Fail-loud
+
+`error_message` on: a dictionary page with no code stream; a code stream ending before the
+page's present values; a code outside the dictionary (named); a PLAIN page shorter than its
+present count. No bare `return` was added; the two the string path had (`data_size < 1`,
+`got != pc`) now carry messages.
+
+### 11.5 Verification
+
+- `packed_codes_test.cpp` (ASan/UBSan, `make packed-codes-test`, in `make q`): the verdict
+  walk against a per-value lookup, bit widths 0–32, random RLE/bit-packed mixes, cut
+  streams, out-of-range codes, short payloads, zero-length runs.
+- `tests/unit/connectors/parquet_io/test_int_dict_predicate_search.py`: per-row oracle on
+  int16/int32/int64/uint32, required/nullable, nulls, zstd, data page v2, a spilled
+  dictionary (dict + PLAIN pages in one chunk), `=`/`<>`/`IN`/`NOT IN`/`>`/BETWEEN/two
+  `<>`, `COUNT(*)`, `GROUP BY` on the searched column, a second conjunct and column;
+  engagement asserts on `ps_pages`, `ps_rows_out < ps_rows_in`, `ps_runs_filled > 0`,
+  `ps_codes_unpacked < ps_rows_in`; the no-prune canary asserts `ps_pages == 0`; a chunk
+  with no passing entry asserts no page was evaluated; UINT64 range declined / equality
+  searched.
+
+### 11.6 Measurements
+
+(filled in below as they land)
