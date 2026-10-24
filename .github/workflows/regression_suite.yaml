@@ -173,3 +173,77 @@ jobs:
         if: failure() && steps.lakekeeper.outcome != 'skipped'
         working-directory: opteryx-iceberg
         run: scripts/lakekeeper.sh logs
+
+  # The release floor (release.yaml `test-python`) run on every commit, so a
+  # red floor is found on main/PR rather than at tag time. Same suites, same
+  # invocations: make q, rt, dt, st. `make slt` is the fifth floor suite; it
+  # runs in sqllogictest.yaml. None of these need cloud credentials, so this
+  # job has no secrets and is independent of regression_matrix: a red pytest
+  # run cannot hide the floor, and the floor cannot hide it.
+  #
+  # Each suite step runs after a green Compile whatever the earlier suites did
+  # (`!cancelled()`), so one red suite does not mask the state of the rest.
+  # Never add continue-on-error: the job is red if any suite is.
+  release_floor:
+    name: release floor (make q, rt, dt, st)
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+          architecture: x64
+
+      # See regression_matrix: libssl-dev and pkg-config are preinstalled on the
+      # image (asserted, not installed); libnghttp2-dev is installed WITHOUT
+      # `apt-get update`.
+      - name: Verify system packages
+        run: |
+          dpkg -s libssl-dev pkg-config > /dev/null
+          sudo apt-get install -y --no-install-recommends libnghttp2-dev
+          pkg-config --exists openssl libnghttp2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Requirements
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --upgrade numpy cython setuptools-rust
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+
+      # `make q` runs the catalog-backed MERGE/UPDATE/DELETE/OPTIMIZE tests, which
+      # skip themselves without opteryx_catalog. A skip must never be how the
+      # floor passes (0.9.155 shipped refusing every MERGE for that reason).
+      - name: Verify opteryx_catalog is installed
+        run: |
+          python -c "import opteryx_catalog, importlib.metadata as m; print('opteryx-catalog', m.version('opteryx-catalog'))"
+
+      - name: Compile
+        id: compile
+        run: make compile
+
+      - name: Verify the compiled tree imports
+        run: python -c "import draken, rugo, skene, opteryx; print(opteryx.__version__)"
+
+      - name: make q — SQL shape regression battery
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: make q
+
+      - name: make rt — rugo unit tests
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: make rt
+
+      - name: make dt — draken unit tests
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: make dt
+
+      - name: make st — skene native suite + Python bindings
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: make st
