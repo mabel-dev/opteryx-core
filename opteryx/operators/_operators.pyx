@@ -3209,6 +3209,14 @@ cdef class NativePlan:
             sort_p1_index, sort_ascending, sort_nulls_first, topn_limit,
             c_from_p1, c_from_p2, c_names)
 
+    def drain_scan_plans(self):
+        """Cancel every NativeScanPlan's IO pipeline and wait for its in-flight
+        work, freeing nothing, so diagnostics read afterwards are final. Same
+        precondition as close_scan_plans: the engine driver has finished."""
+        cdef NativeScanPlan sp
+        for sp in self.scan_plans:
+            sp.drain()
+
     def close_scan_plans(self):
         """Cancel + shut down every NativeScanPlan's IO pipeline. MUST only run
         after the engine driver has finished (its workers block inside the

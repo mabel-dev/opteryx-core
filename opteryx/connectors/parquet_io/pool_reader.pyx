@@ -3166,6 +3166,7 @@ cdef class NativeScanPlan:
         self.cache_fill_bytes = 0
         self.scan_identity = None
         self._closed = False
+        self._drained = False
         self._pool = None
         self.footer_fetch_ns = 0
         self.fetch_paths = {}
@@ -3285,6 +3286,11 @@ cdef class NativeScanPlan:
             "chunk_cache_get_skipped_bytes": self.pipeline_ptr.cc_get_skipped_bytes(),
             "chunk_cache_pread_skipped_chunks": self.pipeline_ptr.cc_pread_skipped_chunks(),
             "chunk_cache_pread_skipped_bytes": self.pipeline_ptr.cc_pread_skipped_bytes(),
+            # Remote bloom round: probes answered by the process bloom cache vs
+            # fetched, and the cache's bytes (bloom_bytes_cache.hpp).
+            "bloom_cache_hits": self.pipeline_ptr.bloom_cache_hits(),
+            "bloom_cache_misses": self.pipeline_ptr.bloom_cache_misses(),
+            "bloom_cache_bytes": self.pipeline_ptr.bloom_cache_bytes(),
             # Scan prefilter: rows reaching the worker-side predicate / surviving it.
             "prefilter_rows_in": self.pipeline_ptr.prefilter_rows_in(),
             "prefilter_rows_out": self.pipeline_ptr.prefilter_rows_out(),
@@ -3367,10 +3373,13 @@ cdef class NativeScanPlan:
             return
         self.pipeline_ptr.set_range_settle(True)
 
-    cpdef void close(self):
-        if self._closed:
+    cpdef void drain(self):
+        """Cancel the IO pipeline and wait until nothing is in flight — including a
+        remote bloom round that outlived its scan — without freeing it, so
+        diagnostics() read afterwards count every request. close() drains first."""
+        if self._closed or self._drained:
             return
-        self._closed = True
+        self._drained = True
         if self.pipeline_ptr != NULL:
             # GIL released: wait_shutdown blocks until in-flight fetch/decode work
             # drains, which on GCS took >5s at teardown - holding the GIL froze the
@@ -3378,7 +3387,14 @@ cdef class NativeScanPlan:
             with nogil:
                 self.pipeline_ptr.cancel()
                 self.pipeline_ptr.wait_shutdown()
-                del self.pipeline_ptr
+
+    cpdef void close(self):
+        if self._closed:
+            return
+        self.drain()
+        self._closed = True
+        if self.pipeline_ptr != NULL:
+            del self.pipeline_ptr
             self.pipeline_ptr = NULL
         if self.footer_map != NULL:
             del self.footer_map

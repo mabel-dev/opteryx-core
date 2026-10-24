@@ -84,11 +84,14 @@ jobs:
       # statically links; Rust builds the opteryx.compute crate. Both are
       # preinstalled on the ubuntu-24.04 runner image, so assert rather than
       # install: `apt-get update` hangs for hours whenever the
-      # azure.archive.ubuntu.com mirror flakes.
+      # azure.archive.ubuntu.com mirror flakes. libnghttp2-dev is installed
+      # WITHOUT `apt-get update`: the vendored libcurl must have HTTP/2 (setup.py
+      # _assert_vendored_curl_http2 fails the build without it).
       - name: Verify system packages
         run: |
           dpkg -s libssl-dev pkg-config > /dev/null
-          pkg-config --exists openssl
+          sudo apt-get install -y --no-install-recommends libnghttp2-dev
+          pkg-config --exists openssl libnghttp2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

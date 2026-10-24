@@ -854,6 +854,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             if (excluded[static_cast<size_t>(g.item_index(u))]) g.bloom_drop[static_cast<size_t>(u)] = 1u;
         g.bloom->fetch->bufs.clear();
         g.bloom->fetch->bufs.shrink_to_fit();
+        g.bloom->cached.clear();
     }
 
     // Row admission (see RowAdmission). Borrowed; outlives the run. nullptr = admit all.

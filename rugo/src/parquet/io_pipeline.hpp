@@ -72,6 +72,7 @@
 // rule on the engine side, and trace_bridge_c.h for why the bridge exists.
 #include "core/trace_bridge_c.h"
 #include "core/chunk_cache.h"     // C7: the planner pins cached chunks and skips their GET
+#include "bloom_bytes_cache.hpp"  // remote bloom bytes, read once per process
 
 // H6 whole-file local mmap cache: ON on every architecture. It shipped per-arch
 // (x86 on, ARM off) on 2026-08-14 because ARM measured 2-5% slower — with the
@@ -2204,6 +2205,13 @@ class ParquetIOPipeline {
     std::atomic<uint64_t> cc_get_skipped_bytes_{0};     // compressed bytes not requested
     std::atomic<uint64_t> cc_pread_skipped_chunks_{0};
     std::atomic<uint64_t> cc_pread_skipped_bytes_{0};
+    // Remote bloom round (fetch_ranges_async + the engine's start_bloom_round):
+    // probes answered from the process bloom cache vs fetched, and that cache's
+    // size as last seen by this pipeline's round (the cache is per extension, so
+    // the reading is taken where the round runs, not where diagnostics are read).
+    std::atomic<uint64_t> bloom_cache_hits_{0};
+    std::atomic<uint64_t> bloom_cache_misses_{0};
+    std::atomic<int64_t> bloom_cache_bytes_{0};
     std::atomic<uint64_t> page_index_bytes_fetched_{0};
     std::atomic<uint64_t> page_index_pages_pruned_{0};
     std::atomic<uint64_t> page_index_bytes_pruned_{0};
@@ -4345,6 +4353,10 @@ class ParquetIOPipeline {
         std::mutex error_mtx;
     };
 
+    // One bloom filter inside request `req`'s bytes, to keep in the process bloom
+    // cache (bloom_bytes_cache.hpp) once that request lands.
+    struct BloomSlice { size_t req; int64_t offset; int64_t length; };
+
     // Issue the requests and return at once; the caller polls `state`. One pool
     // ticket PER FILE, each a concurrent get_many on its own worker's HTTP client
     // — the data path's fan-out. One get_many for every file would funnel them
@@ -4353,8 +4365,12 @@ class ParquetIOPipeline {
     // when it exists (dedicated IO workers), else the decode pool, and are
     // counted in tickets_inflight_ like every other ticket, so wait_shutdown
     // cannot return while one still touches the pipeline. A local path is a
-    // caller error: local ranges are a pread.
-    std::shared_ptr<RangeFetch> fetch_ranges_async(std::vector<RangeRequest> reqs) {
+    // caller error: local ranges are a pread. Every `bloom_slices` entry is copied
+    // into the process bloom cache by the ticket that read its request, before
+    // `state` is published — so a round that lands after its scan has finished
+    // still fills the cache.
+    std::shared_ptr<RangeFetch> fetch_ranges_async(std::vector<RangeRequest> reqs,
+                                                   const std::vector<BloomSlice>& bloom_slices) {
         auto fetch = std::make_shared<RangeFetch>();
         for (const auto& r : reqs) {
             const bool remote = r.path.compare(0, 5, "gs://") == 0 ||
@@ -4365,6 +4381,10 @@ class ParquetIOPipeline {
             if (r.end <= r.start)
                 throw std::logic_error("fetch_ranges_async: empty range for " + r.path);
         }
+        for (const BloomSlice& b : bloom_slices)
+            if (b.req >= reqs.size() || b.offset < reqs[b.req].start ||
+                b.offset + b.length > reqs[b.req].end || b.length <= 0)
+                throw std::logic_error("fetch_ranges_async: bloom slice outside its request");
         if (reqs.empty()) {
             fetch->state.store(1, std::memory_order_release);
             return fetch;
@@ -4385,11 +4405,15 @@ class ParquetIOPipeline {
                 parts[it->second].push_back(i);
             }
         }
+        // Per request: the (offset, length) blooms to cache from its bytes.
+        auto slices_by_req = std::make_shared<std::vector<std::vector<std::pair<int64_t, int64_t>>>>(reqs.size());
+        for (const BloomSlice& b : bloom_slices) (*slices_by_req)[b.req].emplace_back(b.offset, b.length);
         fetch->bufs.resize(reqs.size());
         fetch->parts_left.store(static_cast<int>(parts.size()), std::memory_order_relaxed);
         auto shared_reqs = std::make_shared<const std::vector<RangeRequest>>(std::move(reqs));
         for (auto& idx : parts) {
-            auto task = [this, fetch, shared_reqs, ix = std::move(idx)]() {
+            auto task = [this, fetch, shared_reqs, slices_by_req, has_slices = !bloom_slices.empty(),
+                         ix = std::move(idx)]() {
                 const std::vector<RangeRequest>& rq = *shared_reqs;
                 try {
                     std::vector<std::pair<std::string, std::map<std::string, std::string>>> http;
@@ -4416,8 +4440,12 @@ class ParquetIOPipeline {
                                 std::to_string(r.end - r.start) + " bytes, got " +
                                 std::to_string(bufs[k].size()));
                         bytes_fetched_.fetch_add(bufs[k].size(), std::memory_order_relaxed);
+                        for (const auto& [off, len] : (*slices_by_req)[ix[k]])
+                            bloom_bytes_cache().insert(r.path, off, len, bufs[k].data() + (off - r.start));
                         fetch->bufs[ix[k]] = std::move(bufs[k]);
                     }
+                    if (has_slices)
+                        bloom_cache_bytes_.store(bloom_bytes_cache().bytes(), std::memory_order_relaxed);
                 } catch (const std::exception& e) {
                     std::lock_guard<std::mutex> lk(fetch->error_mtx);
                     if (!fetch->failed.exchange(true)) fetch->error = e.what();
@@ -5038,6 +5066,15 @@ class ParquetIOPipeline {
     uint64_t cc_get_skipped_bytes() const { return cc_get_skipped_bytes_.load(std::memory_order_relaxed); }
     uint64_t cc_pread_skipped_chunks() const { return cc_pread_skipped_chunks_.load(std::memory_order_relaxed); }
     uint64_t cc_pread_skipped_bytes() const { return cc_pread_skipped_bytes_.load(std::memory_order_relaxed); }
+    // The bloom round's cache lookups (start_bloom_round records them).
+    void note_bloom_cache(uint64_t hits, uint64_t misses, int64_t cache_bytes) {
+        bloom_cache_hits_.fetch_add(hits, std::memory_order_relaxed);
+        bloom_cache_misses_.fetch_add(misses, std::memory_order_relaxed);
+        bloom_cache_bytes_.store(cache_bytes, std::memory_order_relaxed);
+    }
+    uint64_t bloom_cache_hits() const { return bloom_cache_hits_.load(std::memory_order_relaxed); }
+    uint64_t bloom_cache_misses() const { return bloom_cache_misses_.load(std::memory_order_relaxed); }
+    int64_t bloom_cache_bytes() const { return bloom_cache_bytes_.load(std::memory_order_relaxed); }
     uint64_t page_index_bytes_fetched() const {
         return page_index_bytes_fetched_.load(std::memory_order_relaxed);
     }

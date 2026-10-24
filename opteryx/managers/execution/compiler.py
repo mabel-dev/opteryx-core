@@ -7617,6 +7617,13 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
             if not _saw_finished:
                 out_q.wait_finished()
             _done_wait_ns = _t.perf_counter_ns() - _tw0
+            # Drain every scan's IO pipeline (cancel + wait for in-flight tickets,
+            # nothing freed) BEFORE the diagnostics harvest below: a remote bloom
+            # round can still be in flight after its scan finished, and its GETs
+            # are only counted when they land. Counted in close_scans time.
+            _tc0 = _t.perf_counter_ns()
+            nplan.drain_scan_plans()
+            _drain_scans_ns = _t.perf_counter_ns() - _tc0
             _io_diags: list = []
             # Skene row-group SKIPPING is a run-time decision (the Source's claim
             # builder reads each file's footer statistics), so unlike parquet's
@@ -7841,7 +7848,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                         )
             _tc0 = _t.perf_counter_ns()
             nplan.close_scan_plans()
-            _close_scans_ns = _t.perf_counter_ns() - _tc0
+            _close_scans_ns = _drain_scans_ns + _t.perf_counter_ns() - _tc0
             del handle
 
             if telemetry is not None:

@@ -146,6 +146,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t cc_get_skipped_bytes() nogil
         uint64_t cc_pread_skipped_chunks() nogil
         uint64_t cc_pread_skipped_bytes() nogil
+        uint64_t bloom_cache_hits() nogil
+        uint64_t bloom_cache_misses() nogil
+        int64_t bloom_cache_bytes() nogil
         uint64_t page_index_bytes_fetched() nogil
         uint64_t page_index_gate_declines() nogil
         uint64_t spin_iterations() nogil
@@ -279,6 +282,8 @@ cdef class NativeScanPlan:
     # compiler did not record (nothing to attribute).
     cdef public object scan_identity
     cdef bint _closed
+    # drain() ran: the pipeline is cancelled and quiescent but not yet freed.
+    cdef bint _drained
     cdef MemoryPool _pool
     # Wall time spent fetching/parsing footers not already in _PARSED_FOOTER_CACHE
     # (one network round-trip per uncached file, serial). This is genuine IO, not
@@ -290,6 +295,7 @@ cdef class NativeScanPlan:
     # (vector_index_admission.hpp) must name them the same way.
     cdef public dict fetch_paths
 
+    cpdef void drain(self)
     cpdef void close(self)
 
 

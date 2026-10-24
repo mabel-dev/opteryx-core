@@ -34,12 +34,15 @@ jobs:
       # libssl-dev and pkg-config are preinstalled on the ubuntu-24.04 runner
       # image, so assert rather than install: `apt-get update` hangs for hours
       # whenever the azure.archive.ubuntu.com mirror flakes. Fails loudly if the
-      # image ever drops them.
+      # image ever drops them. libnghttp2-dev is installed WITHOUT
+      # `apt-get update`: the vendored libcurl must have HTTP/2 (setup.py
+      # _assert_vendored_curl_http2 fails the build without it).
       - name: Verify system packages
         if: matrix.os == 'ubuntu-latest'
         run: |
           dpkg -s libssl-dev pkg-config > /dev/null
-          pkg-config --exists openssl
+          sudo apt-get install -y --no-install-recommends libnghttp2-dev
+          pkg-config --exists openssl libnghttp2
         
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
