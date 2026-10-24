@@ -250,6 +250,9 @@ opteryx/third_party/mbleven.c
 !testdata/parquet_tests/byte_stream_split.zstd.parquet
 !testdata/parquet_tests/byte_stream_split_extended.gzip.parquet
 !testdata/parquet_tests/delta_length_byte_array.parquet
+# 2.1MB; tests/sql/test_unnest_function_expression_pushdown.py reads it from a
+# fresh checkout.
+!testdata/public/exploit_db/exploit_db.parquet
 **.csv
 **.tgz
 **.stats.json

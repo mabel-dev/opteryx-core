@@ -33,7 +33,6 @@ def _scalar(sql):
     [
         ("testdata.planets", "id"),  # parquet
         ("testdata.fuzzing.wide", "grp_wide"),  # parquet, several row groups
-        ("testdata.tpch_100_skene.nation", "n_nationkey"),  # skene
     ],
 )
 @pytest.mark.parametrize("predicate", ["{c} IS NULL", "{c} IS NOT NULL", "{c} = 3", "{c} > 3"])

@@ -37,7 +37,7 @@ import pytest
 import opteryx
 from opteryx.planner.optimizer.strategies.join_algorithm import _decide_swap_reasoned
 
-TPCH = "testdata.tpch_1"
+TPCH = "testdata.tpch_001"
 
 
 def _decisions(sql, label):
@@ -92,8 +92,8 @@ def test_inner_join_records_a_kept_decision_with_its_numbers():
     detail = details[0]
     assert detail.startswith("kept (")
     # Both sides' numbers, so the choice is checkable rather than assertable.
-    assert "149,998 rows" in detail
-    assert "1,500,000 rows" in detail
+    assert "1,498 rows" in detail
+    assert "15,000 rows" in detail
 
 
 def test_inner_join_records_a_swap_and_still_counts_it():
@@ -164,13 +164,15 @@ def test_ratio_stays_readable_across_its_real_range():
             WHERE o_custkey IN (SELECT c_custkey FROM {TPCH}.customer)""",
         "left semi join exchange",
     )[0]
+    # region (5 rows) against orders (15,000): a ratio in the thousands, which is
+    # the end of the range that needs the thousands separator.
     large = _decisions(
-        f"""SELECT n_name FROM {TPCH}.nation
-            WHERE n_nationkey IN (SELECT c_nationkey FROM {TPCH}.customer)""",
+        f"""SELECT r_name FROM {TPCH}.region
+            WHERE r_regionkey IN (SELECT o_custkey FROM {TPCH}.orders)""",
         "left semi join exchange",
     )[0]
     assert "ratio 0.1x" in small
-    assert "ratio 6,000x" in large
+    assert "ratio 3,000x" in large
 
 
 def test_semi_join_exchange_does_not_report_statistics_it_never_read():

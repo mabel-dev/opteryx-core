@@ -29,7 +29,7 @@ import pytest
 
 import opteryx
 
-T = "testdata.tpch_1."
+T = "testdata.tpch_001."
 LABEL_PREFIX = "cost-based join planning"
 
 
