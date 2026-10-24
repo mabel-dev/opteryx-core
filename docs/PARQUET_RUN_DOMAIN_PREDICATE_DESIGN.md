@@ -321,7 +321,25 @@ the per-row work proportional to survivors.
   any path choice (`sel_mode`, the packed-code reserve, the RLE run path), so it decodes
   exactly as before. A UINT64 range declines (entries compare as raw int64 bits; equality
   is exact, order is not) — for the search AND the chunk skip.
-- `io_pipeline.hpp`: integer kinds register the column as a page-search candidate
+- **Selectivity gate (per page, integers only):** an evaluated page more than a 64th of
+  whose rows pass is kept WHOLE — it decodes exactly as without the search and the scan's
+  filter decides its rows (`ps_pages_whole`). Measured ungated on the Mac (§11.6): a 55%-pass
+  predicate (`TraficSourceID IN (-1, 6)`) cost 1.33x and an 18%-pass one (`OS NOT IN …`)
+  1.09x, because selecting rows costs per survivor (a second walk of the code stream, the
+  compacted emission) while the baseline's per-row work is a handful of vectorised passes.
+  Strings are not gated: the string decode is the expensive part, so dropping any row pays.
+- **Packed codes under selection:** a nullable int dictionary column keeps its positional
+  packed code array under the search (positional by EMITTED row): a page kept whole decodes
+  one-pass into it at `total_emitted`; a selective page scatters only its survivors there
+  (one store per survivor on an all-present page). The emitted shape is therefore the same
+  §11 dict-shaped column as without the search, and a mixed dict+PLAIN chunk materialises
+  its prefix over the emitted rows.
+- Scratch that is a function of the row group's size (the verdict bytes, the selection,
+  the search row mask) is thread_local, as the decompression scratch already was: a 64 KB
+  malloc/free per row group was a contended malloc-lock round trip on a 16-thread scan.
+- `io_pipeline.hpp`: the pass-1 survivor mask is reused as the other columns' row mask when
+  every row the search admitted passed the whole predicate (the single-conjunct case), and
+  the 0/1 byte masks are counted eight bytes a popcount; integer kinds register the column as a page-search candidate
   (`add_search_col`; strings are registered first by the callers, since a string column
   costs more to decode); `add_int_not_needles` (kind 7) added; kind 6 no longer withheld
   from the decoder; under range settlement a kind-6 column is never the search column
@@ -368,4 +386,48 @@ present count. No bare `return` was added; the two the string path had (`data_si
 
 ### 11.6 Measurements
 
-(filled in below as they land)
+Keep rule stated before the first number (§8.2): Q1/Q7 median wall ≤ 0.90 on both arches, no
+guard worse than 1.00; otherwise the change is reverted.
+
+**Mac (M5 Pro, 16 workers, `scratch.hits_rg64k_b4`, 5 interleaved rounds, baseline = the
+pre-edit tree with the identical other binaries, result digests identical on every query).**
+Wall and process-CPU medians, B/A (final build: gate + probe + lazy mask):
+
+| query | wall B/A | B wins | CPU B/A | notes |
+|---|---|---|---|---|
+| Q01 `AdvEngineID <> 0` | 0.999 (0.985 in two earlier rounds) | 2/5 | 0.990 | 70.5M rows decided, 630,500 emitted; 99.1% of verdicts from RLE runs |
+| Q07 (same filter, GROUP BY) | 0.995 | 3/5 | 0.975 | |
+| `= 0` (99% pass) | 1.006 | 1/5 | 0.985 | every page kept whole by the probe |
+| `IN (2, 3)` | 1.021 | 2/5 | 0.956 | |
+| `> 0` (range-settled from stats, never searched) | 1.013 | 3/5 | 0.990 | control |
+| `<> 1` no-prune canary (every entry passes; stats cannot answer) | 0.993 | 4/5 | 0.988 | search declined |
+| `SUM(AdvEngineID) GROUP BY OS` canary | 0.998 | 3/5 | 1.003 | control |
+| Q39-shape `CounterID = 62 AND IsRefresh = 0 AND DontCountHits = 0` | 1.031 | 0/5 | 1.021 | 28 pages |
+| `TraficSourceID IN (-1, 6) AND IsRefresh = 0` (55% pass) | 1.014 | 1/5 | 1.008 | 11,165 of 11,200 pages kept whole |
+| `OS NOT IN (2, 44, 56)` (18.6% pass) | 1.056 | 0/5 | 1.050 | 9,429 whole, 1,771 selective |
+
+Earlier rounds of the same day, for the record: ungated (every evaluated page selected, int32
+indices under selection) `TraficSourceID IN` 1.333 and `OS NOT IN` 1.092; with the gate but a
+full verdict walk per page 1.151 / 1.195; with the probe 1.021 / 1.047.
+
+**Verdict on the Mac: not a win.** Q01/Q07 are flat (the targets), and the mid-selectivity
+integer predicates lose 1–6% consistently (0/5). The mechanism does what it says — the
+per-row work after the decoder is gone for Q01 (draken's per-row compare scatter, mask gather
+and dict-vector build left the profile) — but Q01's wall is not made of that work (§11.7).
+
+**x86 (i5-8500, 6 cores, mimalloc preload, `hits_rugo_262k`):** see below when run.
+
+### 11.7 Where Q01's wall actually is (the finding of this work)
+
+The baseline profile split by thread, worker threads only, per Q01 run (thread-ms; samply, Mac):
+user code 36 · `__psynch_mutexwait` 101 · `open()` 37 · malloc lock (`__ulock_wait2` under
+`draken_malloc` → system malloc; no mimalloc on macOS) 26 · `mmap` 10. The main thread is 27%
+busy, each worker 21%. The mutex waits are `local_file_mapping` / `acquire_local_fd` /
+`queue_mutex_` (every claim, result push and pop) contended by 16 threads once per row group;
+the `open`/`mmap` are the per-PIPELINE whole-file mapping cache — every query opens and maps
+all 100 files again (the pipeline object is per query) and the 16 workers do it on the same
+vnodes at once. The decoder was 4% of Q01's user CPU before this work; user CPU is a fifth of
+the workers' non-idle time. A short query over 1,114 row groups is therefore bounded by
+per-row-group kernel work in the pipeline, not by decoding, and no decoder change can move
+it. That work (a per-process mapping cache keyed by path+mtime, lock-free claim/result
+queues, pre-sized per-worker scratch) is pipeline structure and was not touched here.

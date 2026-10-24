@@ -84,6 +84,9 @@ inline std::atomic<long long> ps_dict_entries_pass {0};  // dictionary entries t
 // unpacked) vs values whose code was unpacked from a bit-packed group.
 inline std::atomic<long long> ps_runs_filled       {0};
 inline std::atomic<long long> ps_codes_unpacked    {0};
+// Evaluated integer-search pages kept whole because more than a 64th of
+// their rows passed (selection would cost more than it saves).
+inline std::atomic<long long> ps_pages_whole       {0};
 
 inline void reset() {
     metadata_ns.store(0, std::memory_order_relaxed);
@@ -122,6 +125,7 @@ inline void reset() {
     ps_dict_entries_pass.store(0, std::memory_order_relaxed);
     ps_runs_filled.store(0, std::memory_order_relaxed);
     ps_codes_unpacked.store(0, std::memory_order_relaxed);
+    ps_pages_whole.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -174,6 +178,7 @@ inline long long ps_dict_entries_count()      { return ps_dict_entries.load(std:
 inline long long ps_dict_entries_pass_count() { return ps_dict_entries_pass.load(std::memory_order_relaxed); }
 inline long long ps_runs_filled_count()       { return ps_runs_filled.load(std::memory_order_relaxed); }
 inline long long ps_codes_unpacked_count()    { return ps_codes_unpacked.load(std::memory_order_relaxed); }
+inline long long ps_pages_whole_count()       { return ps_pages_whole.load(std::memory_order_relaxed); }
 
 } // namespace rugo_tel
 

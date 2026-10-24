@@ -1890,11 +1890,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                  target_col->max_definition_level > 0 &&
                  result.ext_int64 == nullptr && result.ext_int32 == nullptr &&
                  result.ext_float64 == nullptr && result.ext_float32 == nullptr &&
-                 row_mask == nullptr && !search_on) {
+                 row_mask == nullptr) {
         // Nullable numeric dict column with no caller-provided dense buffer and no
         // row-mask: pre-allocate packed codes array (zero = null sentinel).
-        // The integer search selects rows like a row mask does, so it takes the
-        // same compacted dict_indices path below.
+        // Under the page search the array is positional by EMITTED row: a page
+        // that keeps every row decodes straight into it at total_emitted, a
+        // selective page scatters its survivors there compactly.
         // byte_array is excluded: mixed dict/plain chunks determine at the first
         // PLAIN page whether to intern (dict_indices) or materialise to dense.
         // When row_mask is active the dict_codes_array would not be filtered, so
@@ -1940,19 +1941,45 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // Page search counters, flushed once after the page loop.
     long long _ps_pages = 0, _ps_discarded = 0, _ps_fallthrough = 0;
     long long _ps_rows_in = 0, _ps_rows_out = 0;
-    long long _ps_runs = 0, _ps_unpacked = 0;
+    long long _ps_runs = 0, _ps_unpacked = 0, _ps_whole = 0;
     if (search_on) {
-      search->row_mask.assign(
-          target_col->num_values > 0 ? (size_t)target_col->num_values : 0, 0);
       search->applied = true;
       if (byte_array_dict_mode) compute_entry_pass();
     }
     // With the search armed the dictionary page was read in place; it must be
     // owned (whole or compacted) before any data page references it.
     settle_dictionary_bytes();
+    // The search row mask is materialised LAZILY: a chunk every evaluated page
+    // of which keeps all its rows needs no mask at all (the search is reported
+    // as not applied and the column holds every row, as without it), and the
+    // 64 KB zero-fill, per-page fill and the caller's count over it were a
+    // measurable fraction of a short query (2026-10-24). Until the first
+    // selective or discarded page, whole pages are only recorded; that page
+    // starts the mask (every row 0: pages the caller's row mask or jump plan
+    // skipped never visit the search and must stay out) and replays them.
+    static thread_local std::vector<std::pair<int32_t, int32_t>> _search_whole_ranges;
+    _search_whole_ranges.clear();
+    bool search_mask_started = false;
+    auto search_mask_start = [&]() {
+      if (search_mask_started) return;
+      search_mask_started = true;
+      search->row_mask.assign(
+          target_col->num_values > 0 ? (size_t)target_col->num_values : 0, 0);
+      for (const auto& r : _search_whole_ranges) {
+        const size_t end = (size_t)r.first + (size_t)r.second;
+        if (search->row_mask.size() < end) search->row_mask.resize(end, 0);
+        std::memset(search->row_mask.data() + r.first, 1, (size_t)r.second);
+      }
+      _search_whole_ranges.clear();
+    };
     // Rows [base, base + n) of the chunk: copy the page's selection (or mark
-    // every row) into the search row mask.
+    // every row) into the search row mask. A discarded page leaves its rows 0.
     auto search_mark_rows = [&](int32_t base, int32_t n, const uint8_t* sel) {
+      if (sel == nullptr && !search_mask_started) {
+        _search_whole_ranges.emplace_back(base, n);
+        return;
+      }
+      search_mask_start();
       const size_t end = (size_t)base + (size_t)n;
       if (search->row_mask.size() < end) search->row_mask.resize(end, 0);
       if (sel != nullptr) std::memcpy(search->row_mask.data() + base, sel, (size_t)n);
@@ -2369,6 +2396,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         ++_ps_pages;
         ++_ps_discarded;
         _ps_rows_in += page_values;
+        search_mask_start();   // its rows stay 0
         total_collected += page_values;
         cursor = compressed_data + compressed_size;
         ++result.pages_skipped;
@@ -2632,6 +2660,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           for (int32_t dl : def_levels) pc += (dl == max_def);
         }
         bool evaluated = false;
+        bool whole_by_probe = false;   // integer search: the prefix probe kept the page whole
+        constexpr uint64_t kSearchKeepWholeDenom = 64;   // a page is kept whole above 1/64 of its rows passing
         if (enc == 0 && search_str_on) {
           _page_vpass.assign((size_t)pc, 0);
           for (const std::string& pat : *skip_pred->str_vals)
@@ -2680,7 +2710,30 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           const int bw = (int)data_ptr[0];
           _page_vpass.resize((size_t)pc);
           uint32_t bad_code = 0;
-          const int32_t got = DecodeRLEBitPackedVerdicts(
+          // Integer search: probe the page's first values before walking all of
+          // it. A page most of whose rows pass is kept whole (the gate below),
+          // and knowing that from a prefix costs a fraction of the page: on a
+          // bit-packed page the full walk unpacks every code only to keep every
+          // row (measured 2026-10-24: +15% on a 55%-pass predicate with the
+          // full walk). The probe is pruning-only: a page whose prefix passes
+          // but whose tail fails merely keeps rows the scan's filter then drops.
+          constexpr int32_t kProbeValues = 4096;
+          if (search_int_on && pc > kProbeValues) {
+            long long probe_runs = 0, probe_unpacked = 0;
+            const int32_t probed = DecodeRLEBitPackedVerdicts(
+                data_ptr + 1, data_size - 1, kProbeValues, bw, entry_pass.data(),
+                (uint32_t)entry_pass.size(), _page_vpass.data(), &bad_code,
+                &probe_runs, &probe_unpacked);
+            if (probed == kProbeValues &&
+                (uint64_t)count_set_bytes(_page_vpass.data(), (size_t)kProbeValues) * kSearchKeepWholeDenom >
+                    (uint64_t)kProbeValues) {
+              whole_by_probe = true;
+              _ps_runs += probe_runs;
+              _ps_unpacked += probe_unpacked;
+            }
+            // A short or malformed prefix is reported by the full walk below.
+          }
+          const int32_t got = whole_by_probe ? pc : DecodeRLEBitPackedVerdicts(
               data_ptr + 1, data_size - 1, pc, bw, entry_pass.data(),
               (uint32_t)entry_pass.size(), _page_vpass.data(), &bad_code,
               &_ps_runs, &_ps_unpacked);
@@ -2710,9 +2763,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // 0/1 bytes with no data-dependent branch: this runs once per row of
           // every searched page (ClickBench Q01: 70M rows a query), and the
           // branchy form of it was 22% of the query's CPU (profile 2026-10-24).
-          uint8_t* sel;
+          uint8_t* sel = nullptr;
           int32_t n;
-          if (def_levels.empty() && page_sel_mask == nullptr) {
+          if (whole_by_probe) {
+            // Kept whole from the prefix: no selection is built; every row of
+            // the page is emitted (under the page mask, as without the search).
+            n = page_values;
+          } else if (def_levels.empty() && page_sel_mask == nullptr) {
             // Required column (or all-present page), no mask: the verdicts ARE
             // the selection — no copy.
             sel = _page_vpass.data();
@@ -2747,9 +2804,24 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             }
             n = count_set_bytes(sel, (size_t)page_values);
           }
+          // Integer search: a page more than a 64th of whose rows pass is kept
+          // WHOLE. Selecting rows costs per survivor AND per bit-packed group
+          // holding one (the selective code walk unpacks every such group, on
+          // x86 with the scalar unpacker), so it pays only when survivors are
+          // rare; a kept-whole page decodes as without the search and the
+          // scan's filter decides its rows. Measured 2026-10-24: ungated, a
+          // 55%-pass predicate cost 1.33x and an 18%-pass one 1.09x (Mac); at
+          // an eighth the 18%-pass case still cost 1.11x on x86 from its 15%
+          // of selective pages, while ClickBench Q01 (0.9% pass) won. Strings
+          // are not gated: the string decode is the expensive part, so dropping
+          // any row pays.
+          const bool keep_whole =
+              whole_by_probe ||
+              (search_int_on && n > 0 && (uint64_t)n * kSearchKeepWholeDenom > (uint64_t)page_values);
           ++_ps_pages;
           _ps_rows_in += page_values;
-          _ps_rows_out += n;
+          _ps_rows_out += keep_whole ? page_values : n;
+          if (keep_whole) ++_ps_whole;
           if (n == 0) {
             // Take this page's def levels back out: it emits nothing.
             if (page_all_present) {
@@ -2758,11 +2830,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               all_def_levels.resize_uninit(all_def_levels.size() - (size_t)page_values);
             }
             ++_ps_discarded;
+            search_mask_start();   // its rows stay 0
             total_collected += page_values;
             cursor = compressed_data + compressed_size;
             continue;
           }
-          if (n < page_values) {
+          if (n < page_values && !keep_whole) {
             page_selective = true;
             page_sel_rows  = n;
             page_sel_mask  = sel;
@@ -2954,7 +3027,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               return;
             }
             const size_t code_width = result.code_width;
-            if ((size_t)(total_collected + page_values) * code_width >
+            if ((size_t)(total_emitted + page_values) * code_width >
                 result.dict_codes_array.size()) {
               result.error_message = "column '" + target_col->name +
                   "': dictionary page at row " + std::to_string(total_collected) +
@@ -2966,7 +3039,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             RUGO_TEL_START(_rle_t0);
             const int32_t decoded = DecodeRLEBitPackedCodesPacked(
                 data_ptr, data_size, present_count, bit_width,
-                result.dict_codes_array.data() + (size_t)total_collected * code_width,
+                result.dict_codes_array.data() + (size_t)total_emitted * code_width,
                 result.code_width, &max_code);
             RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
             if (decoded != present_count) {
@@ -3013,12 +3086,64 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             }
 
             // ── Scatter packed codes for nullable dict columns ──
-            if (!result.dict_codes_array.empty() && page_uses_dictionary) {
+            if (!result.dict_codes_array.empty() && page_uses_dictionary &&
+                page_vsel != nullptr) {
+              // Selective page (page search): `indices` holds the codes of the
+              // SELECTED present values, in order, and the array is positional by
+              // emitted row. An all-present page's survivors are consecutive from
+              // total_emitted — one store per survivor, nothing per row. A page
+              // with nulls interleaves its selected null rows (zero placeholder,
+              // already there) with the selected present ones.
+              const int32_t max_def = target_col->max_definition_level;
+              const int32_t row_offset = total_emitted;
+              if ((size_t)(total_emitted + page_sel_rows) * result.code_width >
+                  result.dict_codes_array.size()) {
+                result.error_message = "column '" + target_col->name +
+                    "': selected rows of the page at row " + std::to_string(total_collected) +
+                    " run past the column chunk's " +
+                    std::to_string(result.dict_codes_array.size() / result.code_width) + " rows";
+                return;
+              }
+              if (page_all_present || def_levels.empty()) {
+                if ((int32_t)indices.size() != page_sel_rows) {
+                  result.error_message = "column '" + target_col->name +
+                      "': page at row " + std::to_string(total_collected) + " selected " +
+                      std::to_string(page_sel_rows) + " rows but decoded " +
+                      std::to_string(indices.size()) + " codes";
+                  return;
+                }
+                for (int32_t k = 0; k < page_sel_rows; ++k) {
+                  const int32_t code = indices[k];
+                  if (code < 0 || code >= (int32_t)dict_size) return;
+                  WritePackedCode(result.dict_codes_array.data(), row_offset + k,
+                                  code, result.code_width);
+                }
+              } else {
+                int32_t code_idx = 0, out = 0;
+                for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
+                  if (!page_sel_mask[i]) continue;
+                  if (def_levels[i] == max_def) {
+                    if (code_idx >= (int32_t)indices.size()) return;
+                    const int32_t code = indices[code_idx++];
+                    if (code < 0 || code >= (int32_t)dict_size) return;
+                    WritePackedCode(result.dict_codes_array.data(), row_offset + out,
+                                    code, result.code_width);
+                  }
+                  ++out;
+                }
+                if (out != page_sel_rows || code_idx != (int32_t)indices.size()) {
+                  result.error_message = "column '" + target_col->name +
+                      "': page at row " + std::to_string(total_collected) +
+                      " selected rows and decoded codes disagree";
+                  return;
+                }
+              }
+            } else if (!result.dict_codes_array.empty() && page_uses_dictionary) {
               // Scatter sparse indices into full-width packed codes array
               if (indices.size() != (size_t)present_count) return;
               int32_t max_def = target_col->max_definition_level;
               int32_t code_idx = 0;
-              int32_t row_offset = total_collected;
+              int32_t row_offset = total_emitted;
 
               if (page_all_present) {
                 // Fast-path page: def_levels was never expanded, and every slot
@@ -3371,35 +3496,35 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             _ok = MaterializeDictPrefixToDense(
                 result.dict_int32_values, result.int32_values,
                 result.dict_indices, result.dict_codes_array,
-                result.code_width, all_def_levels, total_collected, _md,
+                result.code_width, all_def_levels, sel_mode ? total_emitted : total_collected, _md,
                 total_needed);
             int32_dict_mode = false;
           } else if (int64_dict_mode) {
             _ok = MaterializeDictPrefixToDense(
                 result.dict_int64_values, result.int64_values,
                 result.dict_indices, result.dict_codes_array,
-                result.code_width, all_def_levels, total_collected, _md,
+                result.code_width, all_def_levels, sel_mode ? total_emitted : total_collected, _md,
                 total_needed);
             int64_dict_mode = false;
           } else if (int128_dict_mode) {
             _ok = MaterializeDictPrefixToDense(
                 result.dict_int128_values, result.int128_values,
                 result.dict_indices, result.dict_codes_array,
-                result.code_width, all_def_levels, total_collected, _md,
+                result.code_width, all_def_levels, sel_mode ? total_emitted : total_collected, _md,
                 total_needed);
             int128_dict_mode = false;
           } else if (float32_dict_mode) {
             _ok = MaterializeDictPrefixToDense(
                 result.dict_float32_values, result.float32_values,
                 result.dict_indices, result.dict_codes_array,
-                result.code_width, all_def_levels, total_collected, _md,
+                result.code_width, all_def_levels, sel_mode ? total_emitted : total_collected, _md,
                 total_needed);
             float32_dict_mode = false;
           } else {
             _ok = MaterializeDictPrefixToDense(
                 result.dict_float64_values, result.float64_values,
                 result.dict_indices, result.dict_codes_array,
-                result.code_width, all_def_levels, total_collected, _md,
+                result.code_width, all_def_levels, sel_mode ? total_emitted : total_collected, _md,
                 total_needed);
             float64_dict_mode = false;
           }
@@ -3933,6 +4058,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       rugo_tel::ps_rows_out.fetch_add(_ps_rows_out, std::memory_order_relaxed);
       rugo_tel::ps_runs_filled.fetch_add(_ps_runs, std::memory_order_relaxed);
       rugo_tel::ps_codes_unpacked.fetch_add(_ps_unpacked, std::memory_order_relaxed);
+      rugo_tel::ps_pages_whole.fetch_add(_ps_whole, std::memory_order_relaxed);
+      // No page dropped a row: the column holds every row the caller asked for,
+      // exactly as without the search — report it as not applied so the caller
+      // decodes the other columns under its own mask and counts nothing here.
+      if (!search_mask_started) search->applied = false;
     }
     }  // end if (!used_parallel_path) [sequential fallback]
 

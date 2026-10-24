@@ -39,9 +39,12 @@ import rugo.rugo_native as rp
 from opteryx.connectors import DiskConnector
 
 N = 50_000
-# Skewed: most rows carry 0 (long RLE runs, like ClickBench AdvEngineID), a
-# handful of other values appear in bursts (bit-packed groups).
-VALUES = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7, 12, 52]
+# Skewed: ~99.5% of rows carry 0 in long runs (RLE, like ClickBench AdvEngineID),
+# a handful of other values appear in short bursts (bit-packed groups). Under
+# `v <> 0` well under a 64th of the rows pass, so pages are SELECTED rather
+# than kept whole (the gate in decode_column.cpp); `v <> 7` passes nearly every
+# row and exercises the kept-whole path.
+VALUES = [0, 0] + [2, 3, 7, 12, 52]
 
 _WS_COUNTER = [0]
 
@@ -56,7 +59,7 @@ def _values(seed, null_rate):
             i += 1
             continue
         v = rnd.choice(VALUES)
-        run = rnd.choice([1, 1, 1, 2, 5, 40, 300, 2000]) if v == 0 else rnd.choice([1, 1, 2, 3])
+        run = rnd.choice([40, 300, 2000, 2000]) if v == 0 else rnd.choice([1, 1, 2, 3])
         for _ in range(min(run, N - i)):
             out.append(v)
             i += 1
@@ -126,6 +129,8 @@ PREDICATES = {
     "gt":      ("v > 0",             lambda v: v is not None and v > 0),
     "between": ("v >= 3 AND v <= 12", lambda v: v is not None and 3 <= v <= 12),
     "ne_twice": ("v <> 0 AND v <> 2", lambda v: v is not None and v not in (0, 2)),
+    # Nearly every row passes: evaluated, then kept whole (the selectivity gate).
+    "ne_rare":  ("v <> 7",            lambda v: v is not None and v != 7),
 }
 
 
@@ -186,7 +191,20 @@ def test_int_search_engaged(dataset):
     assert tel["ps_dict_entries"] > 0 and tel["ps_dict_entries_pass"] < tel["ps_dict_entries"], (shape, tel)
     assert tel["ps_runs_filled"] > 0, (shape, tel)
     assert tel["ps_codes_unpacked"] < tel["ps_rows_in"], (shape, tel)
-    assert rows[0][0] == tel["ps_rows_out"] or shape == "int32_spill", (shape, tel, rows)
+    assert tel["ps_pages_whole"] < tel["ps_pages"], (shape, tel)
+    assert rows[0][0] <= tel["ps_rows_out"], (shape, tel, rows)
+
+
+def test_int_search_keeps_a_page_whole_when_most_rows_pass(dataset):
+    """`v <> 7`: nearly every row passes, so each evaluated page is kept whole —
+    the selection machinery never runs for it — and the answer is still exact."""
+    shape, tmp, ws, vals, _t = dataset
+    rp.reset_cpp_telemetry()
+    rows = _query(tmp, ws, "SELECT COUNT(*) FROM {T} WHERE v <> 7")
+    tel = rp.get_cpp_telemetry()
+    assert rows == [(sum(1 for v in vals if v is not None and v != 7),)], shape
+    assert tel["ps_pages"] > 0 and tel["ps_pages_whole"] == tel["ps_pages"], (shape, tel)
+    assert tel["ps_rows_out"] == tel["ps_rows_in"], (shape, tel)
 
 
 def test_int_search_declined_when_every_entry_passes(dataset):
