@@ -190,7 +190,7 @@ jobs:
 
       # `make slt` drives the external sqllogictest-rs runner, a Rust binary - the one
       # thing a floor leg builds rather than restores. Same build and cache key as the
-      # nightly sqllogictest workflow, so a warm cache makes this a no-op.
+      # regression_suite.yaml `sqllogictest` job, so a warm cache makes this a no-op.
       - name: Install Rust toolchain (slt only)
         if: matrix.target == 'slt'
         uses: dtolnay/rust-toolchain@stable
@@ -203,7 +203,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/sqllogictest
-          key: sqllogictest-${{ runner.os }}-${{ hashFiles('.github/workflows/sqllogictest.yaml') }}
+          key: sqllogictest-${{ runner.os }}-v1
 
       - name: Build sqllogictest binary (slt only)
         if: matrix.target == 'slt'

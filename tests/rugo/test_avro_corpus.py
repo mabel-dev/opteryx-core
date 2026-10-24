@@ -78,7 +78,8 @@ def _corpus_files():
     for corpus in CORPORA:
         root = AVRO_ROOT / corpus
         for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix in (".avsc", ".json", ".txt", ".md") or path.name in ("LICENSE", "NOTICE"):
+            # .DS_Store: macOS Finder metadata in a local checkout (gitignored), not corpus.
+            if not path.is_file() or path.suffix in (".avsc", ".json", ".txt", ".md") or path.name in ("LICENSE", "NOTICE", ".DS_Store"):
                 continue
             files.append(path.relative_to(AVRO_ROOT).as_posix())
     return files
