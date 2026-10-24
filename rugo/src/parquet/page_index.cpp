@@ -242,16 +242,7 @@ size_t EvaluatePagePredicate(const ColumnIndexData &ci, size_t num_pages,
   return pruned;
 }
 
-namespace {
-// `int8`..`int64` / `uint8`..`uint64` — the logical spellings metadata.cpp gives
-// a plain integer column (a bare physical `int32`/`int64` included).
-bool IsPlainIntegerLogical(const std::string &lt) {
-  const size_t s = (!lt.empty() && lt[0] == 'u') ? 1 : 0;
-  if (lt.compare(s, 3, "int") != 0) return false;
-  const std::string w = lt.substr(s + 3);
-  return w == "8" || w == "16" || w == "32" || w == "64";
-}
-}  // namespace
+// IsPlainIntegerLogical: metadata.hpp (shared with the decoder's integer search).
 
 size_t EvaluatePageRange(const ColumnIndexData &ci, size_t num_pages,
                          int64_t lo, int64_t hi,

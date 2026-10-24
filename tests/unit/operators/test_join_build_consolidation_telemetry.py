@@ -34,7 +34,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 
-TPCH = "testdata.tpch_1"
+# A committed fixture, NOT a TPC-H dataset: consolidation only happens when the build
+# side is MORE THAN ONE morsel, and TPC-H SF0.01 is one file with one row group
+# (so it only ever reports `declined_single_morsel`). `accounts` has 8 row groups and
+# three row-distinct string columns; `events` is 10 per account, so the estimated
+# output is 10x the build side. See dev/generate_join_consolidation_fixture.py.
+FIXTURE = "testdata.flat.join_consolidation"
+ACCOUNT_ROWS = 3200
 
 _EXPECTED_KEYS = {
     "identity",
@@ -104,15 +110,15 @@ def test_wide_string_payload_consolidates_and_reports_the_ratio():
     large fanout. The record must carry BOTH per-row costs, because their ratio is
     the whole argument for taking the path."""
     diags = _diagnostics(
-        f"""SELECT c.c_name, c.c_address, c.c_comment, o.o_orderkey
-            FROM {TPCH}.customer c INNER JOIN {TPCH}.orders o
-            ON c.c_custkey = o.o_custkey"""
+        f"""SELECT a.name, a.address, a.note, e.event_id
+            FROM {FIXTURE}.accounts a INNER JOIN {FIXTURE}.events e
+            ON a.account_id = e.account_id"""
     )
     row = diags[0]
     assert row["outcome"] == "consolidated"
     assert row["consolidated"] is True
     assert row["build_morsels"] > 1
-    assert row["build_rows"] == 149999
+    assert row["build_rows"] == ACCOUNT_ROWS
     assert row["payload_bytes"] > 0
     # 3 payload columns -> 12 bytes of code per output row, against a dense cost this
     # test asserts only as "much larger" (the exact byte count is data, not contract).
@@ -125,9 +131,9 @@ def test_narrow_payload_declines_with_the_measurement_that_refused_it():
     a real saving over 8-byte values. The record must show the measured ratio that
     made the call, so the decline is checkable rather than assertable."""
     diags = _diagnostics(
-        f"""SELECT c.c_custkey, c.c_nationkey, o.o_orderkey
-            FROM {TPCH}.customer c INNER JOIN {TPCH}.orders o
-            ON c.c_custkey = o.o_custkey"""
+        f"""SELECT a.account_id, a.region_id, e.event_id
+            FROM {FIXTURE}.accounts a INNER JOIN {FIXTURE}.events e
+            ON a.account_id = e.account_id"""
     )
     row = diags[0]
     assert row["outcome"] == "declined_payload_too_narrow"
@@ -143,13 +149,13 @@ def test_estimate_is_reported_next_to_the_actual_build_size():
     is the number the gate was handed; `build_rows` is what the sink actually held.
     Reporting one without the other is what made the original 70.6s query undiagnosable."""
     diags = _diagnostics(
-        f"""SELECT c.c_name, c.c_address, c.c_comment, o.o_orderkey
-            FROM {TPCH}.customer c INNER JOIN {TPCH}.orders o
-            ON c.c_custkey = o.o_custkey"""
+        f"""SELECT a.name, a.address, a.note, e.event_id
+            FROM {FIXTURE}.accounts a INNER JOIN {FIXTURE}.events e
+            ON a.account_id = e.account_id"""
     )
     row = diags[0]
     assert row["estimated_rows"] > 0
-    assert row["build_rows"] == 149999
+    assert row["build_rows"] == ACCOUNT_ROWS
 
 
 def test_missing_estimate_is_its_own_reason():
@@ -158,8 +164,8 @@ def test_missing_estimate_is_its_own_reason():
     'no estimate' — and that must be spelled differently from a decline that MADE a
     comparison, since only the latter says anything about the byte model."""
     diags = _diagnostics(
-        f"""SELECT o_orderkey FROM {TPCH}.orders
-            WHERE o_custkey IN (SELECT c_custkey FROM {TPCH}.customer WHERE c_nationkey = 3)"""
+        f"""SELECT event_id FROM {FIXTURE}.events
+            WHERE account_id IN (SELECT account_id FROM {FIXTURE}.accounts WHERE region_id = 3)"""
     )
     row = diags[0]
     assert row["outcome"] == "declined_no_estimate"
@@ -172,10 +178,10 @@ def test_decision_is_reported_per_join_not_per_query():
     """Two joins, two records. A per-query scalar would average away exactly the join
     that took the wrong path."""
     diags = _diagnostics(
-        f"""SELECT c.c_name, n.n_name, o.o_orderkey
-            FROM {TPCH}.orders o
-            INNER JOIN {TPCH}.customer c ON c.c_custkey = o.o_custkey
-            INNER JOIN {TPCH}.nation n ON n.n_nationkey = c.c_nationkey"""
+        f"""SELECT a.name, r.name AS region_name, e.event_id
+            FROM {FIXTURE}.events e
+            INNER JOIN {FIXTURE}.accounts a ON a.account_id = e.account_id
+            INNER JOIN {FIXTURE}.regions r ON r.region_id = a.region_id"""
     )
     assert len(diags) == 2
     assert len({r["identity"] for r in diags}) == 2

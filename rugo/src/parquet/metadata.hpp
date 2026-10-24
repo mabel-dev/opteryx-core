@@ -24,6 +24,17 @@ struct PageEncodingStat {
   int32_t count = 0;
 };
 
+// `int8`..`int64` / `uint8`..`uint64` — the logical spellings metadata.cpp gives
+// a plain integer column (a bare physical `int32`/`int64` carries "" instead,
+// which callers treat as plain signed). Shared by the PageIndex range tests and
+// the decoder's integer dictionary search so the two admit the same columns.
+inline bool IsPlainIntegerLogical(const std::string &lt) {
+  const size_t s = (!lt.empty() && lt[0] == 'u') ? 1 : 0;
+  if (lt.compare(s, 3, "int") != 0) return false;
+  const std::string w = lt.substr(s + 3);
+  return w == "8" || w == "16" || w == "32" || w == "64";
+}
+
 struct ColumnStats {
   std::string name;          // joined path_in_schema: "a.b.c"
   std::string physical_type; // e.g. "INT64", "BYTE_ARRAY"

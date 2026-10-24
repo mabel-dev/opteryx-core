@@ -122,6 +122,8 @@ cdef extern from "telemetry.hpp" namespace "rugo_tel":
     long long ps_rows_out_count()
     long long ps_dict_entries_count()
     long long ps_dict_entries_pass_count()
+    long long ps_runs_filled_count()
+    long long ps_codes_unpacked_count()
     void reset() nogil
 
 
@@ -172,6 +174,10 @@ def get_cpp_telemetry():
         "ps_rows_out":          ps_rows_out_count(),
         "ps_dict_entries":      ps_dict_entries_count(),
         "ps_dict_entries_pass": ps_dict_entries_pass_count(),
+        # dictionary pages decided per code (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11):
+        # values decided from an RLE run without unpacking vs codes unpacked.
+        "ps_runs_filled":       ps_runs_filled_count(),
+        "ps_codes_unpacked":    ps_codes_unpacked_count(),
     }
 
 cimport parquet_reader

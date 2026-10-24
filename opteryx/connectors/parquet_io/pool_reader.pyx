@@ -750,9 +750,20 @@ cdef class CppIOPipeline:
         self.pipeline.add_int_needles(column.encode('utf-8'), v)
 
     def add_int_range(self, str column, int64_t lo, int64_t hi):
-        """Register a pushed inclusive int range (kind 6) for PageIndex page
-        pruning. Ignored for a column already carrying a predicate."""
+        """Register a pushed inclusive int range (kind 6): PageIndex page pruning,
+        range settlement, and the integer dictionary skip / search. Ignored for a
+        column already carrying a predicate."""
         self.pipeline.add_int_range(column.encode('utf-8'), lo, hi)
+
+    def add_int_not_needles(self, str column, list needles):
+        """Register pushed int not-membership needles (kind 7: `<>` / NOT IN) for
+        the integer dictionary skip / search. Ignored for a column already
+        carrying a predicate."""
+        cdef vector[int64_t] v
+        cdef int64_t x
+        for x in needles:
+            v.push_back(x)
+        self.pipeline.add_int_not_needles(column.encode('utf-8'), v)
 
     def add_str_pred(self, str column, int kind, list patterns):
         """Phase 2: register a pushed string decode-skip predicate. kind: 1=membership
@@ -2296,16 +2307,25 @@ def _needle_slot(value):
 def _flatten_value_predicates(predicates):
     """Flatten pushed (col, op, value) triples into the decoder's per-value
     predicate inputs (ValuePredicate, rugo/src/parquet/decode.hpp):
-    ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])}, int_ranges{col:[lo, hi]})``.
+    ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])}, int_ranges{col:[lo, hi]},
+    int_not_needles{col:[int]})``.
     kind: 1=membership (=/IN), 2=starts-with, 3=ends-with, 4=contains,
     5=not-contains. One predicate per column for strings (first wins) — a single
     conjunct is sound for skipping. `str_preds` keeps the order the conjuncts were
     pushed in, and the page search picks its column in that order (first
-    registered kind 4/5 column wins).
+    registered kind 4/5 column wins, then the integer columns).
 
     Every int needle leaves here already in the probe's int64 slot (`_needle_slot`)
     — the two callers below push straight into a `vector[int64_t]` and must not be
     the place that discovers a value does not fit.
+
+    `int_not_needles` (kind 7: the integer dictionary skip / search) is the union
+    of every `<>` / NOT IN int literal on a column — a conjunction of
+    not-memberships is one not-membership. A member that does not fit int64 is
+    left out: no int64 value equals it, so leaving it out drops no row it would
+    have dropped and only weakens the pruning. A column that also carries a
+    membership or a range keeps that (the C++ side registers kind 7 only on a
+    column with no predicate yet).
 
     `int_ranges` (kind 6: PageIndex page pruning, and range settlement) intersects
     every Gt/GtEq/Lt/LtEq conjunct with a Python int literal on a column into one
@@ -2315,7 +2335,7 @@ def _flatten_value_predicates(predicates):
     past INT64_MAX as undecidable). One beyond int64 on its CLOSED side (`x > 2**70`)
     cannot be clamped — that would claim INT64_MAX passes — so the conjunct is
     left out of the range, which only weakens pruning; see `range_conjuncts_exact`."""
-    return _flatten_value_predicates_exact(predicates)[:3]
+    return _flatten_value_predicates_exact(predicates)[:4]
 
 
 def range_conjuncts_exact(triples):
@@ -2328,7 +2348,7 @@ def range_conjuncts_exact(triples):
     for p_col, p_op, p_val in triples:
         if p_op not in _RANGE_OPS or type(p_val) is not int:
             return None
-    _, _, int_ranges, declined = _flatten_value_predicates_exact(triples)
+    _, _, int_ranges, _, declined = _flatten_value_predicates_exact(triples)
     if declined:
         return None
     return set(int_ranges)
@@ -2340,6 +2360,7 @@ def _flatten_value_predicates_exact(predicates):
     int_needles = {}
     str_preds = {}
     int_ranges = {}
+    int_not_needles = {}
     declined = set()
     _kind = {"_STARTS_WITH": 2, "_ENDS_WITH": 3, "InStr": 4, "NotInStr": 5}
     for pred in predicates:
@@ -2371,6 +2392,21 @@ def _flatten_value_predicates_exact(predicates):
                         strs.append(vv.encode("utf-8"))
                 if strs:
                     str_preds[p_col] = (1, strs)
+        elif p_op == "NotEq":
+            if type(p_val) is int:
+                slot = _needle_slot(p_val)
+                if slot is not None:
+                    int_not_needles.setdefault(p_col, []).append(slot)
+        elif p_op == "NotInList":
+            # Only an all-int list: a member of another type says the column is
+            # not an integer one (or the list mixes domains), and this probe
+            # compares integers only.
+            members = list(p_val or [])
+            if members and all(type(vv) is int for vv in members):
+                slots = [_needle_slot(vv) for vv in members]
+                slots = [s for s in slots if s is not None]
+                if slots:
+                    int_not_needles.setdefault(p_col, []).extend(slots)
         elif p_op in _kind:
             b = p_val if isinstance(p_val, bytes) else (p_val.encode("utf-8") if isinstance(p_val, str) else None)
             if b is not None and p_col not in str_preds:
@@ -2390,7 +2426,7 @@ def _flatten_value_predicates_exact(predicates):
                     continue
                 rng = int_ranges.setdefault(p_col, [_I64_MIN, _I64_MAX])
                 rng[1] = min(rng[1], hi)
-    return int_needles, str_preds, int_ranges, declined
+    return int_needles, str_preds, int_ranges, int_not_needles, declined
 
 
 _RANGE_OPS = frozenset(("Gt", "GtEq", "Lt", "LtEq"))
@@ -3012,17 +3048,22 @@ cpdef IpcRowGroupSource open_ipc_source(
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
     if predicates:
-        int_needles, str_preds, int_ranges = _flatten_value_predicates(predicates)
-        for cname, needles in int_needles.items():
-            if needles and cname not in str_preds:
-                src.pipeline.add_int_needles(cname, needles)
+        int_needles, str_preds, int_ranges, int_not_needles = _flatten_value_predicates(predicates)
+        # Strings first: the page search takes the first registered column present
+        # in a row group, and a string column is the costlier one to decode.
         for cname in str_preds:
             kind, pats = str_preds[cname]
             if pats:
                 src.pipeline.add_str_pred(cname, kind, pats)
-        # Last: a column with a membership/string predicate keeps that one.
+        for cname, needles in int_needles.items():
+            if needles and cname not in str_preds:
+                src.pipeline.add_int_needles(cname, needles)
+        # A column with a membership/string predicate keeps that one.
         for cname, (lo, hi) in int_ranges.items():
             src.pipeline.add_int_range(cname, lo, hi)
+        for cname, needles in int_not_needles.items():
+            if needles:
+                src.pipeline.add_int_not_needles(cname, needles)
     return src
 
 
@@ -3814,13 +3855,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef int64_t _needle
     cdef bytes _pat
     if predicates:
-        int_needles, str_preds, int_ranges = _flatten_value_predicates(predicates)
-        for cname, needles in int_needles.items():
-            if needles and cname not in str_preds:
-                _int_v.clear()
-                for _needle in needles:
-                    _int_v.push_back(_needle)
-                plan.pipeline_ptr.add_int_needles(cname.encode('utf-8'), _int_v)
+        int_needles, str_preds, int_ranges, int_not_needles = _flatten_value_predicates(predicates)
+        # Strings first: the page search takes the first registered column present
+        # in a row group, and a string column is the costlier one to decode.
         for cname in str_preds:
             kind, pats = str_preds[cname]
             if pats:
@@ -3829,9 +3866,21 @@ cpdef NativeScanPlan open_native_scan_plan(
                     _pat = p if isinstance(p, bytes) else str(p).encode('utf-8')
                     _str_v.push_back(<string>_pat)
                 plan.pipeline_ptr.add_str_pred(cname.encode('utf-8'), <int>kind, _str_v)
-        # Last: a column with a membership/string predicate keeps that one.
+        for cname, needles in int_needles.items():
+            if needles and cname not in str_preds:
+                _int_v.clear()
+                for _needle in needles:
+                    _int_v.push_back(_needle)
+                plan.pipeline_ptr.add_int_needles(cname.encode('utf-8'), _int_v)
+        # A column with a membership/string predicate keeps that one.
         for cname, (lo, hi) in int_ranges.items():
             plan.pipeline_ptr.add_int_range(cname.encode('utf-8'), <int64_t>lo, <int64_t>hi)
+        for cname, needles in int_not_needles.items():
+            if needles:
+                _int_v.clear()
+                for _needle in needles:
+                    _int_v.push_back(_needle)
+                plan.pipeline_ptr.add_int_not_needles(cname.encode('utf-8'), _int_v)
     # A pool sink must be wired regardless — the decode worker's pool-path
     # (dk=0) branch expects one to exist even though this plan's Source never
     # routes a column there deliberately (it fails loud on dk=0 instead).

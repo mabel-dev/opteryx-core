@@ -65,6 +65,21 @@ int32_t DecodeRLEBitPackedCodesPacked(const uint8_t *data, size_t data_size,
                                       uint8_t *dst, uint8_t code_width,
                                       uint32_t *max_code);
 
+// Per-value verdicts straight from the hybrid code stream
+// (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11): vpass[i] = entry_pass[code_i]
+// for i in [0, num_values), where entry_pass holds one 0/1 byte per dictionary
+// entry. An RLE run is ONE lookup and a fill of its length — its codes are never
+// materialised; a bit-packed group is unpacked (per-arch unpackers) and looked
+// up per code. `*runs_filled` and `*codes_unpacked` accumulate how many values
+// took each path (telemetry). Returns num_values on success; -1 on a short or
+// malformed stream; -2 when a code is at or above `num_entries`, with that code
+// in `*bad_code`. On failure vpass is partially written and must not be read.
+int32_t DecodeRLEBitPackedVerdicts(const uint8_t *data, size_t data_size,
+                                   int32_t num_values, int bit_width,
+                                   const uint8_t *entry_pass, uint32_t num_entries,
+                                   uint8_t *vpass, uint32_t *bad_code,
+                                   long long *runs_filled, long long *codes_unpacked);
+
 // Selective variant of DecodeRLEBitPackedIndicesNoPrefix: walks the same stream
 // of `num_values` codes but APPENDS only the codes whose `sel` byte is non-zero
 // (sel has one 0/1 byte per value). An RLE run appends its code once per

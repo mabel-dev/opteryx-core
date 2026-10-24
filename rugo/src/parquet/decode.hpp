@@ -12,34 +12,46 @@
 //     column's dictionary BEFORE decoding its data pages. If no unique value
 //     satisfies it, the whole row group yields zero rows (for a pushed conjunct)
 //     and the data pages are skipped.
-//   * Page search (docs/PARQUET_PAGE_SEARCH_DESIGN.md), kinds 4/5 only, and only
-//     when the caller also passes a PageSearchOut: the conjunct is evaluated on
-//     the raw page bytes and only passing rows are emitted.
+//   * Page search (docs/PARQUET_PAGE_SEARCH_DESIGN.md; the integer form is
+//     docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11), only when the caller
+//     also passes a PageSearchOut: a byte_array column under kind 4/5 is
+//     evaluated on the raw page bytes; an int32/int64 dictionary-encoded column
+//     under kind 0/6/7 is evaluated once per dictionary entry and then per code
+//     straight off the RLE/bit-packed stream. Only passing rows are emitted.
 // Either way it only ever drops rows the conjunct proves dead; the scan's own
 // filter still evaluates the full predicate over whatever survives.
 struct ValuePredicate {
   // -1 none, 0 int membership (=/IN), 1 str membership (=/IN),
   // 2 str starts-with, 3 str ends-with, 4 str contains (LIKE '%x%'),
   // 5 str not-contains (NOT LIKE '%x%': a value passes when it contains none of
-  // the patterns), 6 int range (lo <= v <= hi, int_vals = {lo, hi}; consumed
-  // ONLY by PageIndex page pruning — the IO pipeline never hands it to the
-  // decoder).
+  // the patterns), 6 int range (lo <= v <= hi, int_vals = {lo, hi}; PageIndex
+  // page pruning, range settlement, and the int dictionary skip / search),
+  // 7 int not-membership (<>, NOT IN: a value passes when it equals none of
+  // int_vals).
+  // Int needles and bounds are int64 in the column's LOGICAL domain: a physical
+  // int32 column's entries are sign- or zero-extended by its declared signedness
+  // before comparing; a UINT64 column's entries are compared as their raw 64
+  // bits (the planner carries a needle above INT64_MAX as the same bit pattern),
+  // which is exact for kinds 0/7 and why kind 6 declines UINT64.
   int kind = -1;
-  const std::vector<int64_t>*     int_vals = nullptr;  // kinds 0, 6
+  const std::vector<int64_t>*     int_vals = nullptr;  // kinds 0, 6, 7
   const std::vector<std::string>* str_vals = nullptr;  // kinds 1..5 (operands/patterns)
 };
 
 // Page search result (docs/PARQUET_PAGE_SEARCH_DESIGN.md §3). A caller arms the
 // search on ONE column by passing a non-null PageSearchOut together with a kind
-// 4/5 ValuePredicate; the decoder then emits only the rows that pass (and that a
-// row_mask, if any, selects) and records them here, so the caller can decode the
-// row group's other columns under the same rows.
+// 4/5 (byte_array) or kind 0/6/7 (int32/int64) ValuePredicate; the decoder then
+// emits only the rows that pass (and that a row_mask, if any, selects) and
+// records them here, so the caller can decode the row group's other columns
+// under the same rows.
 struct PageSearchOut {
   // One byte per row of the column chunk, 1 = emitted. Valid only when `applied`.
   std::vector<uint8_t> row_mask;
-  // False when the decoder declined the search (not a scalar byte_array column,
-  // not kind 4/5, an empty pattern): the column was decoded exactly as it would
-  // have been without it and `row_mask` is meaningless.
+  // False when the decoder declined the search (not a scalar byte_array /
+  // plain-integer column, a kind the column's type has no test for, an empty
+  // pattern, an int column with no dictionary page, or an int dictionary every
+  // entry of which passes — nothing to drop): the column was decoded exactly as
+  // it would have been without it and `row_mask` is meaningless.
   bool applied = false;
 };
 

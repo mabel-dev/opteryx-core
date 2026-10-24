@@ -3756,9 +3756,10 @@ class ParquetIOPipeline {
                 const ValuePredicate* skip_ptr = nullptr;
                 if (ng == nullptr && item.row_mask.empty() && !value_preds_.empty()) {
                     auto nit = value_preds_.find(col_stats.name);
-                    // A range (kind 6) is a page-index-only predicate: the
-                    // decoder has no range test, so it never sees one.
-                    if (nit != value_preds_.end() && nit->second.kind != 6) {
+                    // Every kind reaches the decoder, a range (kind 6) included:
+                    // it tests an integer dictionary like a membership does and
+                    // declines any other column shape.
+                    if (nit != value_preds_.end()) {
                         skip.kind = nit->second.kind;
                         skip.int_vals = &nit->second.int_vals;
                         skip.str_vals = &nit->second.str_vals;
@@ -3935,10 +3936,16 @@ class ParquetIOPipeline {
             // the decoder declines the predicate there anyway) nor under the latmat
             // pass-1 predicate without the prefilter: that survivor mask is mapped
             // back to row-group rows by pass 2, so its columns must stay full-length.
+            //
+            // Under range settlement a kind-6 column is never searched: the
+            // settlement proves whole row groups and pages from statistics
+            // without decoding anything, and it runs only when no column is
+            // searched — so the search must leave those columns to it.
             size_t search_i = SIZE_MAX;
             if (item.row_mask.empty() && !search_cols_.empty() &&
                 !(pass1_pred_.fn != nullptr && !prefilter)) {
                 for (const std::string& name : search_cols_) {
+                    if (range_settle_ && value_preds_.find(name)->second.kind == 6) continue;
                     for (size_t i = 0; i < ncols_total; ++i) {
                         if (item.column_stats[i].name != name) continue;
                         bool nested_leaf = false;
@@ -4668,25 +4675,42 @@ class ParquetIOPipeline {
 
     // Register a pushed per-value predicate (ValuePredicate) for a column. Call
     // once per column before any submit. One predicate per column (last wins); a
-    // single conjunct is sound for skipping. Kinds 4/5 also make the column a
-    // page-search candidate, in the order registered.
+    // single conjunct is sound for skipping. String kinds 4/5 and every integer
+    // kind (0/6/7) also make the column a page-search candidate, in the order
+    // registered: the first candidate present in a row group is the one
+    // searched (docs/PARQUET_PAGE_SEARCH_DESIGN.md §5), so callers register the
+    // string conjuncts first — a string column costs more to decode, so dropping
+    // its rows early is worth more.
+    void add_search_col(const std::string& column) {
+        if (std::find(search_cols_.begin(), search_cols_.end(), column) == search_cols_.end())
+            search_cols_.push_back(column);
+    }
     void add_int_needles(const std::string& column, const std::vector<int64_t>& needles) {
         ColValuePred& p = value_preds_[column];
         p.kind = 0; p.int_vals = needles;
+        add_search_col(column);
     }
     void add_str_pred(const std::string& column, int kind, const std::vector<std::string>& vals) {
         ColValuePred& p = value_preds_[column];
         p.kind = kind; p.str_vals = vals;
-        if ((kind == 4 || kind == 5) &&
-            std::find(search_cols_.begin(), search_cols_.end(), column) == search_cols_.end())
-            search_cols_.push_back(column);
+        if (kind == 4 || kind == 5) add_search_col(column);
     }
-    // Inclusive int64 range conjunct (kind 6), PageIndex pruning only. A column
-    // already carrying a predicate keeps it — one predicate per column.
+    // Inclusive int64 range conjunct (kind 6): PageIndex pruning, range
+    // settlement, and the integer dictionary skip / search. A column already
+    // carrying a predicate keeps it — one predicate per column.
     void add_int_range(const std::string& column, int64_t lo, int64_t hi) {
         if (value_preds_.count(column) != 0) return;
         ColValuePred& p = value_preds_[column];
         p.kind = 6; p.int_vals = {lo, hi};
+        add_search_col(column);
+    }
+    // Integer not-membership (kind 7: `<>`, NOT IN — a value passes when it
+    // equals none of `needles`). A column already carrying a predicate keeps it.
+    void add_int_not_needles(const std::string& column, const std::vector<int64_t>& needles) {
+        if (value_preds_.count(column) != 0) return;
+        ColValuePred& p = value_preds_[column];
+        p.kind = 7; p.int_vals = needles;
+        add_search_col(column);
     }
     void clear_eq_needles() { value_preds_.clear(); search_cols_.clear(); }
 

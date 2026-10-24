@@ -1141,10 +1141,37 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     if (contains_kind)
       for (const std::string& pat : *skip_pred->str_vals)
         if (pat.empty()) { patterns_nonempty = false; break; }
-    const bool search_on =
+    const bool search_str_on =
         search != nullptr && patterns_nonempty &&
         result.type == "byte_array" && target_col->max_repetition_level == 0;
     const bool search_negate = contains_kind && skip_pred->kind == 5;
+    // Integer form (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11): a scalar
+    // int32/int64 column of plain integer logical type under a kind 0 (=/IN),
+    // 6 (range) or 7 (<>/NOT IN) conjunct. Eligible here; ARMED only once the
+    // dictionary is loaded and not every entry passes (search_int_on below) —
+    // a chunk nothing can be dropped from decodes exactly as without it. A
+    // UINT64 range declines: its entries compare as raw int64 bits, which
+    // orders values above INT64_MAX wrongly (equality is exact either way).
+    const bool int_kind =
+        skip_pred != nullptr && skip_pred->int_vals != nullptr &&
+        ((skip_pred->kind == 0 || skip_pred->kind == 7)
+             ? !skip_pred->int_vals->empty()
+             : (skip_pred->kind == 6 && skip_pred->int_vals->size() == 2));
+    const bool search_int_eligible =
+        search != nullptr && int_kind &&
+        (result.type == "int32" || result.type == "int64") &&
+        target_col->max_repetition_level == 0 &&
+        (target_col->logical_type.empty() ||
+         IsPlainIntegerLogical(target_col->logical_type)) &&
+        !(skip_pred->kind == 6 && target_col->logical_type == "uint64");
+    // The conjunct's verdict on one integer value in the column's logical domain.
+    auto int_value_pass = [&](int64_t v) -> uint8_t {
+      const std::vector<int64_t>& iv = *skip_pred->int_vals;
+      if (skip_pred->kind == 6) return (v >= iv[0] && v <= iv[1]) ? 1 : 0;
+      for (int64_t needle : iv)
+        if (v == needle) return skip_pred->kind == 0 ? 1 : 0;
+      return skip_pred->kind == 0 ? 0 : 1;
+    };
     // The decompressed byte_array dictionary page, wherever it lies. Without the
     // search it is copied into string_dict_arena up front (the arena IS the
     // page). With the search armed the copy is deferred: the page is searched
@@ -1194,7 +1221,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         // this costs ClickBench 5.0%, JOB 2.1%).
         const bool zc_byte_array = result.type == "byte_array";
 
-        if (zc_byte_array && target_col->codec == 0 && search_on) {
+        if (zc_byte_array && target_col->codec == 0 && search_str_on) {
           // Search armed: no copy — the page is read in place (file bytes or a
           // chunk-cache image) and settled after the entry verdicts are known.
           dict_data_ptr  = dict_compressed_data;
@@ -1224,7 +1251,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // result owns: a page served from the chunk cache (or filled into it)
               // is copied in rather than aliased.
               if (zc_byte_array && got_ptr != dict_dst.data()) {
-                if (search_on) {
+                if (search_str_on) {
                   // Search armed: read the served page in place (the cache
                   // entry / fill slot outlives this decode); settle later.
                   dict_in_arena = false;
@@ -1509,34 +1536,58 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
     bool int128_dict_mode = (result.type == "int128" && dict_size > 0);
 
-    // (search_on / search_negate are decided above the dictionary load.)
+    // (search_str_on / search_negate are decided above the dictionary load.)
 
-    // Per-dictionary-entry verdict of a kind 4/5 conjunct: one SIMD search over
-    // the dictionary page itself (dict_bytes: the decompressed page, length
-    // prefixes intact, in the arena or in place) instead of a per-entry match.
-    // An empty pattern is contained by every value. Computed at most once per
-    // chunk.
+    // Per-dictionary-entry verdict of the pushed conjunct, computed at most once
+    // per chunk. Strings (kinds 4/5): one SIMD search over the dictionary page
+    // itself (dict_bytes: the decompressed page, length prefixes intact, in the
+    // arena or in place) instead of a per-entry match; an empty pattern is
+    // contained by every value. Integers (kinds 0/6/7): each entry widened to
+    // the column's logical value and tested. Parquet has no narrow or unsigned
+    // physical storage — INT8/UINT8/INT16/UINT16/UINT32 all arrive as physical
+    // int32 — so an unsigned column must ZERO-extend, exactly as the RLE
+    // materialisation below does. Sign-extending is what broke it once:
+    // 192.168.4.136 is stored as 0xC0A80488, which read as int32 is
+    // -1062730616 and equals no needle, so `= <any value with bit 31 set>`
+    // found the dictionary "disjoint", skipped EVERY dictionary-encoded row
+    // group, and returned zero rows with no error. Comparing in int64 also
+    // removes the need for an INT32 range guard on the needle: one outside the
+    // column's range simply matches nothing, which is the right answer.
     std::vector<uint8_t> entry_pass;
     uint32_t entry_pass_count = 0;
     bool entry_pass_ready = false;
     auto compute_entry_pass = [&]() {
       if (entry_pass_ready) return;
       entry_pass_ready = true;
-      const uint32_t n = static_cast<uint32_t>(result.string_dict_lens.size());
-      entry_pass.assign(n, 0);
-      bool all_hit = false;
-      for (const std::string& pat : *skip_pred->str_vals)
-        if (pat.empty()) { all_hit = true; break; }
-      if (all_hit) {
-        std::fill(entry_pass.begin(), entry_pass.end(), uint8_t(1));
+      uint32_t n = 0;
+      if (int32_dict_mode || int64_dict_mode) {
+        n = static_cast<uint32_t>(int32_dict_mode ? result.dict_int32_values.size()
+                                                  : result.dict_int64_values.size());
+        entry_pass.assign(n, 0);
+        for (uint32_t k = 0; k < n; ++k) {
+          const int64_t v = int64_dict_mode
+              ? result.dict_int64_values[k]
+              : (result.is_unsigned ? (int64_t)(uint32_t)result.dict_int32_values[k]
+                                    : (int64_t)result.dict_int32_values[k]);
+          entry_pass[k] = int_value_pass(v);
+        }
       } else {
+        n = static_cast<uint32_t>(result.string_dict_lens.size());
+        entry_pass.assign(n, 0);
+        bool all_hit = false;
         for (const std::string& pat : *skip_pred->str_vals)
-          rugo::page_search::mark_values_containing(
-              dict_bytes, dict_bytes_len, n,
-              reinterpret_cast<const uint8_t*>(pat.data()), pat.size(), entry_pass.data());
+          if (pat.empty()) { all_hit = true; break; }
+        if (all_hit) {
+          std::fill(entry_pass.begin(), entry_pass.end(), uint8_t(1));
+        } else {
+          for (const std::string& pat : *skip_pred->str_vals)
+            rugo::page_search::mark_values_containing(
+                dict_bytes, dict_bytes_len, n,
+                reinterpret_cast<const uint8_t*>(pat.data()), pat.size(), entry_pass.data());
+        }
+        if (search_negate)
+          for (uint32_t k = 0; k < n; ++k) entry_pass[k] ^= 1u;
       }
-      if (search_negate)
-        for (uint32_t k = 0; k < n; ++k) entry_pass[k] ^= 1u;
       for (uint32_t k = 0; k < n; ++k) entry_pass_count += entry_pass[k];
       rugo_tel::ps_dict_entries.fetch_add(n, std::memory_order_relaxed);
       rugo_tel::ps_dict_entries_pass.fetch_add(entry_pass_count, std::memory_order_relaxed);
@@ -1564,7 +1615,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       // nearly every entry passing (`LIKE '%http%'`, `NOT LIKE '%.google.%'`)
       // that is pure overhead — measured 2026-10-22: +15% / +7% on those
       // canaries ungated, flat with the gate — so at most half may pass.
-      const bool compactable = search_on && entry_pass_ready && n > 0 &&
+      const bool compactable = search_str_on && entry_pass_ready && n > 0 &&
                                entry_pass_count > 0 && entry_pass_count * 2u <= n;
       if (!compactable) {
         if (dict_in_arena) return;   // the arena already is the page
@@ -1611,6 +1662,20 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       dict_in_arena = true;
       RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _st_t0);
     };
+
+    // ── Integer search arming (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11) ──
+    // Decided here, with the dictionary loaded and before any path choice below
+    // (the skip, sel_mode, the packed-code reserve): the search is armed only
+    // when at least one entry fails, so a chunk it could drop nothing from —
+    // the no-prune canary — takes exactly the decode it takes today. A chunk
+    // without a dictionary page is not searched: its PLAIN values would have to
+    // be evaluated one by one for no run structure to exploit.
+    bool search_int_on = false;
+    if (search_int_eligible && (int32_dict_mode || int64_dict_mode)) {
+      compute_entry_pass();
+      search_int_on = entry_pass_count < entry_pass.size();
+    }
+    const bool search_on = search_str_on || search_int_on;
 
     // ── Phase 2: dictionary-membership / per-value decode-skip ────────────────
     // Evaluate the pushed predicate against this dict-encoded column's dictionary
@@ -1678,32 +1743,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     if (skip_eligible && dict_covers_all_rows) {
       bool any_match = false;
       const int kind = skip_pred->kind;
-      if (kind == 0 && (int64_dict_mode || int32_dict_mode) && skip_pred->int_vals) {
-        if (int64_dict_mode) {
-          for (int64_t dv : result.dict_int64_values) {
-            for (int64_t needle : *skip_pred->int_vals) { if (dv == needle) { any_match = true; break; } }
-            if (any_match) break;
-          }
+      if (int_kind && (int64_dict_mode || int32_dict_mode)) {
+        // =/IN, range, <>/NOT IN over an integer dictionary: the per-entry
+        // verdicts (kind 6 on a UINT64 column is excluded from the search but
+        // not from the skip — a raw-bits range test could skip a chunk whose
+        // values above INT64_MAX pass, so it must not decide here either).
+        if (kind == 6 && int64_dict_mode && target_col->logical_type == "uint64") {
+          any_match = true;
         } else {
-          // Widen each dictionary entry to the LOGICAL value the needle is
-          // expressed in before comparing. Parquet has no narrow or unsigned
-          // physical storage - INT8/UINT8/INT16/UINT16/UINT32 all arrive as
-          // physical int32 - so an unsigned column must ZERO-extend, exactly as
-          // the RLE materialisation below does for the same reason. Sign-
-          // extending is what broke it: 192.168.4.136 is stored as the bit
-          // pattern 0xC0A80488, which read as int32 is -1062730616 and equals no
-          // needle, so `= <any value with bit 31 set>` found the dictionary
-          // "disjoint", skipped EVERY dictionary-encoded row group, and returned
-          // zero rows with no error. Comparing in int64 also removes the need for
-          // an INT32 range guard on the needle: a needle outside the column's
-          // range simply matches nothing, which is the right answer.
-          for (int32_t dv : result.dict_int32_values) {
-            const int64_t val = result.is_unsigned ? (int64_t)(uint32_t)dv : (int64_t)dv;
-            for (int64_t needle : *skip_pred->int_vals) {
-              if (val == needle) { any_match = true; break; }
-            }
-            if (any_match) break;
-          }
+          compute_entry_pass();
+          any_match = entry_pass_count > 0;
         }
       } else if ((kind == 4 || kind == 5) && byte_array_dict_mode && skip_pred->str_vals) {
         // Contains / not-contains: one SIMD pass over the dictionary page.
@@ -1828,9 +1877,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                  target_col->max_definition_level > 0 &&
                  result.ext_int64 == nullptr && result.ext_int32 == nullptr &&
                  result.ext_float64 == nullptr && result.ext_float32 == nullptr &&
-                 row_mask == nullptr) {
+                 row_mask == nullptr && !search_on) {
         // Nullable numeric dict column with no caller-provided dense buffer and no
         // row-mask: pre-allocate packed codes array (zero = null sentinel).
+        // The integer search selects rows like a row mask does, so it takes the
+        // same compacted dict_indices path below.
         // byte_array is excluded: mixed dict/plain chunks determine at the first
         // PLAIN page whether to intern (dict_indices) or materialise to dense.
         // When row_mask is active the dict_codes_array would not be filtered, so
@@ -1864,14 +1915,15 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     draken::AppendBuffer<uint8_t> _page_plain;
     draken::AppendBuffer<int32_t> _page_dict_indices;
     draken::AppendBuffer<uint8_t> _page_vsel;  // sel_mode: one 0/1 byte per PRESENT value of the page
-    // Page search scratch (search_on): per-PRESENT-value verdict, per-row
-    // selection, and the dictionary codes of a dict-encoded page.
+    // Page search scratch (search_on): per-PRESENT-value verdict and per-row
+    // selection. A dict-encoded page's verdicts come straight off its code
+    // stream (DecodeRLEBitPackedVerdicts); its codes are never materialised here.
     std::vector<uint8_t> _page_vpass;
     std::vector<uint8_t> _page_search_sel;
-    draken::AppendBuffer<int32_t> _page_search_codes;
     // Page search counters, flushed once after the page loop.
     long long _ps_pages = 0, _ps_discarded = 0, _ps_fallthrough = 0;
     long long _ps_rows_in = 0, _ps_rows_out = 0;
+    long long _ps_runs = 0, _ps_unpacked = 0;
     if (search_on) {
       search->row_mask.assign(
           target_col->num_values > 0 ? (size_t)target_col->num_values : 0, 0);
@@ -2295,7 +2347,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       // Every row of the page is a guaranteed non-pass: drop it before it is
       // decompressed. This is the page-level form of the dictionary skip, so
       // it also covers chunks whose dictionary spilled to PLAIN pages.
-      if (search_on && byte_array_dict_mode && entry_pass_count == 0 &&
+      if (search_on && entry_pass_ready && entry_pass_count == 0 &&
           (page_header.encoding == 2 || page_header.encoding == 8)) {
         ++_ps_pages;
         ++_ps_discarded;
@@ -2563,7 +2615,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           for (int32_t dl : def_levels) pc += (dl == max_def);
         }
         bool evaluated = false;
-        if (enc == 0) {
+        if (enc == 0 && search_str_on) {
           _page_vpass.assign((size_t)pc, 0);
           for (const std::string& pat : *skip_pred->str_vals)
             rugo::page_search::mark_values_containing(
@@ -2573,29 +2625,68 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           if (search_negate)
             for (int32_t v = 0; v < pc; ++v) _page_vpass[v] ^= 1u;
           evaluated = true;
-        } else if ((enc == 2 || enc == 8) && dict_size > 0 && byte_array_dict_mode &&
-                   entry_pass_count < entry_pass.size()) {
-          // Codes: 1 byte bit width, then RLE/bit-packed with no length prefix.
-          if (data_size < 1) return;
-          const int bw = (int)data_ptr[0];
-          int32_t got = DecodeRLEBitPackedIndicesNoPrefix(
-              data_ptr + 1, data_size - 1, pc, bw, _page_search_codes);
-          if (got != pc) return;
+        } else if (enc == 0 && search_int_on) {
+          // A PLAIN page in a dictionary-encoded chunk (the writer's dictionary
+          // spilled): its values are not in the dictionary, so each is tested.
+          const size_t width = result.type == "int32" ? 4 : 8;
+          if (data_size < (size_t)pc * width) {
+            result.error_message = "column '" + target_col->name +
+                "': PLAIN page at row " + std::to_string(total_collected) + " holds " +
+                std::to_string(data_size / width) + " values for " + std::to_string(pc) +
+                " present rows";
+            return;
+          }
           _page_vpass.resize((size_t)pc);
-          const uint32_t nent = (uint32_t)entry_pass.size();
           for (int32_t v = 0; v < pc; ++v) {
-            const uint32_t code = (uint32_t)_page_search_codes[v];
-            if (code >= nent) {
-              result.error_message = "dictionary code " + std::to_string(code) +
-                                     " out of range for a dictionary of " +
-                                     std::to_string(nent) + " entries";
-              return;
+            int64_t val;
+            if (width == 4) {
+              int32_t raw;
+              std::memcpy(&raw, data_ptr + (size_t)v * 4, 4);
+              val = result.is_unsigned ? (int64_t)(uint32_t)raw : (int64_t)raw;
+            } else {
+              std::memcpy(&val, data_ptr + (size_t)v * 8, 8);
             }
-            _page_vpass[v] = entry_pass[code];
+            _page_vpass[v] = int_value_pass(val);
           }
           evaluated = true;
-        } else if (enc == 7) {
-          ++_ps_fallthrough;   // DELTA_BYTE_ARRAY: front-coded, not searchable raw
+        } else if ((enc == 2 || enc == 8) && dict_size > 0 && entry_pass_ready &&
+                   entry_pass_count < entry_pass.size()) {
+          // Codes: 1 byte bit width, then RLE/bit-packed with no length prefix.
+          // Verdicts come straight off the stream: an RLE run is one lookup and
+          // a fill, a bit-packed group is unpacked and looked up per code.
+          if (data_size < 1) {
+            result.error_message = "column '" + target_col->name +
+                "': dictionary-encoded page at row " + std::to_string(total_collected) +
+                " has no code stream";
+            return;
+          }
+          const int bw = (int)data_ptr[0];
+          _page_vpass.resize((size_t)pc);
+          uint32_t bad_code = 0;
+          const int32_t got = DecodeRLEBitPackedVerdicts(
+              data_ptr + 1, data_size - 1, pc, bw, entry_pass.data(),
+              (uint32_t)entry_pass.size(), _page_vpass.data(), &bad_code,
+              &_ps_runs, &_ps_unpacked);
+          if (got == -2) {
+            result.error_message = "column '" + target_col->name +
+                "': dictionary code " + std::to_string(bad_code) +
+                " in the page at row " + std::to_string(total_collected) +
+                " is outside the " + std::to_string(entry_pass.size()) +
+                "-entry dictionary";
+            return;
+          }
+          if (got != pc) {
+            result.error_message = "column '" + target_col->name +
+                "': dictionary code stream of the page at row " +
+                std::to_string(total_collected) + " ends before its " +
+                std::to_string(pc) + " values";
+            return;
+          }
+          evaluated = true;
+        } else if (enc == 7 || enc == 5) {
+          // DELTA_BYTE_ARRAY (front-coded) / DELTA_BINARY_PACKED: not evaluated
+          // raw; the page keeps every row and the scan's filter decides them.
+          ++_ps_fallthrough;
         }
         if (evaluated) {
           _page_search_sel.resize((size_t)page_values);
@@ -3804,6 +3895,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       rugo_tel::ps_pages_fallthrough.fetch_add(_ps_fallthrough, std::memory_order_relaxed);
       rugo_tel::ps_rows_in.fetch_add(_ps_rows_in, std::memory_order_relaxed);
       rugo_tel::ps_rows_out.fetch_add(_ps_rows_out, std::memory_order_relaxed);
+      rugo_tel::ps_runs_filled.fetch_add(_ps_runs, std::memory_order_relaxed);
+      rugo_tel::ps_codes_unpacked.fetch_add(_ps_unpacked, std::memory_order_relaxed);
     }
     }  // end if (!used_parallel_path) [sequential fallback]
 

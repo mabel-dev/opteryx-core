@@ -79,6 +79,11 @@ inline std::atomic<long long> ps_rows_in           {0};  // rows of evaluated pa
 inline std::atomic<long long> ps_rows_out          {0};  // rows of evaluated pages that passed
 inline std::atomic<long long> ps_dict_entries      {0};  // dictionary entries searched
 inline std::atomic<long long> ps_dict_entries_pass {0};  // dictionary entries that passed
+// Dictionary-encoded pages decided per code (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md
+// §11): values whose verdict came from an RLE run's single lookup (never
+// unpacked) vs values whose code was unpacked from a bit-packed group.
+inline std::atomic<long long> ps_runs_filled       {0};
+inline std::atomic<long long> ps_codes_unpacked    {0};
 
 inline void reset() {
     metadata_ns.store(0, std::memory_order_relaxed);
@@ -115,6 +120,8 @@ inline void reset() {
     ps_rows_out.store(0, std::memory_order_relaxed);
     ps_dict_entries.store(0, std::memory_order_relaxed);
     ps_dict_entries_pass.store(0, std::memory_order_relaxed);
+    ps_runs_filled.store(0, std::memory_order_relaxed);
+    ps_codes_unpacked.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -165,6 +172,8 @@ inline long long ps_rows_in_count()           { return ps_rows_in.load(std::memo
 inline long long ps_rows_out_count()          { return ps_rows_out.load(std::memory_order_relaxed); }
 inline long long ps_dict_entries_count()      { return ps_dict_entries.load(std::memory_order_relaxed); }
 inline long long ps_dict_entries_pass_count() { return ps_dict_entries_pass.load(std::memory_order_relaxed); }
+inline long long ps_runs_filled_count()       { return ps_runs_filled.load(std::memory_order_relaxed); }
+inline long long ps_codes_unpacked_count()    { return ps_codes_unpacked.load(std::memory_order_relaxed); }
 
 } // namespace rugo_tel
 

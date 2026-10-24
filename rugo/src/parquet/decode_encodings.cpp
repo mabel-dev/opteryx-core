@@ -614,6 +614,112 @@ int32_t DecodeRLEBitPackedCodesPacked(const uint8_t *data, size_t data_size,
 }
 
 // ---------------------------------------------------------------------------
+// DecodeRLEBitPackedVerdicts
+// The per-value verdict of a per-dictionary-entry pass table, read straight off
+// the hybrid stream (docs/PARQUET_RUN_DOMAIN_PREDICATE_DESIGN.md §11). The
+// stream is walked once: an RLE run becomes one table lookup and a memset of
+// its length, so a run-heavy page (ClickBench AdvEngineID: ~0.4 bits per value
+// on the wire) is decided in a handful of operations; a bit-packed run is
+// unpacked through the same per-arch group unpackers as the index decoders,
+// into an L1-resident tile, and each code is looked up. The bounds check on
+// codes is one compare per tile (its max) plus one per RLE run.
+// ---------------------------------------------------------------------------
+
+int32_t DecodeRLEBitPackedVerdicts(const uint8_t *data, size_t data_size,
+                                   int32_t num_values, int bit_width,
+                                   const uint8_t *entry_pass, uint32_t num_entries,
+                                   uint8_t *vpass, uint32_t *bad_code,
+                                   long long *runs_filled, long long *codes_unpacked) {
+  *bad_code = 0;
+  if (bit_width < 0 || bit_width > 32 || num_values < 0) return -1;
+  if (num_values == 0) return 0;
+  if (bit_width == 0) {
+    // Single-entry dictionary: every value is code 0, no bits on the wire.
+    if (num_entries == 0) { *bad_code = 0; return -2; }
+    std::memset(vpass, entry_pass[0], (size_t)num_values);
+    *runs_filled += num_values;
+    return num_values;
+  }
+  constexpr int32_t kTileGroups = 64;
+  alignas(64) int32_t tile[kTileGroups * 8];
+  const unpack_groups_fn_t unpack = get_unpack_fn();
+  const int bpg = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
+  const uint32_t value_mask = (bit_width == 32) ? 0xFFFFFFFFu : ((1u << bit_width) - 1u);
+
+  const uint8_t *ptr = data;
+  const uint8_t *end = data + data_size;
+  int32_t decoded = 0;
+  long long runs = 0, unpacked = 0;
+
+  while (decoded < num_values && ptr < end) {
+    uint32_t header = 0;
+    int shift = 0;
+    while (ptr < end && shift < 32) {
+      uint8_t byte = *ptr++;
+      header |= ((uint32_t)(byte & 0x7F)) << shift;
+      if ((byte & 0x80) == 0) break;
+      shift += 7;
+    }
+
+    if ((header & 1) == 1) {
+      const int32_t num_groups    = (int32_t)(header >> 1);
+      const int32_t values_in_run = num_groups * 8;
+      const int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
+      if (ptr + bytes_needed > end) break;
+
+      const int32_t to_decode   = std::min(values_in_run, num_values - decoded);
+      const int32_t full_groups = to_decode / 8;
+      const int32_t remainder   = to_decode - full_groups * 8;
+      uint8_t *out = vpass + decoded;
+      for (int32_t g = 0; g < full_groups; g += kTileGroups) {
+        const int32_t n_groups = std::min(kTileGroups, full_groups - g);
+        unpack(ptr + (size_t)g * bpg, tile, n_groups, bit_width);
+        const int32_t n = n_groups * 8;
+        uint32_t tile_max = 0;
+        for (int32_t i = 0; i < n; i++) {
+          const uint32_t v = (uint32_t)tile[i];
+          tile_max = v > tile_max ? v : tile_max;
+        }
+        if (tile_max >= num_entries) { *bad_code = tile_max; return -2; }
+        for (int32_t i = 0; i < n; i++) out[i] = entry_pass[(uint32_t)tile[i]];
+        out += n;
+      }
+      if (remainder > 0) {
+        int32_t tmp[8] = {};
+        unpack_group_8_scalar(ptr + (size_t)full_groups * bpg, tmp, bit_width);
+        for (int32_t i = 0; i < remainder; i++) {
+          const uint32_t v = (uint32_t)tmp[i];
+          if (v >= num_entries) { *bad_code = v; return -2; }
+          out[i] = entry_pass[v];
+        }
+      }
+      unpacked += to_decode;
+      decoded += to_decode;
+      ptr += bytes_needed;
+    } else {
+      const int32_t count       = (int32_t)(header >> 1);
+      const int     value_bytes = (bit_width + 7) / 8;
+      if (ptr + value_bytes > end) break;
+      uint32_t value = 0;
+      for (int i = 0; i < value_bytes; i++) value |= ((uint32_t)(*ptr++)) << (i * 8);
+      value &= value_mask;
+      // A zero-length run consumes nothing: malformed, never absorbed.
+      if (count <= 0) return -1;
+      if (value >= num_entries) { *bad_code = value; return -2; }
+
+      const int32_t to_fill = std::min(count, num_values - decoded);
+      std::memset(vpass + decoded, entry_pass[value], (size_t)to_fill);
+      runs += to_fill;
+      decoded += to_fill;
+    }
+  }
+
+  *runs_filled += runs;
+  *codes_unpacked += unpacked;
+  return (decoded == num_values) ? decoded : -1;
+}
+
+// ---------------------------------------------------------------------------
 // DecodeRLEBitPackedIndicesSelected
 // ---------------------------------------------------------------------------
 
