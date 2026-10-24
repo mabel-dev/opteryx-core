@@ -389,33 +389,37 @@ present count. No bare `return` was added; the two the string path had (`data_si
 Keep rule stated before the first number (§8.2): Q1/Q7 median wall ≤ 0.90 on both arches, no
 guard worse than 1.00; otherwise the change is reverted.
 
-**Mac (M5 Pro, 16 workers, `scratch.hits_rg64k_b4`, 5 interleaved rounds, baseline = the
-pre-edit tree with the identical other binaries, result digests identical on every query).**
-Wall and process-CPU medians, B/A (final build: gate + probe + lazy mask):
+**Final build (gate at 1/64 passing, 512-value probe, lazy mask), 5 interleaved rounds per
+machine, baseline = the pre-edit tree with identical other binaries, result digests identical on
+every query. Wall and process-CPU medians, B/A.**
 
-| query | wall B/A | B wins | CPU B/A | notes |
+| query | Mac wall | Mac CPU | x86 wall | x86 CPU |
 |---|---|---|---|---|
-| Q01 `AdvEngineID <> 0` | 0.999 (0.985 in two earlier rounds) | 2/5 | 0.990 | 70.5M rows decided, 630,500 emitted; 99.1% of verdicts from RLE runs |
-| Q07 (same filter, GROUP BY) | 0.995 | 3/5 | 0.975 | |
-| `= 0` (99% pass) | 1.006 | 1/5 | 0.985 | every page kept whole by the probe |
-| `IN (2, 3)` | 1.021 | 2/5 | 0.956 | |
-| `> 0` (range-settled from stats, never searched) | 1.013 | 3/5 | 0.990 | control |
-| `<> 1` no-prune canary (every entry passes; stats cannot answer) | 0.993 | 4/5 | 0.988 | search declined |
-| `SUM(AdvEngineID) GROUP BY OS` canary | 0.998 | 3/5 | 1.003 | control |
-| Q39-shape `CounterID = 62 AND IsRefresh = 0 AND DontCountHits = 0` | 1.031 | 0/5 | 1.021 | 28 pages |
-| `TraficSourceID IN (-1, 6) AND IsRefresh = 0` (55% pass) | 1.014 | 1/5 | 1.008 | 11,165 of 11,200 pages kept whole |
-| `OS NOT IN (2, 44, 56)` (18.6% pass) | 1.056 | 0/5 | 1.050 | 9,429 whole, 1,771 selective |
+| Q01 `AdvEngineID <> 0` | 1.009 (3/5) | 0.992 | X86Q01 | |
+| Q07 (same filter, GROUP BY) | 0.984 (4/5) | 1.000 | X86Q07 | |
+| `= 0` (99% pass, every page whole) | 0.986 | 0.998 | X86EQ0 | |
+| `IN (2, 3)` | 0.972 (4/5) | 0.996 | X86IN | |
+| `> 0` (range-settled from stats, never searched) | 0.985 | 1.024 | X86GT | |
+| `<> 1` no-prune canary (every entry passes; stats cannot answer) | 0.982 (5/5) | 0.997 | X86NE1 | |
+| `SUM(AdvEngineID) GROUP BY OS` canary | 0.997 | 0.997 | X86SUM | |
+| Q39-shape `CounterID = 62 AND IsRefresh = 0 AND DontCountHits = 0` | 1.008 | 0.985 | X86Q39 | |
+| `TraficSourceID IN (-1, 6) AND IsRefresh = 0` (55% pass, all pages whole) | 0.993 | 1.005 | X86TRAF | |
+| `OS NOT IN (2, 44, 56)` (18.6% pass, all pages whole) | 0.984 | 1.004 | X86OS | |
 
-Earlier rounds of the same day, for the record: ungated (every evaluated page selected, int32
-indices under selection) `TraficSourceID IN` 1.333 and `OS NOT IN` 1.092; with the gate but a
-full verdict walk per page 1.151 / 1.195; with the probe 1.021 / 1.047.
+Mac: M5 Pro, 16 workers, `scratch.hits_rg64k_b4`, no allocator preload (none on macOS). x86:
+i5-8500, 6 cores, mimalloc preload, `hits_rugo_262k` (the same rows in 8 files of 216 row
+groups; the box does not hold the 100-file layout).
 
-**Verdict on the Mac: not a win.** Q01/Q07 are flat (the targets), and the mid-selectivity
-integer predicates lose 1–6% consistently (0/5). The mechanism does what it says — the
-per-row work after the decoder is gone for Q01 (draken's per-row compare scatter, mask gather
-and dict-vector build left the profile) — but Q01's wall is not made of that work (§11.7).
+Earlier rounds of the same day, for the record (the gate's history): ungated, every evaluated
+page selected through int32 indices — Mac `TraficSourceID IN` 1.333, `OS NOT IN` 1.092; gate
+at 1/8 with a full verdict walk per page — 1.151 / 1.195; with a 4,096-value probe — Mac
+1.014 / 1.056, x86 1.008 / 1.114 (x86 Q01 0.930, Q07 0.900, `IN` 0.894, all 5/5); gate at
+1/64 with the 4,096 probe — Mac 0.986 / 1.007, x86 1.013 / 1.049 (every page whole: the probe
+itself was the cost on bit-packed pages; x86 Q01 0.941, Q07 0.918, `IN` 0.899).
 
-**x86 (i5-8500, 6 cores, mimalloc preload, `hits_rugo_262k`):** see below when run.
+**Verdict.** Q01/Q07 are flat on the Mac (the targets; their wall is not made of decode work,
+§11.7) and X86VERDICT on x86. No canary or control moved beyond noise on either machine. The
+keep rule of §8.2 (Q1/Q7 ≤ 0.90) is not met on the Mac and X86RULE on x86.
 
 ### 11.7 Where Q01's wall actually is (the finding of this work)
 

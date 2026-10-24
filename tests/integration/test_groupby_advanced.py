@@ -731,11 +731,11 @@ class TestGroupByWithMissions:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                Status,
+                Mission_Status,
                 COUNT(*) as cnt
             FROM testdata.missions
-            GROUP BY Status
-            ORDER BY Status
+            GROUP BY Mission_Status
+            ORDER BY Mission_Status
             """
         ).to_pylist()
 
@@ -747,11 +747,11 @@ class TestGroupByWithMissions:
             """
             SELECT
                 Company,
-                Status,
+                Mission_Status,
                 COUNT(*) as cnt
             FROM testdata.missions
-            GROUP BY Company, Status
-            ORDER BY Company, Status
+            GROUP BY Company, Mission_Status
+            ORDER BY Company, Mission_Status
             """
         ).to_pylist()
 

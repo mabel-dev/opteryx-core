@@ -2717,7 +2717,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // row (measured 2026-10-24: +15% on a 55%-pass predicate with the
           // full walk). The probe is pruning-only: a page whose prefix passes
           // but whose tail fails merely keeps rows the scan's filter then drops.
-          constexpr int32_t kProbeValues = 4096;
+          // 512: at 4096 the probe alone cost 1-5% on bit-packed pages that keep
+          // every row (x86, 2026-10-24); 512 values still decide a 1/64 gate.
+          constexpr int32_t kProbeValues = 512;
           if (search_int_on && pc > kProbeValues) {
             long long probe_runs = 0, probe_unpacked = 0;
             const int32_t probed = DecodeRLEBitPackedVerdicts(
