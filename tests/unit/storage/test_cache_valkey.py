@@ -12,8 +12,11 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from tests import is_arm, is_mac, is_windows, skip_if
 
-def test_invalid_config():
+def test_invalid_config(monkeypatch):
     from opteryx.managers.kvstores import ValkeyCache
+
+    # CI exports VALKEY_CONNECTION; `server=None` must mean "none configured" here.
+    monkeypatch.delenv("VALKEY_CONNECTION", raising=False)
 
     with pytest.raises(Exception):
         ValkeyCache(server="")

@@ -72,7 +72,9 @@ test_cases = [
         query="SELECT Company FROM opteryx.space_missions WHERE Rocket_Status = 'Active';",
         expected_rowcount=1010,
         expected_columncount=1,
-        stats={"columns_read": 1, "rows_read": 1010},
+        # columns_read is columns DECODED: the projected Company plus the Rocket_Status
+        # the filter reads. It cannot be 1 and still apply the predicate.
+        stats={"columns_read": 2, "rows_read": 1010},
     ),
     TestCase(
         query="SELECT COUNT(*) FROM opteryx.many",

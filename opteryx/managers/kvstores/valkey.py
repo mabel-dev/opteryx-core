@@ -45,7 +45,13 @@ def _valkey_client(connection: str):
 
 
 def _valkey_server(**kwargs):
-    connection = kwargs.get("server") or os.environ.get("VALKEY_CONNECTION")
+    # An explicit `server=` is used as given -- an empty string is a configuration
+    # error and must reach the client, which rejects it, not be read as "unset". Only
+    # an absent server falls back to the environment, where an empty value (an unset
+    # CI secret expands to "") means no cache is configured.
+    connection = kwargs.get("server")
+    if connection is None:
+        connection = os.environ.get("VALKEY_CONNECTION") or None
     if connection is None:
         return None
 

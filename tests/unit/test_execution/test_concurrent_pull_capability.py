@@ -1,18 +1,12 @@
-"""M4 Stage 1: the concurrent-pull reentrancy capability + parallel-DISTINCT gate.
+"""Parallel DISTINCT over a non-reentrant source.
 
-``BasePlanNode.is_concurrent_pull_safe()`` is the CORRECTNESS distinction that lets
-a parallel strategy self-pull a scan locklessly ONLY when the source's
-``next_morsel`` is reentrant — native single-pass parquet, whose cursor is guarded
-by an internal std::mutex that hands each caller a distinct already-decoded row
-group. Every other source (virtual datasets driven by a non-reentrant Python
-generator, two-pass latmat, empty-manifest fallback) must report ``False`` so the
-strategy SERIALISES the live pull. If it lied, N workers would re-enter one
-generator and crash (``generator already executing``) or corrupt its state.
+A parallel DISTINCT (forced via W>1) over a virtual dataset, which is driven by a
+non-reentrant Python generator, used to crash (``generator already executing``)
+because N workers re-entered one generator. It must run serialised, not raise, and
+stay result-identical to the serial engine.
 
-This is the regression for that crash: ``_distinct_stream`` previously self-pulled
-LOCKLESS unconditionally, so a parallel DISTINCT over a virtual dataset (forced via
-zero row-floor + W>1) crashed. It must now run serialised, not raise, and stay
-result-identical to the serial engine.
+The `is_concurrent_pull_safe()` capability tests that lived here were deleted with
+the Python scheduler they exercised; the native engine has no such method.
 """
 
 import os
@@ -20,31 +14,8 @@ import sys
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
 
-import pytest
-
 import opteryx
 from opteryx import config
-from opteryx.models import QueryTelemetry
-from opteryx.planner import query_planner
-
-
-def _plan(sql):
-    return query_planner(
-        operation=sql,
-        parameters=None,
-        visibility_filters=None,
-        execution_context=opteryx.session().context,
-        query_id="t",
-        telemetry=QueryTelemetry.detached(),
-    )
-
-
-def _scan_node(plan):
-    for nid in plan.nodes():
-        node = plan[nid]
-        if getattr(node, "is_scan", False):
-            return node
-    return None
 
 
 def _rows(sql, *, workers):
@@ -74,29 +45,6 @@ def _rows(sql, *, workers):
     return sorted(out, key=repr)
 
 
-PARQUET = os.path.join(
-    os.path.dirname(__file__), "../../..", "testdata/clickbench_tiny"
-)
-
-
-# ── the capability itself ──────────────────────────────────────────────────────
-
-
-def test_virtual_source_is_not_concurrent_pull_safe():
-    """A virtual dataset is a non-reentrant generator → must report False."""
-    scan = _scan_node(_plan("SELECT DISTINCT name FROM $planets"))
-    assert scan is not None
-    assert scan.is_concurrent_pull_safe() is False
-
-
-@pytest.mark.skipif(not os.path.exists(PARQUET), reason="clickbench_tiny missing")
-def test_parquet_single_pass_is_concurrent_pull_safe():
-    """A plain projected parquet scan resolves to single-pass → reentrant → True."""
-    scan = _scan_node(_plan('SELECT DISTINCT "UserID" FROM testdata.clickbench_tiny'))
-    assert scan is not None
-    assert scan.is_concurrent_pull_safe() is True
-
-
 # ── the regression: parallel DISTINCT over a non-reentrant source ───────────────
 
 
@@ -120,7 +68,6 @@ def test_parallel_distinct_multi_column_over_virtual_no_crash():
 
 
 if __name__ == "__main__":
-    test_virtual_source_is_not_concurrent_pull_safe()
-    if os.path.exists(PARQUET):
-        test_parquet_single_pass_is_concurrent_pull_safe()
-    print("✅ concurrent-pull capability + parallel-distinct regression")
+    test_parallel_distinct_over_virtual_source_no_crash_matches_serial()
+    test_parallel_distinct_multi_column_over_virtual_no_crash()
+    print("✅ parallel-distinct regression")
