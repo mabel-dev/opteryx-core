@@ -299,9 +299,9 @@ def test_reads_back_in_duckdb(grouped_file):
     path, _, expected = grouped_file
     con = duckdb.connect()
     p = path.replace("'", "''")
-    assert _by_rid(_canon_table(con.execute(f"SELECT * FROM read_parquet('{p}')").fetch_arrow_table())) == expected
+    assert _by_rid(_canon_table(con.execute(f"SELECT * FROM read_parquet('{p}')").to_arrow_table())) == expected
     got = con.execute(f"SELECT * FROM read_parquet('{p}') WHERE rid BETWEEN {FILTER_LO} AND {FILTER_HI}")
-    assert _by_rid(_canon_table(got.fetch_arrow_table())) == _filtered(expected)
+    assert _by_rid(_canon_table(got.to_arrow_table())) == _filtered(expected)
     con.close()
 
 

@@ -243,6 +243,13 @@ opteryx/third_party/mbleven.c
 !vector_sketch_reduce.cpp
 
 **.parquet
+# apache/parquet-testing reference files (sha256-pinned in
+# tests/rugo/test_parquet_testing_reference_encodings.py); the test reads them
+# from a fresh checkout, so they must be committed.
+!testdata/parquet_tests/alp_extended.zstd.parquet
+!testdata/parquet_tests/byte_stream_split.zstd.parquet
+!testdata/parquet_tests/byte_stream_split_extended.gzip.parquet
+!testdata/parquet_tests/delta_length_byte_array.parquet
 **.csv
 **.tgz
 **.stats.json
