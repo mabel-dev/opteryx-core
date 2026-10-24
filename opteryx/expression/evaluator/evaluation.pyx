@@ -3537,6 +3537,9 @@ cdef int _dv_copy_result_dense(
     cdef uint32_t* sel
     cdef uint32_t i, phys
     cdef void* data
+    # A constant-shaped ARRAY in which every row is NULL (a folded `NULL::ARRAY<T>`)
+    # leaves as a self-describing DRAKEN_NULL column, below.
+    cdef bint as_null = False
 
     # VARIANT is German-string storage (buffers.h) — same slot/arena layout as the
     # VARCHAR family. It is the result type of `->`.
@@ -3555,11 +3558,24 @@ cdef int _dv_copy_result_dense(
         # ARRAY-producing kernel, JSONB_OBJECT_KEYS, always emits identity), so
         # fail loud rather than build unexercised gather logic for it.
         if (src.flags & DRAKEN_SEL_IDENTITY) == 0:
-            return -1
-        return _dv_copy_result_array_offsets(src, out_vec, out_data, out_validity,
-                                            out_sel, out_arena)
+            # ... with ONE exception, reached today: a typed NULL literal
+            # (`NULL::ARRAY<T>`, or a TRY_CAST of a constant that cannot convert,
+            # which folds to the same) arrives constant-shaped, every row NULL. There
+            # is nothing to gather and no row has an array to flatten, so it is the
+            # value a bare NULL is: a self-describing DRAKEN_NULL column (the arm
+            # below), as NULL::TIMESTAMP already is. Any other non-identity shape
+            # stays refused.
+            if src.validity == NULL or src.data_length != 1:
+                return -1
+            for i in range(n):
+                if (src.validity[i >> 3] >> (i & 7)) & 1:
+                    return -1   # a row holds a real array: the gather is still unbuilt
+            as_null = True
+        else:
+            return _dv_copy_result_array_offsets(src, out_vec, out_data, out_validity,
+                                                out_sel, out_arena)
 
-    if src.type == DRAKEN_NULL:
+    if src.type == DRAKEN_NULL or as_null:
         # Self-describing null (buffers.h): type==NULL means every row is null,
         # with no data and no validity buffer at all — nothing to copy.
         data = NULL
@@ -3584,7 +3600,7 @@ cdef int _dv_copy_result_dense(
             memcpy(<uint8_t*>data + <size_t>i * es,
                    <const uint8_t*>src.data + <size_t>src.selection[i] * es, es)
 
-    if src.validity != NULL:
+    if src.validity != NULL and not as_null:
         validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
         if validity == NULL:
             draken_free(data)
@@ -3605,7 +3621,7 @@ cdef int _dv_copy_result_dense(
     out_vec.data_length = n
     out_vec.length = n
     out_vec.validity = validity
-    out_vec.type = src.type
+    out_vec.type = DRAKEN_NULL if as_null else src.type
     out_vec.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION
     out_data[0] = data
     out_validity[0] = validity

@@ -990,6 +990,19 @@ def _distinct_on_identities(step):
     return [expression.schema_column.identity for expression in step.on]
 
 
+# dtype -> (draken_native constant builder, lowest, highest literal it can hold).
+_CONST_INTEGER_BUILDERS = {
+    DrakenType.INT8: ("vector_int8_from_constant", -(1 << 7), (1 << 7) - 1),
+    DrakenType.INT16: ("vector_int16_from_constant", -(1 << 15), (1 << 15) - 1),
+    DrakenType.INT32: ("vector_int32_from_constant", -(1 << 31), (1 << 31) - 1),
+    DrakenType.INT64: ("vector_from_constant", -(1 << 63), (1 << 63) - 1),
+    DrakenType.UINT8: ("vector_uint8_from_constant", 0, (1 << 8) - 1),
+    DrakenType.UINT16: ("vector_uint16_from_constant", 0, (1 << 16) - 1),
+    DrakenType.UINT32: ("vector_uint32_from_constant", 0, (1 << 32) - 1),
+    DrakenType.UINT64: ("vector_uint64_from_constant", 0, (1 << 64) - 1),
+}
+
+
 def _const_scalar_vector(dtype, value):
     """Build a length-1 constant-encoded Vector for an `IDENTIFIER = LITERAL`
     const-replacement column (see the FilterNode branch below). Returns None for a
@@ -1010,10 +1023,16 @@ def _const_scalar_vector(dtype, value):
         if not isinstance(value, bool):
             return None
         return Vector(_draken_native.vector_from_bool_constant(value, 1))
-    if dtype == DrakenType.INT64:
-        if isinstance(value, bool) or not isinstance(value, int):
+    integer = _CONST_INTEGER_BUILDERS.get(dtype)
+    if integer is not None:
+        # Every integer width, signed and unsigned: columns carry their REAL width
+        # (a small id is INT8), so keying on INT64 alone silently disabled the
+        # optimization for them. A literal outside the column's range can match no
+        # row; it takes the ordinary path rather than being wrapped to fit.
+        builder, low, high = integer
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             return None
-        return Vector(_draken_native.vector_from_constant(value, 1))
+        return Vector(getattr(_draken_native, builder)(value, 1))
     if dtype == DrakenType.FLOAT64:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
