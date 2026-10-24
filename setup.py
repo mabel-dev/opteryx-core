@@ -1684,6 +1684,7 @@ extensions.append(
         extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
         depends=[
             "rugo/src/parquet/io_pipeline.hpp",
+            "rugo/src/parquet/bloom_bytes_cache.hpp",
             "rugo/src/parquet/nested_json.hpp",
             "rugo/src/parquet/ipc_serialize.hpp",
             "rugo/src/parquet/decode.hpp",
