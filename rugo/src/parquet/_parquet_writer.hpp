@@ -3022,7 +3022,7 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
       ColumnKmv &kmv = erg.kmv[i];
       kmv.tracked = true;
       kmv.present = (uint64_t)hashes.size();
-      for (uint64_t h : hashes) kmv.sketch.add(h);
+      kmv.sketch.add_many(hashes.data(), hashes.size());
       if (!hashes.empty()) {
         // Below K distinct the sketch already holds every distinct hash, so
         // its size IS the count; only a wider chunk pays the counting pass.

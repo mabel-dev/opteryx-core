@@ -646,9 +646,11 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 #    box out of memory on H2O medium. Measured on the x86 box 2026-10-18,
 #    rugo parquet vs skene lz4: TPC-H SF1 0.79x, SF10 0.82x, JOB 0.61x, H2O
 #    medium 1.27x (two ~100M-row-output queries).
-#    The stamp .rugo-v1 is bumped when the writer changes what a mirror holds
-#    (v1 = DECIMAL dictionary encoding, commit 1fdadfc4), so a mirror written
-#    by an older writer regenerates instead of being benchmarked.
+#    The stamp .rugo-vN is bumped when the writer changes what a mirror holds
+#    (v1 = DECIMAL dictionary encoding, commit 1fdadfc4; v2 = 16-byte string
+#    bounds, NDV without blooms, file-level `rugo.ndv.<column>`, encoding_stats
+#    and size_statistics, 2026-10-23), so a mirror written by an older writer
+#    regenerates instead of being benchmarked.
 #
 #  - mirror_skene — the `-skene` targets. skene v3, lz4 (see gate 3 below).
 #
@@ -656,13 +658,13 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 # interrupted build leaves a partial tree that `test -d` would accept, silently
 # benchmarking a fraction of the dataset.
 define mirror_rugo
-	@test -f $(2).rugo-v1 || { \
+	@test -f $(2).rugo-v2 || { \
 		rm -rf $(2) && \
 		for t in $$(cd $(1) && ls -d */ | tr -d /); do \
 			$(PYTHON) dev/rewrite_parquet_layout.py $(1)/$$t $(2)/$$t \
 				--rows 65536 --block 4 --compression zstd --file-bytes 4294967296 || exit 1; \
 		done && \
-		touch $(2).rugo-v1; \
+		touch $(2).rugo-v2; \
 	}
 endef
 

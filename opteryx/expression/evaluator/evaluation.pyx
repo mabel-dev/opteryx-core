@@ -2910,13 +2910,31 @@ ctypedef struct Pass1PredCtx:
     # the PLAN says that column is. The producer of `cols` tags its views from what
     # it can see in the decoded buffers, which is the physical layout — rugo, being
     # opteryx-free by contract, cannot know that a byte_array chunk is VARBINARY
-    # rather than VARCHAR. Only the plan knows. So the tag is carried here and
-    # stamped on entry: the predicate always sees each column tagged as the plan
-    # says it is, which is exactly what the serial fallback passes.
+    # rather than VARCHAR, nor that a file's INT16 column is an INT32 in the
+    # relation. Only the plan knows. So the type is carried here and applied on
+    # entry — a re-tag when the bytes are the same width, a widening when the file
+    # stored the column narrower — and the predicate always sees each column as the
+    # plan says it is, which is exactly what the serial fallback passes.
     const int*      col_type
 
 
 ctypedef int (*Pass1EvalFn)(void*, DrakenVector**, int, uint32_t, uint8_t*) noexcept nogil
+
+
+cdef extern from "engine/ladder_widening.hpp" namespace "opteryx::engine" nogil:
+    bint is_ladder_widening(DrakenType from_type, DrakenType to_type)
+    VecResult ladder_widen(DrakenType to_type, const DrakenVector* v)
+
+
+cdef extern from "core/type_width.h" nogil:
+    size_t draken_fixed_width(DrakenType t)
+    int draken_is_string_family(DrakenType t)
+
+
+# Pass-1 rc for a column the plan types as something its decoded view can neither be
+# re-tagged as (a different byte width) nor widened to. Every caller fails on it: a
+# predicate over the wrong bytes is a wrong answer, never a shape to decline.
+DEF PASS1_RC_TYPE_MISMATCH = 95
 
 
 cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
@@ -2925,13 +2943,17 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
     (resolved once on the main thread, kept alive by the scan). `cols[i]` is decoded
     pass-1 predicate column i; `out_mask` is caller-owned, nbytes=(num_rows+7)//8.
     Returns 0 → out_mask is the survivor bitmap (data-bit AND validity); else the
-    c_execute_dv_inner rc (worker fails loud).
+    c_execute_dv_inner rc, 4 when a widening kernel failed, or
+    PASS1_RC_TYPE_MISMATCH (worker fails loud).
 
     `cols[i].type` is advisory: the caller tags its views from the physical buffers,
-    which is all a producer outside the plan can see. `ctx.col_type[i]` is the tag
-    the PLAN gives that column, and it wins — see Pass1PredCtx. A caller that
-    already tags correctly (the serial fallbacks, which pass the consumer's own
-    morsel columns) matches it and no copy happens."""
+    which is all a producer outside the plan can see. `ctx.col_type[i]` is the type
+    the PLAN gives that column, and it wins — see Pass1PredCtx. A view already at
+    the plan's type is used as it is (the serial fallbacks, which pass the
+    consumer's own morsel columns, always are). One of the same byte width is
+    re-tagged. One the file stored narrower is widened with the parquet Source's own
+    ladder kernel (engine/ladder_widening.hpp), so the predicate reads the values the
+    Source emits. Anything else is a mismatch, and fails."""
     cdef Pass1PredCtx* c = <Pass1PredCtx*>ctx
     cdef BytecodeInstr* instrs = c.instrs
     cdef int count = c.count
@@ -2942,13 +2964,23 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
-    # Retag scratch, one slot per INSTRUCTION so it shares dv_cache's existing 256
-    # bound and adds no new failure mode. Only touched for a load whose incoming tag
-    # disagrees with the plan's; every other load points straight at the caller's
-    # vector, untouched.
+    # Re-tag / widen scratch, one slot per INSTRUCTION so it shares dv_cache's
+    # existing 256 bound and adds no new failure mode. Only touched for a load whose
+    # incoming type disagrees with the plan's; every other load points straight at
+    # the caller's vector, untouched.
     cdef DrakenVector  col_store[256]
+    # Buffers the widenings allocated, released on every exit.
+    cdef void* own_data[256]
+    cdef void* own_validity[256]
+    cdef void* own_selection[256]
+    cdef int n_own = 0
+    cdef VecResult wr
+    cdef DrakenType have
+    cdef size_t have_width = 0
     cdef int ci = 0
     cdef int want = 0
+    cdef int j = 0
+    cdef bint prepared = False
     cdef int rc = 0
     cdef int err_op = 0
     cdef int opcode = 0
@@ -2970,50 +3002,85 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
         if opcode == BC_LOAD_COL:
             ci = col_idx[k]
             want = col_type[ci]
-            if cols[ci].type == <DrakenType>want:
+            have = cols[ci].type
+            if have == <DrakenType>want:
                 dv_cache[k] = cols[ci]
-            else:
-                # The producer tagged this view from the physical buffers and got a
-                # different type than the plan's. Stamp the plan's tag on a copy —
-                # the caller's vector is left alone, and the predicate now runs over
-                # exactly the operands the serial fallback would hand it.
+                continue
+            # An earlier load of the same column already re-tagged or widened it.
+            prepared = False
+            for j in range(k):
+                if instrs[j].opcode == BC_LOAD_COL and col_idx[j] == ci:
+                    dv_cache[k] = dv_cache[j]
+                    prepared = True
+                    break
+            if prepared:
+                continue
+            if is_ladder_widening(have, <DrakenType>want):
+                wr = ladder_widen(<DrakenType>want, cols[ci])
+                if wr.data == NULL:
+                    rc = 4
+                    break
+                own_data[n_own] = wr.data
+                own_validity[n_own] = wr.validity
+                own_selection[n_own] = <void*>wr.selection if wr.owns_selection else NULL
+                n_own += 1
+                col_store[k].data = wr.data
+                col_store[k].selection = wr.selection
+                col_store[k].data_length = wr.data_length
+                col_store[k].length = wr.length
+                col_store[k].validity = wr.validity
+                col_store[k].type = wr.type
+                col_store[k].flags = wr.flags
+                dv_cache[k] = &col_store[k]
+                continue
+            have_width = draken_fixed_width(have)
+            if ((have_width != 0 and have_width == draken_fixed_width(<DrakenType>want))
+                    or (draken_is_string_family(have)
+                        and draken_is_string_family(<DrakenType>want))):
+                # Same bytes, another tag: stamp the plan's on a copy — the caller's
+                # vector is left alone.
                 col_store[k] = cols[ci][0]
                 col_store[k].type = <DrakenType>want
                 dv_cache[k] = &col_store[k]
+                continue
+            rc = PASS1_RC_TYPE_MISMATCH
+            break
         elif opcode == BC_LOAD_LIT_CONST:
             dv_cache[k] = lit_dv[k]
         else:
             dv_cache[k] = NULL
-    rc = _dv_try_tiled(instrs, count, dv_cache, num_rows, arena, False,
-                       &tiled, &err_op, &err_msg)
     if rc == 0:
-        memcpy(out_mask, tiled.data, <size_t>nbytes)
-        if tiled.validity != NULL:
-            c_bitmap_and_inplace(out_mask, tiled.validity, <size_t>nbytes)
-        draken_free(tiled.data)
-        draken_free(tiled.validity)
-        draken_frame_arena_destroy(arena)
-        return 0
-    if rc != -1:
-        draken_frame_arena_destroy(arena)
-        return rc
-    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, num_rows, &err_op, &err_msg, &child_vr)
-    if rc == 0 and child_vr != NULL:
-        # See _dv_filter_span_cxx — structurally unreachable, fail loud not leak.
-        draken_vecresult_discard_c(child_vr)
-        draken_frame_arena_destroy(arena)
-        return 97
-    if rc == 0:
-        mask_dv = dv_stack[0]
-        dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
-        if dense == NULL:
-            draken_frame_arena_destroy(arena)
-            return 99
-        memcpy(out_mask, dense, <size_t>nbytes)
-        if mask_dv.validity != NULL:
-            c_bitmap_and_inplace(out_mask, mask_dv.validity, <size_t>nbytes)
+        rc = _dv_try_tiled(instrs, count, dv_cache, num_rows, arena, False,
+                           &tiled, &err_op, &err_msg)
+        if rc == 0:
+            memcpy(out_mask, tiled.data, <size_t>nbytes)
+            if tiled.validity != NULL:
+                c_bitmap_and_inplace(out_mask, tiled.validity, <size_t>nbytes)
+            draken_free(tiled.data)
+            draken_free(tiled.validity)
+        elif rc == -1:
+            rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
+                                    arena, nbytes, num_rows, &err_op, &err_msg, &child_vr)
+            if rc == 0 and child_vr != NULL:
+                # See _dv_filter_span_cxx — structurally unreachable, fail loud not leak.
+                draken_vecresult_discard_c(child_vr)
+                rc = 97
+            elif rc == 0:
+                mask_dv = dv_stack[0]
+                dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
+                if dense == NULL:
+                    rc = 99
+                else:
+                    memcpy(out_mask, dense, <size_t>nbytes)
+                    if mask_dv.validity != NULL:
+                        c_bitmap_and_inplace(out_mask, mask_dv.validity, <size_t>nbytes)
     draken_frame_arena_destroy(arena)
+    for j in range(n_own):
+        draken_free(own_data[j])
+        if own_validity[j] != NULL:
+            draken_free(own_validity[j])
+        if own_selection[j] != NULL:
+            draken_free(own_selection[j])
     return rc
 
 

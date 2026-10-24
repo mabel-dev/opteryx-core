@@ -651,6 +651,30 @@ absent) and hits_skene (planner estimate present, 3 rounds); ratio vs pre-edit B
 TPC-H SF10 (rugo, 3 rounds): FULL 1.002, every arm within ±0.4%. Result digests identical to BASE on every
 query (Q31/Q32 differ only in LIMIT tie order, ORDER BY values identical).
 
-Still open: the Mac arms (both layouts, TPC-H SF10 rugo, H2O groupby g1–g10 where the R5 emit gather targets
-g10's 9 s key emit) — built, not run; the compile-time switches `OPTERYX_GB_NO_R4/R5/R7/R9` stay until ruled.
+### 10.4 Mac (M5, DOP 16): FULL vs all four switches off, 3 interleaved rounds (2026-10-24)
+
+Same sources, one candidate tree, the comparison arm built with `-DOPTERYX_GB_NO_R4/R5/R7/R9=1` (the
+pre-edit tree no longer compiles against the working tree's other edits). hits_rugo_262k, RSS 1.00,
+controls 0.978.
+
+| Q08 | Q09 | Q15 | Q16 | Q18 | Q28 | Q30 | Q31 | Q32 | Q33 | Q34 | Q35 | geomean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.96 | 1.08 | 1.10 | 1.00 | 1.05 | 1.02 | **1.21** | 1.06 | 1.08 | 1.08 | 1.04 | 1.05 | **1.059** |
+
+A LOSS on ARM (≈ +8% against the controls) where x86 was −0.7%. Q30 is the only target whose keys R7
+packs, and it is the worst case: the packing pass (an 8 B/row write and re-read before the hash) costs
+20% on ARM where it earned 1% on x86. R9 is inert at DOP 16, so the Q15/Q32/Q33 losses are R5's
+gather and/or R4's per-group sketch feed; the per-part arms were not run on the Mac. H2O groupby g1–g10
+(rugo, 3 rounds): FULL 1.019, g10 1.039 (R5's emit-gather target did not pay), g3 1.086, g9 0.963;
+g3/g4/g5/g6 digests differ run to run in BOTH arms (FLOAT sums/averages merged in worker order) — not
+a phase-2 effect; integer-keyed g1/g10 bit-identical.
+
+**Attribution run (same day, 5 arms × 3 rounds, ClickBench rugo):** ALLOFF 1.000 · FULL 0.991 · −R4 0.966 ·
+−R5 1.030 · −R7 1.020; Q30 FULL 1.037 (was 1.205 an hour earlier), −R7 1.162. The controls moved up to 20%
+between arms (Q20 0.80 on every arm vs ALLOFF; medians 0.93–1.01), so the two Mac runs together bound the
+phase at −1%..+6% on ARM with no part separable: **within the day's noise, not a measured loss** — the
+2026-10-12 note stands (3-round runs drift ±4%, sub-5% calls need ≥5 rounds, and this box was not free of
+other work). x86 is the arch that resolved the per-part effects.
+
+The compile-time switches `OPTERYX_GB_NO_R4/R5/R7/R9` stay until ruled.
 Harness: `dev/groupby_baseline.py` (record), session scratch `ablate.py` (arms × rounds, RSS, digests).

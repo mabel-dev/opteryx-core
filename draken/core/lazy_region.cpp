@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/alloc.h"
+#include "core/type_width.h"           // draken_fixed_width / draken_is_string_family
 #include "core/vector_alloc.h"
 #include "ops/string_gather.h"              // str_take (string family)
 #include "ops/kernels/error_handling.h"     // draken_error_sentinel[_fmt]
@@ -44,25 +45,6 @@ inline Guard make_guard(const DrakenVector* g) noexcept {
     return o;
 }
 
-// Byte width of one fixed-width value; 0 = not a fixed-width type handled here.
-inline size_t fixed_width(DrakenType t) noexcept {
-    switch (t) {
-        case DRAKEN_INT8:  case DRAKEN_UINT8:  return 1;
-        case DRAKEN_INT16: case DRAKEN_UINT16: return 2;
-        case DRAKEN_INT32: case DRAKEN_UINT32: case DRAKEN_FLOAT32:
-        case DRAKEN_DATE32: case DRAKEN_TIME32: return 4;
-        case DRAKEN_INT64: case DRAKEN_UINT64: case DRAKEN_FLOAT64: case DRAKEN_DECIMAL:
-        case DRAKEN_TIMESTAMP64: case DRAKEN_TIME64: return 8;
-        case DRAKEN_DECIMAL128: case DRAKEN_INTERVAL: case DRAKEN_UUID: return 16;
-        default: return 0;
-    }
-}
-
-inline bool is_string_family(DrakenType t) noexcept {
-    return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY ||
-           t == DRAKEN_VARIANT;
-}
-
 inline VecResult dense_result(void* data, uint8_t* validity, uint32_t m, DrakenType t) {
     VecResult r{};
     r.data           = data;
@@ -83,7 +65,7 @@ VecResult lz_gather(const DrakenVector& v, const uint32_t* idx, uint32_t m) {
     const bool need_validity = has_absent || v.validity != nullptr;
     const size_t vb = (static_cast<size_t>(m) + 7u) >> 3;
 
-    if (is_string_family(v.type)) {
+    if (draken_is_string_family(v.type)) {
         std::vector<int32_t> ix(m);
         for (uint32_t i = 0; i < m; ++i)
             ix[i] = idx[i] == kAbsent ? 0 : static_cast<int32_t>(idx[i]);
@@ -122,7 +104,7 @@ VecResult lz_gather(const DrakenVector& v, const uint32_t* idx, uint32_t m) {
         return dense_result(data, validity, m, DRAKEN_BOOL);
     }
 
-    const size_t w = fixed_width(v.type);
+    const size_t w = draken_fixed_width(v.type);
     if (w == 0) {
         draken_free(validity);
         throw std::invalid_argument("lazy branch evaluation: unsupported operand type");

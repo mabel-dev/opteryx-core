@@ -555,6 +555,13 @@ static inline void pass1_run_predicate(MorselRef& result, const Pass1Pred& pred)
         if (rc == 4) {
             result.success = false;
             result.error = "pass-1 predicate eval failed (rc=4, kernel error)";
+        } else if (rc == 95) {
+            // A predicate column decoded as a type the plan's can be neither re-tagged
+            // to nor widened to: evaluating it would read the wrong bytes. A fault,
+            // not a capability statement — the serial path would meet the same file.
+            result.success = false;
+            result.error = "pass-1 predicate eval failed (rc=95, a predicate column "
+                           "decoded as a type the plan cannot read it as)";
         }
     }
 }

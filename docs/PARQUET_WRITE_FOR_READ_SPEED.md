@@ -267,7 +267,16 @@ Evidence [M]:
 
 Test changes that move an assertion (not loosen it): `test_all_metadata_fields` gains the two flags; the longer-rename test now counts the name three times (the NDV key embeds it).
 
-Owed: a write-time A/B (every hashable chunk is now hashed and counted even without a bloom; floats newly get a `distinct_count`). Not run — heavy runs wait for "machine's free". Existing mirrors carry none of this until regenerated (bump `.rugo-v1`).
+Write cost, measured 2026-10-23: interleaved A/B, process per arm, 6 rounds, median of 15 writes after 3 warm-ups. Input is a 200k × 50 CSV. The old arm is this writer with only the NDV changes reversed. Harness: `scratch/grouped_layout_model/writer_ab/`.
+
+| shape | NDV work as first built | + `KmvSketch::add_many` (one-pass K smallest per chunk) | + linear sorted-union `KmvSketch::merge` (chunk → file sketch) |
+|---|---|---|---|
+| wide, blooms | 1.09 | 1.056 | **1.028** (69.6 → 71.6 ms) |
+| wide, no blooms | 1.07 | 1.041 | **1.009** |
+| 5,000 rows | 1.75 | 1.364 | **1.053** (1.34 → 1.41 ms) |
+| floats only | 1.13 | 1.088 | **1.040** |
+
+Each fix leaves the sketches identical, checked against the per-hash `add()` reference (198 add cases, 1,538 merge cases including self-merge and a 200-chunk fold). Output files are byte-identical across 10 write shapes once `(build N)` in `created_by` is normalised. In a profile, the 5,000-row residual before the merge fix was `FileNdv::add` → `merge`: one binary search and insert per hash, 0.37 of 0.48 ms, serial on the calling thread. The linear merge beat its predecessor in 24 of 24 per-round pairs. The mirrors were rebuilt under `.rugo-v2`; the fixes do not change bytes, so they need no rebuild.
 
 ### 3.2 P3 modelled: column order inside a block [M geometry, Model GETs]
 
