@@ -4189,10 +4189,10 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                     if kind == "int":
                         if csp.physical_type != s_int32 and csp.physical_type != s_int64:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
-                        # WP-11: parquet TIME is decoded as plain INT64 (the binder
-                        # models no TIME logical type from a scan), so a "time[...]"
-                        # annotation on an int column is admitted — it flows through
-                        # the ordinary int path, byte-identically to the trampoline.
+                        # WP-11: a "time[...]" annotation on an int column is admitted
+                        # (INT32 for ms, INT64 for us/ns): it decodes through the
+                        # ordinary int path and the native Source rescales it to the
+                        # declared unit and attaches the TIME descriptor (LC_TIME).
                         # A1 (E33): admit the full integer logical family — bare
                         # (empty) / int8 / int16 / int32 / int64 / uint8 / uint16 /
                         # uint32 / uint64. Signed int8/16 widen to DK_INT64 on decode;

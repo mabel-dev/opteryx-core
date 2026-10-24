@@ -25,6 +25,8 @@ alongside the column.
 * DECIMAL (int64-backed) and DECIMAL128 carry precision and scale outside the
   vector, so a view of them is a decimal with no scale.
 * TIMESTAMP carries a mandatory unit descriptor, same problem.
+* TIME is stored in the file's unit and rescaled by the scan, so the worker would
+  compare the raw stored integers.
 * DATE32 has no descriptor and would now be admissible; it is left out because this
   gate has only ever been exercised for the types below and widening it wants its
   own measurement, not a free ride on this one.
@@ -48,8 +50,9 @@ from draken.draken_native import DrakenType
 # Integers and floats: `_classify_scan_columns` records logical_coerce 0 for every
 # width and signedness, and the consumer wraps them with `draken_type_for(dk)` —
 # the same physical-kind→type mapping `pass1_natural_type` applies in rugo.
-# TIME32/TIME64: parquet TIME decodes as a plain int stream and no TIME coercion is
-# modelled on either scan path, so it reaches output as that int.
+# TIME32/TIME64 are deliberately absent: the scan rescales a parquet TIME column
+# from the file's unit to the declared one and attaches a descriptor, so a view of
+# the raw stored integers is not the value the predicate compares against.
 # BOOL: self-describing, bit-packed, no descriptor.
 # VARCHAR / VARBINARY: one byte layout, two tags, and the tag alone selects the
 # semantics (byte-length ops either way; character ops throw on VARBINARY, and the
@@ -71,8 +74,6 @@ _DESCRIPTOR_FREE_TYPES = frozenset(
         DrakenType.UINT64,
         DrakenType.FLOAT32,
         DrakenType.FLOAT64,
-        DrakenType.TIME32,
-        DrakenType.TIME64,
         DrakenType.BOOL,
         DrakenType.VARCHAR,
         DrakenType.VARBINARY,

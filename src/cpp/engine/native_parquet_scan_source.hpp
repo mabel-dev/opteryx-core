@@ -40,10 +40,10 @@
 //     DRAKEN_DATE32 / TIMESTAMP64 / DECIMAL with the exact unit or precision/scale
 //     descriptor, byte-identically to the trampoline scan's `_coerce_vectors`.
 //     DECIMAL128 (DK_DECIMAL128) is self-describing via ColumnOut.dec_* and needs
-//     no `logical_coerce` entry. BOOL is DK_BOOL dense. Parquet TIME is decoded as
-//     plain INT64 (the binder does not model a TIME logical type from a scan), so
-//     it flows through the ordinary int path with no coercion — identical to the
-//     trampoline.
+//     no `logical_coerce` entry. BOOL is DK_BOOL dense. Parquet TIME is retagged
+//     INT64 + LogicalKind::TIME (unit us) via LC_TIMEOFDAY: the binder declares every
+//     TIME column TIME[us], so the stored integers are scaled from the FILE's unit
+//     (ColumnOut::time_unit) to microseconds since midnight.
 //   - Exception: DK_POOL columns explicitly flagged via `decimal_columns` (plan-
 //     time known to be int64-backed DECIMAL — see native_decimal_pool_decode.hpp
 //     for why these are ALWAYS DK_POOL regardless of parquet encoding) are read
@@ -141,15 +141,14 @@ namespace opteryx::engine {
 //   bits [0:4]  kind   0=none 1=decimal(int64-backed) 3=date32 4=timestamp64
 //                       5=array-with-timestamp-element
 //                       (decimal128 is self-describing via DK_DECIMAL128 +
-//                       ColumnOut.dec_* and needs NO entry; parquet TIME is
-//                       decoded as plain INT64 — the binder does not model a TIME
-//                       logical type — so it takes the ordinary int path, not a
-//                       coercion kind)
-//   bits [4:8]  unit   0=s 1=ms 2=us 3=ns  (timestamp, and array<timestamp>, only)
+//                       ColumnOut.dec_* and needs NO entry)
+//                       6=ipv4 7=time (parquet TIME -> INT64 + TIME[unit], scaled
+//                       from the file's unit to the packed unit)
+//   bits [4:8]  unit   0=s 1=ms 2=us 3=ns  (timestamp, array<timestamp>, time)
 //   bits [8:16] precision  (int64-backed decimal only)
 //   bits [16:24] scale      (int64-backed decimal only)
 enum : int {
-    LC_NONE = 0, LC_DECIMAL64 = 1, LC_DATE = 3, LC_TIMESTAMP = 4,
+    LC_NONE = 0, LC_DECIMAL64 = 1, LC_DATE = 3, LC_TIMEOFDAYSTAMP = 4,
     // R6: ARRAY whose ELEMENT is a TIMESTAMP. The parquet list<timestamp> leaf
     // decodes as physical int64 and the IPC wire format carries no logical type,
     // so the child needs the same unit-carrying retag the scalar case gets —
@@ -162,11 +161,33 @@ enum : int {
     // UINT32: integer rendering instead of dotted-decimal, and a hard refusal from
     // CIDR_AGG, which requires the descriptor.
     LC_IPV4 = 6,
+    // Parquet TIME. The binder declares a parquet TIME column TIME[us], the engine's
+    // canonical TIME (INT64 + LogicalKind::TIME, microseconds since midnight, as
+    // CAST produces it); a catalog may declare another unit. A file stores ms
+    // (INT32), us or ns (INT64), per FILE, so the scan rescales from the file's
+    // unit (ColumnOut::time_unit) to the DECLARED unit packed in bits [4:8] and
+    // attaches the descriptor.
+    LC_TIMEOFDAY = 7,
 };
 static inline int lc_kind(int packed)      { return packed & 0xF; }
 static inline int lc_unit(int packed)      { return (packed >> 4) & 0xF; }
 static inline int lc_precision(int packed) { return (packed >> 8) & 0xFF; }
 static inline int lc_scale(int packed)     { return (packed >> 16) & 0xFF; }
+
+// Rescale a TIME value between unit codes (0=s 1=ms 2=us 3=ns). Widening goes
+// through unsigned arithmetic so a garbage value under a NULL slot cannot be signed
+// overflow; narrowing truncates toward zero, which for a time of day (>= 0) is floor.
+static inline int64_t time_rescale(int64_t raw, int from, int to) {
+    if (from == to) return raw;
+    if (to > from) {
+        uint64_t f = 1;
+        for (int k = from; k < to; ++k) f *= 1000u;
+        return static_cast<int64_t>(static_cast<uint64_t>(raw) * f);
+    }
+    int64_t d = 1;
+    for (int k = to; k < from; ++k) d *= 1000;
+    return raw / d;
+}
 
 // ---- NativeScanColumnBuilder ------------------------------------------------------
 // The decode half of the native scan: rugo ColumnOut -> CxxColumn, for every shape a
@@ -326,7 +347,9 @@ struct NativeScanColumnBuilder {
         }
     }
 
-    // WP-11: build a projected DATE / TIMESTAMP column from a direct/dict column.
+    // WP-11: build a projected DATE / TIMESTAMP / TIME column from a direct/dict column.
+    // TIME is the one that moves values: INT64 + LogicalKind::TIME, rescaled from
+    // the file's unit (ColumnOut::time_unit) to the declared unit.
     // Mirrors the trampoline scan's reinterpret_as_date32 /
     // retag_int64_as_timestamp64 exactly:
     //   - DATE32 emits an int32 payload (per data_length, so dict-shaped columns
@@ -356,11 +379,46 @@ struct NativeScanColumnBuilder {
         }
 
         const bool is_date = (kind == LC_DATE);
-        const DrakenType dtype = is_date ? DRAKEN_DATE32 : DRAKEN_TIMESTAMP64;
+        const bool is_time = (kind == LC_TIMEOFDAY);
+        const DrakenType dtype = is_date ? DRAKEN_DATE32
+                                         : (is_time ? DRAKEN_INT64 : DRAKEN_TIMESTAMP64);
 
         void* payload = data;
         OwnedBuffer<void> data_buf;
-        if (is_date && !src_is_32) {
+        if (is_time) {
+            // Rescale to the DECLARED unit, from THIS file's unit. An INT32 carrier is
+            // parquet TIME(MILLIS) -- the only unit INT32 can hold -- so an
+            // unrecorded unit on it means ms. Converted over the physical values
+            // (data_length) so dict-shaped columns keep their codes. A value already
+            // in the declared unit on an int64 carrier is kept as is: no copy.
+            const int to_unit = lc_unit(packed);
+            int from_unit = to_unit;
+            switch (result.columns[i].time_unit) {
+                case 1: from_unit = 1; break;
+                case 2: from_unit = 2; break;
+                case 3: from_unit = 3; break;
+                default:
+                    if (src_is_32) from_unit = 1;
+            }
+            if (src_is_32 || from_unit != to_unit) {
+                int64_t* nd = static_cast<int64_t*>(
+                    draken_malloc((data_length > 0u ? data_length : 1u) * sizeof(int64_t)));
+                if (src_is_32) {
+                    const int32_t* sd = static_cast<const int32_t*>(data);
+                    for (uint32_t k = 0; k < data_length; ++k)
+                        nd[k] = time_rescale(static_cast<int64_t>(sd[k]), from_unit, to_unit);
+                } else {
+                    const int64_t* sd = static_cast<const int64_t*>(data);
+                    for (uint32_t k = 0; k < data_length; ++k)
+                        nd[k] = time_rescale(sd[k], from_unit, to_unit);
+                }
+                draken_free(data);
+                payload = nd;
+                data_buf = OwnedBuffer<void>(nd);
+            } else {
+                data_buf = OwnedBuffer<void>(data);
+            }
+        } else if (is_date && !src_is_32) {
             // int64 → int32 over the physical values (data_length), preserving any
             // dict codes: byte-identical to draken's vector_reinterpret_as_date32.
             int32_t* nd = static_cast<int32_t*>(
@@ -390,9 +448,15 @@ struct NativeScanColumnBuilder {
                        (result.columns[i].row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
         out.own = std::make_shared<VectorOwner>(v, std::move(data_buf), std::move(val_buf),
                                                  std::move(codes_buf));
-        if (kind == LC_TIMESTAMP) {
+        if (kind == LC_TIMEOFDAYSTAMP) {
             LogicalType lt;
             lt.kind = LogicalKind::TIMESTAMP;
+            lt.unit = static_cast<TimestampUnit>(lc_unit(packed));
+            lt.offset_minutes = 0;
+            out.own->logical_type = logical_type_intern(lt);
+        } else if (is_time) {
+            LogicalType lt;
+            lt.kind = LogicalKind::TIME;
             lt.unit = static_cast<TimestampUnit>(lc_unit(packed));
             lt.offset_minutes = 0;
             out.own->logical_type = logical_type_intern(lt);

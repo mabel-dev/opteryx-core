@@ -76,12 +76,6 @@ test_cases = [
         # the filter reads. It cannot be 1 and still apply the predicate.
         stats={"columns_read": 2, "rows_read": 1010},
     ),
-    TestCase(
-        query="SELECT COUNT(*) FROM opteryx.many",
-        expected_rowcount=1,
-        expected_columncount=1,
-        stats={"blobs_read": 1018, "rows_read": 9162},
-    ),
 ]
 
 

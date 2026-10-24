@@ -211,11 +211,11 @@ class TestComplexGroupByExpressions:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                COALESCE(yearDiscovered, 0) as year,
+                COALESCE(year, 0) as selection_year,
                 COUNT(*) as cnt
-            FROM testdata.satellites
-            GROUP BY COALESCE(yearDiscovered, 0)
-            ORDER BY year
+            FROM testdata.astronauts
+            GROUP BY COALESCE(year, 0)
+            ORDER BY selection_year
             """
         ).to_pylist()
 
@@ -259,11 +259,11 @@ class TestGroupByAggregateEdgeCases:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                planetId,
+                "group",
                 COUNT(DISTINCT name) as distinct_names,
-                COUNT(DISTINCT CAST(yearDiscovered AS VARCHAR)) as distinct_years
-            FROM testdata.satellites
-            GROUP BY planetId
+                COUNT(DISTINCT CAST(year AS VARCHAR)) as distinct_years
+            FROM testdata.astronauts
+            GROUP BY "group"
             """
         ).to_pylist()
 
@@ -450,18 +450,18 @@ class TestGroupByPerformanceCharacteristics:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                planetId,
+                "group",
                 COUNT(*) as cnt,
-                COUNT(radius) as radius_cnt,
+                COUNT(space_flights) as flights_cnt,
                 COUNT(DISTINCT name) as distinct_names,
-                SUM(radius) as sum_r,
-                AVG(radius) as avg_r,
-                MIN(radius) as min_r,
-                MAX(radius) as max_r,
-                MIN(yearDiscovered) as min_year,
-                MAX(yearDiscovered) as max_year
-            FROM testdata.satellites
-            GROUP BY planetId
+                SUM(space_flights) as sum_r,
+                AVG(space_flights) as avg_r,
+                MIN(space_flights) as min_r,
+                MAX(space_flights) as max_r,
+                MIN(year) as min_year,
+                MAX(year) as max_year
+            FROM testdata.astronauts
+            GROUP BY "group"
             """
         ).to_pylist()
 
@@ -476,12 +476,12 @@ class TestGroupByPerformanceCharacteristics:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                planetId,
+                "group",
                 name,
-                yearDiscovered,
+                year,
                 COUNT(*) as cnt
-            FROM testdata.satellites
-            GROUP BY planetId, name, yearDiscovered
+            FROM testdata.astronauts
+            GROUP BY "group", name, year
             """
         ).to_pylist()
 
@@ -591,11 +591,11 @@ class TestGroupByWithFiltering:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                planetId,
+                "group",
                 COUNT(*) as cnt
-            FROM testdata.satellites
-            WHERE radius > 1000 AND yearDiscovered > 1950 AND name LIKE '%s%'
-            GROUP BY planetId
+            FROM testdata.astronauts
+            WHERE space_flights > 1 AND year > 1950 AND name LIKE '%s%'
+            GROUP BY "group"
             """
         ).to_pylist()
 
@@ -676,18 +676,18 @@ class TestGroupByNullHandling:
         result = execute_on_session_and_get_arrow(session, 
             """
             SELECT
-                yearDiscovered,
+                year,
                 COUNT(*) as cnt
-            FROM testdata.satellites
-            GROUP BY yearDiscovered
-            ORDER BY yearDiscovered
+            FROM testdata.astronauts
+            GROUP BY year
+            ORDER BY year
             """
         ).to_pylist()
 
-        # Check NULL grouping - if NULLs exist, they should be grouped
-        null_rows = [r for r in result if r["yearDiscovered"] is None]
-        if null_rows:
-            assert len(null_rows) == 1  # All NULLs in one group
+        # astronauts.year has 27 NULLs (330 of 357 populated): they must form ONE group.
+        null_rows = [r for r in result if r["year"] is None]
+        assert len(null_rows) == 1
+        assert null_rows[0]["cnt"] == 27
 
     def test_count_null_vs_nonnull(self, session):
         """COUNT(*) vs COUNT(col) with NULLs."""
@@ -695,13 +695,14 @@ class TestGroupByNullHandling:
             """
             SELECT
                 COUNT(*) as cnt_all,
-                COUNT(yearDiscovered) as cnt_year
-            FROM testdata.satellites
+                COUNT(year) as cnt_year
+            FROM testdata.astronauts
             """
         ).to_pylist()
 
-        # COUNT(*) >= COUNT(col)
-        assert result[0]["cnt_all"] >= result[0]["cnt_year"]
+        # COUNT(*) counts rows, COUNT(col) skips the 27 NULL years.
+        assert result[0]["cnt_all"] == 357
+        assert result[0]["cnt_year"] == 330
 
 
 class TestGroupByWithMissions:

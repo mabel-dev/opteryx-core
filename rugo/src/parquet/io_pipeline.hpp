@@ -277,6 +277,12 @@ struct ColumnOut {
     // descriptor". Carried, not applied — the consumer decides whether to
     // attach it (see the IPV4 gates on the two opteryx scan paths).
     int      draken_logical_kind = 0;
+    // Unit of a parquet TIME column, from THIS file's footer logical type
+    // ("time[ms]" / "time[us]" / "time[ns]"): 1=ms 2=us 3=ns, the same coding the
+    // temporal retag uses for TIMESTAMP units. 0 = not a TIME column. The unit is
+    // per FILE (a relation can mix ms and ns files), so it cannot come from the plan;
+    // the scan needs it to scale the stored integers to the declared microseconds.
+    uint8_t  time_unit = 0;
     // E37 carried key-hash: per-data-element hash seed (str_hash_seed) computed
     // during slot build, one uint64 per slot (plain: length; dict: data_length).
     // draken_vector_own_string* COPIES it, so unlike the buffers above this is NOT
@@ -3493,6 +3499,13 @@ class ParquetIOPipeline {
                 // Same posture as the clustering hint above: copied from this
                 // file's footer whichever branch below builds the column.
                 cout.draken_logical_kind = col_stats.draken_logical_kind;
+                // TIME unit, from the same footer (see ColumnOut::time_unit).
+                if (col_stats.logical_type.compare(0, 5, "time[") == 0) {
+                    const std::string& lt = col_stats.logical_type;
+                    cout.time_unit = lt.compare(5, 2, "ms") == 0 ? 1
+                                   : lt.compare(5, 2, "us") == 0 ? 2
+                                   : lt.compare(5, 2, "ns") == 0 ? 3 : 0;
+                }
                 // Direct-path logical gate (Stage 4a). Plain numerics + boolean +
                 // int128 DECIMAL128 go direct as their physical kind. DATE and
                 // TIMESTAMP decode to a physical int32/int64 stream and are

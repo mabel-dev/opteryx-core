@@ -608,7 +608,7 @@ def _element_chain(ct):
 #   packed = kind | (unit << 4) | (precision << 8) | (scale << 16)
 _LC_DECIMAL64 = 1
 _LC_DATE = 3
-_LC_TIMESTAMP = 4
+_LC_TIMEOFDAYSTAMP = 4
 # R6: ARRAY whose ELEMENT is a TIMESTAMP — the parquet list<timestamp> leaf decodes
 # as physical int64 and the IPC wire format carries no logical type, so the CHILD
 # vector needs the same unit-carrying retag the scalar case gets. Mirrors the
@@ -621,6 +621,11 @@ _LC_ARRAY_TIMESTAMP = 5
 # requires the descriptor — refuses it. See logical_type.h on why IPV4 is
 # nonetheless carried rather than treated as droppable.
 _LC_IPV4 = 6
+# (Named TIMEOFDAY because <locale.h> defines LC_TIME as a macro / enum.)
+# Parquet TIME: retagged INT64 + LogicalKind.TIME in the DECLARED unit (packed in
+# bits [4:8], as for TIMESTAMP). The file stores ms / us / ns per file, so the
+# native scan rescales from the file's own footer unit -- see ColumnOut::time_unit.
+_LC_TIMEOFDAY = 7
 # Members of the three widening ladders (signed int / unsigned int / float). A
 # declared type outside these is never a widening target — see `_widen_target`.
 _WIDENABLE_PHYSICAL = frozenset((
@@ -646,6 +651,19 @@ def _ipv4_coerce(sc, pt):
     if lg is None or lg.kind != LogicalKind.IPV4:
         return 0
     return _LC_IPV4
+
+
+def _time_coerce(sc, pt):
+    """Packed TIME retag for a parquet TIME read-set column (0 = none).
+
+    A TIME column takes the ordinary int decode path (the footer gate admits the
+    `time[...]` annotation as kind "int"); the native Source then rescales the stored
+    integers from the file's unit to the declared one and attaches the TIME
+    descriptor. The unit is packed here because the plan knows what the schema
+    DECLARED, while only the file knows what it STORED."""
+    if pt not in (DrakenType.TIME32, DrakenType.TIME64):
+        return 0
+    return _LC_TIMEOFDAY | (_wp11_unit(sc) << 4)
 
 
 def _widen_target(sc, pt):
@@ -714,17 +732,16 @@ def _wp11_logical_coerce(sc, pt):
     int64 range (>18) — the native decimal wire format carries no descriptor, so
     without a valid plan-time precision/scale the scan must stay on the trampoline.
 
-    Parquet TIME is NOT handled here: the binder decodes it as plain INT64 (no TIME
-    logical type is modelled from a scan), so a time column reaches the ordinary int
-    path — see native_scan_rejection's "int" footer branch, which admits a
-    time-annotated int column.
+    Parquet TIME is NOT handled here: it reaches the ordinary int path (see
+    native_scan_rejection's "int" footer branch, which admits a time-annotated int
+    column) and is retagged by `_time_coerce`.
 
     `kind_str` feeds native_scan_rejection's footer gate; `packed` feeds the native
     Source's build_column retag (LC_* packing)."""
     if pt == DrakenType.DATE32:
         return ("date", False, _LC_DATE)
     if pt == DrakenType.TIMESTAMP64:
-        return ("timestamp", False, _LC_TIMESTAMP | (_wp11_unit(sc) << 4))
+        return ("timestamp", False, _LC_TIMEOFDAYSTAMP | (_wp11_unit(sc) << 4))
     if pt == DrakenType.DECIMAL:
         ct = sc.column_type
         lg = ct.logical if ct is not None else None
@@ -3490,11 +3507,10 @@ class _Compiler:
         for sc in read_scs:
             pt = _physical_type(sc)
             coerce = _wp11_logical_coerce(sc, pt)
-            # WP-11: parquet TIME binds to a TIME32/TIME64 schema type but decodes as
-            # plain INT64 (the binder models no TIME coercion) — the trampoline emits
-            # it as INT64. Route it through the int path so the native scan emits the
-            # identical INT64 column; the "int" footer gate admits the time[...]
-            # logical annotation.
+            # WP-11: parquet TIME binds to a TIME32/TIME64 schema type. It decodes
+            # through the int path (the "int" footer gate admits the time[...]
+            # logical annotation); `_time_coerce` then has the native Source rescale
+            # it to the declared unit and emit INT64 + LogicalKind.TIME.
             if pt in _INT_KIND_TYPES:
                 # Every integer width, signed and unsigned. The schema declares the
                 # column's REAL width now (see _rugo_schema._integer_column_type),
@@ -3512,7 +3528,7 @@ class _Compiler:
                 string_types.append(0)
                 decimal_columns.append(0)
                 widen_types.append(widen)
-                logical_coerce.append(_ipv4_coerce(sc, pt))
+                logical_coerce.append(_ipv4_coerce(sc, pt) or _time_coerce(sc, pt))
             elif pt == DrakenType.FLOAT32:
                 kinds.append("float32")
                 string_types.append(0)
@@ -6999,7 +7015,7 @@ class _Compiler:
         if physical == DrakenType.TIMESTAMP64:
             # The packing carries the declared unit above the kind (LC_* packing);
             # the retag is unit-blind to the value, so only the kind is tested.
-            return (coerce & 0xF) == _LC_TIMESTAMP
+            return (coerce & 0xF) == _LC_TIMEOFDAYSTAMP
         allowed_coerce = _LC_DATE if physical == DrakenType.DATE32 else 0
         return coerce in (0, allowed_coerce)
 
