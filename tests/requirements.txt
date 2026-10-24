@@ -43,6 +43,10 @@ fastavro
 cramjam  # fastavro's snappy codec (tests/rugo/test_avro_corpus.py reads snappy Kafka Connect files)
 avro
 python-snappy
+# Parquet footer/page-header decoder for the rugo encoding tests
+# (tests/rugo/test_parquet_value_encodings.py, test_parquet_footer_sections.py,
+# test_parquet_testing_reference_encodings.py import it at module level).
+thriftpy2
 # Iceberg manifest oracle for tests/rugo/test_avro_iceberg_manifests.py and
 # test_avro_reader_schema.py (SqlCatalog needs the sqlite extra). Also the
 # opteryx-iceberg suite regression_suite.yaml runs: pyiceberg-core computes the
