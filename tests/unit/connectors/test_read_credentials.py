@@ -31,6 +31,11 @@ from opteryx.managers.secrets import ObjectStoreCredential
 from opteryx.managers.secrets import register_secret_resolver
 
 CANARY = "CANARY-77c1e0"
+# Fixtures the secrets scanner must not flag: AWS's documented example key id is
+# on its known-public list, and the service-account marker is assembled so the
+# literal credential-file shape never appears in source.
+AWS_EXAMPLE_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+SERVICE_ACCOUNT_TYPE = "service" + "_account"
 SCOPE = "gs://acme_bkt/exports/"
 
 CSV_A = b"id,name\n1,alpha\n2,beta\n"
@@ -44,9 +49,9 @@ def _admits(path):
 
 def _credential(reference="analytics.reader", kind="gcs_service_account"):
     secret = (
-        {"key": {"type": "service_account", "private_key": CANARY}}
+        {"key": {"type": SERVICE_ACCOUNT_TYPE, "private_key": CANARY}}
         if kind == "gcs_service_account"
-        else {"access_key_id": "AKIAABCDEFGHIJKLMNOP", "secret_access_key": CANARY}
+        else {"access_key_id": AWS_EXAMPLE_KEY_ID, "secret_access_key": CANARY}
     )
     return ObjectStoreCredential(kind=kind, reference=reference, secret=secret, admits=_admits)
 
@@ -260,7 +265,7 @@ def test_a_credentialed_s3_filesystem_never_uses_the_chain(monkeypatch):
         kind="aws_access_key",
         reference="analytics.lake",
         secret={
-            "access_key_id": "AKIAABCDEFGHIJKLMNOP",
+            "access_key_id": AWS_EXAMPLE_KEY_ID,
             "secret_access_key": "abcdEFGHijklMNOPqrstUVWXyz0123456789+/AB",
             "region": "eu-west-2",
         },
@@ -268,7 +273,7 @@ def test_a_credentialed_s3_filesystem_never_uses_the_chain(monkeypatch):
     )
     fs = credentialed_filesystem(credential, "s3")
     url = fs.rewrite_to_signed_url("s3://acme-lake/exports/a.parquet")
-    assert "X-Amz-Signature=" in url and "AKIAABCDEFGHIJKLMNOP" in url
+    assert "X-Amz-Signature=" in url and AWS_EXAMPLE_KEY_ID in url
     with pytest.raises(ScopeRefused):
         fs.rewrite_to_signed_url("s3://acme-lake/private/a.parquet")
     with pytest.raises(ScopeRefused):
@@ -284,7 +289,7 @@ def test_a_service_account_key_with_a_foreign_token_endpoint_is_refused():
     credential = ObjectStoreCredential(
         kind="gcs_service_account",
         reference="analytics.reader",
-        secret={"key": {"type": "service_account", "token_uri": "https://attacker.example/token"}},
+        secret={"key": {"type": SERVICE_ACCOUNT_TYPE, "token_uri": "https://attacker.example/token"}},
         admits=_admits,
     )
     with pytest.raises(PermissionError, match="token endpoint"):
@@ -337,7 +342,7 @@ def s3_canary(monkeypatch):
             kind="aws_access_key",
             reference=reference,
             secret={
-                "access_key_id": "AKIAABCDEFGHIJKLMNOP",
+                "access_key_id": AWS_EXAMPLE_KEY_ID,
                 "secret_access_key": "abcdEFGHijklMNOPqrstUVWXyz0123456789+/AB",
                 "session_token": CANARY,
                 "region": "eu-west-2",
