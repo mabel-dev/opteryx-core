@@ -9,10 +9,11 @@ CPython's repr() does (fixed for -4 <= exp < 16, else scientific with a signed
 two-digit-minimum exponent), on every text-export path.
 
 fmt_double / fmt_float (draken/interop/value_format.hpp) build that text
-straight from ryu's integer decimal (d2s_decimal / f2s_decimal, Opteryx
-additions to third_party/ulfjack/ryu) instead of printing ryu's scientific text
-and parsing it back. The layout is hand-written, so it is pinned here against
-an independent oracle over many values and every layout boundary:
+straight from dragonbox's integer decimal (third_party/jkjeon) instead of
+printing a scientific text and parsing it back. The layout is hand-written, so
+it is pinned here against an independent oracle over many values and every
+layout boundary (the digits themselves are pinned byte-for-byte against
+std::to_chars by draken/interop/float_text_test.cpp, `make float-text-test`):
 
 * FLOAT64: repr(float) IS the oracle — CPython's repr is the shortest string
   that round-trips, with this exact layout.
@@ -79,7 +80,7 @@ def _f32_oracle(v):
 
 def _edge_doubles():
     # -0.0 is left out: draken's vector_float64_from_sequence normalises it to
-    # 0.0 before any writer sees it (zero takes ryu's unchanged special path).
+    # 0.0 before any writer sees it (zero prints "0.0" through wr_zero, not dragonbox).
     vals = [0.0, 1.0, -1.0, 0.5, 0.1, 0.2, 0.3, 1 / 3, 2 / 3, 123.456, -9.75]
     for k in range(-30, 31):
         for m in (1.0, 1.5, 9.999999999999999, 2.5):

@@ -5,7 +5,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
-#include "ryu.h"          // d2fixed_buffered_n / d2s_buffered_n (FLOAT64 → ASCII)
+#include "ryu.h"          // d2fixed_buffered_n / d2exp_buffered_n (FLOAT64 → ASCII)
 #include <cstring>
 #include <cmath>          // std::isfinite / std::isnan
 #include <vector>         // single-pass format staging (avoid double ryu)

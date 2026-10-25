@@ -578,7 +578,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                             cppvector[DrakenType] types,
                                             cppvector[int] lk, cppvector[int] lu,
                                             cppvector[int] lp, cppvector[int] ls,
-                                            cppvector[int] ld) except +
+                                            cppvector[int] ld,
+                                            cppvector[cppvector[int]] elem_chain) except +
         void set_sort_drop_unsearchable(size_t p) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
@@ -3781,16 +3782,21 @@ cdef class NativePlan:
         self._e.set_native_scan_row_identity(p, c_files, c_index, c_kinds, c_names)
 
     def set_native_scan_absent_columns(self, size_t p, list files, list absent, list types,
-                                       list logical):
+                                       list logical, list elem_chains):
         """Schema evolution: pipeline `p`'s native parquet scan emits, for each file in
         `files` (fetch paths), the projected columns it lacks as all-NULL constants.
         `absent[f]` is one 0/1 flag per projected column for files[f]; `types` (DrakenType
         ints) and `logical` ((kind, unit, precision, scale, dimension) tuples or None) are
-        every projected column's declared type, in projection order."""
+        every projected column's declared type, in projection order. `elem_chains[i]` is
+        column i's flat ARRAY element chain (six ints per level, see
+        ``engine.hpp::decode_elem_chain``), empty for every other column; an ARRAY column
+        some file lacks is filled with typed NULLs from it."""
         cdef cppvector[string] c_files
         cdef cppvector[uint8_t] c_absent
         cdef cppvector[DrakenType] c_types
         cdef cppvector[int] lk, lu, lp, ls, ld
+        cdef cppvector[cppvector[int]] c_elem
+        cdef cppvector[int] c_one
         for f in files:
             c_files.push_back((<str>f).encode("utf-8"))
         for flags in absent:
@@ -3804,7 +3810,12 @@ cdef class NativePlan:
             else:
                 lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
                 lp.push_back(<int>entry[2]); ls.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
-        self._e.set_native_scan_absent_columns(p, c_files, c_absent, c_types, lk, lu, lp, ls, ld)
+        for chain in elem_chains:
+            c_one.clear()
+            for value in chain:
+                c_one.push_back(<int>value)
+            c_elem.push_back(c_one)
+        self._e.set_native_scan_absent_columns(p, c_files, c_absent, c_types, lk, lu, lp, ls, ld, c_elem)
 
     def set_native_scan_deletes(self, size_t p, size_t admission, object holder):
         """Give pipeline `p`'s native parquet scan its merge-on-read deletes (a

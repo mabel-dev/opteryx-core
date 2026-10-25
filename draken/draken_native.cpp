@@ -37,7 +37,8 @@
 
 #include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "fast_float.h"
-#include "ryu.h"
+#include "ryu.h"  // d2fixed_buffered_n: fixed-precision CAST text (dragonbox is shortest-only)
+#include "interop/value_format.hpp"  // wr_double_sci
 #include "core/buffers.h"
 #include "core/ipv4.h"
 #include "core/alloc.h"
@@ -3498,8 +3499,7 @@ static inline size_t ryu_format_double(char* buf, double d, uint32_t precision) 
     }
 
     if (d >= 9.9e24 || d <= -9.9e24) {
-        const int n = d2s_buffered_n(d, buf);
-        return static_cast<size_t>(n);
+        return static_cast<size_t>(rugo_text::wr_double_sci(buf, d) - buf);
     }
 
     int len = d2fixed_buffered_n(d, precision, buf);
@@ -8338,7 +8338,7 @@ NB_MODULE(draken_native, m) {
                 // For dict/constant shapes scan only data_length unique values; for dense
                 // shapes data_length == length so this is still O(rows).
                 // A char[64] stack buffer is large enough for any scalar we render:
-                //   int64: max 20 chars; float64: ≤25 chars (ryu); bool: 5; timestamps: 26.
+                //   int64: max 20 chars; float64: ≤25 chars; bool: 5; timestamps: 26.
                 char buf[64];
                 const uint32_t nd = v.vec.data_length;
 

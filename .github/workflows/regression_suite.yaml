@@ -190,6 +190,14 @@ jobs:
         run: |
           python -c "import hadro, fastapi, uvicorn, importlib.metadata as m; print('hadro', m.version('hadro'))"
 
+      # tests/storage/test_clone_metastore_gate.py and test_egress_protection.py read the
+      # catalog's SOURCE from the sibling checkout ../opteryx-catalog, not the installed
+      # wheel: they pin this engine against the catalog it ships beside (release order is
+      # catalog, then core), and the wheel may be a release behind. actions/checkout
+      # cannot place a repository outside the workspace, so this clones beside it.
+      - name: Checkout opteryx-catalog beside the workspace
+        run: git clone --depth 1 https://github.com/mabel-dev/opteryx-catalog.git "$GITHUB_WORKSPACE/../opteryx-catalog"
+
       - name: "Authenticate to Google Cloud"
         uses: google-github-actions/auth@v1
         with:

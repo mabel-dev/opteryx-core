@@ -58,9 +58,8 @@ def test_residual_reasons_reachable():
     fallback, ruled 2026-10-03) and tags the matching reason — both as the
     refusal's `reason` field (what the census reads) and in its message.
 
-    HAND_SET holds one entry today — `footer_gate` via schema evolution (an absent
-    ARRAY column, which cannot be filled with NULL), the last residual with a live
-    SQL trigger. Written as a loop rather than a parametrize so
+    HAND_SET holds one entry today — `footer_gate` via an INT96 timestamp column
+    (the gate has no spelling for it), the last residual with a live SQL trigger. Written as a loop rather than a parametrize so
     that HAND_SET emptying out (when that last one closes) stays a real passing
     assertion instead of an empty parameter set, which pytest turns into a skip."""
     for expected_reason, sql in census.HAND_SET.items():
@@ -747,8 +746,7 @@ def test_census_frontier_is_empty():
 
 def test_census_counts_a_refused_scan(monkeypatch):
     """The gate above can fail: a battery holding one refused scan (HAND_SET's
-    schema-evolution trigger: an absent ARRAY column) tallies one refusal under its
-    reason code, and is not
+    trigger: an INT96 timestamp column) tallies one refusal under its reason code, and is not
     lost among the queries that raised for other reasons."""
     monkeypatch.setattr(census, "_read_battery", lambda: [census.HAND_SET["footer_gate"]])
     tally = census.census()

@@ -568,11 +568,16 @@ def _null_fill_type(sc):
     Source emits for `sc` from a file that does not hold it — the type it emits for
     `sc` from a file that does (see `_classify_scan_columns`) — or None when that type
     is the FILE's, not the schema's, so no fill can be typed without a file to read:
-    parquet TIME decodes at its stored integer width, and an ARRAY's element is the
-    file's."""
+    parquet TIME decodes at its stored integer width, and an ARRAY whose element type
+    the schema does not resolve. An ARRAY with a resolved element chain is filled with
+    typed all-NULL rows built from it (the element chain rides with the fill)."""
     pt = _physical_type(sc)
-    if pt is None or pt in (DrakenType.TIME32, DrakenType.TIME64, DrakenType.ARRAY):
+    if pt is None or pt in (DrakenType.TIME32, DrakenType.TIME64):
         return None
+    if pt == DrakenType.ARRAY:
+        if not _element_chain(sc.column_type):
+            return None
+        return pt.value, _logical_tuple(sc.column_type)
     if pt == DrakenType.VARIANT:
         # VARIANT reads as VARCHAR (the `string_types` tag `_classify_scan_columns` sends).
         return DrakenType.VARCHAR.value, None
@@ -4433,7 +4438,8 @@ class _Compiler:
             self._native_scan_absent[scan.identity] = (
                 files, flags,
                 [0 if f is None else f[0] for f in fill],
-                [None if f is None else f[1] for f in fill])
+                [None if f is None else f[1] for f in fill],
+                [_element_chain(sc.column_type) for sc in read_scs])
         if coverage is not None and splan.covered_items:
             # (request, seed): the aggregate above shapes the seed - ungrouped, one
             # partial per aggregate; grouped, (key tuple, partials) per group.

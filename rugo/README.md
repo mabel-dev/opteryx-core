@@ -261,6 +261,7 @@ Evaluates a column bloom filter at the given byte offset/length for a candidate 
 from rugo.parquet_writer import write_parquet, write_parquet_with_bounds
 data = write_parquet(morsel, compression="zstd")           # -> bytes
 data, bounds = write_parquet_with_bounds(morsel)           # + per-column min/max
+data = write_parquet_fast(morsel)                       # no bloom/dictionary/statistics/page index: fastest write
 ```
 
 | Area              | Support                                                                                                         |
@@ -268,7 +269,7 @@ data, bounds = write_parquet_with_bounds(morsel)           # + per-column min/ma
 | Column types      | INT8/16/32 and UINT8/16/32 (physical `int32` + INTEGER(width,signed) annotation), INT64/UINT64 (physical `int64`), FLOAT32 (physical `float`), FLOAT64 (physical `double`), BOOL, VARCHAR/NVARCHAR/VARBINARY, VARIANT (→STRING), DATE32, TIME32/64, TIMESTAMP64 (µs/ms/ns), INTERVAL (FLBA-12), DECIMAL/DECIMAL128 (FLBA), ARRAY/LIST of those — list elements keep their own width, same rules as a scalar column — all-null (→INT32). FP16 written as LIST<DOUBLE> (one-way). |
 | Encoding          | `PLAIN` values, `RLE` definition levels, one data page per column chunk                                         |
 | Compression        | `ZSTD` (default) or uncompressed                                                                                |
-| Statistics         | per-column min/max/null_count + `column_orders` (so readers trust them)                                       |
+| Statistics         | per-column min/max/null_count + `column_orders` (so readers trust them); `statistics=False` writes none of them (and skips the passes that compute them) for files no query engine will prune |
 | Bloom filters      | split-block (SBBF), XXH64, on equality-friendly columns; `bloom_filters=True\|False\|[names]`                     |
 | Layout             | single row group per Morsel                                                                                    |
 

@@ -34,7 +34,7 @@
 #include "planner/manifest_sketch.hpp"
 #include "planner/native_manifest.hpp"
 #include "planner/predicate_bounds.hpp"
-#include "ryu.h"
+#include "dragonbox/dragonbox.h"
 
 namespace opteryx::planner {
 
@@ -132,28 +132,15 @@ inline std::optional<__int128> on_gridline(__int128 unscaled, int32_t exponent, 
 // A float as Python's `Decimal(str(value))`: its shortest round-trip digits.
 inline bool float_decimal(double v, __int128& unscaled, int32_t& exponent) {
     if (!std::isfinite(v)) return false;
-    char buffer[32];
-    const int n = d2s_buffered_n(v, buffer);
-    buffer[n] = '\0';
-    // ryu: [-]D[.DDD]E[-]X
-    std::string digits;
-    bool negative = false;
-    int32_t point = 0;
-    int k = 0;
-    if (buffer[k] == '-') { negative = true; ++k; }
-    bool after_point = false;
-    for (; k < n && buffer[k] != 'E'; ++k) {
-        if (buffer[k] == '.') { after_point = true; continue; }
-        digits.push_back(buffer[k]);
-        if (after_point) --point;
+    if (v == 0.0) {
+        unscaled = 0;
+        exponent = 0;
+        return true;
     }
-    if (k >= n) return false;
-    const int32_t e = static_cast<int32_t>(std::strtol(buffer + k + 1, nullptr, 10));
-    if (digits.size() > 30) return false;
-    __int128 u = 0;
-    for (char c : digits) u = u * 10 + (c - '0');
-    unscaled = negative ? -u : u;
-    exponent = e + point;
+    const auto d = jkj::dragonbox::to_decimal(v);
+    const __int128 digits = static_cast<__int128>(d.significand);
+    unscaled = d.is_negative ? -digits : digits;
+    exponent = d.exponent;
     return true;
 }
 

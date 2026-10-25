@@ -6,7 +6,7 @@ When C/C++ source code `#include`s a header from a vendored library (e.g., `#inc
 
 This happened in June 2026 with `d2s_buffered_n` from the Ryu library:
 - `draken_native.cpp` and `cast_numeric.cpp` `#include "ryu.h"`
-- `ryu.h` declares `d2s_buffered_n` and `d2fixed_buffered_n`
+- `ryu.h` then declared `d2s_buffered_n` and `d2fixed_buffered_n` (`d2s` has since been replaced by dragonbox)
 - But only `d2fixed.c` was in the sources; `d2s.c` was missing
 - Result: `undefined symbol: d2s_buffered_n` at import time on the Pi
 
@@ -32,7 +32,7 @@ This runs `dev/check_undefined_symbols.py`, which uses `nm -u` to inspect all co
 
 | Header | Implementation Files | Used By |
 |--------|---------------------|---------|
-| `ryu.h` | `d2s.c`, `d2fixed.c` | draken_native, cast_numeric |
+| `ryu.h` | `d2fixed.c` | draken_native, cast_numeric, string_humanize |
 | `yyjson.h` | `yyjson.c` | (currently unused in main codebase) |
 | `xxhash.h` | `xxhash.c` | *(header-only when XXH_INLINE_ALL is defined)* |
 | `lz4.h` | `lz4.c` | parquet compression |

@@ -129,6 +129,16 @@ class TestFloat64ToString:
         v = dn.vector_cast_float64_to_string(f64([None, float("nan"), INF, -INF]))
         assert v.to_pylist() == [None, "NaN", "Infinity", "-Infinity"]
 
+    def test_huge_magnitudes_print_shortest_scientific(self):
+        # >= 9.9e24 is not fixed notation: the shortest round-trip digits as
+        # "D[.DDD]E[-]X" (unpadded exponent, no '+').
+        v = dn.vector_cast_float64_to_string(
+            f64([1e25, -1.2345e30, 9.9e24, -9.9e24, 1.7976931348623157e308, 1.5e25])
+        )
+        assert v.to_pylist() == [
+            "1E25", "-1.2345E30", "9.9E24", "-9.9E24", "1.7976931348623157E308", "1.5E25",
+        ]
+
     def test_precision_argument(self):
         v = dn.vector_cast_float64_to_string(f64([1.2345]), precision=2)
         assert v.to_pylist() == ["1.23"]

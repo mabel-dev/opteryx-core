@@ -1010,7 +1010,6 @@ extensions = [
         "opteryx.compiled.planner.native_manifest",
         sources=[
             "opteryx/compiled/planner/native_manifest.pyx",
-            "third_party/ulfjack/ryu/d2s.c",
             # A .skene file's footer statistics are aggregated natively
             # (planner/skene_stats.hpp) from skene's own footer parse, so this
             # extension compiles skene's READER in - its own copy, as the
@@ -1177,7 +1176,7 @@ extensions = [
         # same argument as the JSONL core above: stateless functions over a
         # caller-supplied buffer, its own copy here, rugo_native keeps its own. The
         # Python edge (_avro_column_wrap.cpp) is rugo_native only. Schema JSON
-        # (yyjson), JSON-text float formatting (ryu) and base64 (mabel) resolve
+        # (yyjson) and base64 (mabel) resolve
         # from draken_native at load, like every other draken symbol here.
         "rugo/src/avro/avro_schema.cpp",
         "rugo/src/avro/avro_container.cpp",
@@ -1642,13 +1641,12 @@ extensions.append(
                 "rugo/src/parquet/decode_page.cpp",
                 "rugo/src/parquet/page_index.cpp",
                 # STRUCT/MAP → JSON text (nested_json.hpp): the assembler, plus the
-                # renderers it shares with the JSON writers — ryu (float text) and
-                # mabel base64 (binary leaves). Out-of-line HERE so _operators /
+                # renderers it shares with the JSON writers — float text is
+                # header-only dragonbox — and mabel base64 (binary leaves).
+                # Out-of-line HERE so _operators /
                 # parquet_read resolve them from this module, exactly as they do
                 # DecodeColumnFromChunk.
                 "rugo/src/parquet/nested_json.cpp",
-                "third_party/ulfjack/ryu/d2s.c",
-                "third_party/ulfjack/ryu/f2s.c",
                 "third_party/mabel/base64/_base64.c",
                 "third_party/mabel/base64/_base64_dispatch.c",
                 "third_party/mabel/base64/_base64_neon.c",

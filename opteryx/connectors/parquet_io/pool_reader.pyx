@@ -4395,9 +4395,16 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                         if csp.logical_type != declared[<size_t>k]:
                             return _footer_declared_mismatch(path, rg_i, wanted[<size_t>k], declared_types[k], csp.physical_type, csp.logical_type)
                     else:  # float64
-                        if csp.physical_type != s_float64:
+                        # A float32 chunk is admitted too: the relation declares FLOAT64,
+                        # the compiler sends that as the widen target, and the Source widens
+                        # the decoded float32 column (NativeParquetScanSource ->
+                        # engine/ladder_widening.hpp, float ladder). The reverse - a float64
+                        # chunk under a FLOAT32 relation - stays refused by the float32
+                        # branch above: nothing on the scan narrows.
+                        if csp.physical_type != s_float64 and csp.physical_type != s_float32:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
-                        if csp.logical_type.size() != 0 and csp.logical_type != s_float64:
+                        if csp.logical_type.size() != 0 and csp.logical_type != s_float64 \
+                                and csp.logical_type != s_float32:
                             return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     found = True
                     break

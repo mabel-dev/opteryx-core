@@ -803,7 +803,8 @@ public:
                                         std::vector<DrakenType> types,
                                         std::vector<int> lk, std::vector<int> lu,
                                         std::vector<int> lp, std::vector<int> ls,
-                                        std::vector<int> ld) {
+                                        std::vector<int> ld,
+                                        std::vector<std::vector<int>> elem_chain) {
         auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
         if (src == nullptr)
             throw std::runtime_error(
@@ -816,7 +817,8 @@ public:
         for (size_t f = 0; f < files.size(); ++f)
             per_file[f].assign(absent.begin() + static_cast<std::ptrdiff_t>(f * ncols),
                                absent.begin() + static_cast<std::ptrdiff_t>((f + 1) * ncols));
-        src->set_absent_columns(files, per_file, types, intern_logical_vec(lk, lu, lp, ls, ld));
+        src->set_absent_columns(files, per_file, types, intern_logical_vec(lk, lu, lp, ls, ld),
+                                decode_elem_chains(elem_chain, ncols));
     }
     // Arm pipeline `p`'s native parquet scan as the CONSUMER, testing `column` (the
     // leading key's PHYSICAL name) under its NULL placement.

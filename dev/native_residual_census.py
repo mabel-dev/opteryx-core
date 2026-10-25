@@ -114,7 +114,28 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
 # ---------------------------------------------------------------------------
 _FLAT = "testdata/flat/formats/parquet"
 _TEN = "testdata/flat/ten_files"
-_EVOLVING = "testdata/flat/different"
+
+
+def _int96_fixture() -> str:
+    """A one-file directory whose `ts` column is an INT96 timestamp (legacy Impala/Spark
+    storage). The footer gate has no `expected_kinds` spelling for int96, so a scan of
+    it is REFUSED - the one `footer_gate` residual with a live single-file SQL trigger
+    now that an absent ARRAY column is filled. Written once, under the temp directory,
+    rather than committed: it is 1 row, and a .parquet file is gitignored."""
+    import datetime
+    import tempfile
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    directory = os.path.join(tempfile.gettempdir(), "opteryx_census_int96")
+    path = os.path.join(directory, "ts.parquet")
+    if not os.path.isfile(path):
+        os.makedirs(directory, exist_ok=True)
+        table = pa.table({"ts": pa.array([datetime.datetime(2020, 1, 1)], type=pa.timestamp("ns"))})
+        pq.write_table(table, path, use_deprecated_int96_timestamps=True)
+    return directory
+
 
 HAND_SET: Dict[str, str] = {
     # (R2 `pushed_limit` is RETIRED — no longer reachable, so it has no hand-set
@@ -190,9 +211,11 @@ HAND_SET: Dict[str, str] = {
     # column with no usable logical descriptor — has no parquet-scan trigger in the
     # test corpus, making it a defensive check like `no_manifest`/R7a. Same
     # retirement convention as R2 / R5 / R5b.)
-    # R7b — the footer gate; still reachable via schema evolution: an ARRAY column
-    # (`cves`) absent from one file cannot be filled with NULL.
-    "footer_gate": "SELECT cves FROM '%s'" % _EVOLVING,
+    # R7b — the footer gate; still reachable through a column type it has no spelling
+    # for: an INT96 timestamp. (Its other live trigger, an ARRAY column absent from one
+    # file, closed when the Source began filling it with typed NULLs built from the
+    # schema's element chain - see test_array_column_missing_from_some_files.)
+    "footer_gate": "SELECT ts FROM '%s'" % _int96_fixture(),
     # (R5b (A1) `unsigned_predicate_input` is RETIRED — no longer reachable, so it has
     # no hand-set entry. An unsigned predicate input used to fail closed because the
     # relocated ExprFilter's compare requires both operands to share a DrakenType and

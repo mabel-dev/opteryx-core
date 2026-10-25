@@ -91,7 +91,7 @@ PARQUET_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/parquet $(DRAKEN_INC) \
                 -I$(ZSTD_DIR) -I$(ROOT)/third_party/bshoshany \
                 -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
                 -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/libdeflate \
-                -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu
+                -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/jkjeon/include
 # %_test.cpp carries its own main() and would collide with replay_main.cpp's.
 # _parquet_column_wrap.cpp is the Python edge (Python.h), excluded like the
 # JSONL/CSV column builders below.
@@ -106,17 +106,16 @@ PARQUET_SRCS := $(filter-out %_test.cpp %/_parquet_column_wrap.cpp,$(wildcard $(
                 $(ROOT)/draken/core/chunk_cache.cpp \
                 $(ROOT)/draken/core/trace_bridge.cpp \
                 $(ZSTD_SRCS)
-# C sources: libdeflate for the GZIP codec (compression.cpp), ryu + mabel base64
-# for the STRUCT/MAP JSON-text renderer (nested_json.cpp).
+# C sources: libdeflate for the GZIP codec (compression.cpp), mabel base64 for the
+# STRUCT/MAP JSON-text renderer (nested_json.cpp; its float text is header-only
+# dragonbox).
 PARQUET_CSRCS := $(ROOT)/third_party/libdeflate/lib/deflate_decompress.c \
                  $(ROOT)/third_party/libdeflate/lib/gzip_decompress.c \
                  $(ROOT)/third_party/libdeflate/lib/crc32.c \
                  $(ROOT)/third_party/libdeflate/lib/utils.c \
                  $(ROOT)/third_party/libdeflate/lib/arm/cpu_features.c \
                  $(ROOT)/third_party/libdeflate/lib/x86/cpu_features.c \
-                 $(wildcard $(ROOT)/third_party/mabel/base64/*.c) \
-                 $(ROOT)/third_party/ulfjack/ryu/d2s.c \
-                 $(ROOT)/third_party/ulfjack/ryu/f2s.c
+                 $(wildcard $(ROOT)/third_party/mabel/base64/*.c)
 PARQUET_DEFS := -DRUGO_PARQUET_CREATED_BY='"opteryx-fuzz"' -DHAVE_ZSTD
 
 # --- rugo jsonl / csv ---------------------------------------------------------
@@ -135,12 +134,13 @@ CSV_SRCS   := $(filter-out %/csv_column_builder.cpp,$(wildcard $(ROOT)/rugo/src/
 
 # --- rugo avro ----------------------------------------------------------------
 # All of it is pure C++ (the Python edge is _avro_column_wrap.cpp, excluded). The
-# reader resolves yyjson and mabel base64 from draken_native and ryu from the
-# rugo_native text casts in the wheel; here they are compiled in.
+# reader resolves yyjson and mabel base64 from draken_native and ryu's d2fixed from
+# the rugo_native text casts in the wheel; here they are compiled in.
 AVRO_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/avro $(DRAKEN_INC) -I$(ZSTD_DIR) \
              -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
              -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/yyjson/src \
              -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/ulfjack/ryu \
+             -I$(ROOT)/third_party/jkjeon/include \
              -I$(ROOT)/third_party/libdeflate -I$(ROOT)/third_party/bzip2
 AVRO_SRCS := $(ROOT)/rugo/src/avro/avro_schema.cpp \
              $(ROOT)/rugo/src/avro/avro_container.cpp \
@@ -159,8 +159,6 @@ AVRO_CSRCS := $(ROOT)/third_party/yyjson/src/yyjson.c \
               $(ROOT)/third_party/libdeflate/lib/x86/cpu_features.c \
               $(ROOT)/rugo/src/avro/_bzip2_lib.c \
               $(wildcard $(ROOT)/third_party/mabel/base64/*.c) \
-              $(ROOT)/third_party/ulfjack/ryu/d2s.c \
-              $(ROOT)/third_party/ulfjack/ryu/f2s.c \
               $(ROOT)/third_party/ulfjack/ryu/d2fixed.c
 CC ?= clang
 

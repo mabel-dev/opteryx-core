@@ -842,14 +842,23 @@ inline bool str_lt(const StrSlice &a, const StrSlice &b) {
   return a.len < b.len;
 }
 
+// Null rows among the first `num_rows` logical rows. The one counter: compute_stats
+// reports it, and a chunk written with statistics off still needs it to size its
+// dictionary decision.
+inline int64_t count_nulls(const ColumnInput &col, size_t num_rows) {
+  int64_t nulls = 0;
+  for (size_t i = 0; i < num_rows; i++)
+    if (!is_valid(col.validity, i))
+      nulls++;
+  return nulls;
+}
+
 // `with_sum`: false for the page index's per-page bounds, which never carry a
 // sum — only chunk statistics do.
 inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
                                  bool with_sum = true) {
   ColumnStats st;
-  for (size_t i = 0; i < num_rows; i++)
-    if (!is_valid(col.validity, i))
-      st.null_count++;
+  st.null_count = count_nulls(col, num_rows);
 
   // PRESERVE mode: typed buffers hold dict values; logical row i reads
   // value[codes[i]]. Plain/auto-build: codes==nullptr => value[i].
@@ -2666,7 +2675,7 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
                                size_t num_rows, int64_t data_page_offset,
                                int64_t dict_page_offset,
                                size_t compressed_total, size_t uncompressed_total,
-                               int codec, const ColumnStats &stats,
+                               int codec, bool statistics, const ColumnStats &stats,
                                int64_t bloom_offset, int32_t bloom_length,
                                int64_t oi_offset, int32_t oi_length,
                                int64_t ci_offset, int32_t ci_length,
@@ -2713,7 +2722,7 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     w.writeI64Field(6, (int64_t)uncompressed_total); // total_uncompressed_size
     w.writeI64Field(7, (int64_t)compressed_total);   // total_compressed_size
     // key_value_metadata (field 8): the chunk's exact integer sum (chunk_sum.hpp).
-    if (stats.has_sum) {
+    if (statistics && stats.has_sum) {
       w.writeFieldHeader(CT_LIST, 8);
       w.writeListHeader(CT_STRUCT, 1);
       w.structBegin(); // KeyValue
@@ -2726,8 +2735,9 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
       w.writeI64Field(11, dict_page_offset);       // dictionary_page_offset
     // statistics (field 12): null_count(3), distinct_count(4), max_value(5),
     // min_value(6), is_max_value_exact(7), is_min_value_exact(8). Ascending
-    // ids. Omitted for LIST columns (nested null semantics — no leaf stats).
-    if (!c.is_array) {
+    // ids. Omitted for LIST columns (nested null semantics — no leaf stats), and
+    // for every column of a file written with statistics off.
+    if (statistics && !c.is_array) {
       w.writeFieldHeader(CT_STRUCT, 12);
       w.structBegin(); // Statistics
       w.writeI64Field(3, stats.null_count);
@@ -2772,7 +2782,7 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     // size_statistics (field 16): only unencoded_byte_array_data_bytes (1).
     // The level histograms (2, 3) carry nothing for a flat column that
     // null_count does not, and the spec lets them be omitted there.
-    if (!c.is_array && stats.unencoded_ba_bytes >= 0) {
+    if (statistics && !c.is_array && stats.unencoded_ba_bytes >= 0) {
       w.writeFieldHeader(CT_STRUCT, 16);
       w.structBegin(); // SizeStatistics
       w.writeI64Field(1, stats.unencoded_ba_bytes);
@@ -2825,6 +2835,11 @@ struct RGMeta {
   std::vector<int32_t>     oi_length;
   size_t row_count      = 0;
   size_t total_byte_size = 0;
+  // False when the row group was written with statistics off: its chunks carry
+  // no Statistics struct, no `rugo.sum`, no SizeStatistics, and `stats` above is
+  // left default. The footer reads this, so the patch path (which carries a
+  // source file's statistics) keeps the default.
+  bool   statistics     = true;
 
   // Size every per-column vector for a row group of `ncols` columns, with the
   // "nothing here" defaults the footer reads as absence. ONE place, so a new
@@ -2930,7 +2945,7 @@ struct FileNdv {
 // per-column slot exists before any column is encoded, so the columns can fill
 // their own slots concurrently.
 inline EncodedRowGroup init_encoded_row_group(size_t ncols, size_t rg_rows,
-                                              int codec) {
+                                              int codec, bool statistics) {
   EncodedRowGroup erg;
   erg.rows = rg_rows;
   erg.chunks.resize(ncols);
@@ -2938,6 +2953,7 @@ inline EncodedRowGroup init_encoded_row_group(size_t ncols, size_t rg_rows,
   erg.kmv.resize(ncols);
   erg.meta.row_count = rg_rows;
   erg.meta.init_columns(ncols, codec);
+  erg.meta.statistics = statistics;
   return erg;
 }
 
@@ -3000,17 +3016,30 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
       return;   // arrays carry no statistics, no bloom and no page index
     }
 
-    meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
+    // Statistics off: no min/max/sum/size pass and no NDV (chunk or file). Only
+    // the null count survives, because the dictionary decision needs the number
+    // of present rows.
+    size_t null_count;
+    if (meta.statistics) {
+      meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
+      null_count = (size_t)meta.stats[i].null_count;
+    } else {
+      null_count = (size_t)count_nulls(rg_cols[i], rg_rows);
+    }
 
     // ONE XXH64 pass per column, shared by every consumer of a value hash:
     // the chunk's distinct_count, the file-level NDV (FileNdv), the bloom
     // filter and the dictionary-encoding decision — see hash_column_rows.
-    // Always taken for a hashable type: the NDV statistics are written whether
-    // or not the column carries a bloom filter (a bloom-less column used to
-    // lose its distinct_count with it).
-    const size_t present_rows = rg_rows - (size_t)meta.stats[i].null_count;
+    // Taken for a hashable type whenever one of those consumers exists: the NDV
+    // statistics are written whether or not the column carries a bloom filter (a
+    // bloom-less column used to lose its distinct_count with it). A chunk with
+    // statistics off, no bloom and no dictionary has no consumer, so it pays no
+    // hash pass.
+    const size_t present_rows = rg_rows - null_count;
     std::vector<uint64_t> row_hashes;
-    const bool have_row_hashes = hash_column_rows(rg_cols[i], rg_rows, row_hashes);
+    const bool have_row_hashes =
+        (meta.statistics || rg_cols[i].bloom || rg_cols[i].dict_enabled) &&
+        hash_column_rows(rg_cols[i], rg_rows, row_hashes);
 
     // Set below from the distinct hashes, so it is EXACT; the dictionary
     // decision reuses it.
@@ -3019,17 +3048,21 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
     if (have_row_hashes) {
       std::vector<uint64_t> hashes =
           compact_present_hashes(row_hashes, rg_cols[i].validity, rg_rows);
-      ColumnKmv &kmv = erg.kmv[i];
-      kmv.tracked = true;
-      kmv.present = (uint64_t)hashes.size();
-      kmv.sketch.add_many(hashes.data(), hashes.size());
-      if (!hashes.empty()) {
-        // Below K distinct the sketch already holds every distinct hash, so
-        // its size IS the count; only a wider chunk pays the counting pass.
-        const size_t ndv = kmv.sketch.is_exact() ? kmv.sketch.size()
-                                                 : bloom_ndv(hashes);
-        meta.stats[i].distinct_count = (int64_t)ndv;
-        exact_ndv = ndv;
+      if (meta.statistics) {
+        ColumnKmv &kmv = erg.kmv[i];
+        kmv.tracked = true;
+        kmv.present = (uint64_t)hashes.size();
+        kmv.sketch.add_many(hashes.data(), hashes.size());
+        if (!hashes.empty()) {
+          // Below K distinct the sketch already holds every distinct hash, so
+          // its size IS the count; only a wider chunk pays the counting pass.
+          exact_ndv = kmv.sketch.is_exact() ? kmv.sketch.size() : bloom_ndv(hashes);
+          meta.stats[i].distinct_count = (int64_t)exact_ndv;
+        }
+      } else if (!hashes.empty()) {
+        // No sketch to read the count from; the bloom size and the dictionary
+        // budget still need it.
+        exact_ndv = bloom_ndv(hashes);
       }
       if (rg_cols[i].bloom && !hashes.empty()) {
         BloomFilter bf = bloom_build(hashes, exact_ndv, 0.01);
@@ -3158,12 +3191,12 @@ struct RowGroupJob {
 // fixes the file order) happens afterwards, serially, in place_chunk.
 inline std::vector<EncodedRowGroup> encode_row_groups(
     const std::vector<RowGroupJob> &jobs, int codec, int profile,
-    size_t max_page_bytes, bool want_index) {
+    size_t max_page_bytes, bool want_index, bool statistics) {
   std::vector<EncodedRowGroup> out;
   out.reserve(jobs.size());
   size_t ntasks = 0;
   for (const RowGroupJob &j : jobs) {
-    out.push_back(init_encoded_row_group(j.cols->size(), j.rows, codec));
+    out.push_back(init_encoded_row_group(j.cols->size(), j.rows, codec, statistics));
     ntasks += j.cols->size();
   }
   auto run = [&](size_t g, size_t i) {
@@ -3197,9 +3230,11 @@ inline std::vector<EncodedRowGroup> encode_row_groups(
 // Encode every column chunk of ONE row group (see encode_row_groups).
 inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
                                         size_t rg_rows, int codec, int profile,
-                                        size_t max_page_bytes, bool want_index) {
+                                        size_t max_page_bytes, bool want_index,
+                                        bool statistics) {
   std::vector<EncodedRowGroup> one = encode_row_groups(
-      {RowGroupJob{&rg_cols, rg_rows}}, codec, profile, max_page_bytes, want_index);
+      {RowGroupJob{&rg_cols, rg_rows}}, codec, profile, max_page_bytes, want_index,
+      statistics);
   return std::move(one[0]);
 }
 
@@ -3244,8 +3279,11 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
                                    size_t rg_rows, int codec, int profile,
                                    size_t max_page_bytes, bool want_index,
                                    RGMeta &meta) {
+  // Its only caller is the column patcher, whose footer carries every chunk's
+  // statistics: always on.
   EncodedRowGroup erg = encode_row_group(rg_cols, rg_rows, codec, profile,
-                                         max_page_bytes, want_index);
+                                         max_page_bytes, want_index,
+                                         /*statistics=*/true);
   for (size_t i = 0; i < rg_cols.size(); i++) {
     place_bloom(out, base_offset, erg.meta, erg.blooms[i], i);
     place_chunk(out, base_offset, erg, i);
@@ -3538,7 +3576,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     for (size_t i = 0; i < schema_cols.size(); i++)
       write_column_chunk(fm, all_rg_cols[rg][i], meta.row_count, meta.data_offsets[i],
                          meta.dict_offsets[i], meta.sizes[i], meta.uncompressed[i],
-                         meta.codecs[i], meta.stats[i], meta.bloom_offset[i],
+                         meta.codecs[i], meta.statistics, meta.stats[i],
+                         meta.bloom_offset[i],
                          meta.bloom_length[i], meta.oi_offset[i], meta.oi_length[i],
                          meta.ci_offset[i], meta.ci_length[i], meta.encoding_stats[i]);
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size
@@ -3580,6 +3619,22 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
   out.insert(out.end(), MAGIC, MAGIC + 4);
 }
 
+// Two outputs are made OF the statistics: the PageIndex (per-page min/max) and
+// the whole-file bounds. A write that asks for either while statistics are off
+// cannot be honoured, and silently writing neither would hide the conflict —
+// refuse it. `where` names the caller in the message.
+inline void require_statistics_for_outputs(bool statistics, bool want_index,
+                                           bool want_bounds, const char *where) {
+  if (statistics) return;
+  if (want_index)
+    throw std::invalid_argument(
+        std::string(where) + ": statistics=False cannot write a page index (it is "
+        "per-page min/max); pass page_index=False or max_page_bytes=0");
+  if (want_bounds)
+    throw std::invalid_argument(
+        std::string(where) + ": statistics=False cannot return column bounds");
+}
+
 // ---- top-level file assembly ----
 //
 // Returns the complete parquet file as bytes. All columns must have the same
@@ -3615,13 +3670,16 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t max_rows_per_rg = 65536,
                                          size_t max_page_bytes = 0,
                                          bool page_index = true,
-                                         size_t row_groups_per_block = 4) {
+                                         size_t row_groups_per_block = 4,
+                                         bool statistics = true) {
   if (row_groups_per_block == 0)
     throw std::invalid_argument("WriteParquet: row_groups_per_block must be >= 1");
   // A PageIndex over one page per chunk would describe the granularity the
   // footer's own Statistics already carry, so it rides on page splitting being
   // on — see write_page_index.
   const bool want_index = page_index && max_page_bytes > 0;
+  require_statistics_for_outputs(statistics, want_index, out_stats != nullptr,
+                                 "WriteParquet");
   if (max_rows_per_rg > 0)
     require_array_row_offsets(cols, "WriteParquet");
   max_rows_per_rg = aligned_rows_per_row_group(max_rows_per_rg);
@@ -3664,7 +3722,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
       jobs.push_back(RowGroupJob{&all_rg_cols[rg], rg_rows});
     }
     std::vector<EncodedRowGroup> block =
-        encode_row_groups(jobs, codec, profile, max_page_bytes, want_index);
+        encode_row_groups(jobs, codec, profile, max_page_bytes, want_index, statistics);
     // base_offset == 0: `file` already starts at absolute 0 and includes the
     // leading PAR1, so file.size() is the absolute position.
     write_block(file, /*base_offset=*/0, block);
@@ -3735,13 +3793,17 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 class StreamingParquetWriter {
  public:
   StreamingParquetWriter(int codec, int profile, size_t max_page_bytes,
-                         bool page_index, size_t row_groups_per_block = 4)
+                         bool page_index, size_t row_groups_per_block = 4,
+                         bool statistics = true)
       : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes),
         want_index_(page_index && max_page_bytes > 0),
+        statistics_(statistics),
         row_groups_per_block_(row_groups_per_block) {
     if (row_groups_per_block == 0)
       throw std::invalid_argument(
           "StreamingParquetWriter: row_groups_per_block must be >= 1");
+    require_statistics_for_outputs(statistics, want_index_, /*want_bounds=*/false,
+                                   "StreamingParquetWriter");
     const char *MAGIC = "PAR1";
     buf_.insert(buf_.end(), MAGIC, MAGIC + 4); // header (drained with block 1)
     block_.reserve(row_groups_per_block_);
@@ -3756,7 +3818,7 @@ class StreamingParquetWriter {
       have_schema_ = true;
     }
     block_.push_back(encode_row_group(rg_cols, rg_rows, codec_, profile_,
-                                      max_page_bytes_, want_index_));
+                                      max_page_bytes_, want_index_, statistics_));
     // Footer reads only shape fields (never data pointers) from these — store a
     // stripped copy so no per-batch data buffer is retained across row groups.
     all_rg_cols_.push_back(strip_data(rg_cols));
@@ -3823,6 +3885,7 @@ class StreamingParquetWriter {
   int profile_;
   size_t max_page_bytes_;
   bool want_index_;
+  bool statistics_;
   size_t row_groups_per_block_;
   bool have_schema_ = false;
   int64_t abs_offset_ = 0;             // bytes already drained via take_pending

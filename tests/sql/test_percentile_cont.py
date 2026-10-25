@@ -205,8 +205,8 @@ def test_grouped_several_percentiles():
         d = ",".join(f"('{v!r}'::DOUBLE)" for v in densities)
         (p50, p90, med) = duck.sql(
             f"SELECT {_pc(0.5)}, {_pc(0.9)}, MEDIAN(x) FROM (VALUES {g}) t(x)"
-        ).fetchone()
-        (d90,) = duck.sql(f"SELECT {_pc(0.9, direction=' DESC')} FROM (VALUES {d}) t(x)").fetchone()
+        ).fetchall()[0]
+        (d90,) = duck.sql(f"SELECT {_pc(0.9, direction=' DESC')} FROM (VALUES {d}) t(x)").fetchall()[0]
         expected.append((key, p50, p90, med, d90))
     _assert_rows_equal(_rows(sql), expected)
 

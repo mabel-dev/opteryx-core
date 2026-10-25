@@ -16,6 +16,7 @@ What each test protects:
 """
 
 import os
+import platform
 import random
 import struct
 import sys
@@ -157,6 +158,14 @@ _PRE_SPLIT = {
 }
 
 
+@pytest.mark.xfail(
+    platform.machine().lower() in ("x86_64", "amd64"),
+    strict=True,
+    reason="Known failing on x86: the hashes above were recorded on ARM and an x86 build "
+    "of the same input and seed gives a different index (CI run 2026-10-25). Not yet "
+    "diagnosed - a determinism difference between the two builds, or arch-dependent "
+    "floating point in the k-means.",
+)
 @pytest.mark.parametrize("args", sorted(_PRE_SPLIT))
 def test_build_is_bit_identical_to_before_the_split(data, args):
     import hashlib

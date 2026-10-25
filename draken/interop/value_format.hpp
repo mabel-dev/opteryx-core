@@ -2,7 +2,7 @@
 // Shared value -> text formatting for the draken Vector JSON serializer and the
 // rugo CSV / JSON(L) morsel writers. Lives in draken because it is the shared,
 // pure renderer both sides depend on (rugo -> draken; never the reverse).
-// Pure C++; no Python. Doubles use ryu (shortest round-trip); dates/timestamps
+// Pure C++; no Python. Doubles use dragonbox (shortest round-trip); dates/timestamps
 // render ISO-8601; decimals render with their scale.
 
 #include <charconv>
@@ -21,7 +21,7 @@
 #include "core/uuid_text.h"
 #include "core/string_slot.h"
 #include "logical_type.h"  // LogicalKind — the kind vocabulary is draken's, never copied
-#include "ryu.h"  // third_party/ulfjack/ryu is on every consuming extension's include path
+#include "dragonbox/dragonbox.h"  // third_party/jkjeon/include is on every consuming extension's include path
 
 namespace rugo_text {
 
@@ -196,71 +196,7 @@ inline char *put6(char *p, int v) { // v in [0,999999] (microseconds)
 
 inline bool double_is_nan_or_inf(double v) { return std::isnan(v) || std::isinf(v); }
 
-// Reshape already-parsed shortest-round-trip digits into Python-style decimal
-// text: plain fixed-point for ordinary magnitudes, scientific (lowercase e,
-// signed 2+ digit exponent) only outside that range -- the same threshold
-// CPython's repr()/json.dumps use (fixed for -4 <= exp < 16, scientific
-// otherwise). Pure text layout: does not care whether `digits` came from
-// ryu's double or float algorithm, so fmt_double and fmt_float share it.
-inline void fmt_shortest_digits(std::string &out, bool neg, const char *digits, int nd, int exp) {
-  // Reshape into a stack buffer, appended once. Worst case is "0." plus three
-  // leading zeros plus 17 digits (23 bytes incl. sign) — 40 leaves headroom.
-  char buf[40];
-  char *q = buf;
-  if (neg) *q++ = '-';
-  if (exp >= -4 && exp < 16) {
-    if (exp < 0) {
-      *q++ = '0'; *q++ = '.';
-      for (int k = 0; k < -exp - 1; k++) *q++ = '0';
-      std::memcpy(q, digits, nd); q += nd;
-    } else {
-      int intDigits = exp + 1;
-      if (nd <= intDigits) {
-        std::memcpy(q, digits, nd); q += nd;
-        for (int k = nd; k < intDigits; k++) *q++ = '0';
-        *q++ = '.'; *q++ = '0';
-      } else {
-        std::memcpy(q, digits, intDigits); q += intDigits;
-        *q++ = '.';
-        std::memcpy(q, digits + intDigits, nd - intDigits); q += nd - intDigits;
-      }
-    }
-  } else {
-    *q++ = digits[0];
-    if (nd > 1) { *q++ = '.'; std::memcpy(q, digits + 1, nd - 1); q += nd - 1; }
-    *q++ = 'e';
-    *q++ = exp < 0 ? '-' : '+';
-    int aexp = exp < 0 ? -exp : exp;
-    if (aexp >= 100) { *q++ = (char)('0' + aexp / 100); aexp %= 100; }
-    q = put2(q, aexp); // %02d: two digits minimum
-  }
-  out.append(buf, q - buf);
-}
-
-// Parse ryu's "D[.DDDD]E[-]DD" scientific text (as returned by d2s_buffered_n
-// / f2s_buffered_n — same shape for both) into sign + digit run + exponent,
-// then reshape. `digits` is sized for the double case (<= 17 significant
-// digits); float's <= 9 fits with room to spare.
-inline void fmt_shortest(std::string &out, const char *sci, int n) {
-  bool neg = sci[0] == '-';
-  int p = neg ? 1 : 0;
-  char digits[24];
-  int nd = 0;
-  digits[nd++] = sci[p++];
-  if (p < n && sci[p] == '.') {
-    p++;
-    while (sci[p] != 'E') digits[nd++] = sci[p++];
-  }
-  p++; // skip 'E'
-  bool eneg = sci[p] == '-';
-  if (eneg) p++;
-  int exp = 0;
-  while (p < n) exp = exp * 10 + (sci[p++] - '0');
-  if (eneg) exp = -exp;
-  fmt_shortest_digits(out, neg, digits, nd, exp);
-}
-
-// Number of decimal digits in m (1..17 for a ryu double mantissa, <= 9 float).
+// Number of decimal digits in m (1..17 for a double mantissa, <= 9 float).
 inline int decimal_digits(uint64_t m) {
   int n = 1;
   while (m >= 10000) { m /= 10000; n += 4; }
@@ -268,14 +204,16 @@ inline int decimal_digits(uint64_t m) {
   return n;
 }
 
-// The same text fmt_shortest_digits lays out, built straight from ryu's
-// integer decimal (|v| == m * 10^e10, see d2s_decimal) instead of from
-// scientific text: no "D.DDDE±X" print, no parse back, and the digit runs move
-// as FIXED-size copies the compiler keeps inline (a variable-length memcpy is a
-// libc call per value). Byte-identical to fmt_shortest_digits by construction —
-// same nd digits, same exp (= e10 + nd - 1), same layout rules — and pinned by
-// tests/rugo/test_float_text_direct.py. Writes at most 64 bytes at p (the text
-// is <= 23; the fixed digit copies run past it).
+// Python-style decimal text of a shortest round-trip integer decimal
+// (|v| == m * 10^e10, see double_decimal): plain fixed-point for ordinary
+// magnitudes, scientific (lowercase e, signed 2+ digit exponent) only outside
+// that range -- the threshold CPython's repr()/json.dumps use (fixed for
+// -4 <= exp < 16, scientific otherwise), exp = e10 + nd - 1. Shared by the double
+// and float paths. The digit runs move as FIXED-size copies the compiler keeps
+// inline (a variable-length memcpy is a libc call per value). Pinned by
+// draken/interop/float_text_test.cpp and tests/rugo/test_float_text_direct.py.
+// Writes at most 64 bytes at p (the text is <= 23; the fixed digit copies run
+// past it).
 inline char *wr_decimal_shortest(char *buf, bool neg, uint64_t m, int32_t e10) {
   const int nd = decimal_digits(m);
   const int exp = e10 + nd - 1;
@@ -331,55 +269,122 @@ inline void fmt_decimal_shortest(std::string &out, bool neg, uint64_t m, int32_t
   out.append(buf, wr_decimal_shortest(buf, neg, m, e10) - buf);
 }
 
-inline void fmt_double(std::string &out, double v) {
-  bool neg; uint64_t m; int32_t e10;
-  if (d2s_decimal(v, &neg, &m, &e10)) {
-    fmt_decimal_shortest(out, neg, m, e10);
-    return;
+// The shortest round-trip decimal of a double, |v| == m * 10^e10, from
+// dragonbox. false for zero, infinities and NaN, which have no such decimal (the
+// caller renders those). A double that is a whole number below 2^53 skips the
+// algorithm: its decimal is the integer itself. m then keeps its trailing zeros
+// (dragonbox's do not), which cannot change the text: such a value
+// has exp <= 15, so wr_decimal_shortest lays it out as plain digits + ".0" either
+// way. The text is pinned byte-for-byte by float_text_test.cpp.
+inline bool double_decimal(double v, bool *neg, uint64_t *m, int32_t *e10) {
+  uint64_t bits;
+  std::memcpy(&bits, &v, sizeof bits);
+  const uint32_t be = (uint32_t)((bits >> 52) & 0x7FF);
+  if (be == 0x7FF || (bits << 1) == 0) return false;
+  *neg = (bits >> 63) != 0;
+  if (be != 0) {
+    const uint64_t sig = (bits & ((1ull << 52) - 1)) | (1ull << 52);
+    const int32_t eb = (int32_t)be - 1075;  // |v| == sig * 2^eb
+    if (eb <= 0 && eb >= -52 && (uint32_t)__builtin_ctzll(sig) >= (uint32_t)-eb) {
+      *m = sig >> -eb;
+      *e10 = 0;
+      return true;
+    }
   }
-  // Zero / infinities / NaN have no ryu decimal: d2s_buffered_n's own text.
-  char sci[32];
-  int n = d2s_buffered_n(v, sci);
-  fmt_shortest(out, sci, n);
+  const auto d = jkj::dragonbox::to_decimal(v, jkj::dragonbox::policy::sign::ignore);
+  *m = d.significand;
+  *e10 = d.exponent;
+  return true;
+}
+
+// FLOAT32 counterpart. The decimal is the shortest that round-trips the 32-bit
+// float (see fmt_float: never reach it by widening to double).
+inline bool float_decimal(float v, bool *neg, uint32_t *m, int32_t *e10) {
+  uint32_t bits;
+  std::memcpy(&bits, &v, sizeof bits);
+  const uint32_t be = (bits >> 23) & 0xFF;
+  if (be == 0xFF || (bits << 1) == 0) return false;
+  *neg = (bits >> 31) != 0;
+  if (be != 0) {
+    const uint32_t sig = (bits & ((1u << 23) - 1)) | (1u << 23);
+    const int32_t eb = (int32_t)be - 150;  // |v| == sig * 2^eb
+    if (eb <= 0 && eb >= -23 && (uint32_t)__builtin_ctz(sig) >= (uint32_t)-eb) {
+      *m = sig >> -eb;
+      *e10 = 0;
+      return true;
+    }
+  }
+  const auto d = jkj::dragonbox::to_decimal(v, jkj::dragonbox::policy::sign::ignore);
+  *m = d.significand;
+  *e10 = d.exponent;
+  return true;
+}
+
+// Zero has no shortest decimal (double_decimal / float_decimal decline it) and
+// prints "0.0" / "-0.0". Infinities and NaN have no decimal text at all: every
+// caller renders those as null / an empty field before reaching here, so one
+// arriving is a caller bug and fails loudly rather than printing something.
+inline char *wr_zero(char *p, bool neg) {
+  if (neg) *p++ = '-';
+  std::memcpy(p, "0.0", 3);
+  return p + 3;
+}
+
+[[noreturn]] inline void throw_no_decimal_text(const char *who) {
+  throw std::domain_error(std::string(who) + ": NaN/Infinity have no decimal text; the caller must render null");
+}
+
+// fmt_double / fmt_float written in place: <= 64 bytes at p.
+inline char *wr_double(char *p, double v) {
+  bool neg; uint64_t m; int32_t e10;
+  if (double_decimal(v, &neg, &m, &e10)) return wr_decimal_shortest(p, neg, m, e10);
+  if (v == 0.0) return wr_zero(p, std::signbit(v));
+  throw_no_decimal_text("wr_double");
 }
 
 // FLOAT32 counterpart. MUST NOT be reached by promoting a float to double
-// first: d2s_buffered_n on the widened value finds the shortest string that
-// round-trips THAT double, which is a different (typically much longer)
-// value than the shortest string that round-trips the original 32-bit float
-// -- widening is exact but not distance-preserving among neighbouring
-// doubles. f2s_buffered_n runs ryu's algorithm on the actual 24-bit mantissa.
-inline void fmt_float(std::string &out, float v) {
-  bool neg; uint32_t m; int32_t e10;
-  if (f2s_decimal(v, &neg, &m, &e10)) {
-    fmt_decimal_shortest(out, neg, m, e10);
-    return;
-  }
-  // Zero / infinities / NaN have no ryu decimal: f2s_buffered_n's own text.
-  char sci[32];
-  int n = f2s_buffered_n(v, sci);
-  fmt_shortest(out, sci, n);
-}
-
-// fmt_double / fmt_float written in place: <= 64 bytes at p. Values with no ryu
-// decimal (zero, and the NaN / infinities callers render as null) take the
-// std::string formatter's text, so both forms cannot disagree.
-inline char *wr_double(char *p, double v) {
-  bool neg; uint64_t m; int32_t e10;
-  if (d2s_decimal(v, &neg, &m, &e10)) return wr_decimal_shortest(p, neg, m, e10);
-  std::string s;
-  fmt_double(s, v);
-  std::memcpy(p, s.data(), s.size());
-  return p + s.size();
-}
-
+// first: the shortest string that round-trips the widened double is a different
+// (typically much longer) value than the shortest string that round-trips the
+// original 32-bit float -- widening is exact but not distance-preserving among
+// neighbouring doubles. float_decimal runs dragonbox on the actual 24-bit mantissa.
 inline char *wr_float(char *p, float v) {
   bool neg; uint32_t m; int32_t e10;
-  if (f2s_decimal(v, &neg, &m, &e10)) return wr_decimal_shortest(p, neg, m, e10);
-  std::string s;
-  fmt_float(s, v);
-  std::memcpy(p, s.data(), s.size());
-  return p + s.size();
+  if (float_decimal(v, &neg, &m, &e10)) return wr_decimal_shortest(p, neg, m, e10);
+  if (v == 0.0f) return wr_zero(p, std::signbit(v));
+  throw_no_decimal_text("wr_float");
+}
+
+inline void fmt_double(std::string &out, double v) {
+  char buf[64];
+  out.append(buf, wr_double(buf, v) - buf);
+}
+
+inline void fmt_float(std::string &out, float v) {
+  char buf[64];
+  out.append(buf, wr_float(buf, v) - buf);
+}
+
+// The shortest round-trip digits of a finite nonzero double as scientific text,
+// "[-]D[.DDD]E[-]X": no trailing zeros in the digit run, the exponent unpadded and
+// unsigned when positive ("1E25", "1.2345E-7"). CAST FLOAT -> VARCHAR prints this
+// for magnitudes beyond fixed notation. <= 24 bytes at p.
+inline char *wr_double_sci(char *p, double v) {
+  bool neg; uint64_t m; int32_t e10;
+  if (!double_decimal(v, &neg, &m, &e10)) throw_no_decimal_text("wr_double_sci");
+  while (m % 10 == 0) { m /= 10; e10++; }  // the whole-number shortcut keeps zeros
+  const int nd = decimal_digits(m);
+  int exp = e10 + nd - 1;
+  char dig[20];
+  for (int i = nd - 1; i >= 0; i--) { dig[i] = (char)('0' + m % 10); m /= 10; }
+  if (neg) *p++ = '-';
+  *p++ = dig[0];
+  if (nd > 1) { *p++ = '.'; std::memcpy(p, dig + 1, nd - 1); p += nd - 1; }
+  *p++ = 'E';
+  if (exp < 0) { *p++ = '-'; exp = -exp; }
+  if (exp >= 100) *p++ = (char)('0' + exp / 100);
+  if (exp >= 10) *p++ = (char)('0' + (exp / 10) % 10);
+  *p++ = (char)('0' + exp % 10);
+  return p;
 }
 
 // Howard Hinnant's civil-from-days (days since 1970-01-01).

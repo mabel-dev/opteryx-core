@@ -220,6 +220,7 @@ q:
 	@$(PYTEST) tests/storage/test_mabel_connector.py -q
 	@$(MAKE) --no-print-directory chunk-cache-test
 	@$(MAKE) --no-print-directory simd-find-test
+	@$(MAKE) --no-print-directory float-text-test
 	@$(MAKE) --no-print-directory gb-block-store-test
 	@$(MAKE) --no-print-directory slab-pool-test
 	@$(MAKE) --no-print-directory packed-codes-test
@@ -405,6 +406,25 @@ simd-find-test: ## Build and run the substring-search (simd_find.h) + parquet pa
 	@/tmp/opteryx-tests/simd_find_test
 	$(call print_green,"✓ simd_find / page search oracle tests passed")
 
+FLOAT_TEXT_INCLUDES = -I$(CURDIR)/draken -I$(CURDIR)/draken/core -I$(CURDIR)/third_party/cyan4973 \
+    -I$(CURDIR)/third_party/jkjeon/include
+
+float-text-test: ## Reference gate: dragonbox float/double text vs std::to_chars + a plain repr layout, under ASan/UBSan (sampled)
+	$(call print_blue,"Building and running float text reference gate...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    $(FLOAT_TEXT_INCLUDES) $(CURDIR)/draken/interop/float_text_test.cpp -o /tmp/opteryx-tests/float_text_test
+	@/tmp/opteryx-tests/float_text_test
+	$(call print_green,"✓ float text reference gate passed")
+
+float-text-exhaustive: ## Same gate over all 2^32 float32 patterns + 100M doubles, optimised, all cores (minutes)
+	$(call print_blue,"Building and running the exhaustive float text reference gate...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O2 -Wall -Wextra $(FLOAT_TEXT_INCLUDES) $(CURDIR)/draken/interop/float_text_test.cpp \
+	    -o /tmp/opteryx-tests/float_text_exhaustive
+	@/tmp/opteryx-tests/float_text_exhaustive --exhaustive
+	$(call print_green,"✓ exhaustive float text reference gate passed")
+
 carchar-set-test: ## Build and run the CarcharSet batched-probe (mark_new) oracle test under ASan/UBSan
 	$(call print_blue,"Building and running CarcharSet batched-probe tests...")
 	@mkdir -p /tmp/opteryx-tests
@@ -584,7 +604,6 @@ DRAKEN_KERNEL_C_SRCS := \
 	$(CURDIR)/third_party/mabel/base64/_base64_rvv.c \
 	$(CURDIR)/third_party/mabel/base85/_base85.c \
 	$(CURDIR)/third_party/ulfjack/ryu/d2fixed.c \
-	$(CURDIR)/third_party/ulfjack/ryu/d2s.c \
 	$(CURDIR)/third_party/yyjson/src/yyjson.c
 
 DRAKEN_KERNEL_INCLUDES := \

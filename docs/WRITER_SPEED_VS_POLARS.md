@@ -523,3 +523,102 @@ failure.
 - `rugo.parquet.read_metadata` does not expose per-chunk encodings, so I could not
   read which columns were dictionary-encoded straight from the output. That was
   inferred above from the per-type size deltas instead.
+
+## 7. Float converter bench and `statistics=False` (2026-10-25, M5 Pro, ARM only)
+
+### Float converters (private bench, nothing vendored)
+
+Bench source: `fbench/` in the 2026-10-25 session scratchpad (`bench.cpp`, `yy_wrap.c`).
+ns per value, best of 9, 2M values, single thread; "text" is digits plus layout into a
+64-byte buffer, with the current `wr_decimal_shortest` unless named.
+
+| dataset | ryu digits | dragonbox digits | ryu text | dragonbox text | yyjson native text |
+|---|---:|---:|---:|---:|---:|
+| `random()*1000` (full precision) | 8.0 | 6.4 | 15.5 | 15.6 | 8.2 |
+| `round(x, 3)` (the benchmark's float columns) | **17.7** | 5.4 | 21.3 | **8.7** | 10.5 |
+| 2-decimal prices | 16.7 | 5.1 | 20.2 | 8.7 | 11.8 |
+| integral doubles | 2.1 | 5.9 | 5.3 | 11.0 | 3.1 |
+| wide-bench mix | 12.9 | 5.9 | 18.5 | 12.1 | 9.4 |
+| random bit patterns | 10.9 | 7.7 | 23.7 | 18.8 | 11.0 |
+
+- **Ryu is slow on short decimals** (17.7 ns): it generates 17 digits, then strips them one
+  `div10` at a time. Dragonbox trims in one step (5.4 ns). `gen_data.py`'s float columns are
+  `round(x, 3)`, so this is the benchmark's case.
+- **Dragonbox (fmt's copy)** matched ryu's `(mantissa, exponent)` on 40M random-bit doubles and
+  4M of each dataset: 0 mismatches. It loses on integral doubles (no small-integer path; ryu
+  and yyjson have one).
+- **yyjson's Schubfach is not a drop-in:** 679 of 4M `round3` and 412 of 4M price values
+  produce different digits from ryu's. Excluded.
+- **Not benchmarked:** zmij, Teju Jagua, and standalone jk-jeon/dragonbox (not on disk;
+  fetching them needs agreement).
+- **Text stage after the digits** (`wr3`: block digit conversion, no per-pair loop): byte-identical
+  to `wr_decimal_shortest` on 60M random `(m, e10)` pairs, but only −5% on the wide mix, neutral
+  on `round3`, +23% on integral. It fails the keep rule and was not landed. The fixed-size copies
+  from 2026-10-16 are already inline; the remaining string cost is `std::string::append(buf, n)`,
+  about 2 ns per value.
+- **In the writer** (`write_csv` over 17 float columns): 48–51 ns CPU per float against 17.5 for
+  an int, so formatting is the float cost. A digit-generator swap is worth 8–13 ns of that on
+  `round3`, ARM only.
+
+### `statistics=False`
+
+New parameter on `write_parquet`, `open_parquet_writer`, `write_parquet_stream` (not on
+`write_parquet_with_bounds`, which is made of statistics). Off: no Statistics struct, no
+`rugo.sum`, no SizeStatistics, no `rugo.ndv.*`, no min/max/sum pass, and no value-hash pass
+unless a bloom filter or a dictionary still needs it. `statistics=False` with an active page
+index (`page_index=True` and `max_page_bytes > 0`) raises `ValueError`. Within-process A/B on the
+200k x 50 table, 15 alternating rounds, median ms:
+
+| config | statistics on | statistics off | off / on |
+|---|---:|---:|---:|
+| benchmark config (bloom off, page_index off) | 69.5 | 66.0 | 0.95 |
+| bloom off + dictionary off | 48.6 | 39.8 | 0.82 |
+| defaults | 72.7 | 71.5 | 0.98 |
+
+The saving is small at the defaults because dictionary builds dominate; it matters once the
+dictionary is off. File size changes by about 10 KB.
+
+## 8. Dragonbox replaces ryu for float text (2026-10-25, ruled and built)
+
+Ruled by the architect after §7: vendor jk-jeon/dragonbox 1.1.3 (`third_party/jkjeon/`, provenance in
+`VENDORED.md`), small-integer fast path in front, gated on byte-identity with ryu.
+
+- **Where:** `double_decimal` / `float_decimal` in `draken/interop/value_format.hpp` feed the
+  existing `wr_decimal_shortest`. Whole numbers below 2^53 skip the algorithm (`m` keeps its
+  trailing zeros, which cannot change the text: such a value always lays out as digits + `.0`).
+  Zero prints `0.0` / `-0.0` (`wr_zero`); NaN and the infinities have no decimal text and throw
+  `std::domain_error` (every caller renders those as null / empty first). The `d2s_decimal` /
+  `f2s_decimal` additions to vendored ryu (§6) are gone with ryu's `d2s.c` / `f2s.c`.
+- **Gate (as first built):** `draken/interop/float_text_test.cpp` with ryu's own `d2s_buffered_n` /
+  `f2s_buffered_n` text as the oracle. `make float-text-exhaustive`: all 2^32 float32 bit patterns
+  plus 100M-draw double samples and the structured sets, 4,981,084,342 values, 0 mismatches. A
+  deliberately wrong digit in a scratch copy is caught (7,431 mismatches), so the gate is not vacuous.
+- **Ryu's shortest-digit code removed (2026-10-25).** `d2s.c`, `f2s.c` and the tables only they used
+  are deleted; the gate's oracle is now `std::to_chars` (shortest, scientific) laid out by a plain
+  Python-`repr` layout written in the test, independent of dragonbox and of `value_format.hpp`.
+  Before deleting ryu a one-off run compared the new paths against ryu over 301,629,987 values
+  (200M random double bit patterns, every binary exponent at its mantissa corners, whole numbers
+  to 2^20, 100M random float32 patterns, +/-0): `fmt_double` / `wr_double` / `fmt_float` /
+  `wr_float` text, `wr_double_sci` against `d2s_buffered_n`, the planner's `float_decimal`
+  digits against its old parse of ryu's text, and `to_chars` against ryu: 0 mismatches.
+- **What stays of ryu:** `d2fixed.c` (+ `common.h`, `digit_table.h`, `d2fixed_full_table.h`,
+  `d2s_intrinsics.h`, `ryu.h` trimmed to `d2fixed*` / `d2exp*`). `d2fixed_buffered_n` is
+  fixed-precision (`%.Nf`) formatting of the exact binary value and `d2exp_buffered_n` the `%.Ne`
+  counterpart; dragonbox produces shortest digits only and cannot reproduce them (rounding the
+  shortest digits is double rounding). They back CAST FLOAT -> VARCHAR (`cast_numeric.cpp`,
+  `draken_native.cpp`) and HUMANIZE (`string_humanize.cpp`). Removing them is an architect decision.
+- **A/B** (pre-dragonbox build vs new, one process per cell, 8 alternating rounds, 15 writes per
+  process, median wall ms): wide CSV 38.5 → 33.7 (0.88), wide JSONL 47.9 → 41.0 (0.86),
+  `round(x, 3)` CSV 21.6 → 15.8 (0.73) and JSONL 0.77, full-precision CSV 0.96, integer-only CSV
+  0.99 (flat). New faster in 8/8 rounds on every float shape. ARM only; x86 is owed.
+- **Suites:** `make q`, `make rt` (2997), `make dt` (3596), `make st` (57), `make slt` green.
+
+## 9. `write_parquet_fast` (2026-10-25)
+
+`rugo.parquet.write_parquet_fast(morsel, ...)`: `write_parquet` with `bloom_filters=False`,
+`dictionary=False`, `statistics=False`, `page_index=False`, `max_page_bytes=0`. It takes only the
+options that cannot contradict that (compression, row-group sizing, `sorted_by`, `alp`); anything
+else is a `TypeError`, so call `write_parquet` for other combinations. One-shot only; the streaming
+writers take the same four switches individually. Same table, within-process A/B, 15 alternating
+rounds, median: **39.4 ms / 33.58 MB** against 69.1 ms / 38.38 MB for the benchmark's `write_parquet`
+configuration (polars: 25 ms / 36.3 MB). Python-only, so no rebuild. Mac ARM only.

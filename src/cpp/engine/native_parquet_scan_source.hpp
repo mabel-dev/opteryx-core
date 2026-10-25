@@ -125,6 +125,7 @@
 #include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
 #include "native_expression.hpp"           // ExprProgram / ExprFilterFn — scan prefilter
 #include "null_constant_column.hpp"         // null_constant_column — schema-evolution fill
+#include "native_sort.hpp"                 // gather_rows / make_empty_col / kGatherNullRow — typed all-NULL ARRAY fill
 
 // R2 (scan-pushed LIMIT) row truncation. Lives in draken next to the take/slice
 // machinery; resolved at load time from draken_native, the same dynamic-lookup
@@ -986,9 +987,34 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // constant view over it (null_constant_column), so its one slot is shared.
     std::vector<CxxColumn> null_templates_;
 
+    // Parallel to column_names: for an ARRAY column some file lacks, a one-column
+    // morsel holding a zero-row ARRAY typed with its element subtree (make_empty_col).
+    // An ARRAY has no flat one-slot template to borrow (its `data` is offsets, its
+    // payload a child vector), so its NULL fill is gathered from this schema instead
+    // (kGatherNullRow), which is how a join emits a typed all-NULL ARRAY half. Null
+    // for every other column.
+    std::vector<MorselPtr> array_null_schema_;
+
+    // The all-NULL fill of absent column `i`, `n` rows long: the shared constant view
+    // for a flat type, a gathered typed all-NULL column for an ARRAY.
+    CxxColumn absent_fill(size_t i, uint32_t n, ErrCtx& err) const {
+        if (i >= array_null_schema_.size() || array_null_schema_[i] == nullptr)
+            return null_constant_column(null_templates_[i], n);
+        std::vector<uint32_t> order(n, kGatherNullRow);
+        std::vector<uint32_t> row_m(n, 0), row_r(n, 0);
+        const std::vector<MorselPtr> ms{array_null_schema_[i]};
+        MorselPtr filled = gather_rows(ms, order, 0, n, row_m, row_r, {}, err);
+        if (err.code == 0 && (filled == nullptr || filled->columns.size() != 1)) {
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: the all-NULL ARRAY fill did not produce one column";
+        }
+        if (err.code != 0) return CxxColumn{};
+        return filled->columns[0];
+    }
+
     // One data slot of type `t`, zeroed, as the source of a constant all-NULL view.
-    // Every type the scan can emit has a flat slot except ARRAY, which the compiler
-    // refuses to fill (its element type is the file's, not the schema's).
+    // Every type the scan can emit has a flat slot except ARRAY, which is filled from
+    // `array_null_schema_` instead (see absent_fill).
     static CxxColumn make_null_template(DrakenType t, const LogicalType* lt) {
         OwnedBuffer<void> buf;
         if (draken_type_is_string_storage(t)) {
@@ -1029,23 +1055,35 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // fetch paths (the work items' keys); `absent[f]` holds one flag per projected
     // column for files[f]. `types`/`logical` are every projected column's declared
     // type — what this Source emits for it from a file that holds it.
+    // `element[i]` is column i's ARRAY element subtree (empty for every other column);
+    // an ARRAY column some file lacks must have one - its NULL fill is typed by it.
     void set_absent_columns(const std::vector<std::string>& files,
                             const std::vector<std::vector<uint8_t>>& absent,
                             const std::vector<DrakenType>& types,
-                            const std::vector<const LogicalType*>& logical) {
+                            const std::vector<const LogicalType*>& logical,
+                            const std::vector<std::vector<EmptyColElem>>& element) {
         const size_t ncols = column_names->size();
         if (files.size() != absent.size())
             throw std::invalid_argument("set_absent_columns: one flag set per file");
         if (types.size() != ncols || logical.size() != ncols)
             throw std::invalid_argument("set_absent_columns: one declared type per projected column");
         null_templates_.assign(ncols, CxxColumn{});
+        array_null_schema_.assign(ncols, nullptr);
         for (size_t f = 0; f < files.size(); ++f) {
             if (absent[f].size() != ncols)
                 throw std::invalid_argument("set_absent_columns: one flag per projected column");
             for (size_t i = 0; i < ncols; ++i) {
-                if (absent[f][i] == 0 || null_templates_[i].own) continue;
-                if (is_array_column(i))
-                    throw std::invalid_argument("set_absent_columns: an ARRAY column cannot be filled");
+                if (absent[f][i] == 0 || null_templates_[i].own || array_null_schema_[i] != nullptr)
+                    continue;
+                if (is_array_column(i)) {
+                    if (i >= element.size() || element[i].empty())
+                        throw std::invalid_argument(
+                            "set_absent_columns: an ARRAY column has no resolved element type");
+                    auto schema = std::make_shared<CxxMorsel>();
+                    schema->columns.push_back(make_empty_col(DRAKEN_ARRAY, logical[i], element[i]));
+                    array_null_schema_[i] = std::move(schema);
+                    continue;
+                }
                 null_templates_[i] = make_null_template(types[i], logical[i]);
             }
             if (!absent_.emplace(files[f], absent[f]).second)
@@ -1815,7 +1853,9 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                         continue;
                     }
                     if (is_absent(i)) {
-                        m->columns.push_back(null_constant_column(null_templates_[i], n));
+                        CxxColumn fill = absent_fill(i, n, err);
+                        if (err.code != 0) return SourceResult::FINISHED;
+                        m->columns.push_back(std::move(fill));
                         continue;
                     }
                     CxxColumn col;
@@ -1881,7 +1921,9 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                         continue;
                     }
                     if (is_absent(i)) {
-                        m->columns.push_back(null_constant_column(null_templates_[i], n_survivors));
+                        CxxColumn fill = absent_fill(i, n_survivors, err);
+                        if (err.code != 0) return SourceResult::FINISHED;
+                        m->columns.push_back(std::move(fill));
                         continue;
                     }
                     CxxColumn col;
@@ -1900,9 +1942,11 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                     if (!build_column(result, i, m->columns[i], err)) { build_err(); return SourceResult::FINISHED; }
                     nrows = m->columns[i].view.length;
                 }
-                for (size_t i = 0; i < ncols; ++i)
-                    if (is_absent(i))
-                        m->columns[i] = null_constant_column(null_templates_[i], static_cast<uint32_t>(nrows));
+                for (size_t i = 0; i < ncols; ++i) {
+                    if (!is_absent(i)) continue;
+                    m->columns[i] = absent_fill(i, static_cast<uint32_t>(nrows), err);
+                    if (err.code != 0) return SourceResult::FINISHED;
+                }
                 // Before the Source's own prefilter, which filters them with the rest.
                 if (!identity_kinds_.empty() &&
                     !append_row_identity(*m, result.path, result.rg_idx, kept_ptr, kept_len, -1, err))

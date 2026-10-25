@@ -8,8 +8,15 @@ Guard: the engine must not import pyarrow or numpy at runtime.
 
 pyarrow/numpy are allowed in tests and dev scripts, but NOT inside the engine
 (opteryx/rugo/draken). This runs a representative read + execute + native write
-workload in a fresh subprocess and asserts neither library got imported. It
-must be a subprocess because the test process itself uses pyarrow as an oracle.
+workload in a fresh subprocess with pyarrow and numpy BLOCKED at import: any
+engine import of either raises, so the workload only completes if the engine does
+not need them. It must be a subprocess because the test process itself uses
+pyarrow as an oracle.
+
+Blocked rather than merely observed because rugo/__init__.py imports pyarrow
+first when it is installed (a deliberate load-order workaround, ruled 2026-08-13
+and 2026-08-25). That import is optional there - an ImportError is tolerated - so
+under the block it is skipped, and what is left is the engine's own dependence.
 """
 
 import os
@@ -19,7 +26,21 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 _WORKLOAD = r"""
+import importlib.abc
 import sys
+
+_BANNED = ("pyarrow", "numpy")
+
+
+class _Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in _BANNED:
+            raise ImportError("blocked by test_no_arrow_in_engine: " + fullname)
+        return None
+
+
+sys.meta_path.insert(0, _Blocker())
+
 import opteryx
 from draken.morsels.morsel import Morsel
 from rugo.parquet import write_parquet
@@ -39,7 +60,7 @@ for sql in (
 morsel = Morsel.combine(list(session.execute_to_morsels("SELECT id, name, gravity FROM $planets")))
 write_parquet(morsel)
 
-leaked = sorted(m for m in ("pyarrow", "numpy") if m in sys.modules)
+leaked = sorted(m for m in _BANNED if m in sys.modules)
 if leaked:
     sys.stderr.write("ENGINE IMPORTED: " + ", ".join(leaked) + "\n")
     sys.exit(1)

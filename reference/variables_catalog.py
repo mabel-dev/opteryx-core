@@ -55,6 +55,15 @@ _ENVIRONMENT_DERIVED = {
     "version": "build",
 }
 
+# Variables whose value is READ BACK from native state rather than taken from
+# `FromConfig(...)`, so the config-constant scan below cannot see which environment
+# key configures them. Each is still environment-configurable, so the catalog must
+# record the key instead of a literal. variable -> environment key.
+_NATIVE_READBACK_ENV_KEYS = {
+    "slab_pool_budget_bytes": "SLAB_POOL_BUDGET_BYTES",
+    "slab_pool_prefault_bytes": "SLAB_POOL_PREFAULT_BYTES",
+}
+
 # Per-session identity stamped by ExecutionContext, not configuration. Listed so
 # the catalog is complete; they are not settings and have no default.
 _SESSION_IDENTITY = {
@@ -110,6 +119,12 @@ def _variable_environment_keys() -> dict[str, str]:
         env_key = config_to_env.get(constant)
         if env_key is not None:
             mapping[variable] = env_key
+    for variable, env_key in _NATIVE_READBACK_ENV_KEYS.items():
+        if env_key not in config_keys:
+            raise RuntimeError(
+                f"{variable} is mapped to {env_key}, which opteryx.config does not read"
+            )
+        mapping[variable] = env_key
     return mapping
 
 
