@@ -233,12 +233,14 @@ class GBBlockPool {
     }
 
     // A slab-class block: the slab pool charges it by the slot it lives in. Counted
-    // as a miss here (not served by THIS pool's lists), as it always was.
+    // as a miss here (not served by THIS pool's lists), as it always was - but NOT in
+    // os_bytes: release() never counts it back into freed_bytes, so os_bytes less
+    // freed_bytes is the memory THIS pool holds charged (small blocks only), and a
+    // slab-class block would make that figure grow by every block, every query.
     static void* from_slab(size_t bytes) {
         void* p = draken_malloc(bytes);
         if (p == nullptr) throw std::bad_alloc();
         gb_pool_tel::misses.fetch_add(1, std::memory_order_relaxed);
-        gb_pool_tel::os_bytes.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
         return p;
     }
 

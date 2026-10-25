@@ -258,10 +258,10 @@ Evaluates a column bloom filter at the given byte offset/length for a candidate 
 `rugo.parquet_writer` (and the `rugo.parquet` facade) serialize a Draken Morsel to a well-formed, PyArrow-readable Parquet file.
 
 ```python
-from rugo.parquet_writer import write_parquet, write_parquet_with_bounds
+from rugo.parquet import write_parquet, write_parquet_fast, write_parquet_with_bounds
 data = write_parquet(morsel, compression="zstd")           # -> bytes
 data, bounds = write_parquet_with_bounds(morsel)           # + per-column min/max
-data = write_parquet_fast(morsel)                       # no bloom/dictionary/statistics/page index: fastest write
+data = write_parquet_fast(morsel)                          # no bloom/dictionary/statistics/page index
 ```
 
 | Area              | Support                                                                                                         |

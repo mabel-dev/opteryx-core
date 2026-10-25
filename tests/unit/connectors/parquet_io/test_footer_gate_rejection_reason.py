@@ -65,15 +65,26 @@ def test_a_kind_with_no_decoder_is_named():
     assert reason == "column 'user_name' has kind 'struct', which the native scan has no decoder for"
 
 
-def test_the_sql_refusal_carries_the_reason():
-    """End to end: a schema-evolved dataset whose absent column cannot be filled with
-    NULL (an ARRAY — its element type is the file's) is refused, and the message
-    names the column and the file."""
+def test_the_sql_refusal_carries_the_reason(tmp_path):
+    """End to end: a scan the footer gate refuses - an INT96 timestamp column, which
+    it has no spelling for - fails with a message naming the column, the file and the
+    type the file stores."""
+    import datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(
+        pa.table({"ts": pa.array([datetime.datetime(2020, 1, 1)], type=pa.timestamp("ns"))}),
+        tmp_path / "ts.parquet",
+        use_deprecated_int96_timestamps=True,
+    )
     with pytest.raises(NotSupportedError) as err:
-        list(opteryx.session().execute_to_morsels("SELECT cves FROM 'testdata/flat/different'"))
+        list(opteryx.session().execute_to_morsels(f"SELECT ts FROM '{tmp_path}'"))
     message = str(err.value)
-    assert "(footer_gate: column 'cves' is not in testdata/flat/different/planets.parquet" in message
-    assert "(ARRAY) cannot be filled with NULL" in message
+    assert "(footer_gate: column 'ts' (kind 'timestamp')" in message
+    assert "ts.parquet" in message
+    assert "physical type 'int96'" in message
 
 
 if __name__ == "__main__":  # pragma: no cover

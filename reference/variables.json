@@ -789,6 +789,30 @@
         "default_source": "environment",
         "environment_key": "SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS"
     },
+    "slab_pool_budget_bytes": {
+        "name": "slab_pool_budget_bytes",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "SLAB_POOL_BUDGET_BYTES"
+    },
+    "slab_pool_prefault_bytes": {
+        "name": "slab_pool_prefault_bytes",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "SLAB_POOL_PREFAULT_BYTES"
+    },
     "spill_ceiling_bytes": {
         "name": "spill_ceiling_bytes",
         "type": "INT64",

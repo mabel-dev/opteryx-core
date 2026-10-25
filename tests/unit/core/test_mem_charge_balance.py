@@ -15,7 +15,10 @@ The group-by pool keeps the blocks it takes from the system across queries (up t
 1 GiB) and they stay charged - real memory, measured 2026-10-19 to grow ~5 MiB on
 the second run of the group-by below and ~0.4 MiB a run by the tenth. So the
 invariant is the account LESS what the pool holds (its system bytes less its
-freed bytes): that must not move, run after run.
+freed bytes) LESS what the slab pool holds (the bytes of its slots it has faulted,
+which it charges and keeps for re-use): that must not move, run after run. Measured
+2026-10-25 over 40 runs of the group-by below it is exactly zero every run, while the
+slab pool's own figure climbs from 116 to 200 MiB as it warms.
 """
 
 import os
@@ -29,6 +32,7 @@ import opteryx
 from opteryx.compiled.structures.memory_pool import process_memory_charged
 from opteryx.compiled.structures.memory_pool import process_memory_peak
 from opteryx.compiled.structures.memory_pool import reset_process_memory_peak
+from opteryx.compiled.structures.memory_pool import slab_pool_stats
 from opteryx.operators._operators import get_groupby_telemetry
 
 ROWS = 3_000_000
@@ -46,9 +50,10 @@ def _run(sql):
 
 
 def _charged_beyond_pool():
-    """The account less the group-by pool's held memory (see the module note)."""
+    """The account less the group-by and slab pools' held memory (see the module note)."""
     tel = get_groupby_telemetry()
-    return process_memory_charged() - (tel["pool_os_bytes"] - tel["pool_freed_bytes"])
+    held = tel["pool_os_bytes"] - tel["pool_freed_bytes"]
+    return process_memory_charged() - held - slab_pool_stats()["faulted_bytes"]
 
 
 @pytest.mark.parametrize("sql", [GROUP_BY, JOIN], ids=["group_by", "join"])
