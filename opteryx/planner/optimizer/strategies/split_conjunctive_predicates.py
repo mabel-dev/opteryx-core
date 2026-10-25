@@ -37,7 +37,7 @@ from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns, get_nodes_of_type_from_logical_plan
+from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns
 from .predicate_rewriter import rewrite_anded_not_like_to_all
 from opteryx.compiled.structures.plan_steps import FilterStep
 
@@ -74,7 +74,7 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         # visit() acts on Filter nodes only; with none, the rebuild re-adds the
         # plan unchanged.
-        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))) > 0
+        return plan.has_step(LogicalPlanStepType.Filter)
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """

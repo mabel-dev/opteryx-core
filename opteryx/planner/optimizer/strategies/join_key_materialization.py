@@ -239,7 +239,7 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
         plan[join_id] = node
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for _nid, node in plan.nodes(True):
-            if node.node_type == LogicalPlanStepType.Join and node.on is not None:
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Join,)):
+            if node.on is not None:
                 return True
         return False

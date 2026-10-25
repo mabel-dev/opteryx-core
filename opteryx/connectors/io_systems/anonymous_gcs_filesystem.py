@@ -27,10 +27,12 @@ Authorization header at all, via OpteryxHttpFileSystem. GCS's own object-level I
 decides the outcome: a public object is read; a private one 403s from GCS itself --
 Opteryx makes no allow/deny decision of its own.
 
-Deliberately has no `list_files`: GCS bucket LISTING is a separate IAM permission
-from object GET and is not assumed granted anonymously, so glob patterns over
-gs:// are rejected outright by callers (see the READ_JSONL/READ_PARQUET/READ_CSV
-binder branches) rather than silently escalating to an authenticated listing call.
+LISTING is tried ANONYMOUSLY too (docs/ANONYMOUS_REMOTE_READS_DESIGN.md): `list_files`
+asks the JSON API for the prefix with NO Authorization header, through the credential-free
+`object_listing` module, so a glob over a public bucket works. A bucket that does not allow
+anonymous listing answers 401/403 and the query fails saying so - it is NEVER retried with the
+process's credentials. That is the rule this class exists to keep: READ_* never uses the
+platform's identity. This module imports nothing from the credentialed filesystem.
 """
 
 
@@ -39,8 +41,36 @@ class AnonymousGcsFileSystem:
 
     def __init__(self):
         from opteryx.connectors.io_systems.http_filesystem import OpteryxHttpFileSystem
+        from opteryx.connectors.io_systems.object_listing import GCS_API
 
         self._http = OpteryxHttpFileSystem()
+        # Where listing requests go. A deployment constant (tests point it at a local
+        # object store); it decides WHERE an anonymous request goes, never what it may read.
+        self.api = GCS_API
+
+    def list_file_infos(self, base_dir: str, recursive: bool = True) -> list:
+        """The objects under `base_dir` (gs://bucket/prefix), listed anonymously."""
+        from opteryx.connectors.io_systems.object_listing import anonymous_listing_limit
+        from opteryx.connectors.io_systems.object_listing import list_gcs_objects
+
+        def get(url, headers):
+            # An anonymous request carries NO headers - the client call below cannot even express one.
+            if headers:
+                raise ValueError("an anonymous listing carries no request headers")
+            return self._http.http_client.get(url)
+
+        return list_gcs_objects(
+            get,
+            base_dir,
+            recursive,
+            headers={},
+            anonymous=True,
+            limit=anonymous_listing_limit(),
+            api=self.api,
+        )
+
+    def list_files(self, base_dir: str, recursive: bool = True) -> list:
+        return [info.path for info in self.list_file_infos(base_dir, recursive)]
 
     @staticmethod
     def _to_public_https_url(path: str) -> str:

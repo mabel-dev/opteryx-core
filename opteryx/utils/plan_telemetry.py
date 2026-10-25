@@ -284,6 +284,7 @@ _OPERATOR_LABELS = {
     "CsvReadNode": "CSV SCAN",
     "JsonlReadNode": "JSONL SCAN",
     "AvroReadNode": "AVRO SCAN",
+    "OrcReadNode": "ORC SCAN",
     "SkeneReadNode": "SKENE SCAN",
     "PostgresReadNode": "POSTGRES SCAN",
     "FunctionDatasetNode": "FUNCTION SCAN",

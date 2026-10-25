@@ -713,17 +713,10 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         """Run if there is a cross join to convert, or a keyed inner join with a Filter
         somewhere above it that might hold an expression equality for it."""
-        has_filter = False
         has_inner_join = False
-        for _nid, node in plan.nodes(True):
-            if (
-                node.node_type == LogicalPlanStepType.Join
-                and node.type == "cross join"
-                and not node.on
-            ):
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Join,)):
+            if node.type == "cross join" and not node.on:
                 return True
-            if node.node_type == LogicalPlanStepType.Filter:
-                has_filter = True
-            elif _is_keyed_inner_join(node):
+            if _is_keyed_inner_join(node):
                 has_inner_join = True
-        return has_filter and has_inner_join
+        return has_inner_join and plan.has_step(LogicalPlanStepType.Filter)

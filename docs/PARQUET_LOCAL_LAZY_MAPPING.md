@@ -2,7 +2,7 @@
 
 Status: BUILT 2026-10-25 (uncommitted), `rugo/src/parquet/io_pipeline.hpp`:
 §2 lazy mapping, then §6 the process-lifetime file table (architect chose
-option B of §5).
+option B of §5), then §8 the spin-then-block queue lock (proposal 1 of §7).
 Scope: the per-row-group cost of the native local parquet scan on short
 ClickBench queries (Q01 `COUNT(*) WHERE AdvEngineID <> 0`, Q07, Q36–Q42).
 
@@ -229,6 +229,229 @@ cheaper than the kernel block/wake it replaces. `SUM … GROUP BY OS`, `URL LIKE
    execution** (trace); ~3.8 ms (45%) is planning/compile/setup/hand-off — the
    stats-settled `>= 0` is 2.3 ms in total. That slice is the largest single
    remaining piece of the short-query gap and needs its own profile.
+
+## 8. Spin-then-block queue lock (proposal 1 of §7 — RULED, BUILT)
+
+`spin_then_lock(std::mutex&)` (io_pipeline.hpp, namespace scope): `try_lock`;
+on failure, while a TIME budget lasts, 16 × (spin hint, `try_lock`) per clock
+check; then an ordinary blocking lock. Returns a `std::unique_lock<std::mutex>`
+(adopted), so `queue_cv_` stays `std::condition_variable` — the probe's
+`condition_variable_any` (an internal mutex on every notify) was NOT carried
+over. Every `queue_mutex_` acquisition goes through it, including the relock
+after an inline decode; condition-variable waits and their wake relock do not
+spin. Budget is a compile-time constant per arch (`kQueueSpinBudget`); zero is a
+plain blocking lock (the spin branch compiles away).
+
+**Budget sweep** (2 interleaved passes):
+
+| budget | Mac Q01 wall / CPU | x86 Q01 wall / CPU |
+|---|---|---|
+| main | 8.58–8.88 / 82 ms | 20.33–20.40 / 77.6 ms |
+| 0 | 8.54–8.73 / 77 | 20.15–20.19 / 77.4 |
+| 1 µs | 7.56–7.77 / 60 | 20.10–20.11 / 77.3 |
+| 2 µs | 7.31–7.51 / 56.5 | 20.27–20.49 / 77.4 |
+| 4 µs | 7.24–7.41 / 54.5 | 20.13–20.22 / 77.3 |
+| 8 µs | 7.18–7.31 / 54 | 20.13–20.32 / 77.4 |
+| 16 µs | 7.15–7.24 / 53.4 | 20.08–20.30 / 77.5 |
+
+Mac controls: at 4 µs `SUM … GROUP BY OS` and `SearchPhrase GROUP BY` flat; at
+16 µs `SearchPhrase` +1.7%/+2.4% (both passes). x86: no budget moves Q01 (glibc
+futex wake is cheaper and x86 Q01 is decode-bound, §1).
+**Chosen: arm64 4 µs, x86-64 0.**
+
+**A/B** (5 interleaved rounds, digests same), main (§6) → spin lock:
+
+Mac (`hits_rg64k_b4`): Q01 9.30 → 7.23 ms **0.778** (5/5, CPU 0.678), Q07 **0.779**
+(5/5, CPU 0.652), Q36 0.901 (5/5), Q37 0.889 (5/5), Q40 0.907 (5/5), Q38/Q39/Q41/Q42
+0.96–0.98, LIKE Q20/Q21 0.981/0.987, `> 0` 0.798, `>= 0` 0.831, `SUM … GROUP BY OS`
+0.995. No loser.
+
+x86 (`hits_rugo_262k`, warm): Q01 0.999, Q07 0.994, Q36 1.004, Q37 1.018 (0/5),
+Q38 1.010 (0/5), rest 0.979–1.004. With main's `_operators.so` swapped in (valid
+on x86, where the budget is 0 and both builds lock identically): Q37 1.003, Q38
+0.999, all 0.981–1.007 — the 1–2% was the relink-layout effect (§3). Flat.
+
+Not done (§7 items 2 and 3): fewer acquisitions per row group; the ~45% of Q01
+wall outside native execution.
+
+## 9. Outside native execution — attribution (2026-10-25, NOTHING BUILT)
+
+Main (§8), Mac, `hits_rg64k_b4`, warm. Session telemetry medians over 30 runs (ms):
+
+| query | total | planning | binder | binding metadata | optimizer | engine compile | native (generator) |
+|---|---|---|---|---|---|---|---|
+| `>= 0` (stats-settled) | 2.11 | 1.04 | 0.57 | 0.36 | 0.22 | 0.73 | 0.27 |
+| Q01 | 6.77 | 1.32 | 0.70 | 0.46 | 0.28 | 1.16 | 4.22 |
+| Q07 | 7.38 | 1.51 | 0.73 | 0.47 | 0.32 | 1.24 | 4.56 |
+
+Q01: ~2.5 ms of 6.8 (37%) is outside native execution. cProfile (300 runs) +
+the main thread of the samply profile (dSYM) attribute it:
+
+1. **Engine compile → `pool_reader.open_native_scan_plan` ≈ 1.0 ms**, built per
+   query from scratch, Cython over Python objects, scaling with files × row
+   groups: `_prune_row_groups` per FILE (~0.46 ms for 100 files: predicate
+   encode + a Python `keep` list + a native min/max test per row group); a
+   Python `(path, rg)` tuple per work item (1,114) beside the C++ vector; a second
+   loop that re-`encode`s the path and re-looks-up `footer_map` PER WORK ITEM;
+   then `_count_remote_fetch_blocks_native(work_items, …)` and
+   `_any_remote_path([...])` each walk all 1,114 items again; string
+   conversions/mallocs ~0.1. Even `>= 0` (no page read) pays 0.73 ms here.
+2. **Binder dataset metadata ≈ 0.36–0.47 ms**: `list_file_infos` (native walk +
+   100 `FileInfoLike` objects) 0.34 ms, then 5 list comprehensions, 200
+   `format_for_path`, a sorted (path, size, mtime) signature tuple — every query,
+   to validate the manifest cache.
+3. **Optimizer ≈ 0.22–0.32 ms** — the known flat cost of the strategy walk
+   (TPC-DS planning profile 2026-10-22); not Q01-specific.
+4. Rest of planning ≈ 0.3 ms (parse, logical plan, session).
+
+**Proposals:**
+- **P1 — native work-list build.** One C++ function over `footer_map` that, per
+  file, runs the min/max test and the coverage verdict and emits the work items,
+  `max_rg_bytes`, cache-fill bytes and the remote flags in ONE pass; Python passes
+  the prepared predicates/coverage request once and keeps only what Python needs
+  (no 1,114-tuple list, no per-item re-encode/lookup, no extra walks). The local
+  bloom pread stays where it is (only for files with Eq/InList predicates).
+  Expected: compile 0.73–1.24 → ~0.2 ms; Q01 ≈ −0.9 ms (−13%), `>= 0` ≈ −0.5 ms.
+  Same answers by construction; same planning-phase ownership (it is plan setup,
+  not execution). Not design-impacting beyond moving a loop to native.
+- **P2 — cheaper dataset signature.** The listing must stay (files are added and
+  GC-deleted; per-file immutability does not make the FILE SET immutable). Two
+  steps: (a) build the signature and the filtered lists natively from the walk
+  (no 100 Python objects, no 200 `format_for_path`) — mechanical, ~−0.25 ms;
+  (b) gate the whole thing on the directories' mtimes (add/remove changes a
+  directory's mtime; files are never rewritten in place by ruling) — ~−0.4 ms but
+  a CHANGE TO A CACHE-VALIDITY RULE → architect's call.
+- **P3 (existing, not this task):** optimizer walk cost; plan cache rulings
+  (PLANCACHE, 4 pending) would remove most of all three for repeated queries.
+
+## 10. P1 — native work-list build (RULED, BUILT)
+
+`opteryx/connectors/parquet_io/pool_reader.pyx`:
+
+- `_PrunePredicates` / `_prepare_prune_predicates`: a scan's pushed predicates
+  (name bytes, operator code, value) prepared ONCE per scan; both callers
+  (`open_native_scan_plan`, `open_ipc_source`) build it before their file loop.
+- `_prune_row_groups` resolves each predicate's chunk index and statistic decode
+  (`_stat_kind`) once per FILE from row group 0 (the parquet spec orders every row
+  group's chunks by schema leaf). `_rg_passes_predicates_native` reads that chunk
+  directly — no name scan over ~105 columns per row group — and raises if a row
+  group's chunk at that index has another name. **The min/max test itself is
+  unchanged and remains the single implementation**: it compares Python values
+  (strings, Decimals, dates, the `TypeError` → keep rule), and a C++ twin would be
+  a second implementation to keep identical (§9's "one C++ function runs the
+  min/max test" was not built for that reason).
+- `open_native_scan_plan`: one pass per file emits the C++ work items and sums the
+  largest projected row group, the chunk-cache fill bytes, the remote flag and the
+  remote items for the fetch-block count; path encoded once, footer looked up once,
+  projected chunk indices resolved once per file. Gone: the Python `(path, rg)` list
+  (1,114 tuples on Q01), the per-item re-encode + footer lookup, two extra walks.
+  The two different remote tests the consumers used (`_is_local_path` for cache
+  fill, the gs/http(s) prefix test for the scan flag and the fetch-block count) are
+  kept exactly as they were.
+
+**Equivalence:** the compiler's `open_native_scan_plan` wrapped in both trees; 56
+queries (43 ClickBench + 13 predicate shapes over hits and TPC-H) → 52 scan plans,
+every recorded fact identical (row groups scanned/pruned/covered/disjoint,
+coverage seed, cache-fill bytes, surviving rows, fetch-ahead depth, memory
+budget); result digests identical where deterministic.
+
+**Measured** (phase telemetry, Mac): Q01 compile 1.23 → 0.77 ms, total 7.2–7.3 →
+6.75–6.8; `_prune_row_groups` 0.46 → 0.11 ms. `>= 0` compile unchanged (0.71): its
+compile is now the C++ statistics coverage (`parquet_cover_row_group` 0.34 ms),
+which P1 did not touch.
+
+A/B (5 interleaved rounds, digests same):
+- Mac, two runs: Q01 0.967 / 0.942 (5/5), Q07 0.940 / 0.936 (5/5); Q39 1.033 (0/5)
+  and Q40 1.016/1.015 in single runs but their phase timers show compile and total
+  equal or lower under P1 (Q40 total 6.99/6.94/6.84 → 6.76/6.90/6.87) and Q39 did
+  not reproduce — harness order effect, not the change.
+- x86 (`hits_rugo_262k`): Q01 **0.923** (5/5), Q07 0.937 (5/5), `> 0` 0.948 (5/5),
+  `>= 0` **0.928** (5/5, CPU 0.927), all others 0.983–1.005.
+
+## 11. P2a — dataset listing: leaner native walk + one-pass signature (RULED, BUILT)
+
+Measured first (Mac, 100-file dataset, per bind): the native walk
+`list_files_info` 229 µs; Python `FileInfoLike` objects ~17 µs; Python filters +
+format checks + signature ~51 µs. §9's estimate (~0.25 ms from moving the Python
+work native) was wrong — the walk was the cost. Architect chose: leaner walk on
+both OSes + `getattrlistbulk` on macOS + the Python one-pass.
+
+`src/cpp/directories.cpp` `list_files_with_info`, via `read_directory_entries`:
+- **macOS:** `getattrlistbulk` (name, type, mtime, data length for many entries
+  per call). An entry with `ATTR_CMN_ERROR` is skipped (as a failed `lstat` was); a
+  failing call stops that directory (as a `readdir` error did).
+- **Elsewhere:** `opendir` + `fstatat` on the directory fd (`AT_SYMLINK_NOFOLLOW`
+  only to classify an unknown `d_type`; `stat` semantics for a regular file's size
+  and mtime).
+- Same rules both ways: symlinks never followed or reported, the root must open, a
+  subdirectory that cannot is skipped, path joined `dir + '/' + name` unless `dir`
+  ends in `/`. Gone: a ~1 KB `dirent` copy and a path-string copy per entry, a
+  `pathconf` per walk, and on macOS (no `_DIRENT_HAVE_D_TYPE`) an `lstat` AND a
+  `stat` on the full path per file.
+- ⛔ Kept unchanged, reported: with an EXTENSION FILTER the walk skips any entry
+  whose name is shorter than the shortest extension BEFORE classifying it, so a
+  short-named directory (`a`, `medium`) is never descended into. The production
+  listing passes no extensions (`list_files_info(base, ())`), where it never
+  applies. Fixing it is a separate decision.
+
+`opteryx/connectors/filesystem_connector.py` `get_dataset_metadata`: one pass over
+the listing — manifest test and `format_for_path` once per path (was twice) — and
+`opteryx/models/dataset_format.py` `single_format(formats, dataset)`, the
+mixed-format rule, which `dataset_format(paths)` now calls (one implementation of
+the rule; the suffix rule stays in Python's `format_for_path` alone).
+
+**Equivalence:** `list_files_info` old vs new over every directory under
+`testdata` (depth ≤ 2), both hits datasets and an edge tree (symlink to file /
+dir / loop, hidden files and dirs, a non-ASCII name, a FIFO, an empty dir, a file
+as root, a missing root), each with no / one / two extensions: Mac 1,242 results,
+7,562 entries; Linux 222 results, 1,662 entries — **identical** (name, type, size,
+mtime ns, and error). Scan plans identical (52 plans / 56 queries).
+
+**Measured:**
+
+| | Mac walk | Mac binding metadata | x86 walk | x86 binding metadata |
+|---|---|---|---|---|
+| before | 219–228 µs | 0.58–0.65 ms | 31.1 µs | 1.01 ms |
+| after | 48.5–49 µs | 0.40–0.41 ms | 23.8 µs | 0.90 ms |
+
+A/B (5 interleaved rounds, digests same): Mac Q01 0.974, Q07 0.965, Q37 0.965,
+Q38 0.960, Q41 0.936, Q42 0.972 (all 5/5), `>= 0` 0.950, rest 0.977–1.006. x86
+(`hits_rugo_262k`) flat: 0.962–1.013, no consistent loser — Linux `stat` on a warm
+dentry cache was already cheap (31 µs for the whole walk), so the −0.1 ms bind
+saving is below the noise of a 20 ms query.
+
+## 12. x86 re-profile on current main (2026-10-25, NOTHING BUILT)
+
+Box (i5-8500, 6 cores, mimalloc, `hits_rugo_262k` warm), main as of §11, perf
+with DWARF call graphs per query. Plain ms: Q01 18.9, Q07 19.8, Q36 51.6, Q37
+18.8, Q38 30.0, Q39 118.9, Q40 19.5, Q41 17.5, Q42 18.8 — six short queries sit
+on one ~18–20 ms floor.
+
+Attribution (share of CPU samples):
+- **Per-morsel thread-CPU clock** (`executor.hpp` `telem_cpu_now_ns`, bracketing
+  every source pull / operator / sink call for `OpStats.cpu_ns`): ~6,500
+  `CLOCK_THREAD_CPUTIME_ID` reads per Q01 (`perf trace`: 1,096,144 in ~168 runs).
+  On this box a read is **800 ns** — a syscall (Linux has no vDSO path for the
+  thread CPU clock) with PTI on every kernel entry; `CLOCK_MONOTONIC` is 18.7 ns.
+  (The Apple Silicon figure in memory was 107 ns.)
+  **Ceiling probe** (reads made free, private tree, 3 interleaved passes): Q01
+  18.87 → 17.72 ms **0.939** (3/3, CPU 0.918), Q07 **0.961** (3/3), Q37 0.990, Q42
+  0.993. The clock does not explain the Q37/Q42 floor.
+- **Per-row work on RLE-decided rows (Q01)**: `DecodeRLEBitPackedIndicesSelected`
+  12.4% (count_selected), `decode_codes_packed` 4.3%, verdict memset in
+  `DecodeRLEBitPackedVerdicts` 3.4%, a `std::fill_n` byte fill 4.1% — ~25% of Q01
+  CPU spent per row on 70.5M rows that runs already decided. Lever = count/settle
+  from runs without per-row bytes (run-domain design work).
+- **Chunk-image copies** under `DecodeColumnFromChunk` / `DecodeFromChunkImage`:
+  ~4.6% Q01, ~4% Q42.
+- **GROUP BY string keys**: `GBArena::put` copies 13.7% of Q39 (2.3% Q37);
+  `AppendBuffer::append` + `build_direct_string_dict` another 5–10% on Q37–Q39.
+- `libpython` 5–15% on the short queries (planning; the optimizer work is in
+  another session).
+
+Consumers of the per-operator `cpu_ns`: plan telemetry's per-node `cpu_time_ms`
+only. The per-PIPELINE CPU (process clock either side of `run_pipeline`, 2 reads
+per pipeline) is separate and stays cheap.
 
 ⛔ x86 measurement trap: the box has 15 GB; `hits_rugo_262k` and
 `hits_rg64k_b4` do not both fit in page cache. An A/B over both in one job read

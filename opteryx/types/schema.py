@@ -10,8 +10,9 @@ are deferred to Phase 9 if needed.
 
 Key design:
 - Bound columns (SchemaColumn and its kinds) are native rows of the query's
-  ColumnTable (opteryx/compiled/planner/column_table.pyx); descriptors and
-  relation schemas are dataclasses here
+  ColumnTable (opteryx/compiled/planner/column_table.pyx); a bound relation's
+  schema is a compiled class (opteryx/compiled/planner/relation_schema.pyx);
+  descriptors are dataclasses here
 - No external dependencies (stdlib only + opteryx.types)
 - Optimized for the operations Opteryx actually performs
 - Full type hints; comprehensive docstrings
@@ -20,7 +21,7 @@ Key design:
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # Bound columns are rows of the query's native ColumnTable; their façade classes
 # live with it (opteryx/compiled/planner/column_table.pyx, native plan graph P1).
@@ -28,6 +29,7 @@ from opteryx.compiled.planner.column_table import ConstantColumn
 from opteryx.compiled.planner.column_table import FunctionColumn
 from opteryx.compiled.planner.column_table import SchemaColumn
 from opteryx.compiled.planner.column_table import mint_column_identity  # noqa: F401 (re-exported)
+from opteryx.compiled.planner.relation_schema import RelationSchema
 
 
 __all__ = [
@@ -57,150 +59,6 @@ class ColumnDisposition:
     INDEXED = "INDEXED"
     NAME = "NAME"
     AGE = "AGE"
-
-
-@dataclasses.dataclass(frozen=True)
-class RelationSchema:
-    """Table/relation schema definition.
-
-    Opteryx relation schema. IMMUTABLE (architect ruling 2026-09-28, native plan
-    graph P5): a plan step's native row mirrors the schema it holds, so an edit is
-    a NEW schema (`dataclasses.replace`) assigned through the step - and, in the
-    binder, re-bound wherever the old one was shared
-    (BindingContext.rebind_schema). `columns` and `aliases` are tuples.
-
-    Attributes:
-        name: Schema/table name (required)
-        columns: SchemaColumn definitions (required)
-        aliases: Alternative names for this schema (default: ())
-        primary_key: Name of primary key column (default: None)
-        row_count_metric: Actual row count if known (default: None)
-        row_count_estimate: Estimated row count (default: None)
-        data_size_metric: Actual data size in bytes (default: None)
-        data_size_estimate: Estimated data size in bytes (default: None)
-    """
-
-    name: str
-    columns: Tuple[SchemaColumn, ...] = ()
-    aliases: Tuple[str, ...] = ()
-    primary_key: Optional[str] = None
-    row_count_metric: Optional[int] = None
-    row_count_estimate: Optional[int] = None
-    data_size_metric: Optional[int] = None
-    data_size_estimate: Optional[int] = None
-
-    def __post_init__(self):
-        # A list given for either sequence is held as a tuple: the schema is a value.
-        object.__setattr__(self, "columns", tuple(self.columns))
-        object.__setattr__(self, "aliases", tuple(self.aliases))
-
-    def clone(self) -> "RelationSchema":
-        """A distinct schema object of the same value. The fields are values
-        (tuples, scalars), so the new object shares them; built straight from
-        the instance dict - the binder copies schemas per branch, and
-        `dataclasses.replace` re-runs __init__ and __post_init__ each time."""
-        new = object.__new__(RelationSchema)
-        new.__dict__.update(self.__dict__)
-        return new
-
-    def with_columns(self, columns) -> "RelationSchema":
-        """This schema with `columns` in place of its own - a new schema."""
-        new = self.clone()
-        new.__dict__["columns"] = tuple(columns)
-        new.__dict__.pop("_lowercase_columns", None)
-        return new
-
-    def __str__(self) -> str:
-        """String representation: schema_name(col1, col2, ...)."""
-        col_list = ", ".join(str(c) for c in self.columns)
-        return f"{self.name}({col_list})"
-
-    def __repr__(self) -> str:
-        """Detailed representation."""
-        return f"RelationSchema(name={self.name!r}, num_columns={len(self.columns)})"
-
-    def branch_copy(self, memo: dict) -> "RelationSchema":
-        """A distinct schema object of the same value, for binder branch isolation.
-
-        The binder binds a join's two legs (and a filter's guarded scope)
-        against their own schema objects, because binding RE-BINDS a scope's
-        schema (narrowing, alias rows swapped in) and BindingContext.rebind_schema
-        replaces a schema by object IDENTITY wherever it is shared: a branch's
-        object must not be the scan's, or a branch's narrowing would reach the
-        scan. The columns themselves are shared - a column is a row of the
-        query's ColumnTable. One shared `memo` per BindingContext.copy keeps a
-        schema reachable under two keys copying to one new schema.
-        """
-        cached = memo.get(id(self))
-        if cached is not None:
-            return cached
-        clone = self.clone()
-        memo[id(self)] = clone
-        return clone
-
-    @property
-    def column_names(self) -> List[str]:
-        """Get list of all column names."""
-        return [col.name for col in self.columns]
-
-    @property
-    def all_column_names(self) -> List[str]:
-        """Get all column names including aliases."""
-        names = []
-        for col in self.columns:
-            names.extend(col.all_names)
-        return names
-
-    @property
-    def num_columns(self) -> int:
-        """Get number of columns."""
-        return len(self.columns)
-
-    def _lowercase_index(self) -> Dict[str, SchemaColumn]:
-        """Lowercased column name or alias -> the FIRST column carrying it (column
-        order, a column's name before its aliases), built on first use and held in
-        the instance dict. Sound because a column's name and aliases are fixed once
-        minted and `columns` only changes through `with_columns`, which drops it."""
-        index = self.__dict__.get("_lowercase_columns")
-        if index is None:
-            index = {}
-            for col in self.columns:
-                index.setdefault(col.name.lower(), col)
-                if col.aliases:
-                    for alias in col.aliases:
-                        index.setdefault(alias.lower(), col)
-            self.__dict__["_lowercase_columns"] = index
-        return index
-
-    def column(self, name: str, case_insensitive: bool = False) -> Optional[SchemaColumn]:
-        """Find column by name (including aliases).
-
-        Args:
-            name: Column name to search for
-            case_insensitive: If True, perform case-insensitive comparison
-
-        Returns:
-            SchemaColumn if found, None otherwise
-        """
-        if case_insensitive:
-            return self._lowercase_index().get(name.lower())
-        else:
-            for col in self.columns:
-                if col.name == name or (col.aliases and name in col.aliases):
-                    return col
-        return None
-
-    def find_column(self, name: str, case_insensitive: bool = False) -> Optional[SchemaColumn]:
-        """Alias for column() for API compatibility."""
-        return self.column(name, case_insensitive=case_insensitive)
-
-    def without_column(self, name: str) -> "RelationSchema":
-        """This schema without its first column named `name` - a new schema (or
-        this one, when it has no such column)."""
-        for i, col in enumerate(self.columns):
-            if col.name == name:
-                return self.with_columns(self.columns[:i] + self.columns[i + 1 :])
-        return self
 
 
 def _column_type_from_dict(data: Dict[str, Any]) -> Any:

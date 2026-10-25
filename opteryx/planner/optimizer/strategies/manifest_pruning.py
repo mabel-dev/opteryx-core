@@ -45,6 +45,7 @@ Key benefits:
 - Catalog-aware (leverages Iceberg/PyIceberg statistics)
 """
 
+from opteryx import config
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
@@ -185,13 +186,10 @@ class ManifestPruningStrategy(OptimizationStrategy):
 
         Only run if there's at least one SCAN node with a manifest.
         """
-        from opteryx import config
-
         if config.features.disable_manifest_pruning:
             return False
 
-        for nid in plan.nodes():
-            node = plan[nid]
-            if node.node_type == LogicalPlanStepType.Scan and node.manifest is not None:
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Scan,)):
+            if node.manifest is not None:
                 return True
         return False

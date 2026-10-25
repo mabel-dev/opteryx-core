@@ -22,11 +22,14 @@ from opteryx.exceptions import (
     md_cause,
     md_code,
 )
+from opteryx.models.dataset_format import AVRO
 from opteryx.models.dataset_format import JSONL
+from opteryx.models.dataset_format import ORC
 from opteryx.models.dataset_format import PARQUET
 from opteryx.models.dataset_format import SKENE
 from opteryx.models.dataset_format import dataset_format
 from opteryx.models.dataset_format import format_for_path
+from opteryx.models.dataset_format import single_format
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import ColumnDescriptor
 from opteryx.types.schema import RelationDescriptor
@@ -533,6 +536,38 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         _FOOTER_METADATA_CACHE[cache_key] = metadata
         return _refuse_vector_columns(skene_metadata_to_schema(metadata, self.dataset), blob_name)
 
+    def _read_avro_schema(self, blob_name: str) -> RelationDescriptor:
+        """Schema for a folder of Avro files, read from the first file's header alone."""
+        from opteryx.connectors.avro_io import header_schema
+
+        file_obj = self.filesystem.open_input_file(blob_name)
+        try:
+            _, columns = header_schema(file_obj.memoryview)
+        except RuntimeError as err:
+            raise DataError(f"The Avro file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
+        finally:
+            file_obj.close()
+        return RelationDescriptor(
+            name=self.dataset,
+            columns=[ColumnDescriptor(name=name, column_type=column_type) for name, column_type in columns],
+        )
+
+    def _read_orc_schema(self, blob_name: str) -> RelationDescriptor:
+        """Schema for a folder of ORC files, read from the first file's footer alone."""
+        from opteryx.connectors.orc_io import header_schema
+
+        file_obj = self.filesystem.open_input_file(blob_name)
+        try:
+            columns = header_schema(file_obj.memoryview, md_code(blob_name))
+        except RuntimeError as err:
+            raise DataError(f"The ORC file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
+        finally:
+            file_obj.close()
+        return RelationDescriptor(
+            name=self.dataset,
+            columns=[ColumnDescriptor(name=name, column_type=column_type) for name, column_type in columns],
+        )
+
     def _infer_jsonl_schema(self, blob_names: list) -> RelationDescriptor:
         """Schema for a JSONL dataset, inferred by decoding its first file that
         actually contains a record.
@@ -679,6 +714,20 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             # (SkeneReadNode's per-file name/type checks).
             return self._read_skene_schema(blob_names[0]), 0
 
+        if dataset_fmt == AVRO:
+            # An Avro file states its schema in its header, even with no records. The
+            # relation is the FIRST file's (the listing is sorted), as READ_AVRO's
+            # is; every file is read with that schema as its reader schema, so a file
+            # whose schema evolved resolves onto it and one that cannot fails the
+            # query naming it.
+            return self._read_avro_schema(blob_names[0]), 0
+
+        if dataset_fmt == ORC:
+            # An ORC file states its schema in its footer, even with no rows. The
+            # relation is the FIRST file's (the listing is sorted); every file is read
+            # as it, by name.
+            return self._read_orc_schema(blob_names[0]), 0
+
         if dataset_fmt == JSONL:
             # JSONL carries no footer: the schema is inferred from the FIRST
             # file (architect decision 2026-08-07 — catalog-declared schema when
@@ -775,11 +824,21 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         # an empty listing is an empty relation and defaults to PARQUET.
         manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
         listing = self._list_blob_infos(self.dataset)
-        blob_infos = [info for info in listing if not is_dataset_manifest(info.path)]
-        manifest_infos = [info for info in listing if info.path == manifest_path]
-        blob_names = [info.path for info in blob_infos]
-        dataset_fmt = dataset_format(blob_names, self.dataset) or PARQUET
-        data_infos = [info for info in blob_infos if format_for_path(info.path) == dataset_fmt]
+        # One pass: each path's manifest test and suffix format, once — this runs on
+        # every query that binds the dataset (MEASURED 2026-10-25: two format
+        # passes and four list walks were ~50 us of a 100-file bind).
+        blob_infos = []
+        blob_formats = []
+        manifest_infos = []
+        for info in listing:
+            if is_dataset_manifest(info.path):
+                if info.path == manifest_path:
+                    manifest_infos.append(info)
+                continue
+            blob_infos.append(info)
+            blob_formats.append(format_for_path(info.path))
+        dataset_fmt = single_format(blob_formats, self.dataset) or PARQUET
+        data_infos = [info for info, fmt in zip(blob_infos, blob_formats) if fmt == dataset_fmt]
         data_names = [info.path for info in data_infos]
         # Bind-time capability gating (the optimizer runs after this): pushdown
         # a reader cannot honor must be DECLINED here, because a pushed limit or
@@ -828,7 +887,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             return schema, Manifest(cached[1], schema)
 
         native = self._native_manifest(
-            schema, dataset_fmt, [info.path for info in data_infos], sizes, manifest_path
+            schema, dataset_fmt, data_names, sizes, manifest_path
         )
         if self.dataset not in _MANIFEST_CACHE and len(_MANIFEST_CACHE) >= _MANIFEST_CACHE_MAX:
             # FIFO evict the oldest entry to bound memory.

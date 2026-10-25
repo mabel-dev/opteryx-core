@@ -2162,17 +2162,13 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         # Everything this strategy rewrites is a scalar subquery, an EXISTS or an
         # IN (SELECT ...), and each of the three holds a SUBQUERY expression node
-        # (`exists` and `in_subquery` in the plan builders wrap one). So a plan with
-        # no SUBQUERY node in any step's expressions has nothing for the precise
+        # (`exists` and `in_subquery` in the plan builders wrap one). So a query
+        # that never minted a SUBQUERY expression has nothing for the precise
         # search below, which walks every expression with three finders per node.
-        # The step expressions are a superset of the lists that search reads
-        # (Filter.condition, Project.columns, Aggregate/AggregateAndGroup
-        # aggregates and groups), so this can only let a plan through to that
+        # The arena's kind mask is a superset of the kinds in any of the query's
+        # plans (ExprArena.has_kind), so this can only let a plan through to that
         # search, never turn one away.
-        if not get_all_nodes_of_type(
-            [expression for _, node in plan.nodes(True) for expression in node.expressions()],
-            (NodeType.SUBQUERY,),
-        ):
+        if not plan.plan_context.expressions.has_kind(NodeType.SUBQUERY):
             return False
         return any(
             (node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition))

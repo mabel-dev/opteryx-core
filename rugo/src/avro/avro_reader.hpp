@@ -14,8 +14,9 @@
 //
 // Nested output (docs §17.2): a whole record / map, or an array of records or arrays,
 // is NVARCHAR JSON text under the parquet NESTEDJSON rules; an array of a plain
-// scalar (bool / int / long / float / double / string / bytes / fixed) is ARRAY.
-// An array of a logical type or an enum is refused (no Draken ARRAY child for it).
+// scalar (bool / int / long / float / double / string / bytes / fixed), or of arrays of one
+// (to any depth, as the parquet scan builds them), is ARRAY.
+// An array of a logical type or an enum has no Draken ARRAY child, so it is a JSON array too.
 //
 // A reader schema (docs §19.3): fields match by field-id when both carry one, else
 // by name; a reader field the file lacks is its default (or NULL) as a constant.
@@ -69,6 +70,10 @@ struct AvroColumn {
     uint8_t*          child_validity = nullptr;
     DrakenType        child_type = DRAKEN_INT64;
     uint32_t          child_length = 0;
+    // A nested Array (an array of arrays): child_type is DRAKEN_ARRAY and the child is this whole
+    // column (its offsets, validity and own child), with `length` == child_length. The leaf buffers
+    // above are then unused.
+    std::unique_ptr<AvroColumn> child_col;
 
     AvroColumn() = default;
     AvroColumn(AvroColumn&& o) noexcept { steal(o); }
@@ -83,7 +88,7 @@ struct AvroColumn {
     // Called by the edge after the buffers were transferred to a Vector.
     void disown() noexcept {
         data = nullptr; validity = nullptr; slots = nullptr; arena = nullptr; codes = nullptr;
-        offsets = nullptr; child_validity = nullptr;
+        offsets = nullptr; child_validity = nullptr; child_col.reset();
     }
 
 private:
@@ -116,7 +121,8 @@ struct AvroColumnType {
     uint8_t    logical_kind = 0;
     uint8_t    precision = 0;
     uint8_t    scale = 0;
-    DrakenType child_type = DRAKEN_INT64;
+    DrakenType child_type = DRAKEN_INT64;   // an ARRAY's innermost element
+    uint8_t    array_depth = 0;             // an ARRAY's levels of nesting (1 = a plain array)
 };
 
 // One batch of a file: a run of whole blocks, at most kBatchRows rows (a larger single
@@ -147,6 +153,9 @@ public:
     AvroFile& operator=(const AvroFile&) = delete;
 
     const std::string& schema_json() const;
+    // True when the file's writer schema has at least one top-level field and EVERY
+    // top-level field carries a `field-id` (an Iceberg Avro data file always does).
+    bool writer_fields_have_ids() const;
     const std::vector<std::pair<std::string, std::string>>& metadata() const;
     const std::vector<std::string>& column_names() const;
     // Parallel to column_names(); known from the header alone, before any block.

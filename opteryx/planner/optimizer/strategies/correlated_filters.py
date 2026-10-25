@@ -102,7 +102,6 @@ from opteryx.utils import random_string
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
-    get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import expressions_with
@@ -1006,5 +1005,4 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan):
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
-        return len(candidates) > 0
+        return plan.has_step(LogicalPlanStepType.Join)

@@ -400,10 +400,9 @@ ARRAY columns, nested to any depth.
   no test fixture and is UNTESTED (the engine may produce such a vector; parquet_writer.pxi
   handles the same case).
 - Reader side, as the reader doc §17.2 already says: an array of a plain scalar reads back
-  as ARRAY (tested value for value); an array of arrays reads back as JSON text (tested via
-  json.loads); an array of a logical type is REFUSED by the reader ("no Draken ARRAY child
-  for it") — the writer still writes it, fastavro and Apache avro read it, and the test
-  asserts the refusal. Lifting that reader limit is not part of this plan.
+  as ARRAY (tested value for value); an array of arrays of a plain scalar reads back as a nested ARRAY (since
+  2026-10-25; it was JSON text when this was written); an array of a logical type was REFUSED by the reader when this was written; since
+  2026-10-25 it reads back as a JSON array (UUID_AND_NESTED_COLUMNS_DESIGN.md §9).
 - 34 tests; `make q` green; `tests/rugo/` + engine READ_AVRO tests green (2,867). `make slt`
   not run.
 

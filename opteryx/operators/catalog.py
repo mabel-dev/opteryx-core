@@ -163,6 +163,7 @@ def _build_registry() -> OperatorRegistry:
     # Local imports to avoid circular dependencies at module load time.
     from opteryx.operators.compaction_commit import CompactionCommitNode
     from opteryx.operators.avro_read import AvroReadNode
+    from opteryx.operators.orc_read import OrcReadNode
     from opteryx.operators.csv_read import CsvReadNode
     from opteryx.operators.explain import ExplainNode
     from opteryx.operators.function_dataset import FunctionDatasetNode
@@ -235,6 +236,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         AvroReadNode,
         name="Avro Reader",
+        category=OperatorCategory.SCAN,
+        is_scan=True,
+    )
+    r.register(
+        OrcReadNode,
+        name="ORC Reader",
         category=OperatorCategory.SCAN,
         is_scan=True,
     )

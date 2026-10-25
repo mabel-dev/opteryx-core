@@ -12,7 +12,6 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
-from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 
 
@@ -85,15 +84,6 @@ def predicate_key(pred: Expression) -> str:
         if node.schema_column is not None
     )
     return format_expression(pred) + "‖" + ",".join(identities)
-
-
-def get_nodes_of_type_from_logical_plan(plan: LogicalPlan, types: Tuple[LogicalPlanStepType]):
-    """Utility to get all nodes of a given type from a logical plan"""
-    matches = []
-    for node in plan.nodes(True):
-        if node[1].node_type in types:
-            matches.append(node)
-    return matches
 
 
 def flip_join_leg_labels(plan: LogicalPlan, join_nid: str) -> None:

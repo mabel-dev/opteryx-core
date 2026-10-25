@@ -76,9 +76,6 @@ _DEFAULT_REGION = "us-east-1"
 # Long enough that a signed URL outlives the scan it was minted for, short
 # enough that one leaking into a log is not a durable credential.
 _DEFAULT_EXPIRY_SECONDS = 3600
-# S3 caps a ListObjectsV2 page at 1000 keys regardless; asking for the maximum
-# minimises round trips on a large dataset.
-_LIST_PAGE_SIZE = 1000
 # Re-resolve a temporary credential this far ahead of its expiry - see
 # `AWSCredentials.is_stale` for why the margin is not optional.
 _REFRESH_MARGIN_SECONDS = 300
@@ -90,7 +87,6 @@ _IMDS_TOKEN_TTL_SECONDS = 21600
 _DEFAULT_METADATA_ENDPOINT = "http://169.254.169.254"
 _CONTAINER_METADATA_HOST = "http://169.254.170.2"
 _STS_NAMESPACE = "{https://sts.amazonaws.com/doc/2011-06-15/}"
-_LIST_NAMESPACE = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 
 
 class FileType(Enum):
@@ -792,70 +788,14 @@ class OpteryxS3FileSystem:
         Paginates - a dataset can exceed the 1000-key page limit, and a
         truncated listing would silently under-read rather than fail.
         """
-        # nosec B405 - no defusedxml: the engine has zero dependencies. The stdlib
-        # expat bundled with every supported Python (>= 2.4.1) enforces entity
-        # amplification limits, and ElementTree never resolves external entities
-        # or fetches DTDs. The document is the reply to a request this module
-        # addressed to an AWS endpoint; it is not user-supplied.
-        import xml.etree.ElementTree as ElementTree  # nosec B405
+        from opteryx.connectors.io_systems.object_listing import list_s3_objects
 
-        from opteryx.connectors.io_systems._file_info import FileInfoLike
-        from opteryx.connectors.io_systems.gcs_filesystem import _rfc3339_to_ns
-
-        bucket, prefix = split_path(base_dir.rstrip("/"))
-        # Trailing slash = directory semantics (see docstring). An empty prefix
-        # means the whole bucket, where no prefix filter is correct.
-        if prefix:
-            prefix = f"{prefix}/"
-
-        blobs: list = []
-        continuation_token = None
-
-        while True:
-            query = {"list-type": "2", "max-keys": str(_LIST_PAGE_SIZE)}
-            if prefix:
-                query["prefix"] = prefix
-            if not recursive:
-                # S3 is flat; a delimiter is what makes a listing non-recursive.
-                query["delimiter"] = "/"
-            if continuation_token:
-                query["continuation-token"] = continuation_token
-
-            url = self.presign(bucket, "", query=query)
-            try:
-                raw = self.http_client.get(url)
-            except RuntimeError as err:
-                raise DatasetReadError(f"Unable to list '{base_dir}' - {err}") from err
-
-            # nosec B314 - see the import above.
-            root = ElementTree.fromstring(raw) if raw else None  # nosec B314
-            if root is None:
-                return blobs
-
-            for contents in root.findall(f"{_LIST_NAMESPACE}Contents"):
-                key_element = contents.find(f"{_LIST_NAMESPACE}Key")
-                key = key_element.text if key_element is not None else None
-                # Skip the zero-byte placeholder objects consoles create for
-                # "folders" - they are not readable data files.
-                if key and not key.endswith("/"):
-                    blobs.append(
-                        FileInfoLike(
-                            path=f"s3://{bucket}/{key}",
-                            size=int(contents.find(f"{_LIST_NAMESPACE}Size").text),
-                            mtime=_rfc3339_to_ns(
-                                contents.find(f"{_LIST_NAMESPACE}LastModified").text
-                            ),
-                        )
-                    )
-
-            truncated = root.find(f"{_LIST_NAMESPACE}IsTruncated")
-            if truncated is None or (truncated.text or "").lower() != "true":
-                return blobs
-
-            next_token = root.find(f"{_LIST_NAMESPACE}NextContinuationToken")
-            continuation_token = next_token.text if next_token is not None else None
-            if not continuation_token:
-                return blobs
+        return list_s3_objects(
+            self.http_client.get,
+            lambda bucket, query: self.presign(bucket, "", query=query),
+            base_dir,
+            recursive,
+        )
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about S3 objects via HEAD requests."""

@@ -49,6 +49,7 @@ class BaseConnector:
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
     requires_execution_context = False  # table_engine() needs the caller's ExecutionContext (e.g. for row-level permission filtering)
+    requires_variables = False  # table_engine() takes the query's system variables (`variables=`)
     requires_original_case = False  # table_engine() needs the relation name as typed in SQL, before the binder's case-folding lowercases node.relation
 
     def supports_forking(self, relation_name: str) -> bool:
@@ -167,6 +168,7 @@ class BaseTable:
     supports_distinct_pushdown = False  # one read = deduplicated rows (see DistinctPushable)
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
+    requires_variables = False  # the binder hands the reader the query's system variables (`.variables`)
     # Serves `row_group_key_bounds`: per-row-group integer min/max (and proven distinct
     # count) of one column, from footers it has already parsed (GroupLimitKeyBoundStrategy).
     supports_row_group_key_bounds = False
@@ -182,6 +184,12 @@ class BaseTable:
     # a mistyped column). Declaring it without implementing the retag makes the
     # plan and the reader disagree about a column's type.
     supports_int64_timestamp_retag = False
+
+    # How this reader's Avro / ORC data files are matched to the relation's columns.
+    # True: by Iceberg id (`field-id` / `iceberg.id`), against the TABLE's schema (a
+    # catalog table). False: by name, against the first file (a folder of .avro / .orc
+    # files; for Avro, as READ_AVRO).
+    data_files_match_field_ids = False
 
     # For a reader with NO file manifest (a remote database, where the rows come
     # over a socket rather than from files the engine reads itself): the

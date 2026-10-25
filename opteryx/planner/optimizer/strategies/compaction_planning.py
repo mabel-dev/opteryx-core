@@ -64,7 +64,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
 def plan_has_compaction(plan) -> bool:
@@ -75,8 +74,7 @@ def plan_has_compaction(plan) -> bool:
     than an optimization.
     """
     return (
-        len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.CompactionCommit,)))
-        > 0
+        plan.has_step(LogicalPlanStepType.CompactionCommit)
     )
 
 
@@ -109,9 +107,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
         return plan_has_compaction(plan)
 
     def complete(self, plan, context: OptimizerContext) -> object:
-        for nid, sink in get_nodes_of_type_from_logical_plan(
-            plan, (LogicalPlanStepType.CompactionCommit,)
-        ):
+        for nid, sink in plan.steps_of((LogicalPlanStepType.CompactionCommit,)):
             scan_id, scan = _source_below(plan, nid, LogicalPlanStepType.Scan)
             if scan is None or scan.manifest is None:
                 # No manifest means nothing committed. Not an error — an empty

@@ -1,5 +1,7 @@
 #include "_avro_column_wrap.hpp"
 
+#include "core/alloc.h"
+
 // Producer surface (resolved at load via RTLD_GLOBAL from draken_native.so).
 #include "vectors/_vector_bridge.h"
 
@@ -58,6 +60,20 @@ PyObject* wrap_avro_column(AvroColumn& c) {
                                               c.validity, c.length, c.type);
             break;
         case OutKind::Array:
+            if (c.child_col) {
+                // An array of arrays: wrap the child first (it takes its own buffers), then hang it
+                // under this level's offsets; draken moves the child's owner subtree into the parent.
+                PyObject* child = wrap_avro_column(*c.child_col);
+                if (child == nullptr) {
+                    draken_free(c.offsets);
+                    draken_free(c.validity);
+                    v = nullptr;
+                    break;
+                }
+                v = draken_vector_own_array_child(c.offsets, child, c.validity, c.length);
+                Py_DECREF(child);
+                break;
+            }
             if (c.child_type == DRAKEN_VARCHAR || c.child_type == DRAKEN_VARBINARY)
                 v = draken_vector_own_array(c.offsets, c.slots, c.arena, c.arena_len, c.child_length,
                                             c.child_type, c.child_validity, c.validity, c.length);

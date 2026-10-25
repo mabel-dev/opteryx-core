@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import dataclasses
 from collections import Counter
 from typing import Tuple
 
@@ -420,7 +419,7 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
     if "$derived" in context.schemas:
         derived_schema = context.schemas.pop("$derived")
         context.schemas["$project"] = derived_schema
-        context.rebind_schema(derived_schema, dataclasses.replace(derived_schema, name="$project"))
+        context.rebind_schema(derived_schema, derived_schema.replace(name="$project"))
     if "$derived" not in context.schemas:
         context.schemas["$derived"] = derived.schema()
 

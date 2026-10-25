@@ -1492,7 +1492,29 @@ cdef tuple _bloom_coalesce_policy(object coalesce_tuning):
     return (float(_config.PARQUET_IO_COALESCE_WASTE_RATIO), int(_config.PARQUET_IO_COALESCE_MAX_BYTES))
 
 
-cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path,
+cdef class _PrunePredicates:
+    """A scan's pushed predicates prepared ONCE for `_prune_row_groups`: the
+    column name as UTF-8 bytes, the operator code and the value, in predicate
+    order. Every file of the scan used to rebuild them."""
+    cdef list predicates
+    cdef vector[string] pcols
+    cdef vector[int] pops
+    cdef list pvals
+
+
+cdef _PrunePredicates _prepare_prune_predicates(list predicates):
+    cdef _PrunePredicates pp = _PrunePredicates()
+    pp.predicates = predicates
+    pp.pvals = []
+    for pred in predicates:
+        col_name, op, value = pred
+        pp.pcols.push_back(col_name.encode('utf-8'))   # str names from the binder
+        pp.pops.push_back(_pred_op_code(op))
+        pp.pvals.append(value)
+    return pp
+
+
+cdef list _prune_row_groups(const FileStats& fs, _PrunePredicates pp, str bloom_path,
                             double waste_ratio, int64_t max_bytes):
     """Indices of `fs`'s row groups that hold rows and survive the pushed `predicates`.
 
@@ -1513,28 +1535,35 @@ cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path
     on min/max only. A bloom whose length the footer does not record cannot be
     planned into a range read; it is probed on its own through TestBloomFilter,
     which parses the header to find its extent."""
-    cdef size_t rg_i, ci, n_rg = fs.row_groups.size()
+    cdef size_t rg_i, ci, pi, n_rg = fs.row_groups.size()
     cdef list keep = []
-    # Predicates prepared once per call (name bytes, operator code, value), on the
-    # first row group that holds rows — where the per-row-group loop first read them.
-    cdef vector[string] pcols
-    cdef vector[int] pops
-    cdef list pvals = []
-    cdef bint prepared = False
+    cdef list predicates = pp.predicates
+    # Each predicate's column chunk, and the statistic decode it needs, resolved ONCE
+    # per file: the parquet spec lists every row group's column chunks in the
+    # schema's leaf order, so row group 0's index is every row group's (the test
+    # checks the name per row group and raises if a file breaks that). -1 = the
+    # file holds no such column, which tests nothing — as the name scan did.
+    cdef vector[Py_ssize_t] pidx
+    cdef vector[int] pkind
+    cdef const RowGroupStats* rg0
+    if predicates and n_rg > 0:
+        rg0 = &fs.row_groups[0]
+        for pi in range(pp.pcols.size()):
+            pidx.push_back(-1)
+            pkind.push_back(_SK_DECODE_VALUE)
+            for ci in range(rg0.columns.size()):
+                if rg0.columns[ci].name == pp.pcols[pi]:
+                    pidx[pi] = <Py_ssize_t>ci
+                    pkind[pi] = _stat_kind(rg0.columns[ci])
+                    break
     for rg_i in range(n_rg):
         if fs.row_groups[rg_i].num_rows == 0:
             continue
         if not predicates:
             keep.append(rg_i)
             continue
-        if not prepared:
-            for pred in predicates:
-                col_name, op, value = pred
-                pcols.push_back(col_name.encode('utf-8'))   # str names from the binder
-                pops.push_back(_pred_op_code(op))
-                pvals.append(value)
-            prepared = True
-        if _rg_passes_predicates_native(fs.row_groups[rg_i], pcols, pops, pvals):
+        if _rg_passes_predicates_native(fs.row_groups[rg_i], pp.pcols, pidx, pkind,
+                                        pp.pops, pp.pvals):
             keep.append(rg_i)
     if bloom_path is None or not keep or not predicates:
         return keep
@@ -1882,14 +1911,17 @@ cdef int _pred_op_code(object op):
 
 
 cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, const vector[string]& pcols,
+                                       const vector[Py_ssize_t]& pidx, const vector[int]& pkind,
                                        const vector[int]& pops, list pvals):
     """Evaluate AND-combined predicates against RowGroupStats min/max without
     materialising a Python dict. Bloom membership is NOT tested here — it needs
     the file's bloom bytes, which `_prune_row_groups` reads once per file for
     every row group this test keeps.
 
-    The predicates arrive PREPARED by `_prune_row_groups` (column name as UTF-8
-    bytes, operator code, value), once per call rather than once per row group.
+    The predicates arrive PREPARED (column name as UTF-8 bytes, operator code,
+    value) once per scan, and with each one's chunk index and statistic decode
+    resolved once per file by `_prune_row_groups` (-1 = the file has no such
+    column: nothing to test).
 
     Every test below assumes the row group's values lie in [min_val, max_val].
     That is FALSE for a float column holding a NaN — Parquet keeps NaN out of
@@ -1903,18 +1935,21 @@ cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, const vector[str
     cdef object min_val, max_val, value
 
     for pi in range(pcols.size()):
+        if pidx[pi] < 0:
+            continue
+        i = <size_t>pidx[pi]
+        if i >= rg.columns.size() or rg.columns[i].name != pcols[pi]:
+            raise ValueError(
+                "parquet row group lists its column chunks in a different order from "
+                "row group 0 (column " + pcols[pi].decode("utf-8", "replace") + ")")
         op = pops[pi]
         value = pvals[pi]
-        for i in range(rg.columns.size()):
-            if rg.columns[i].name != pcols[pi]:
-                continue
-            kind = _stat_kind(rg.columns[i])
-            min_val = _stat_value(kind, rg.columns[i], rg.columns[i].min) \
-                if rg.columns[i].has_min else None
-            max_val = _stat_value(kind, rg.columns[i], rg.columns[i].max) \
-                if rg.columns[i].has_max else None
-            if min_val is None or max_val is None:
-                break
+        kind = pkind[pi]
+        min_val = _stat_value(kind, rg.columns[i], rg.columns[i].min) \
+            if rg.columns[i].has_min else None
+        max_val = _stat_value(kind, rg.columns[i], rg.columns[i].max) \
+            if rg.columns[i].has_max else None
+        if min_val is not None and max_val is not None:
             try:
                 if op == _OP_EQ:
                     if value < min_val or value > max_val:
@@ -1946,7 +1981,6 @@ cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, const vector[str
                         return False
             except TypeError:
                 pass
-            break
     return True
 
 
@@ -3019,6 +3053,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     cdef double bloom_waste_ratio
     cdef int64_t bloom_max_bytes
     bloom_waste_ratio, bloom_max_bytes = _bloom_coalesce_policy(coalesce_tuning)
+    cdef _PrunePredicates prune_preds = _prepare_prune_predicates(predicates or [])
 
     work_items = []
 
@@ -3087,7 +3122,7 @@ cpdef IpcRowGroupSource open_ipc_source(
             # with pread, which cannot read URLs).
             cpp_path_str = orig_to_cpp.get(path, path)
             bloom_path = cpp_path_str if _is_local_path(cpp_path_str) else None
-            kept = _prune_row_groups(deref(fsp), predicates or [], bloom_path,
+            kept = _prune_row_groups(deref(fsp), prune_preds, bloom_path,
                                      bloom_waste_ratio, bloom_max_bytes)
             src.pruned_row_group_count += <int>fsp.row_groups.size() - len(kept)
             for rg_i in kept:
@@ -3696,7 +3731,6 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef int64_t max_rg_bytes = 0
     cdef int64_t rg_bytes
     cdef int64_t est_rg, dyn_pool_size
-    cdef list work_items = []
     cdef uint64_t _footer_t0
     cdef str fetch_url
     cdef dict orig_to_cpp
@@ -3768,6 +3802,36 @@ cpdef NativeScanPlan open_native_scan_plan(
         bloom_projected.add(pred[0].encode('utf-8'))
     cdef ParquetBloomProbe bprobe
     cdef dict remote_probes
+    cdef _PrunePredicates prune_preds = _prepare_prune_predicates(predicates or [])
+    # ONE pass per file builds the C++ work list and everything sized from it — the
+    # largest projected row group (pool sizing), the chunk-cache fill bytes, whether
+    # anything is remote, the remote items the fetch-block count needs: the path is
+    # encoded once, the footer looked up once, the projected chunk indices resolved
+    # once, and the per-row-group loop touches C++ data only. It used to emit a
+    # Python (path, rg) tuple per row group and walk that list three more times,
+    # re-encoding the path and re-finding the footer per item (MEASURED 2026-10-25,
+    # ClickBench Q01, 1,114 row groups: compile 1.16 ms of a 6.8 ms query).
+    #
+    # The projected chunk INDICES are resolved once per FILE — a parquet file's row
+    # groups all list their chunks in the file's schema leaf order. Matching by name
+    # per row group per column built a Python bytes object for every chunk in the
+    # footer: at 64k row groups over 105 columns that was ~166k allocations and
+    # ~20 ms of the plan time of EVERY query (measured 2026-09-24).
+    #
+    # The cache-fill walk sums what a full chunk-cache fill of this scan would hold
+    # (NativeScanPlan.cache_fill_bytes): the decoder fills a chunk only when it is
+    # compressed or remote (decode_column.cpp DecodeColumnFromChunk), and an image
+    # is the chunk's total_uncompressed_size (ChunkPageSource).
+    cdef vector[string] proj_names
+    for name in column_names:
+        proj_names.push_back(name.encode('utf-8'))
+    cdef vector[size_t] proj_idx
+    cdef size_t pk
+    cdef const RowGroupStats* rg0
+    cdef int64_t fill_bytes = 0
+    cdef bint fill_remote, scan_remote
+    cdef bint _remote_scan = False
+    cdef list remote_work_items = []
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
         path_bytes_cpp = fetch_url.encode('utf-8')
@@ -3794,7 +3858,7 @@ cpdef NativeScanPlan open_native_scan_plan(
         # None for remote — blooms are read with pread, which cannot read a URL, so
         # a remote scan prunes on min/max stats only.
         bloom_path = fetch_url if _is_local_path(fetch_url) else None
-        kept = _prune_row_groups(deref(fsp), predicates or [], bloom_path,
+        kept = _prune_row_groups(deref(fsp), prune_preds, bloom_path,
                                  bloom_waste_ratio, bloom_max_bytes)
         plan.pruned_items += <int>fsp.row_groups.size() - len(kept)
         # A REMOTE file's blooms are not read here (that would be a serial round
@@ -3807,6 +3871,19 @@ cpdef NativeScanPlan open_native_scan_plan(
                 if remote_probes is None:
                     remote_probes = {}
                 remote_probes.setdefault(rg_b, []).append((b_off, b_len, b_needles))
+        # Per file: the two remote tests exactly as their consumers made them — the
+        # chunk-cache fill counts a non-local path, the scan's remote flag (and the
+        # fetch-block count) a gs:// / http(s):// one.
+        fill_remote = not _is_local_path(fetch_url)
+        scan_remote = _any_remote_path((fetch_url,))
+        proj_idx.clear()
+        if fsp.row_groups.size() > 0:
+            rg0 = &fsp.row_groups[0]
+            for pk in range(proj_names.size()):
+                for ci in range(rg0.columns.size()):
+                    if rg0.columns[ci].name == proj_names[pk]:
+                        proj_idx.push_back(ci)
+                        break
         for rg_i in kept:
             if request is not None:
                 verdict = parquet_cover_row_group(deref(fsp), <size_t>rg_i, request.req.spec,
@@ -3826,61 +3903,27 @@ cpdef NativeScanPlan open_native_scan_plan(
                     for b_needle in b_needles:
                         bprobe.needles.push_back(<bytes>b_needle)
                     plan.bloom_probes.push_back(bprobe)
-            # Both work-item lists carry the FETCH url: the Python one is re-encoded
-            # below to index footer_map, the C++ one is what the Source fetches.
-            work_items.append((fetch_url, rg_i))
+            # The work item carries the FETCH url: it is what the Source fetches.
             plan.work_items.push_back(pair[string, int](path_bytes_cpp, <int>rg_i))
+            rgp = &fsp.row_groups[rg_i]
+            rg_bytes = 0
+            for ci in proj_idx:
+                if rgp.columns[ci].total_uncompressed_size > 0:
+                    rg_bytes += rgp.columns[ci].total_uncompressed_size
+                    if rgp.columns[ci].codec != 0 or fill_remote:
+                        fill_bytes += rgp.columns[ci].total_uncompressed_size
+            if rg_bytes > max_rg_bytes:
+                max_rg_bytes = rg_bytes
+            if scan_remote:
+                _remote_scan = True
+                remote_work_items.append((fetch_url, rg_i))
 
     if request is not None:
         plan.coverage_seed = coverage_seed(request.req, request.n_aggs, request.n_keys)
 
-    plan.n_items = len(work_items)
+    plan.n_items = <int>plan.work_items.size()
     if plan.n_items == 0:
         return plan
-
-    # Largest projected row group (uncompressed), for the pool sizing below. The
-    # projected columns' chunk INDICES are resolved once per FILE — a parquet
-    # file's row groups all list their chunks in the file's schema leaf order —
-    # and reused for every row group of that file. Matching by name per row
-    # group per column built a Python bytes object for every chunk in the
-    # footer: at 64k row groups over 105 columns that was ~166k allocations
-    # and ~20 ms of the plan time of EVERY query (measured 2026-09-24).
-    cdef vector[string] proj_names
-    cdef dict proj_idx_by_path = {}
-    cdef list proj_idx
-    cdef size_t pk
-    # The same walk also sums what a full chunk-cache fill of this scan would hold
-    # (NativeScanPlan.cache_fill_bytes): the decoder fills a chunk only when it is
-    # compressed or remote (decode_column.cpp DecodeColumnFromChunk), and an image
-    # is the chunk's total_uncompressed_size (ChunkPageSource).
-    cdef dict remote_by_path = {}
-    cdef bint path_remote
-    cdef int64_t fill_bytes = 0
-    for name in column_names:
-        proj_names.push_back(name.encode('utf-8'))
-    max_rg_bytes = 0
-    for path, rg_idx in work_items:
-        path_bytes_cpp = path.encode('utf-8')
-        rgp = &deref(plan.footer_map[0][path_bytes_cpp]).row_groups[rg_idx]
-        proj_idx = proj_idx_by_path.get(path)
-        if proj_idx is None:
-            proj_idx = []
-            for pk in range(proj_names.size()):
-                for ci in range(rgp.columns.size()):
-                    if rgp.columns[ci].name == proj_names[pk]:
-                        proj_idx.append(ci)
-                        break
-            proj_idx_by_path[path] = proj_idx
-            remote_by_path[path] = not _is_local_path(path)
-        path_remote = remote_by_path[path]
-        rg_bytes = 0
-        for ci in proj_idx:
-            if rgp.columns[ci].total_uncompressed_size > 0:
-                rg_bytes += rgp.columns[ci].total_uncompressed_size
-                if rgp.columns[ci].codec != 0 or path_remote:
-                    fill_bytes += rgp.columns[ci].total_uncompressed_size
-        if rg_bytes > max_rg_bytes:
-            max_rg_bytes = rg_bytes
     plan.cache_fill_bytes = fill_bytes
 
     # No in-flight override reaches this path (see the parameter list); the
@@ -3890,7 +3933,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     _validate_fetch_ahead(remote_decode_workers, fetch_ahead, 0)
     fetch_ahead = _gated_fetch_ahead(
         fetch_ahead, fetch_ahead_min_blocks,
-        _count_remote_fetch_blocks_native(work_items, plan.footer_map, list(column_names)),
+        _count_remote_fetch_blocks_native(remote_work_items, plan.footer_map, list(column_names)),
     )
     plan.in_flight_limit = _submission_window(
         decode_workers, remote_decode_workers, fetch_ahead, in_flight_limit_override)
@@ -3898,7 +3941,6 @@ cpdef NativeScanPlan open_native_scan_plan(
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
         dyn_pool_size = 256*1024*1024
-    cdef bint _remote_scan = _any_remote_path([_wi_path for _wi_path, _ in work_items])
     cdef shared_ptr[PriorityPool] _shared_handle
     # LOCAL scans decode on a process-lifetime pool (`_local_decode_pool`), so no
     # query constructs or joins threads; a scan with fewer work items than threads

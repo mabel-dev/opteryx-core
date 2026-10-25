@@ -158,6 +158,52 @@ private:
     bool started_ = false;
 };
 
+// ── Spin-then-block acquisition ──────────────────────────────────────────────
+// For a mutex whose critical sections are a few hundred nanoseconds but which
+// many threads take per row group (ParquetIOPipeline::queue_mutex_). A thread
+// that BLOCKS on a contended std::mutex sleeps in the kernel and is woken and
+// rescheduled only after ~20 µs. MEASURED 2026-10-25 (Mac M5 Pro, 16 workers,
+// ClickBench Q01): the queue lock was HELD 1.2 ms per query (~0.3 µs per hold)
+// while its acquirers WAITED ~90 thread-ms — the lock was mostly free, the cost
+// was the sleep. Spinning on try_lock first takes it as soon as the holder lets
+// go. Bounded by TIME, not iterations: the spin hint costs ~1 cycle (ARM
+// `yield`) to ~140 cycles (x86 `pause`). Only acquisition spins: the returned
+// lock is an ordinary unique_lock, so std::condition_variable waits (and their
+// relock on wake) are untouched. docs/PARQUET_LOCAL_LAZY_MAPPING.md §7–§8.
+// The spin budget per architecture (MEASURED 2026-10-25, docs/PARQUET_LOCAL_LAZY_MAPPING.md §8):
+// past it the acquirer blocks exactly as std::mutex::lock would. arm64 (M5 Pro):
+// Q01 0.78, knee at 4 µs, 16 µs costs a string GROUP BY 2%. x86-64 (i5-8500,
+// glibc): no gain at any budget from 1 to 16 µs — so no spin there.
+#if defined(__aarch64__)
+inline constexpr std::chrono::nanoseconds kQueueSpinBudget{4000};
+#else
+inline constexpr std::chrono::nanoseconds kQueueSpinBudget{0};
+#endif
+inline std::chrono::nanoseconds queue_spin_budget() { return kQueueSpinBudget; }
+
+inline void spin_hint() {
+#if defined(__aarch64__)
+    asm volatile("yield" ::: "memory");
+#elif defined(__x86_64__)
+    __builtin_ia32_pause();
+#endif
+}
+
+inline std::unique_lock<std::mutex> spin_then_lock(std::mutex& m) {
+    if (m.try_lock()) return std::unique_lock<std::mutex>(m, std::adopt_lock);
+    const std::chrono::nanoseconds budget = queue_spin_budget();
+    if (budget.count() > 0) {   // a zero budget is a plain blocking lock
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        do {
+            for (int i = 0; i < 16; ++i) {
+                spin_hint();
+                if (m.try_lock()) return std::unique_lock<std::mutex>(m, std::adopt_lock);
+            }
+        } while (std::chrono::steady_clock::now() < deadline);
+    }
+    return std::unique_lock<std::mutex>(m);
+}
+
 
 // ── Local file table (process lifetime) ──────────────────────────────────────
 // One descriptor and, on first need, one whole-file read-only mapping per LOCAL
@@ -2099,8 +2145,9 @@ class ParquetIOPipeline {
     // decode_pool_->wait() would then block on unrelated tasks finishing, which is
     // wrong; shutdown must instead drain only THIS pipeline's own pending_work_.
     bool owns_pool_ = true;
-    // Multi-producer (4 decode workers) / single-consumer (Python-side caller)
-    // queue. Lock contention is negligible vs the IO/decode cost per item.
+    // Multi-producer (decode tickets) / multi-consumer (every engine worker
+    // pulls) queue. Taken through spin_then_lock: on short scans the cost was
+    // the contended acquisitions' kernel sleeps, not the hold time.
     std::deque<MorselRef> result_queue_;
     // Gap #3 Phase 2b (deadlock fix): claimable queue of not-yet-decoded work,
     // guarded by queue_mutex_. submit_row_group pushes the WorkItem HERE and
@@ -2360,7 +2407,7 @@ class ParquetIOPipeline {
         if (n <= 0) return;
         which.fetch_sub(n, std::memory_order_relaxed);
         if (memory_budget_bytes_ > 0) {
-            { std::lock_guard<std::mutex> lk(queue_mutex_); }
+            { const auto lk = spin_then_lock(queue_mutex_); }
             queue_cv_.notify_all();
         }
     }
@@ -2966,7 +3013,7 @@ class ParquetIOPipeline {
     void run_one_pending() {
         WorkItem item;
         {
-            std::unique_lock<std::mutex> lk(queue_mutex_);
+            std::unique_lock<std::mutex> lk = spin_then_lock(queue_mutex_);
             if (pending_items_.empty()) return;
             if (memory_budget_bytes_ > 0) {
                 // Memory admission: wait while what consumers will release is
@@ -3062,7 +3109,7 @@ class ParquetIOPipeline {
         const size_t n = items.size();
         if (n == 0) return;
         {
-            std::lock_guard<std::mutex> lk(queue_mutex_);
+            const auto lk = spin_then_lock(queue_mutex_);
             for (WorkItem& it : items) pending_items_.push_back(std::move(it));
         }
         items.clear();
@@ -3117,7 +3164,7 @@ class ParquetIOPipeline {
                 return;
             }
             if (memory_budget_bytes_ > 0) {
-                std::unique_lock<std::mutex> lk(queue_mutex_);
+                std::unique_lock<std::mutex> lk = spin_then_lock(queue_mutex_);
                 auto admissible = [this, block_bytes]() {
                     if (shutdown_.load(std::memory_order_relaxed) ||
                         cancelled_.load(std::memory_order_relaxed)) return true;
@@ -4365,7 +4412,7 @@ class ParquetIOPipeline {
         // on the condition variable until it drains rather than spin-yielding.
         {
             auto t_bp = std::chrono::steady_clock::now();
-            std::unique_lock<std::mutex> lk(queue_mutex_);
+            std::unique_lock<std::mutex> lk = spin_then_lock(queue_mutex_);
             queue_cv_.wait(lk, [this]() {
                 return result_queue_.size() < queue_capacity_
                     || shutdown_.load(std::memory_order_relaxed)
@@ -4972,7 +5019,7 @@ class ParquetIOPipeline {
     void post_result(MorselRef&& r) {
         if (shutdown_) return;
         {
-            std::lock_guard<std::mutex> lk(queue_mutex_);
+            const auto lk = spin_then_lock(queue_mutex_);
             result_queue_.push_back(std::move(r));
             enqueue_count_.fetch_add(1, std::memory_order_relaxed);
         }
@@ -4980,7 +5027,7 @@ class ParquetIOPipeline {
     }
 
     bool try_get_result(MorselRef& out) {
-        std::lock_guard<std::mutex> lk(queue_mutex_);
+        const auto lk = spin_then_lock(queue_mutex_);
         if (result_queue_.empty()) return false;
         out = std::move(result_queue_.front());
         result_queue_.pop_front();
@@ -5008,7 +5055,7 @@ class ParquetIOPipeline {
      * Returns false when the pipeline is shut down and the queue is empty.
      */
     bool wait_and_get_result(MorselRef& out) {
-        std::unique_lock<std::mutex> lk(queue_mutex_);
+        std::unique_lock<std::mutex> lk = spin_then_lock(queue_mutex_);
         while (true) {
             if (!result_queue_.empty()) {
                 out = std::move(result_queue_.front());
@@ -5035,7 +5082,7 @@ class ParquetIOPipeline {
                 inline_decodes_.fetch_add(1, std::memory_order_relaxed);
                 lk.unlock();
                 decode_row_group(item);  // does its own queue_mutex_ locking + notify
-                lk.lock();
+                lk = spin_then_lock(queue_mutex_);
                 continue;  // our decode likely enqueued a result — re-check
             }
             // Nothing ready and nothing to help with: sleep until a pool worker

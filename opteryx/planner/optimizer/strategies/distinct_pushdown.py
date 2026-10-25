@@ -41,7 +41,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 """
 Aggregations we can push the DISTINCT past
@@ -186,5 +185,4 @@ class DistinctPushdownStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan):
         # only run if there are DISTINCT clauses in the plan
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Distinct,))
-        return len(candidates) > 0
+        return plan.has_step(LogicalPlanStepType.Distinct)

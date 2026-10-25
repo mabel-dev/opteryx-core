@@ -192,6 +192,43 @@ def _skene_scan_inputs(scan):
     return scan.manifest.get_file_paths(), read_schema_columns
 
 
+def _avro_scan_inputs(scan, dataset: str):
+    """A manifest-backed Avro Scan's reader inputs: (files, reader-schema field name per
+    projected column, reader schema). Which of the two shapes it is is the connector's
+    to declare (`data_files_match_field_ids`).
+
+    A catalog table: the reader schema is the TABLE's
+    (opteryx.connectors.avro_io.table_reader_schema), built from every column the
+    relation binds, so a file is read as the schema the query was bound against,
+    whatever the file's own schema says; fields are matched by field id. A projected
+    column the Avro scan cannot read raises here, naming it.
+
+    A folder of .avro files: as READ_AVRO, the reader schema is the first file's writer
+    schema and fields are matched by name; scan schema columns are file-named.
+
+    No predicate is pushed into this reader (both connectors decline them for an AVRO
+    dataset), so none is carried.
+    """
+    files = scan.manifest.get_file_paths()
+    if scan.connector.data_files_match_field_ids:
+        from opteryx.connectors.avro_io import table_field_name
+        from opteryx.connectors.avro_io import table_reader_schema
+
+        return (
+            files,
+            [table_field_name(dataset, column.schema_column) for column in (scan.columns or [])],
+            table_reader_schema(scan.schema.columns),
+        )
+
+    from opteryx.connectors.avro_io import first_file_reader_schema
+
+    return (
+        files,
+        [column.schema_column.name for column in (scan.columns or [])],
+        first_file_reader_schema(scan.connector.filesystem, files[0]),
+    )
+
+
 def _scan_reader_for_manifest(manifest, dataset: str) -> str:
     """Operator-registry name for a manifest-backed Scan, dispatched on the
     dataset's format (Manifest.file_formats — datasets are single-format).
@@ -381,6 +418,30 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
                 physical_by_identity[column.schema_column.identity]
                 for column in (logical_node.columns or [])
             ],
+            avro_files=list(logical_node.avro_files),
+            avro_reader_schema=logical_node.avro_reader_schema,
+            avro_credentialed_filesystem=logical_node.avro_credentialed_filesystem,
+            avro_manifest_scan=False,
+            avro_require_field_ids=False,
+        )
+    if logical_node.function == "READ_ORC":
+        # READ_ORC is a native scan (NativeOrcScanSource). Projection only: ORC statistics are
+        # not used and no predicate is pushed into the reader, so every predicate stays a
+        # Filter above it. Columns are matched by name against the first file's footer.
+        physical_by_identity = logical_node.orc_physical_by_identity or {}
+        return registry.create(
+            "ORC Reader",
+            query_properties,
+            logical_node,
+            orc_physical_columns=[
+                physical_by_identity[column.schema_column.identity]
+                for column in (logical_node.columns or [])
+            ],
+            orc_files=list(logical_node.orc_files),
+            orc_reader_columns=list(logical_node.orc_reader_columns),
+            orc_match_by_id=False,
+            orc_credentialed_filesystem=logical_node.orc_credentialed_filesystem,
+            orc_function_scan=True,
         )
     return registry.create("Function Dataset", query_properties, logical_node)
 
@@ -632,6 +693,38 @@ def _build_scan_node(logical_node, query_properties, registry):
                 jsonl_files=files,
                 jsonl_physical_columns=physical_columns,
                 jsonl_predicates=predicates,
+            )
+        if reader_name == "Avro Reader":
+            files, physical_columns, reader_schema = _avro_scan_inputs(
+                logical_node, str(logical_node.relation or "")
+            )
+            return registry.create(
+                reader_name,
+                query_properties,
+                logical_node,
+                avro_physical_columns=physical_columns,
+                avro_files=files,
+                avro_reader_schema=reader_schema,
+                avro_credentialed_filesystem=None,
+                avro_manifest_scan=True,
+                avro_require_field_ids=logical_node.connector.data_files_match_field_ids,
+            )
+        if reader_name == "ORC Reader":
+            from opteryx.connectors.orc_io import reader_columns
+
+            dataset = str(logical_node.relation or "")
+            match_by_id = logical_node.connector.data_files_match_field_ids
+            columns = [column.schema_column for column in (logical_node.columns or [])]
+            return registry.create(
+                reader_name,
+                query_properties,
+                logical_node,
+                orc_physical_columns=[column.name for column in columns],
+                orc_files=logical_node.manifest.get_file_paths(),
+                orc_reader_columns=reader_columns(dataset, columns, match_by_id),
+                orc_match_by_id=match_by_id,
+                orc_credentialed_filesystem=None,
+                orc_function_scan=False,
             )
         if reader_name == "Skene Reader":
             files, read_schema_columns = _skene_scan_inputs(logical_node)

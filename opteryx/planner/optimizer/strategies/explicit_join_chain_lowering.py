@@ -205,5 +205,5 @@ class ExplicitJoinChainLoweringStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return any(
             _is_explicit_inner_join(node) and _is_left_child_of_explicit_join(plan, nid)
-            for nid, node in plan.nodes(True)
+            for nid, node in plan.steps_of((LogicalPlanStepType.Join,))
         )

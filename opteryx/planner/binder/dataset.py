@@ -101,6 +101,8 @@ _READ_CSV_OPTIONS = (
 _READ_PARQUET_OPTIONS = ("credentials",)
 # READ_AVRO, likewise: the schema is in the file's header.
 _READ_AVRO_OPTIONS = ("credentials",)
+# READ_ORC, likewise: the schema is in the file's footer.
+_READ_ORC_OPTIONS = ("credentials",)
 
 
 def _is_glob_pattern(path: str) -> bool:
@@ -295,6 +297,74 @@ def _resolve_glob_files(path: str, filesystem) -> list:
     candidates = filesystem.list_files(base_dir, recursive=True)
     matched = [p for p in candidates if fnmatch.fnmatch(p, path)]
     return sorted(matched)
+
+
+def _bare_reader_source(function: str, example: str, node, context, options):
+    """The front half every bare file-reading function shares (READ_AVRO, READ_ORC): the literal
+    path argument, the scheme rules, the filesystem it is read through, and the matched files.
+    Returns (path, files, filesystem, credential).
+
+    THE RULE (docs/ANONYMOUS_REMOTE_READS_DESIGN.md §0): a bare function NEVER uses the platform's
+    credentials. A user-supplied gs:// / s3:// path is read - and, for a glob, LISTED - through the
+    anonymous filesystems, with no credential at all; the store's own ACL decides, and a bucket that
+    does not allow anonymous listing fails the query saying so. Only `credentials =>` reads with a
+    credential, and that is the CUSTOMER's stored secret, scope-checked per file."""
+    from opteryx.connectors.io_systems import create_filesystem
+    from opteryx.exceptions import DatasetNotFoundError
+
+    path_arg = node.args[0] if node.args else None
+    if path_arg is not None and path_arg.node_type == NodeType.NESTED:
+        path_arg = path_arg.centre
+    if (
+        path_arg is None
+        or path_arg.node_type != NodeType.LITERAL
+        or type(path_arg.value) is not bytes
+    ):
+        raise InvalidFunctionParameterError(
+            f"{function} requires a single string literal path, e.g. {function}('{example}')."
+        )
+    path = path_arg.text()
+    named_args = node.named_args or {}
+    _validate_reader_options(function, node.args, named_args, options)
+
+    protocol = path.split("://")[0] if "://" in path else ""
+    is_glob = _is_glob_pattern(path)
+    # The READ_JSONL scheme rules, for the same reasons (see that branch).
+    if protocol == "gcs":
+        raise InvalidFunctionParameterError(
+            f"{function}('{path}'): 'gcs://' is not a supported scheme; use 'gs://'."
+        )
+    if protocol == "file":
+        raise InvalidFunctionParameterError(
+            f"{function}('{path}'): 'file://' is not a supported scheme; use the local path."
+        )
+
+    credential = _read_credential(function, path, protocol, named_args, context)
+    if credential is not None:
+        filesystem = _credentialed_filesystem(credential, protocol)
+    elif protocol == "gs":
+        from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
+            anonymous_gcs_filesystem,
+        )
+
+        filesystem = anonymous_gcs_filesystem()
+    elif protocol == "s3":
+        from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+            anonymous_s3_filesystem,
+        )
+
+        filesystem = anonymous_s3_filesystem()
+    else:
+        filesystem = create_filesystem(protocol)
+
+    if is_glob:
+        files = _resolve_glob_files(path, filesystem)
+        if not files:
+            raise DatasetNotFoundError(connector=function, dataset=path)
+    else:
+        files = [path]
+    _check_credential_scope(function, credential, files)
+    return path, files, filesystem, credential
 
 
 # How each rejected argument shape is named back to the writer. Naming the shape
@@ -663,22 +733,18 @@ def visit_function_dataset(
         # never the ambient bearer token. GCS's own object-level IAM decides the
         # outcome: a public object (e.g. gs://opteryx/...) is read; a private one
         # (e.g. gs://opteryx_data/...) 403s from GCS itself, not from any allow/deny
-        # decision Opteryx makes. Bucket LISTING is a separate IAM permission from
-        # object GET and is not assumed granted anonymously, so a glob pattern over
-        # gs:// is rejected outright rather than silently escalating to an
-        # authenticated listing call. This does not touch create_filesystem itself,
-        # so catalog-backed GCS read paths (visit_scan) are unaffected; READ_PARQUET
-        # below applies the identical restriction for the identical reason.
+        # decision Opteryx makes. A glob pattern LISTS the prefix, and that is tried
+        # anonymously too (anonymous_gcs_filesystem.list_files: no Authorization header);
+        # a bucket that does not allow anonymous listing fails the query saying so and is
+        # NEVER retried with a credential (docs/ANONYMOUS_REMOTE_READS_DESIGN.md). This does
+        # not touch create_filesystem itself, so catalog-backed GCS read paths (visit_scan)
+        # are unaffected; READ_PARQUET, READ_CSV and READ_AVRO below follow the same rule.
         credential = _read_credential("READ_JSONL", path, protocol, named_args, context)
         if credential is not None:
             # A customer's own credential: listing is the store's to allow, so
             # globs work here - each expanded file is checked against SCOPE below.
             filesystem = _credentialed_filesystem(credential, protocol)
         elif protocol == "gs":
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_JSONL('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
-                )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
             )
@@ -688,10 +754,6 @@ def visit_function_dataset(
             # SECURITY: the S3 twin of the gs:// branch above, for the same reason -
             # create_filesystem("s3") signs with this process's own AWS credential
             # chain. See anonymous_s3_filesystem's docstring.
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_JSONL('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly, or read the whole prefix without a wildcard."
-                )
             from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
                 anonymous_s3_filesystem,
             )
@@ -905,75 +967,12 @@ def visit_function_dataset(
             node.connector.credentialed_filesystem = filesystem
     elif node.function == "READ_AVRO":
         from opteryx.connectors.avro_io import header_schema
-        from opteryx.connectors.io_systems import create_filesystem
-        from opteryx.exceptions import DatasetNotFoundError
         from opteryx.exceptions import DatasetReadError
         from opteryx.exceptions import NotSupportedError
 
-        path_arg = node.args[0] if node.args else None
-        if path_arg is not None and path_arg.node_type == NodeType.NESTED:
-            path_arg = path_arg.centre
-        if (
-            path_arg is None
-            or path_arg.node_type != NodeType.LITERAL
-            or type(path_arg.value) is not bytes
-        ):
-            raise InvalidFunctionParameterError(
-                "READ_AVRO requires a single string literal path, e.g. READ_AVRO('file.avro')."
-            )
-        path = path_arg.text()
-        named_args = node.named_args or {}
-        _validate_reader_options("READ_AVRO", node.args, named_args, _READ_AVRO_OPTIONS)
-
-        protocol = path.split("://")[0] if "://" in path else ""
-        is_glob = _is_glob_pattern(path)
-        # The READ_JSONL scheme rules, for the same reasons (see that branch).
-        if protocol == "gcs":
-            raise InvalidFunctionParameterError(
-                f"READ_AVRO('{path}'): 'gcs://' is not a supported scheme; use 'gs://'."
-            )
-        if protocol == "file":
-            raise InvalidFunctionParameterError(
-                f"READ_AVRO('{path}'): 'file://' is not a supported scheme; use the local path."
-            )
-
-        # SECURITY: as READ_JSONL — a bare dataset function never reads a user-supplied
-        # gs:// / s3:// path with this process's own credentials. Without `credentials`
-        # it reads anonymously (the store's ACL decides) and a glob is refused, since
-        # listing is not assumed to be granted anonymously.
-        credential = _read_credential("READ_AVRO", path, protocol, named_args, context)
-        if credential is not None:
-            filesystem = _credentialed_filesystem(credential, protocol)
-        elif protocol == "gs":
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_AVRO('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly."
-                )
-            from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
-                anonymous_gcs_filesystem,
-            )
-
-            filesystem = anonymous_gcs_filesystem()
-        elif protocol == "s3":
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_AVRO('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly."
-                )
-            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
-                anonymous_s3_filesystem,
-            )
-
-            filesystem = anonymous_s3_filesystem()
-        else:
-            filesystem = create_filesystem(protocol)
-
-        if is_glob:
-            avro_files = _resolve_glob_files(path, filesystem)
-            if not avro_files:
-                raise DatasetNotFoundError(connector="READ_AVRO", dataset=path)
-        else:
-            avro_files = [path]
-        _check_credential_scope("READ_AVRO", credential, avro_files)
+        path, avro_files, filesystem, credential = _bare_reader_source(
+            "READ_AVRO", "file.avro", node, context, _READ_AVRO_OPTIONS
+        )
 
         # The relation schema is the FIRST file's (matches sorted by path), read from its
         # header alone. Every file is then read with that schema as its READER schema,
@@ -1025,6 +1024,62 @@ def visit_function_dataset(
         node.avro_credentialed_filesystem = filesystem if credential is not None else None
         # No predicate is pushed into the reader (Avro has no statistics), so no
         # connector: every predicate stays a Filter above the scan.
+    elif node.function == "READ_ORC":
+        from opteryx.connectors.orc_io import header_schema
+        from opteryx.connectors.orc_io import reader_columns
+        from opteryx.exceptions import DatasetReadError
+        from opteryx.exceptions import NotSupportedError
+
+        path, orc_files, filesystem, credential = _bare_reader_source(
+            "READ_ORC", "file.orc", node, context, _READ_ORC_OPTIONS
+        )
+
+        # The relation schema is the FIRST file's footer (matches sorted by path), and every file is
+        # then read as it, matched by name: a column a later file lacks is NULL, a narrower integer
+        # or float widens, and a file that cannot be read that way fails the query naming it
+        # (docs/ORC_READER_DESIGN.md). An ORC file states its schema even with no rows.
+        file_obj = filesystem.open_input_file(orc_files[0])
+        try:
+            columns = header_schema(file_obj.memoryview, md_code(orc_files[0]))
+        except RuntimeError as err:
+            raise DatasetReadError(
+                f"The ORC file {md_code(orc_files[0])} could not be read. {md_cause(err)}"
+            ) from err
+        finally:
+            file_obj.close()
+
+        if node.column_aliases:
+            raise NotSupportedError(
+                f"READ_ORC('{path}') AS alias(...) is not supported -- only AS alias "
+                "(renaming the relation, not its columns) is. Use a **SELECT** ... AS "
+                "new_name wrapper to rename individual columns."
+            )
+
+        relation_name = node.alias or f"$read_orc-{random_string()}"
+        schema_columns = [
+            context.plan_context.columns.relation_column(
+                relation_name, name, column_type=column_type, origin=[relation_name]
+            )
+            for name, column_type in columns
+        ]
+        schema = RelationSchema(name=relation_name, columns=schema_columns)
+        context.schemas[relation_name] = schema
+
+        node.alias = relation_name
+        # node.columns is left unset, as for READ_AVRO: projection pushdown fills it.
+        node.schema = schema
+        node.dataset = path
+        node.orc_files = orc_files
+        node.orc_physical_columns = [name for name, _ in columns]
+        node.orc_physical_by_identity = {
+            schema_column.identity: name
+            for (name, _), schema_column in zip(columns, schema_columns)
+        }
+        node.orc_reader_columns = reader_columns(path, schema_columns, match_by_id=False)
+        # With `credentials`, the reader signs each file's URL with this filesystem
+        # (OrcReadNode.native_scan_locations); otherwise it re-derives the anonymous one from the
+        # path's scheme. No predicate is pushed into the reader, so no connector.
+        node.orc_credentialed_filesystem = filesystem if credential is not None else None
     elif node.function == "READ_PARQUET":
         from opteryx.connectors._rugo_schema import rugo_to_relation_schema
         from opteryx.connectors.filesystem_connector import FileSystemTable
@@ -1085,10 +1140,6 @@ def visit_function_dataset(
             filesystem = _credentialed_filesystem(credential, protocol)
             storage_type = "GCS" if protocol == "gs" else "S3"
         elif protocol == "gs":
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_PARQUET('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
-                )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
             )
@@ -1099,10 +1150,6 @@ def visit_function_dataset(
             # SECURITY: the S3 twin of the gs:// branch above, for the same reason -
             # create_filesystem("s3") signs with this process's own AWS credential
             # chain. See anonymous_s3_filesystem's docstring.
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_PARQUET('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly, or read the whole prefix without a wildcard."
-                )
             from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
                 anonymous_s3_filesystem,
             )
@@ -1313,10 +1360,6 @@ def visit_function_dataset(
         if credential is not None:
             filesystem = _credentialed_filesystem(credential, protocol)
         elif protocol == "gs":
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_CSV('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
-                )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
             )
@@ -1326,10 +1369,6 @@ def visit_function_dataset(
             # SECURITY: the S3 twin of the gs:// branch above, for the same reason -
             # create_filesystem("s3") signs with this process's own AWS credential
             # chain. See anonymous_s3_filesystem's docstring.
-            if is_glob:
-                raise NotSupportedError(
-                    f"READ_CSV('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly, or read the whole prefix without a wildcard."
-                )
             from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
                 anonymous_s3_filesystem,
             )
@@ -1543,7 +1582,7 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
 
     # Create table-specific engine
     engine_kwargs = {}
-    if "variables" in dir(gateway):
+    if gateway.requires_variables:
         engine_kwargs["variables"] = context.execution_context.variables
     if gateway.supports_diachronic:
         engine_kwargs["at_date"] = node.at_date
@@ -1616,7 +1655,7 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 f"User does not have permission to view expired snapshots for {node.relation}"
             )
 
-    if "variables" in dir(node.connector):
+    if node.connector.requires_variables:
         node.connector.variables = context.execution_context.variables
     if gateway.supports_diachronic:
         node.connector.start_date = node.start_date

@@ -66,8 +66,8 @@ class VectorSearchStrategy(OptimizationStrategy):
         # A COSINE_DISTANCE elsewhere in the plan (a WHERE, a SELECT list) gives it nothing
         # to do, and finding one needs a walk of every expression.
         return any(
-            node.node_type == LogicalPlanStepType.HeapSort and node.drops_unsearchable
-            for _, node in plan.nodes(True)
+            node.drops_unsearchable
+            for _, node in plan.steps_of((LogicalPlanStepType.HeapSort,))
         )
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

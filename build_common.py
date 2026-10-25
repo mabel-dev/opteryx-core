@@ -889,6 +889,9 @@ def draken_rugo_extensions(parquet_created_by):
                     # avro writer C++ core (docs/AVRO_WRITER_DESIGN.md); rugo_native only —
                     # the engine never writes Avro (READ_AVRO is its only Avro surface).
                     "rugo/src/avro/avro_writer.cpp",
+                    # orc reader C++ core (docs/ORC_READER_DESIGN.md). The Python edge reuses
+                    # wrap_avro_column (the carrier is AvroColumn).
+                    "rugo/src/orc/orc_reader.cpp",
                     # libdeflate (third_party/libdeflate, upstream v1.26): raw DEFLATE
                     # inflate for Avro's `deflate` codec and gzip member inflate (with
                     # CRC32/ISIZE verification) for the parquet GZIP codec — ~2x faster
@@ -981,6 +984,10 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/avro/_avro_reader.pxi",
                 "rugo/src/avro/avro_writer.hpp",
                 "rugo/src/avro/_avro_writer.pxi",
+                "rugo/src/orc/orc_proto.hpp",
+                "rugo/src/orc/orc_rle.hpp",
+                "rugo/src/orc/orc_reader.hpp",
+                "rugo/src/orc/_orc_reader.pxi",
                 # Generated from the same string as -DRUGO_PARQUET_CREATED_BY;
                 # rewritten only on change (write_rugo_build_identity).
                 "rugo/_build_identity.py",

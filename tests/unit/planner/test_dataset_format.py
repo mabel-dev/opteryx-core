@@ -7,6 +7,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "..", "..", ".."))
 
 import pytest
 
+from opteryx.models.dataset_format import AVRO
 from opteryx.models.dataset_format import JSONL
 from opteryx.models.dataset_format import PARQUET
 from opteryx.models.dataset_format import SKENE
@@ -20,6 +21,8 @@ def test_suffix_recognition_is_case_insensitive():
     assert format_for_path("a/b/DATA-1.PARQUET") == PARQUET
     assert format_for_path("a/b/data.jsonl") == JSONL
     assert format_for_path("a/b/data.skene") == SKENE
+    assert format_for_path("a/b/data.avro") == AVRO
+    assert format_for_path("a/b/DATA.AVRO") == AVRO
 
 
 def test_non_data_files_are_not_formats():
@@ -32,6 +35,7 @@ def test_dataset_format_ignores_non_data_files():
     assert dataset_format(["x.parquet", "readme.md", "y.parquet"]) == PARQUET
     assert dataset_format(["x.jsonl"]) == JSONL
     assert dataset_format(["x.skene", "manifest.json"]) == SKENE
+    assert dataset_format(["x.avro", "readme.md", "y.avro"]) == AVRO
 
 
 def test_empty_listing_has_no_format():
@@ -44,6 +48,8 @@ def test_mixed_dataset_raises_never_drops():
         dataset_format(["x.parquet", "y.skene"], "mixed")
     with pytest.raises(MixedFormatDatasetError):
         dataset_format(["x.jsonl", "y.parquet"], "mixed")
+    with pytest.raises(MixedFormatDatasetError):
+        dataset_format(["x.avro", "y.parquet"], "mixed")
 
 
 if __name__ == "__main__":

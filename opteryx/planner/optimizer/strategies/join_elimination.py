@@ -38,7 +38,7 @@ from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
 def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations: set) -> bool:
@@ -187,5 +187,5 @@ class JoinEliminationStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return any(
             node.type == "inner"
-            for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
+            for _, node in plan.steps_of((LogicalPlanStepType.Join,))
         )

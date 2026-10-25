@@ -58,6 +58,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -87,8 +88,11 @@ namespace opteryx::engine {
 // NativeAvroScanSource for the driver's lifetime.
 struct AvroScanSpec {
     std::vector<std::string> files;          // as resolved at bind time; named in messages
-    std::vector<std::string> urls;           // parallel: "" = local path, else the URL to
-                                             // GET with NO credentials
+    std::vector<std::string> urls;           // parallel: "" = local path, else the URL to GET
+    // The `Authorization` value every remote GET carries; empty when the URLs authenticate
+    // themselves (signed) or are anonymous (READ_AVRO). Resolved at compile time by
+    // opteryx.connectors.io_systems.native_locations - exactly one mechanism per read.
+    std::string auth_header;
     std::string reader_schema;               // every file is read as this schema
 
     // Per DECODED column: each top-level field name once.
@@ -99,6 +103,10 @@ struct AvroScanSpec {
     std::vector<uint32_t>    emit_index;     // index into decode_names
 
     bool zero_columns = false;  // COUNT(*)-shaped scan: zero-column morsels, row count only
+    // A catalog table's data files (Iceberg): the reader schema matches fields by
+    // `field-id`, so a file whose fields carry none would resolve every column to NULL
+    // without a word. With this set, such a file fails the query instead.
+    bool require_field_ids = false;
     int  decode_workers = 1;    // width of this Source's own decode pool
 
     // Written by the Source when its global state is torn down; read from Python after
@@ -112,6 +120,17 @@ struct AvroScanSpec {
 };
 
 namespace avro_detail {
+
+// One whole-object GET: `Accept-Encoding: identity` always (a store must not transcode a
+// stored object), and the `Authorization` header when the scan authenticates by header.
+// HttpClient redacts a URL's query string in its errors, so a signed URL's credential
+// never reaches the message.
+inline std::vector<uint8_t> fetch_whole(HttpClient& http, const std::string& url,
+                                        const std::string& auth_header) {
+    std::map<std::string, std::string> headers{{"Accept-Encoding", "identity"}};
+    if (!auth_header.empty()) headers["Authorization"] = auth_header;
+    return http.get(url, headers);
+}
 
 // One loaded file: a mapping (local) or a fetched body (remote).
 struct Loaded {
@@ -167,6 +186,31 @@ inline const LogicalType* logical_for(DrakenType type, uint8_t precision, uint8_
 // AvroColumn -> CxxColumn, taking ownership of every buffer it carries. Mirrors
 // rugo's wrap_avro_column (_avro_column_wrap.cpp) branch for branch, minus the
 // Python box.
+// The owner of an Array column's child: a scalar vector, or (an array of arrays) a whole Array vector with
+// its own child, to any depth. Takes the buffers `c` holds for the child.
+inline std::unique_ptr<VectorOwner> array_child_owner(rugo::avro::AvroColumn& c) {
+    if (c.child_col) {
+        rugo::avro::AvroColumn& inner = *c.child_col;
+        DrakenVector pv = draken_vector_from_dense(inner.offsets, inner.length, DRAKEN_ARRAY, inner.validity);
+        auto owner = std::make_unique<VectorOwner>(pv, OwnedBuffer<void>(inner.offsets),
+                                                   OwnedBuffer<uint8_t>(inner.validity));
+        owner->child_owner = array_child_owner(inner);
+        inner.disown();
+        return owner;
+    }
+    if (c.child_type == DRAKEN_VARCHAR || c.child_type == DRAKEN_VARBINARY) {
+        DrakenStringArena* sa = nullptr;
+        uint8_t* block = string_arena_block(c.slots, c.child_length, c.arena, c.arena_len, c.child_type, &sa);
+        draken_free(c.slots);
+        sa->null_bitmap = c.child_validity;
+        DrakenVector cv = draken_vector_from_dense(sa, c.child_length, c.child_type, c.child_validity);
+        return std::make_unique<VectorOwner>(cv, OwnedBuffer<void>(block), OwnedBuffer<uint8_t>(c.child_validity),
+                                             OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(c.arena));
+    }
+    DrakenVector cv = draken_vector_from_dense(c.data, c.child_length, c.child_type, c.child_validity);
+    return std::make_unique<VectorOwner>(cv, OwnedBuffer<void>(c.data), OwnedBuffer<uint8_t>(c.child_validity));
+}
+
 inline void build_column(rugo::avro::AvroColumn& c, CxxColumn& out) {
     using rugo::avro::OutKind;
     switch (c.kind) {
@@ -191,27 +235,10 @@ inline void build_column(rugo::avro::AvroColumn& c, CxxColumn& out) {
             break;
         }
         case OutKind::Array: {
-            std::unique_ptr<VectorOwner> child;
-            if (c.child_type == DRAKEN_VARCHAR || c.child_type == DRAKEN_VARBINARY) {
-                DrakenStringArena* sa = nullptr;
-                uint8_t* block = string_arena_block(c.slots, c.child_length, c.arena, c.arena_len,
-                                                    c.child_type, &sa);
-                draken_free(c.slots);
-                sa->null_bitmap = c.child_validity;
-                DrakenVector cv = draken_vector_from_dense(sa, c.child_length, c.child_type, c.child_validity);
-                child = std::make_unique<VectorOwner>(cv, OwnedBuffer<void>(block),
-                                                      OwnedBuffer<uint8_t>(c.child_validity),
-                                                      OwnedBuffer<void>(nullptr),
-                                                      OwnedBuffer<uint8_t>(c.arena));
-            } else {
-                DrakenVector cv = draken_vector_from_dense(c.data, c.child_length, c.child_type, c.child_validity);
-                child = std::make_unique<VectorOwner>(cv, OwnedBuffer<void>(c.data),
-                                                      OwnedBuffer<uint8_t>(c.child_validity));
-            }
             DrakenVector pv = draken_vector_from_dense(c.offsets, c.length, DRAKEN_ARRAY, c.validity);
             out.own = std::make_shared<VectorOwner>(pv, OwnedBuffer<void>(c.offsets),
                                                     OwnedBuffer<uint8_t>(c.validity));
-            out.own->child_owner = std::move(child);
+            out.own->child_owner = array_child_owner(c);
             out.view = out.own->vec;
             break;
         }
@@ -411,7 +438,7 @@ private:
             return std::string();
         }
         try {
-            out.body = g.http->get(spec_->urls[i]);
+            out.body = avro_detail::fetch_whole(*g.http, spec_->urls[i], spec_->auth_header);
         } catch (const std::exception& e) {
             return "READ_AVRO('" + path + "'): the file could not be read: " + e.what();
         }
@@ -466,6 +493,8 @@ private:
         try {
             f->avro = std::make_unique<rugo::avro::AvroFile>(f->bytes.ptr, f->bytes.len, spec_->decode_names,
                                                              false, spec_->reader_schema);
+            if (spec_->require_field_ids && !f->avro->writer_fields_have_ids())
+                throw std::runtime_error("a data file of a catalog table must carry a `field-id` on every field; this one does not");
             if (prefilter_fn_ != nullptr) f->avro->split(pass1_names_);
             f->avro->batches();
         } catch (const std::exception& e) {

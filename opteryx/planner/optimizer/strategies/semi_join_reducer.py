@@ -263,13 +263,8 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         query would put a full statistics refresh on the path of queries that have no
         candidate join whatsoever. The real decision still happens in `complete()`.
         """
-        grouped_aggregate = any(
-            node.node_type == LogicalPlanStepType.AggregateAndGroup
-            for _nid, node in plan.nodes(True)
-        )
-        for _nid, node in plan.nodes(True):
-            if node.node_type != LogicalPlanStepType.Join:
-                continue
+        grouped_aggregate = plan.has_step(LogicalPlanStepType.AggregateAndGroup)
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Join,)):
             if node.reducer_applied:
                 continue
             if node.type in _BUILD_SIDE_IS_RIGHT:

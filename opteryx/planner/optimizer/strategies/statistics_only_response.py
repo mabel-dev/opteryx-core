@@ -52,7 +52,6 @@ from opteryx.types.logical_type import LogicalCategory, INT64 as _CT_INT64
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
-    get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.compiled.structures.expressions import rewrite_children
@@ -651,21 +650,17 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Skip if there are Filter, Join, Unnest, or AggregateAndGroup nodes present.
         # Unnest for the reason given on the `unsupported_nodes` list above: it
         # changes the row count to something no manifest statistic knows.
-        killer_candidates = get_nodes_of_type_from_logical_plan(
-            plan,
-            (
-                LogicalPlanStepType.Filter,
-                LogicalPlanStepType.Join,
-                LogicalPlanStepType.Unnest,
-                LogicalPlanStepType.AggregateAndGroup,
-            ),
-        )
-        if len(killer_candidates) > 0:
-            return False
+        for killer in (
+            LogicalPlanStepType.Filter,
+            LogicalPlanStepType.Join,
+            LogicalPlanStepType.Unnest,
+            LogicalPlanStepType.AggregateAndGroup,
+        ):
+            if plan.has_step(killer):
+                return False
 
         # Run only when there are Aggregate nodes present
-        agg_candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Aggregate,))
-        return len(agg_candidates) != 0
+        return plan.has_step(LogicalPlanStepType.Aggregate)
 
     def complete(self, plan, context: OptimizerContext) -> object:
         # If the plan does not match our conservative statistics-only pattern, do

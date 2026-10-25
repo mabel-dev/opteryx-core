@@ -950,6 +950,25 @@ static std::string ResolveScalarLogicalType(const SchemaElement &elem) {
   return "unknown";
 }
 
+// Does this LIST hold groups (STRUCT / MAP) at the bottom of its list nesting? Such a LIST has no
+// Draken ARRAY form (an ARRAY holds scalars), so it is surfaced like a STRUCT / MAP: one JSON
+// value per row (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md §3.1, rugo/src/parquet/nested_json.hpp).
+// A list of lists of scalars is NOT this case; it stays the nested ARRAY the scan already builds.
+static bool ListHoldsGroups(const SchemaElement &list) {
+  const SchemaElement *cur = &list;
+  while (cur->logical_type == "array") {
+    if (cur->children.size() != 1) return false;
+    const SchemaElement &rep = cur->children[0];
+    if (rep.children.empty()) return false;            // legacy 2-level list of a scalar
+    if (rep.children.size() > 1) return true;          // legacy: the repeated group IS a struct element
+    const SchemaElement &el = rep.children[0];
+    if (el.children.empty()) return false;             // a scalar element
+    if (el.logical_type != "array") return true;       // STRUCT or MAP element
+    cur = &el;
+  }
+  return false;
+}
+
 static std::string ResolveArrayLogicalType(const SchemaElement &elem) {
   std::string child_type = "unknown";
   if (!elem.children.empty()) {
@@ -998,6 +1017,23 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
 
     for (const auto &child : elem.children) {
       EmitSchemaEntry(child, nullable, false, columns, map);
+    }
+    return;
+  }
+
+  if (elem.logical_type == "array" && ListHoldsGroups(elem)) {
+    // A LIST of STRUCT / MAP: JSON text, exactly as a STRUCT / MAP column is.
+    if (is_top_level) {
+      SchemaField field;
+      field.name = canonical;
+      field.physical_type = "struct";
+      field.logical_type = "json";
+      field.nullable = nullable;
+      columns.push_back(std::move(field));
+    }
+    map[canonical] = "json";
+    if (elem.name != canonical) {
+      map[elem.name] = "json";
     }
     return;
   }

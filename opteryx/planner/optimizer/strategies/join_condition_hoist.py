@@ -82,7 +82,6 @@ from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
     filter_referenced_columns,
-    get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.plan_steps import FilterStep
 
@@ -235,5 +234,5 @@ class JoinConditionHoistStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return any(
             node.type in _HANDLED_TYPES and node.on is not None
-            for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
+            for _, node in plan.steps_of((LogicalPlanStepType.Join,))
         )

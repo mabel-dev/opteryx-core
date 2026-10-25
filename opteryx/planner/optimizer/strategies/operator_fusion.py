@@ -48,7 +48,7 @@ into joins.
 
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.plan_steps import HeapSortStep
 
 
@@ -57,7 +57,7 @@ class OperatorFusionStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         # visit() fuses an Order into the Limit above it; no Order, nothing to fuse.
-        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Order,))) > 0
+        return plan.has_step(LogicalPlanStepType.Order)
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Order:

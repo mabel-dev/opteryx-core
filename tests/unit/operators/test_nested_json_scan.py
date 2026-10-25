@@ -352,6 +352,34 @@ def test_random_nested_shapes_match_the_oracle(tmp_path, seed):
     check_column(cols, t)
 
 
+@pytest.mark.parametrize("seed", range(40))
+def test_random_lists_of_groups_match_the_oracle(tmp_path, seed):
+    """A top-level LIST with a STRUCT / MAP at the bottom of its list nesting is one JSON array per row
+    (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md ND4). It used to read as ALL NULLs without a word."""
+    rng = random.Random(1000 + seed)
+    group = rng.choice([pa.struct([(f"f{i}", _rand_type(rng, 2)) for i in range(rng.randint(1, 3))]),
+                        pa.map_(pa.string(), _rand_type(rng, 2))])
+    typ = pa.list_(group)
+    if rng.random() < 0.4:
+        typ = pa.list_(typ)
+    n = rng.randint(1, 150)
+    t = pa.table({"id": pa.array(range(n), pa.int64()),
+                  "s": pa.array([_rand_value(rng, typ) for _ in range(n)], typ)})
+    d = write(tmp_path, t, row_group_size=rng.choice([7, 32, 1000]),
+              use_dictionary=rng.random() < 0.5,
+              compression=rng.choice(["none", "snappy", "zstd"]))
+    cols, sources = run(d)
+    assert sources <= NATIVE, (sources, typ)
+    assert cols["id"] == list(range(n))
+    check_column(cols, t)
+
+
+def test_a_list_of_scalars_is_still_an_array(tmp_path):
+    t = pa.table({"id": pa.array([1, 2], pa.int64()), "s": pa.array([[1, 2], None], pa.list_(pa.int64()))})
+    cols, _ = run(write(tmp_path, t))
+    assert cols["s"] == [[1, 2], None]
+
+
 # ── refusals are loud ───────────────────────────────────────────────────────
 
 def test_non_string_map_key_is_refused_naming_the_column(tmp_path):

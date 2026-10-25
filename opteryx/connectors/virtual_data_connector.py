@@ -181,6 +181,7 @@ class VirtualDataTable(BaseTable):
     __mode__ = "Internal"
     __type__ = "VIRTUAL"
     __synchronousity__ = "synchronous"
+    requires_variables = True  # $variables and friends read the query's system variables
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

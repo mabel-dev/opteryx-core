@@ -60,7 +60,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 # Node types that, alone or in combination, never increase row count relative
 # to the Scan they sit above. Anything not in this set (Join, Unnest, Union,
@@ -130,10 +129,10 @@ class LimitEliminationStrategy(OptimizationStrategy):
         return context
 
     def should_i_run(self, plan) -> bool:  # pragma: no cover - trivial
-        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Limit,))) > 0
+        return plan.has_step(LogicalPlanStepType.Limit)
 
     def complete(self, plan, context: OptimizerContext) -> object:
-        scan_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,))
+        scan_nodes = plan.steps_of((LogicalPlanStepType.Scan,))
 
         # Case 1 (ungrouped aggregate) is decided PER LIMIT below, by walking the
         # plan down from that LIMIT — see _limit_sees_only_aggregate_row. It used
@@ -161,9 +160,7 @@ class LimitEliminationStrategy(OptimizationStrategy):
                 else None
             )
 
-        for nid, limit_node in get_nodes_of_type_from_logical_plan(
-            plan, (LogicalPlanStepType.Limit,)
-        ):
+        for nid, limit_node in plan.steps_of((LogicalPlanStepType.Limit,)):
             if limit_node.offset not in (None, 0):
                 continue
             if limit_node.limit in (None, 0):

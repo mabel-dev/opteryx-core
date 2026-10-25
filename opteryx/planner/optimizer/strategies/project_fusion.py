@@ -53,7 +53,7 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import rewrite_children
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Nested
 from opteryx.compiled.structures.plan_steps import ProjectStep
 
@@ -113,7 +113,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         # visit() fuses a Project into the Project above it — it needs two.
-        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Project,))) > 1
+        return plan.count_steps(LogicalPlanStepType.Project) > 1
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Project:

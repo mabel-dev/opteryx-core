@@ -42,7 +42,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
 class LimitPushdownStrategy(OptimizationStrategy):
@@ -129,8 +128,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Limit,))
-        return len(candidates) > 0
+        return plan.has_step(LogicalPlanStepType.Limit)
 
     @staticmethod
     def _collect_relations(node: PlanStep) -> Set[str]:

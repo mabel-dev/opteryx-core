@@ -98,7 +98,6 @@ from opteryx.planner.plan_context import PlanContext
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import flip_join_leg_labels
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 _NON_EQUI_COMPARATORS = ("NotEq", "Lt", "Gt", "LtEq", "GtEq")
 
@@ -844,8 +843,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan):
         # only run if there are LIMIT clauses in the plan
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
-        return len(candidates) > 0
+        return plan.has_step(LogicalPlanStepType.Join)
 
     @staticmethod
     def _side_statistics(plan, join_nid, plan_context: PlanContext):

@@ -67,14 +67,20 @@ def rows(sql):
     return out
 
 per_file, whole, held = [], [], []
+# One file per query first: under a cap, every file the table no longer holds is a
+# miss that evicts the least recently used, and nothing else is in flight — so the
+# count after each pass is exact.
 for _ in range(3):
     per_file.append([rows(f"SELECT COUNT(*), SUM(a), MAX(s) FROM READ_PARQUET('{f}') WHERE a % 7 <> 3")
                      for f in files])
-    # After one-file-at-a-time scans: each new file was a table miss, so the table
-    # is back under its cap here.
     held.append(held_descriptors())
+# Then all twelve in one query, more held at once than a cap allows. A miss evicts
+# only entries no scan holds at that moment, so how far over the cap the table ends
+# depends on scheduling; it is bounded by the files there are.
+for _ in range(3):
     whole.append(rows("SELECT COUNT(*), SUM(a), MAX(s) FROM ds_files WHERE a % 7 <> 3"))
-print("RESULT" + json.dumps({"per_file": per_file, "whole": whole, "held": held}))
+print("RESULT" + json.dumps({"per_file": per_file, "whole": whole, "held": held,
+                             "held_after_whole": held_descriptors()}))
 """
 
 
@@ -117,18 +123,21 @@ def test_descriptors_outlive_the_query():
         got = _run(tmp, 0)
         _check_answers(got, expected)
         assert got["held"] == [N_FILES] * 3, got["held"]
+        assert got["held_after_whole"] == N_FILES, got["held_after_whole"]
 
 
 def test_cap_evicts_least_recently_used_files_and_answers_stay_right():
     """A 128 soft limit caps the table at 8 files. Twelve files scanned one query at a
     time, and all twelve as one dataset in one query (more held at once than the cap
-    allows), must give the same answers. After a pass of one-file queries (each new
-    file a miss that evicts the least recently used), exactly 8 descriptors remain."""
+    allows), must give the same answers. After each pass of one-file queries (each
+    new file a miss that evicts the least recently used), exactly 8 descriptors
+    remain; after the dataset queries, no more than the 12 files."""
     with tempfile.TemporaryDirectory() as tmp:
         expected = _write_files(tmp)
         got = _run(tmp, 128)
         _check_answers(got, expected)
         assert got["held"] == [128 // 16] * 3, got["held"]
+        assert 128 // 16 <= got["held_after_whole"] <= N_FILES, got["held_after_whole"]
 
 
 if __name__ == "__main__":  # pragma: no cover

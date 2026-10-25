@@ -68,6 +68,21 @@ cdef class ExprArena:
     def __dealloc__(self):
         del self._table
 
+    def has_kind(self, kind) -> bool:
+        """Whether an expression of `kind` (a NodeType) was ever minted in this
+        query. False proves no plan of the query holds one; True proves nothing
+        (the expression may since have left the plan) - a gate, not an answer."""
+        return self._table.has_kind(<int32_t>kind.value)
+
+    def any_value(self, kind, values) -> bool:
+        """Whether an expression of `kind` (a NodeType) whose value - operator,
+        function or cast name - is one of `values` exists in this query's arena.
+        False proves no plan of the query holds one; True proves nothing."""
+        cdef vector[string] wanted
+        for value in values:
+            wanted.push_back(_utf8(value))
+        return self._table.any_value(<int32_t>kind.value, wanted)
+
     def seal(self, plans):
         """End of binding: from here every expression that has been placed (in a
         plan step, or under another expression) is immutable. A rewrite builds a
@@ -530,17 +545,6 @@ cdef object _literal_from_native(LiteralValue& value):
 cdef class Expression:
     """What every expression has: identity, naming, the column it binds to."""
 
-    cdef readonly object node_type
-    cdef readonly int64_t expr_id
-    cdef readonly int64_t origin_id
-    cdef ExprArena _arena
-    cdef bint _draft
-    cdef bint _building  # inside __init__: the row is written once, at its end
-    cdef str _alias
-    cdef str _query_column
-    cdef object _schema_column
-    cdef frozenset _relations
-    cdef bint _do_not_create_column
 
     cdef void _bind_arena(self, ExprArena arena, object origin):
         # Every expression belongs to its query's arena and is identified by an id
@@ -562,6 +566,7 @@ cdef class Expression:
         if kind is None:
             kind = _KIND_OF[type(self)] = self.node_type.value
         row.kind = kind
+        self._arena._table.note_kind(kind)
         row.flags = 0
         if self._draft:
             row.flags |= FLAG_DRAFT
@@ -578,15 +583,6 @@ cdef class Expression:
         if self._relations is not None:
             for name in self._relations:
                 row.relations.push_back(self._arena._table.relation(_utf8(name)))
-
-    cdef inline void _check_writable(self):
-        if self._arena._sealed and not self._draft:
-            from opteryx.exceptions import InvalidInternalStateError
-
-            raise InvalidInternalStateError(
-                f"{type(self).__name__} #{self.expr_id} is sealed: expressions are immutable "
-                "once placed after binding - build a new one (replace / rewrite_children)"
-            )
 
     @property
     def arena(self):
@@ -792,11 +788,6 @@ cdef class LogicalColumn(Expression):
         end_column), 1-based, or None for a synthesized reference.
     """
 
-    cdef str _source_column
-    cdef str _source
-    cdef bint _is_outer_reference
-    cdef object _outer_relation
-    cdef tuple _span
 
     def __init__(
         self,
@@ -976,10 +967,6 @@ cdef class Literal(Expression):
     program (predicate_rewriter), so it is never compiled a second time.
     """
 
-    cdef object _value
-    cdef object _type
-    cdef bint _is_wildcard_order_position
-    cdef bint _rlike_compiled
 
     def __init__(self, value=None, type=None, is_wildcard_order_position=False, rlike_compiled=False, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().LITERAL
@@ -1109,11 +1096,6 @@ cdef class Literal(Expression):
 cdef class Comparison(Expression):
     """COMPARISON_OPERATOR expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef object _right
-    cdef bint _negated
-    cdef object _like_selectivity_decay
 
     def __init__(self, value=None, left=None, right=None, negated=False, like_selectivity_decay=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().COMPARISON_OPERATOR
@@ -1256,9 +1238,6 @@ cdef class Comparison(Expression):
 cdef class BinaryOperator(Expression):
     """BINARY_OPERATOR expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef object _right
 
     def __init__(self, value=None, left=None, right=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().BINARY_OPERATOR
@@ -1365,10 +1344,6 @@ cdef class UnaryOperator(Expression):
     than `centre` (logical_planner_builders' exists builder).
     """
 
-    cdef str _value
-    cdef object _centre
-    cdef tuple _parameters
-    cdef bint _negated
 
     def __init__(self, value=None, centre=None, parameters=None, negated=False, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().UNARY_OPERATOR
@@ -1489,9 +1464,6 @@ cdef class UnaryOperator(Expression):
 cdef class ExtractionOperator(Expression):
     """EXTRACTION_OPERATOR expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef object _right
 
     def __init__(self, value=None, left=None, right=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().EXTRACTION_OPERATOR
@@ -1594,9 +1566,6 @@ cdef class ExtractionOperator(Expression):
 cdef class And(Expression):
     """AND expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef object _right
 
     def __init__(self, value=None, left=None, right=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().AND
@@ -1699,9 +1668,6 @@ cdef class And(Expression):
 cdef class Or(Expression):
     """OR expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef object _right
 
     def __init__(self, value=None, left=None, right=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().OR
@@ -1804,9 +1770,6 @@ cdef class Or(Expression):
 cdef class Xor(Expression):
     """XOR expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef object _right
 
     def __init__(self, value=None, left=None, right=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().XOR
@@ -1909,7 +1872,6 @@ cdef class Xor(Expression):
 cdef class Not(Expression):
     """NOT expression."""
 
-    cdef object _centre
 
     def __init__(self, centre=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().NOT
@@ -1975,7 +1937,6 @@ cdef class Not(Expression):
 cdef class Dnf(Expression):
     """DNF expression."""
 
-    cdef tuple _parameters
 
     def __init__(self, parameters=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().DNF
@@ -2040,7 +2001,6 @@ cdef class Dnf(Expression):
 cdef class Cnf(Expression):
     """CNF expression."""
 
-    cdef tuple _parameters
 
     def __init__(self, parameters=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().CNF
@@ -2105,10 +2065,6 @@ cdef class Cnf(Expression):
 cdef class Between(Expression):
     """BETWEEN expression."""
 
-    cdef tuple _value
-    cdef object _left
-    cdef object _right
-    cdef object _centre
 
     def __init__(self, value=None, left=None, right=None, centre=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().BETWEEN
@@ -2236,9 +2192,6 @@ cdef class Between(Expression):
 cdef class Case(Expression):
     """CASE expression."""
 
-    cdef tuple _conditions
-    cdef tuple _results
-    cdef object _else_result
 
     def __init__(self, conditions=None, results=None, else_result=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().CASE
@@ -2342,10 +2295,6 @@ cdef class Case(Expression):
 cdef class Cast(Expression):
     """CAST expression."""
 
-    cdef str _value
-    cdef object _left
-    cdef tuple _parameters
-    cdef object _format
 
     def __init__(self, value=None, left=None, parameters=None, format=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().CAST
@@ -2467,12 +2416,6 @@ cdef class Cast(Expression):
 cdef class Function(Expression):
     """FUNCTION expression."""
 
-    cdef str _value
-    cdef tuple _parameters
-    cdef object _function_ref
-    cdef str _qualified_name
-    cdef tuple _span
-    cdef object _match_threshold
 
     def __init__(self, value=None, parameters=None, function_ref=None, qualified_name=None, span=None, match_threshold=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().FUNCTION
@@ -2629,15 +2572,6 @@ cdef class Aggregator(Expression):
     unbound. Ordering by any other expression would make it a real, bound child.
     """
 
-    cdef str _value
-    cdef tuple _parameters
-    cdef tuple _order
-    cdef str _qualified_name
-    cdef tuple _span
-    cdef str _duplicate_treatment
-    cdef object _limit
-    cdef str _null_treatment
-    cdef dict _over
 
     def __init__(self, value=None, parameters=None, order=None, qualified_name=None, span=None, duplicate_treatment=None, limit=None, null_treatment=None, over=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().AGGREGATOR
@@ -2844,7 +2778,6 @@ cdef class Aggregator(Expression):
 cdef class Nested(Expression):
     """NESTED expression."""
 
-    cdef object _centre
 
     def __init__(self, centre=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().NESTED
@@ -2910,7 +2843,6 @@ cdef class Nested(Expression):
 cdef class Subquery(Expression):
     """SUBQUERY expression."""
 
-    cdef object _value
 
     def __init__(self, value=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().SUBQUERY
@@ -2967,8 +2899,6 @@ cdef class Subquery(Expression):
 cdef class Wildcard(Expression):
     """WILDCARD expression."""
 
-    cdef object _value
-    cdef object _except_columns
 
     def __init__(self, value=None, except_columns=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().WILDCARD
@@ -3037,7 +2967,6 @@ cdef class Wildcard(Expression):
 cdef class Evaluated(Expression):
     """EVALUATED expression."""
 
-    cdef object _value
 
     def __init__(self, value=None, *, alias=None, query_column=None, schema_column=None, relations=None, do_not_create_column=False, origin=None, ExprArena arena not None):
         self.node_type = _node_types().EVALUATED

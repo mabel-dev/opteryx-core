@@ -604,7 +604,7 @@ class CrossJoinChainReorderStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for _nid, node in plan.nodes(True):
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Join,)):
             if _is_unconverted_cross_join(node):
                 return True
         return False

@@ -37,6 +37,9 @@ from opteryx.exceptions import (
 )
 from opteryx.exceptions import md_code
 from opteryx.models import Manifest
+from opteryx.models.dataset_format import AVRO
+from opteryx.models.dataset_format import ORC
+from opteryx.models.dataset_format import manifest_format
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema, ColumnDescriptor, RelationDescriptor
 
@@ -99,12 +102,13 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     supports_topn_pushdown = True
     # The reader that serves a catalog scan is not this class - it is chosen
     # from the manifest's file formats (physical_planner
-    # `_scan_reader_for_manifest`), and a catalog manifest is parquet-only.
-    # That reader is
+    # `_scan_reader_for_manifest`): PARQUET, or AVRO (Iceberg Avro data files;
+    # docs/ICEBERG_AVRO_ORC_DATA_FILES_DESIGN.md). The parquet reader is
     # ParquetReadNode, which honours a scan-declared TIMESTAMP64 on an
-    # int64-stored column. If the catalog ever hands back a non-parquet format,
-    # this has to become format-aware the way FileSystemTable's is.
+    # int64-stored column; this flag describes that reader only, and the Avro
+    # reader decodes timestamps as the Avro schema declares them.
     supports_int64_timestamp_retag = True
+    data_files_match_field_ids = True  # Iceberg Avro data files carry a field-id per field
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -894,7 +898,26 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         self.dataset_committed_at = self.snapshot.timestamp_ms
 
         self.manifest = Manifest(self._decoded_manifest(bounds_are_ordinal), self.schema)
+        self._declare_reader_capabilities()
         return self.schema, self.manifest
+
+    def _declare_reader_capabilities(self) -> None:
+        """Bind-time capability gating, per instance, once the snapshot's file format
+        is known (the optimizer runs after this; FileSystemTable does the same).
+
+        The class-level declarations above describe the parquet reader. An AVRO or ORC
+        dataset is served by the Avro / ORC reader, which decodes every column it is
+        asked for and honours none of them: no pushed predicate, limit or top-N, and no
+        scan-declared timestamp retag. A pushed predicate or limit is REMOVED from the
+        plan, so accepting one the reader would ignore silently returns wrong
+        answers - they are declined here, which leaves a Filter / Limit above the
+        scan. File-level pruning from the manifest is unaffected."""
+        if manifest_format(self.manifest, dataset=self.dataset) not in (AVRO, ORC):
+            return
+        self.supports_predicate_pushdown = False
+        self.supports_limit_pushdown = False
+        self.supports_topn_pushdown = False
+        self.supports_int64_timestamp_retag = False
 
     def _decoded_manifest(self, bounds_are_ordinal: bool):
         """The resolved snapshot's manifest parquet, decoded natively over the
@@ -1354,6 +1377,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     supports_statistics = True  # Opteryx manifests provide stats
     requires_execution_context = True  # information_schema row-level permission filtering
     requires_original_case = False  # table_engine() takes the case-folded relation name
+    requires_variables = False  # table_engine() does not take the query's system variables
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,

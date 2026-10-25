@@ -194,6 +194,31 @@ def test_missing_object_is_a_read_error(s3_public):
 
 
 @pytest.mark.parametrize(
+    "sql, local_sql",
+    [
+        (
+            "SELECT COUNT(*) AS n FROM READ_PARQUET('s3://tweets/ten_files/*.parquet')",
+            f"SELECT COUNT(*) AS n FROM READ_PARQUET('{TESTDATA}/flat/ten_files/*.parquet')",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM READ_JSONL('s3://text/*.jsonl')",
+            f"SELECT COUNT(*) AS n FROM READ_JSONL('{TESTDATA}/jsonl_perf/data.jsonl')",
+        ),
+        (
+            "SELECT COUNT(*) AS n FROM READ_CSV('s3://text/*.csv')",
+            f"SELECT COUNT(*) AS n FROM READ_CSV('{TESTDATA}/generated/customers.csv')",
+        ),
+    ],
+)
+def test_read_functions_list_a_glob_anonymously(s3_public, sql, local_sql):
+    """A glob LISTS the prefix, tried ANONYMOUSLY (docs/ANONYMOUS_REMOTE_READS_DESIGN.md): against the
+    open hadro it lists and reads, and the answer equals the same files on local disk."""
+    remote = _rows(sql)
+    assert remote == _rows(local_sql)
+    assert remote[0]["n"] > 0
+
+
+@pytest.mark.parametrize(
     "sql",
     [
         "SELECT * FROM READ_PARQUET('s3://tweets/ten_files/*.parquet')",
@@ -201,9 +226,12 @@ def test_missing_object_is_a_read_error(s3_public):
         "SELECT * FROM READ_CSV('s3://text/*.csv')",
     ],
 )
-def test_read_functions_refuse_globs(s3_public, sql):
-    """A glob is a bucket LISTING, which is not assumed granted anonymously."""
-    with pytest.raises(NotSupportedError):
+def test_a_denied_anonymous_listing_is_never_retried_with_the_platforms_credentials(s3, sql):
+    """SECURITY: against the signature-checking hadro, with valid platform credentials in the
+    environment, an anonymous listing is DENIED - and the query FAILS saying so. It is not
+    retried with a signed request, which would have succeeded."""
+    assert os.environ["AWS_SECRET_ACCESS_KEY"] == SECRET_KEY
+    with pytest.raises(DatasetReadError, match="does not allow anonymous listing"):
         _rows(sql)
 
 

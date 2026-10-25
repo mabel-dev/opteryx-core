@@ -38,6 +38,7 @@ NOTE: still limited for ORed conditions and complex sub-conditions, which are
 appended after the simple predicates in their original order.
 """
 
+from opteryx import config
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.compiled.planner.statistics import predicate_base_cost as _base_cost
@@ -49,7 +50,6 @@ from opteryx.types import logical_type as _lt
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
-    get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import Dnf
 from opteryx.types.literal_values import literal_order_key
@@ -338,11 +338,8 @@ class PredicateOrderingStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan):
         # Check if predicate ordering is disabled via feature flag
-        from opteryx import config
-
         if config.features.disable_predicate_ordering:
             return False
 
         # only run if there are Filter nodes in the plan
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))
-        return len(candidates) > 0
+        return plan.has_step(LogicalPlanStepType.Filter)

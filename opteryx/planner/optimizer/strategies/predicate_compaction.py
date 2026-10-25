@@ -57,7 +57,6 @@ from opteryx.types import logical_type as _lt
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import filter_referenced_columns
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Between
 from opteryx.compiled.structures.expressions import Cnf
@@ -722,8 +721,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         """Only run if there are FILTER clauses in the plan."""
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))
-        return len(candidates) > 0
+        return plan.has_step(LogicalPlanStepType.Filter)
 
     def _extract_and_predicates(self, node: PlanStep) -> list:
         """

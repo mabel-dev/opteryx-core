@@ -326,10 +326,9 @@ def test_whole_record_map_and_nested_arrays_are_json(codec):
     _, got = _rugo_rows(data, ["inner", "attrs", "id"])
     assert [_json_cell(x) for x in got["inner"]] == [_json_norm(r["inner"]) for r in recs]
     assert [_json_cell(x) for x in got["attrs"]] == [_json_norm(r["attrs"]) for r in recs]
-    # array<array<int>> inside a record, by path: JSON
+    # array<array<int>> inside a record, by path: a nested ARRAY (as the parquet scan builds it)
     _, got = _rugo_rows(data, ["inner.deep.z"])
-    assert [_json_cell(x) for x in got["inner.deep.z"]] == [
-        None if r["inner"] is None else r["inner"]["deep"]["z"] for r in recs]
+    assert got["inner.deep.z"] == [None if r["inner"] is None else r["inner"]["deep"]["z"] for r in recs]
 
 
 def test_json_renders_every_value_kind():
@@ -420,10 +419,12 @@ def test_all_columns_on_a_nested_schema():
     assert [_json_cell(x) for x in got["inner"]] == [_json_norm(r["inner"]) for r in recs]
 
 
-def test_refuses_array_of_logical_type():
+def test_array_of_logical_type_is_a_json_array():
+    # Draken's ARRAY has no child for a date, so it is one JSON array per row (design ND2).
     schema = _record([{"name": "a", "type": {"type": "array", "items": {"type": "int", "logicalType": "date"}}}])
-    data = _write(schema, [{"a": [datetime.date(2020, 1, 1)]}])
-    _refuses(data, r"array of a logical type, which ARRAY cannot hold")
+    data = _write(schema, [{"a": [datetime.date(2020, 1, 1), datetime.date(1970, 1, 2)]}, {"a": []}])
+    _, got = _rugo_rows(data)
+    assert [json.loads(x) for x in got["a"]] == [["2020-01-01", "1970-01-02"], []]
 
 
 # ── batching ──

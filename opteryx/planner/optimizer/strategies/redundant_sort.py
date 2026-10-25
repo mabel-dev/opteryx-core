@@ -65,7 +65,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 # Node types that may sit between a sort and the sort that supersedes it. Row
 # mapping is one-to-one or narrowing, and none of them consumes the ordering of
@@ -116,14 +115,14 @@ class RedundantSortEliminationStrategy(OptimizationStrategy):
         return context
 
     def should_i_run(self, plan) -> bool:
-        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Order,))) > 1
+        return plan.count_steps(LogicalPlanStepType.Order) > 1
 
     def complete(self, plan, context: OptimizerContext) -> object:
         # Candidates are collected against the untouched plan, then removed, so
         # a chain of three sorts resolves to the topmost one in a single pass:
         # the middle sort is found from the top, the bottom from the middle.
         redundant = set()
-        for nid, _ in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Order,)):
+        for nid, _ in plan.steps_of((LogicalPlanStepType.Order,)):
             dominated = _dominated_sort(plan, nid)
             if dominated is not None:
                 redundant.add(dominated)

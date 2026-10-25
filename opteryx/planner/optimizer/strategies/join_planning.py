@@ -59,6 +59,7 @@ from opteryx.planner.cost_estimation import JoinTreeLeaf
 from opteryx.planner.cost_estimation import JoinTreeNode
 from opteryx.planner.cost_estimation import enumerate_join_tree
 from opteryx.planner.cost_estimation.plan_adapter import build_join_graph
+from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner.logical_planner import PlanStep
 
@@ -302,7 +303,7 @@ class JoinPlanningStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         if not features.enable_dpccp_join_planning:
             return False
-        for _nid, node in plan.nodes(True):
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Join,)):
             if _is_unconverted_cross_join(node):
                 return True
         return False

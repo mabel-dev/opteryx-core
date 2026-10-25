@@ -64,6 +64,15 @@ from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result
 from opteryx.types.literal_values import native_literal_value
 from opteryx.compiled.structures.expressions import Cast
 from opteryx.compiled.structures.expressions import Literal
+# The binder's per-node core is compiled (architect plan P2, 2026-10-25): the names
+# below live there and are re-exported here, where every visitor imports them from.
+from opteryx.compiled.planner.binder_core import _append_derived  # noqa: F401
+from opteryx.compiled.planner.binder_core import _rebind  # noqa: F401
+from opteryx.compiled.planner.binder_core import inner_binder  # noqa: F401
+from opteryx.compiled.planner.binder_core import locate_identifier  # noqa: F401
+from opteryx.compiled.planner.binder_core import locate_identifier_in_loaded_schemas  # noqa: F401
+from opteryx.compiled.planner.binder_core import merge_schemas  # noqa: F401
+from opteryx.compiled.planner.binder_core import traversive_recursive_bind  # noqa: F401
 
 # Aggregate return-type inference for the binder. Aggregates are dispatched by
 # the physical aggregate operators (not the function catalog), but the binder
@@ -374,143 +383,6 @@ def _bind_function_reference(node: Expression, context: Any):
     return resolved
 
 
-def _copy_relation_schema(schema: RelationSchema) -> RelationSchema:
-    """A distinct schema object of the same value, for branch isolation during
-    expression binding: re-binding is by object identity (see
-    BindingContext.rebind_schema), so a branch must not hold the object it was
-    copied from. The columns are shared - a column is a row of the query's
-    ColumnTable, fixed once minted (architect ruling 2026-09-27).
-    """
-    return schema.clone()
-
-
-def _rebind(context, schemas: Dict[str, RelationSchema], old: RelationSchema, new: RelationSchema) -> None:
-    """Replace schema `old` by `new` in `schemas` (the dict it was read from) and
-    wherever this bind shares it (BindingContext.rebind_schema). RelationSchema is
-    immutable (architect ruling 2026-09-28): this is how a scope's schema changes."""
-    for key, schema in list(schemas.items()):
-        if schema is old:
-            schemas[key] = new
-    context.rebind_schema(old, new)
-
-
-def _append_derived(context, schemas: Dict[str, RelationSchema], column) -> None:
-    """Add `column` to the scope's `$derived` schema."""
-    derived_schema = schemas["$derived"]
-    _rebind(context, schemas, derived_schema, derived_schema.with_columns(derived_schema.columns + (column,)))
-
-
-def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:
-    """
-    Handles the merging of relations, requiring a custom merge function.
-
-    Parameters:
-        dicts: Tuple[Dict[str, RelationSchema]]
-            Dictionaries to be merged.
-
-    Returns:
-        A merged dictionary containing RelationSchemas.
-
-    A relation holds each of its columns ONCE: two columns with the same identity are
-    the same column, so a repeated identity is added to the merged schema only the first
-    time it is seen. Callers merge one context PER BOUND COLUMN — `visit_project` does —
-    and appending blindly made every relation's schema grow by a factor of the projection
-    width at each Project. That is quadratic on its own (a 90-column SELECT over a
-    20-column relation left 1,800 schema columns for everything above it to scan), and it
-    was also a wrong ANSWER: a later qualified wildcard expands the schema it is given, so
-    `source.*` over a polluted schema emitted every source column many times over and the
-    parent Project rejected the query as ambiguous.
-    """
-    merged_dict: Dict[str, RelationSchema] = {}
-    identities: Dict[str, set] = {}
-    for dic in schemas:
-        # DEBUG: if type(dic) is not dict:
-        # DEBUG:    raise InvalidInternalStateError("Internal Error - merge_schemas expected dicts")
-        for key, value in dic.items():
-            if key in merged_dict:
-                if type(value) is not RelationSchema:
-                    raise InvalidInternalStateError(
-                        "Internal Error - merge_schemas expects schemas"
-                    )
-                seen = identities[key]
-                new_columns = [column for column in value.columns if column.identity not in seen]
-                seen.update(column.identity for column in new_columns)
-                merged_dict[key] = merged_dict[key].with_columns(
-                    merged_dict[key].columns + tuple(new_columns)
-                )
-            else:
-                merged_dict[key] = _copy_relation_schema(value)
-                identities[key] = {column.identity for column in merged_dict[key].columns}
-    return merged_dict
-
-
-def locate_identifier_in_loaded_schemas(
-    value: str, schemas: Dict[str, RelationSchema]
-) -> Tuple[Optional[SchemaColumn], Optional[RelationSchema]]:
-    """
-    Locate a given identifier in a set of loaded schemas.
-
-    Parameters:
-        value: str
-            The identifier to locate.
-        schemas: Dict[str, Schema]
-            The loaded schemas to search within.
-
-    Returns:
-        A tuple containing the column and its source schema, if found.
-    """
-    found_source_relation = None
-    column = None
-    derived_column = None
-    derived_relation = None
-
-    for name, schema in schemas.items():
-        found = schema.find_column(value, case_insensitive=True)
-        if not found:
-            continue
-        if name in ("$derived", "$project"):
-            # `$derived` holds what THIS scope is computing — including the aliases the
-            # projection being bound has already minted. An alias is NOT a relation, so a
-            # name it shares with a real column is not ambiguous: it binds to the input
-            # column, which is what PostgreSQL does when an output name and an input name
-            # collide. Held aside rather than counted, and used only if nothing real
-            # matched (that is how `HAVING <alias>` still resolves).
-            #
-            # Counting it as a relation made an alias that shadows the column it is
-            # computed from self-ambiguous: `SELECT MAX(mass) AS mass, MIN(mass) AS mn`
-            # raised AmbiguousIdentifierError on the operand of its own second aggregate.
-            # Worse, `inner_binder`'s already-seen-expression fast path once bound
-            # sub-trees under a blanket suppress, so the error was swallowed and the
-            # operand was left with no schema_column at all — surfacing much later as
-            # `AttributeError: 'NoneType' object has no attribute 'identity'`.
-            #
-            # `$project` is `$derived` after a Project's own exit renames it (see
-            # project.py) — the same scope-local aliases, just past the point where this
-            # level's projection is considered "settled". A set operation's leg-combining
-            # visitors (visit_union/_intersect/_except) merge sibling leg contexts
-            # directly, with no subquery-style "sack and rebuild" step to re-home a leg's
-            # `$project` under a proper relation name — so one leg's finished scratch
-            # (e.g. a UNION branch's own `(...) AS ratio`) rides into the set operation's
-            # own exit-column resolution alongside the legs' real relation schemas.
-            # Counting it as a competing relation there raised AmbiguousIdentifierError
-            # for `results.gross_margin` vs a sibling UNION branch's freshly computed
-            # `... AS gross_margin` even though the branch's own `FROM` only names one
-            # relation — TPC-DS Q36's `results_rollup` CTE.
-            derived_column = found
-            derived_relation = schema
-            continue
-        if column and found_source_relation:
-            # test for duplicates
-            raise AmbiguousIdentifierError(identifier=value)
-        found_source_relation = schema
-        column = found  # don't exit here, so we can test for duplicates
-
-    if column is None:
-        return derived_column, derived_relation
-
-    return column, found_source_relation
-
-
 def bind_correlated_subquery(node: Expression, context: Any) -> Tuple[Expression, Dict]:
     """
     Bind the plan of a subquery that appears inside an expression.
@@ -602,1136 +474,775 @@ def bind_correlated_subquery(node: Expression, context: Any) -> Tuple[Expression
     return node, context
 
 
-def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]:
-    """
-    Locate which schema the identifier is defined in. We return a populated node
-    and the context.
 
-    Parameters:
-        node: Node
-            The node representing the identifier
-        context: BindingContext
-            The current query context.
+def _bind_reused(node, context, schema_name, schema, found_column, column_name, format_cache, relations_memo):
+    """Bind `node` as a repeat of an expression this scope already computed:
+    `found_column` is the column `schema` (`schema_name` in scope) holds under the
+    node's rendered name. Called by the compiled core (binder_core.inner_binder)."""
+    # A column found in `$project` was MATERIALISED by the Project below this
+    # step: the node is a reference to that output, and its children are not
+    # in scope — the logical planner deliberately drops `id` from the
+    # Project's passthrough when `id + 1` is projected, so `SELECT id + 1 ...
+    # ORDER BY id + 1` has no `id` above the Project. Binding the children
+    # there raised ColumnNotFoundError on `id`. (This bind used to sit under
+    # `suppress(Exception)`, which hid exactly that failure; it was removed.)
+    # Anywhere else — `$derived` (a repeat within the computing step) or a
+    # source relation — the children ARE in scope and are bound.
+    if schema_name != "$project":
+        node, _ = traversive_recursive_bind(node, context, format_cache, relations_memo)
 
-    Returns:
-        Tuple[Node, Dict]: The updated node and the current context.
+    node.schema_column = found_column
+    node.query_column = node.alias or column_name
 
-    Raises:
-        UnexpectedDatasetReferenceError: If the source dataset is not found.
-        ColumnNotFoundError: If the column is not found in the schema.
-    """
-    def create_variable_node(node: Expression, context: BindingContext) -> Expression:
-        """Populates a Node object for a variable.
-
-        The lookup key is `source_column` — the `@@name` exactly as written. It is
-        NOT `value`/`current_name`, which are `alias or source_column`: under
-        `SELECT @@version AS v` those read `v`, so the container was asked for a
-        variable named `v` and reported it missing.
-
-        The alias rides onto the new node and onto the column's aliases, so it names
-        the output column and resolves elsewhere in the query — the same treatment an
-        aliased literal gets in `inner_binder`.
-        """
-        schema_column = context.execution_context.variables.as_column(
-            node.source_column,
-            plan_context=context.plan_context,
-            aliases=[node.alias] if node.alias else None,
-        )
-        new_node = Literal(
-            schema_column=schema_column,
-            type=schema_column.column_type,
-            value=native_literal_value(schema_column.value, schema_column.column_type),
-            alias=node.alias,
-            relations=set(),
-            arena=context.plan_context.expressions,
-        )
-        return new_node
-
-    def _candidates(schemas):
-        """Schemas in `schemas` that could provide this identifier."""
-        if not node.source:
-            return schemas
-        # A reference like `partsupp.ps_suppkey` from `FROM testdata.tpch.partsupp`
-        # carries `node.source = "partsupp"` while the schema is keyed by the
-        # full path `testdata.tpch.partsupp`. Match the bare qualifier against
-        # both the exact key and the trailing dotted segment.
-        #
-        # Folded case: a relation ALIAS is an unquoted SQL identifier, and those
-        # are case-insensitive by the same rule that already makes column names
-        # case-insensitive (`find_column(..., case_insensitive=True)` below) —
-        # `FROM t AS P` addressed as `p.col` is ordinary folding, not a typo.
-        # `node.source` itself gets rewritten to the schema's own-cased spelling
-        # once a match is found (see the unconditional `node.source =
-        # found_source_relation.name` below), so this is the ONE place case gets
-        # folded — every `.source`-keyed structure built after this point
-        # (relation-name lists, `all_relations`, the optimizer) sees one
-        # consistent case, not a per-reference guess. Dataset/CTE *names* (as
-        # opposed to aliases) stay case-sensitive on purpose — they can resolve
-        # to a filesystem path, which is case-sensitive on POSIX.
-        source_lower = node.source.lower()
-        suffix = f".{source_lower}"
-
-        def _shared_holds_it_for_this_qualifier(schema) -> bool:
-            # A `$shared-*` schema holds the merged column of a USING / NATURAL
-            # JOIN, which belongs to EVERY relation it was merged from (`origin`)
-            # and to no other. It is a candidate for `x.col` only when `x` is one of
-            # those relations. Admitting every `$shared` schema for every qualifier
-            # made `c.id` ambiguous after `a JOIN b USING (id)` - c's own `id` and
-            # the merged a/b `id` both matched - so `... JOIN c ON a.id = c.id`,
-            # and every USING chain, could not bind.
-            column = schema.find_column(node.source_column, case_insensitive=True)
-            if column is None:
-                return False
-            origin = column.origin or ()
-            return any(
-                o.lower() == source_lower or o.lower().endswith(suffix) for o in origin
-            )
-
-        return {
-            name: schema
-            for name, schema in schemas.items()
-            if (name.startswith("$shared") and _shared_holds_it_for_this_qualifier(schema))
-            or name.lower() == source_lower
-            or name.lower().endswith(suffix)
-        }
-
-    # get the list of candidate schemas
-    candidate_schemas = _candidates(context.schemas)
-
-    # if there are no candidates, we probably don't know the relation — unless an
-    # enclosing scope does (a qualified correlated reference, `WHERE l.k = o.k`).
-    if not candidate_schemas and not _candidates(context.outer_schemas):
-        if node.source and node.source.lower() in {r.lower() for r in context.relations}:
-            raise UnexpectedDatasetReferenceError(
-                dataset=node.source,
-                message=f"Dataset `{node.source}` is not available after being used on the right side of a ANTI or SEMI JOIN",
-            )
-        else:
-            raise UnexpectedDatasetReferenceError(dataset=node.source)
-
-    # look up the column in the candidate schemas
-    column, found_source_relation = locate_identifier_in_loaded_schemas(
-        node.source_column, candidate_schemas
-    )
-
-    # Not in the local scope — fall outwards to the enclosing query. SQL binds a
-    # name to the innermost scope that provides it, so this runs ONLY after the
-    # local lookup failed, and can never redirect a name the local scope owns.
-    # A hit here is by definition a CORRELATED reference: it is what makes the
-    # subquery depend on the outer row, and tagging it is what lets decorrelation
-    # orient the predicate without guessing from syntax.
-    if not column and context.outer_schemas:
-        column, found_source_relation = locate_identifier_in_loaded_schemas(
-            node.source_column, _candidates(context.outer_schemas)
-        )
-        if column:
-            node.is_outer_reference = True
-            node.outer_relation = found_source_relation
-
-    # if we didn't find the column, suggest alternatives
-    if not column:
-        # Check if the identifier is a variable. Test the name AS WRITTEN
-        # (`source_column`), never `current_name` — that is `alias or source_column`,
-        # so an aliased variable (`@@version AS v`) tests `v`, fails the `@` check and
-        # falls through to ColumnNotFoundError.
-        if node.source_column[0] == "@":
-            node = create_variable_node(node, context)
-            _append_derived(context, context.schemas, node.schema_column)
-            return node, context
-
-        from opteryx.utils import suggest_alternative
-
-        suggestion = suggest_alternative(
-            node.source_column,
-            [
-                column_name
-                for _, schema in candidate_schemas.items()
-                for column_name in schema.all_column_names
-                if column_name is not None
-            ],
-        )
-        raise ColumnNotFoundError(column=node.value, suggestion=suggestion, span=node.span)
-    elif node.source_column[0] == "@":
-        # A second reference to a variable already bound in this query — it was
-        # appended to `$derived` above, so the lookup found it. Same rule as the
-        # not-found branch: test the name as written, and keep the alias.
-        new_node = Literal(
-            schema_column=column,
-            type=column.column_type,
-            value=native_literal_value(column.value, column.column_type),
-            alias=node.alias,
-            arena=context.plan_context.expressions,
-        )
-        return new_node, context
-
-    # Update node.source to the found relation name — ALWAYS, not just when empty.
-    # `_candidates` above matched the qualifier case-insensitively, so a query can
-    # type `p.col` against a relation aliased `P`; rewriting `node.source` to the
-    # relation's OWN spelling here is what keeps it canonical for every consumer
-    # built from `.source` after this point (relation-name lists, `all_relations`,
-    # the optimizer) — they compare by exact string and never fold case themselves.
-    #
-    # One exception: a QUALIFIED reference that resolved to the merged column of a
-    # USING / NATURAL JOIN (a `$shared-*` schema, named `^a#^b#`). The canonical
-    # relation for `a.id` there is `a` — the origin entry the qualifier matched, in
-    # its own spelling — not the internal schema name. `extract_join_fields` sides a
-    # join key by `.source`, so leaving `^a#^b#` made `a JOIN b USING (id) JOIN c
-    # ON a.id = c.id` (and every USING chain) a join with no key at all.
-    shared_hit = node.source and any(
-        key.startswith("$shared") and schema is found_source_relation
-        for key, schema in candidate_schemas.items()
-    )
-    if shared_hit:
-        qualifier = node.source.lower()
-        origin = column.origin or ()
-        node.source = next(
-            o for o in origin
-            if o.lower() == qualifier or o.lower().endswith(f".{qualifier}")
-        )
-    else:
-        node.source = found_source_relation.name
-
-    # if we have an alias for a column not known about in the schema, add it.
-    # A SELECT alias is another NAME for the column in this scope, and a slot has
-    # exactly one name set (architect ruling 2026-09-27): the named column is a new
-    # ALIAS slot, swapped into the scope it was found in, rather than a rename of
-    # whichever copy of the column this scope happens to hold.
-    if node.alias and node.alias not in column.all_names:
+    # A reuse still NAMES an output, so its alias is published onto the shared
+    # column exactly as the identifier path publishes one (below, where an
+    # identifier binds) and as the mint path does when it creates the column.
+    # This was the one bind path that dropped it: `SELECT id + 1 AS a,
+    # id + 1 AS b ... ORDER BY b` minted the column as `a`, reused it for `b`
+    # without recording `b`, and visit_project re-publishes only the FIRST
+    # node's alias per identity — so nothing above the Project could resolve
+    # `b` and ORDER BY raised ColumnNotFoundError.
+    # (An alias is a new ALIAS slot swapped into the scope - see
+    # locate_identifier.)
+    if node.alias and node.alias not in found_column.all_names:
         renamed = context.plan_context.columns.alias(
-            column,
-            column.name,
-            aliases=[*(column.aliases or []), node.alias],
-            origin=column.origin,
+            found_column,
+            found_column.name,
+            aliases=[*(found_column.aliases or []), node.alias],
+            origin=found_column.origin,
         )
         _rebind(
             context,
             context.schemas,
-            found_source_relation,
-            found_source_relation.with_columns(
-                renamed if candidate is column else candidate
-                for candidate in found_source_relation.columns
+            schema,
+            schema.with_columns(
+                renamed if candidate is found_column else candidate
+                for candidate in schema.columns
             ),
         )
-        column = renamed
+        found_column = renamed
+        node.schema_column = found_column
 
-    # Update node.schema_column with the found column
-    node.schema_column = column
-    # if may need to map source aliases to the columns if they weren't able to be
-    # mapped before now
-    if column.origin and len(column.origin) == 1:
-        node.source = column.origin[0]
-    return node, context
-
-
-def traversive_recursive_bind(
-    node: Expression, context: Any, format_cache: Optional[dict] = None
-) -> Tuple[Expression, Any]:
-    # Bind every child first, threading the context through them in their declared
-    # order. (List fields were once bound "in parallel" from one context and the
-    # results merged — but binding mutates the one shared `schemas` dict in place,
-    # so every sibling already saw the others' additions; threading is the same.)
-    def _bind_child(child):
-        nonlocal context
-        bound, context = inner_binder(child, context, format_cache)
-        return bound
-
-    node.map_children(_bind_child)
-    return node, context
-
-
-def inner_binder(
-    node: Expression, context: BindingContext, format_cache: Optional[dict] = None
-) -> Tuple[Expression, Any]:
-    """
-    Note, this is a tree within a tree. This function represents a single step in the execution
-    plan (associated with the relational algebra) which may itself be an evaluation plan
-    (executing comparisons).
-
-    ``format_cache`` memoizes format_expression renders for the lifetime of one
-    root bind (callers omit it; the root call creates it). Keys are computed
-    top-down over pristine subtrees, so within a root bind the cached render of
-    every node is exactly what an uncached render would produce — this collapses
-    the O(n²) per-node memo-key rendering of deep expressions to O(n).
-    """
-    # Retrieve the node type for further processing.
-    node_type = node.node_type
-
-    # Early exit for columns that are already bound.
-    # If the node has a 'schema_column' already set, it doesn't need to be processed again.
-    # This is an optimization to avoid unnecessary work.
-    if node.schema_column is not None:
-        return node, context
-
-    # Early exit for nodes representing IDENTIFIER types.
-    # If the node is of type IDENTIFIER, it's just a simple look up to bind the node.
-    if node_type in (NodeType.IDENTIFIER, NodeType.EVALUATED):
-        return locate_identifier(node, context)
-
-    # A subquery embedded in an EXPRESSION (`col < (SELECT ...)`, as opposed to one
-    # in the FROM clause). Bind its inner plan in a child scope that can see this
-    # scope as the enclosing one, so correlated references resolve outwards and get
-    # tagged. Binding it here is what lets decorrelation run AFTER name resolution
-    # instead of guessing orientation from query text.
-    #
-    # The subquery's own schema stays inside its scope: it must NOT leak into this
-    # one, or its columns would become resolvable in the outer query.
-    if node_type == NodeType.SUBQUERY:
-        return bind_correlated_subquery(node, context)
-
-    # Early exit for nodes representing calculated columns.
-    # If the node represents a calculated column, if we're seeing it again it's because it
-    # has appeared earlier in the plan and in that case we don't need to recalcuate, we just
-    # need to treat the result like an IDENTIFIER
-    # We discard columns not referenced, so this sometimes holds the only reference to
-    # child columns, e.g. MAX(id), we may not have 'id' next time we see it, only MAX(id)
-    if format_cache is None:
-        format_cache = {}
-    column_name = node.query_column or format_expression(node, True, format_cache)
-    for schema_name, schema in context.schemas.items():
-        found_column = schema.find_column(column_name, case_insensitive=True)
-        # A literal's column_name is its own textual form, so the case-insensitive
-        # lookup above (correct for identifiers) would otherwise collapse two
-        # case-distinct string literals ('ss' and 'SS', REPLACE's needle and
-        # replacement) onto a single interned constant and hand the executor
-        # value == value. Reuse a constant for a literal only when the stored
-        # value is byte-identical; otherwise keep it distinct.
-        if (
-            found_column
-            and node_type == NodeType.LITERAL
-            and not (
-                isinstance(found_column, ConstantColumn) and found_column.value == node.value
-            )
-        ):
-            found_column = None
-        # Two literals that are textually identical but carry DIFFERENT aliases are
-        # two distinct OUTPUT columns, and interning them onto one ConstantColumn
-        # gives them one shared identity — so one type and one name. That is the
-        # same failure the case-distinct guard above prevents, one level up.
-        # It surfaced through FULL OUTER JOIN: FullOuterToUnionStrategy synthesizes
-        # one NULL literal per column of the non-preserved side, all spelled `None`,
-        # so every one of them collapsed onto the first. The union's per-column type
-        # coercion then wrote each leg's type onto that single shared column (last
-        # write won) and concatenated mismatched types. Reuse only when the alias
-        # agrees too.
-        if (
-            found_column
-            and node_type == NodeType.LITERAL
-            and isinstance(found_column, ConstantColumn)
-            and node.alias
-            and node.alias not in (found_column.aliases or [])
-        ):
-            found_column = None
-        # Same rule again on the one axis the two guards above cannot see: TYPE. Two
-        # NULL literals are byte-identical in value (both None) and neither need carry
-        # an alias, so an untyped NULL adopted the ConstantColumn of a DIFFERENTLY
-        # TYPED null that merely rendered the same — and with it that null's type.
-        #
-        # `COUNT(* WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))`
-        # (logical_planner_builders) where the ELSE is deliberately an UNTYPED null. If
-        # `p` is a BOOL-typed null — `CAST(NULL AS BOOLEAN)` — the ELSE interned onto it
-        # and came back BOOL, so the blend check refused a query whose branches are
-        # really INT64 and untyped NULL: "IIF: literal 1 is INT64 but literal None is
-        # BOOL". Hand-written `IIF(CAST(NULL AS BOOLEAN), 1, NULL)` failed identically,
-        # while `IIF(id > 3, 1, NULL)` ran — the difference was never the branches.
-        #
-        # Both types must be known before this can rule; an unknown type is not a
-        # disagreement, and refusing on it would stop interning far more than this.
-        if (
-            found_column
-            and node_type == NodeType.LITERAL
-            and isinstance(found_column, ConstantColumn)
-            and node.type is not None
-            and found_column.column_type is not None
-            and node.type != found_column.column_type
-        ):
-            found_column = None
-        # If the column exists in the schema, update node and context accordingly.
-        if found_column:
-            # A column found in `$project` was MATERIALISED by the Project below this
-            # step: the node is a reference to that output, and its children are not
-            # in scope — the logical planner deliberately drops `id` from the
-            # Project's passthrough when `id + 1` is projected, so `SELECT id + 1 ...
-            # ORDER BY id + 1` has no `id` above the Project. Binding the children
-            # there raised ColumnNotFoundError on `id`. (This bind used to sit under
-            # `suppress(Exception)`, which hid exactly that failure; it was removed.)
-            # Anywhere else — `$derived` (a repeat within the computing step) or a
-            # source relation — the children ARE in scope and are bound.
-            if schema_name != "$project":
-                node, _ = traversive_recursive_bind(node, context, format_cache)
-
-            node.schema_column = found_column
-            node.query_column = node.alias or column_name
-
-            # A reuse still NAMES an output, so its alias is published onto the shared
-            # column exactly as the identifier path publishes one (below, where an
-            # identifier binds) and as the mint path does when it creates the column.
-            # This was the one bind path that dropped it: `SELECT id + 1 AS a,
-            # id + 1 AS b ... ORDER BY b` minted the column as `a`, reused it for `b`
-            # without recording `b`, and visit_project re-publishes only the FIRST
-            # node's alias per identity — so nothing above the Project could resolve
-            # `b` and ORDER BY raised ColumnNotFoundError.
-            # (An alias is a new ALIAS slot swapped into the scope - see
-            # locate_identifier.)
-            if node.alias and node.alias not in found_column.all_names:
-                renamed = context.plan_context.columns.alias(
-                    found_column,
-                    found_column.name,
-                    aliases=[*(found_column.aliases or []), node.alias],
-                    origin=found_column.origin,
-                )
-                _rebind(
-                    context,
-                    context.schemas,
-                    schema,
-                    schema.with_columns(
-                        renamed if candidate is found_column else candidate
-                        for candidate in schema.columns
-                    ),
-                )
-                found_column = renamed
-                node.schema_column = found_column
-
-            if isinstance(found_column, ConstantColumn):
-                # A repeat of a constant (a nullary constant function — PI(), E() —
-                # folded to its value) IS that constant: a new LITERAL in its place.
-                node = Literal(
-                    value=native_literal_value(found_column.value, found_column.column_type),
-                    type=found_column.column_type,
-                    origin=node.origin_id,
-                    alias=node.alias,
-                    query_column=node.query_column,
-                    schema_column=found_column,
-                    relations=node.relations,
-                    arena=context.plan_context.expressions,
-                )
-            context.reused_expressions[id(node)] = node
-
-            # Sharing the schema column is not the same as not needing to be bound.
-            # This node keeps its FUNCTION shape, and the expression compiler reads
-            # `function_ref` off the NODE (compiled_expression's NT_FUNCTION arm) to
-            # find the kernel — a second occurrence that only inherited an identity
-            # reached the compiler with function_ref None and raised
-            # "FUNCTION 'UPPER' has no function_ref - not bound". Visible wherever
-            # two occurrences of one call are compiled as separate expressions
-            # rather than one being an identifier reference to the other, which is
-            # exactly what the CASE -> IF_THEN_ELSE rewrite does with
-            # `CASE WHEN ... THEN UPPER(name) ELSE UPPER(name) END`.
-            #
-            # Read the node's CURRENT type, not the `node_type` local captured
-            # before this block ran. The ConstantColumn arm above REPLACES the node
-            # with a LITERAL (a nullary constant function — PI(), E() — folds to its
-            # value), which leaves the local stale and node.value holding a float.
-            # Binding a function reference off that called the catalog's
-            # `resolve(name: str)` with 3.14159..., and Cython's argument coercion
-            # raised `Argument 'name' has incorrect type (expected str, got float)`
-            # from inside _bind_function_reference — surfacing as an
-            # IncompatibleTypesError that named neither the function nor the query.
-            # `SELECT PI() AS a, PI() AS b` was unrunnable, and so was any second
-            # mention of one nullary constant function in a projection, while
-            # `SELECT PI() AS a` alone was fine: it takes the mint-a-new-column path
-            # and never reaches here.
-            #
-            # Not for a `$project` reference (above): it is never compiled as an
-            # expression, and its parameters are deliberately left unbound, so there
-            # is no overload to choose.
-            if (
-                schema_name != "$project"
-                and node.node_type == NodeType.FUNCTION
-                and node.function_ref is None
-            ):
-                _bind_function_reference(node, context)
-
-            return node, context
-
-    schemas = context.schemas
-
-    # do the sub trees off this node
-    node, context = traversive_recursive_bind(node, context, format_cache)
-
-    # Now do the node we're at
-    if node_type == NodeType.LITERAL:
-        schema_column = context.plan_context.columns.constant(
-            column_name,
-            column_type=node.type,
-            aliases=[node.alias] if node.alias else [],
-            value=node.value,
-            nullable=False,
+    if isinstance(found_column, ConstantColumn):
+        # A repeat of a constant (a nullary constant function — PI(), E() —
+        # folded to its value) IS that constant: a new LITERAL in its place.
+        node = Literal(
+            value=native_literal_value(found_column.value, found_column.column_type),
+            type=found_column.column_type,
+            origin=node.origin_id,
+            alias=node.alias,
+            query_column=node.query_column,
+            schema_column=found_column,
+            relations=node.relations,
+            arena=context.plan_context.expressions,
         )
-        _append_derived(context, schemas, schema_column)
-        node.schema_column = schema_column
-        node.query_column = node.alias or column_name
+    context.reused_expressions[id(node)] = node
 
-    elif node_type != NodeType.SUBQUERY and not node.do_not_create_column:
-        if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
-            # we need to add this new column to the schema
-            aliases = [node.alias] if node.alias else []
-            result_type = None
-            fixed_function_result = None
-            if len(node.parameters) == 0:
-                result_type, fixed_function_result = fixed_value_function(node.value, context)
-            if result_type:
-                # fixed_value_function returns (ColumnType, value) directly — no lookup needed.
-                schema_column = context.plan_context.columns.constant(
-                    column_name,
-                    column_type=result_type,
-                    aliases=aliases,
-                    value=fixed_function_result,
-                    nullable=False,
-                )
-                # A fixed-value function IS its value: a new LITERAL in its place.
-                node = Literal(
-                    type=result_type,
-                    value=native_literal_value(fixed_function_result, result_type),
-                    origin=node.origin_id,
-                    alias=node.alias,
-                    query_column=node.query_column,
-                    relations=node.relations,
-                    arena=context.plan_context.expressions,
-                )
+    # Sharing the schema column is not the same as not needing to be bound.
+    # This node keeps its FUNCTION shape, and the expression compiler reads
+    # `function_ref` off the NODE (compiled_expression's NT_FUNCTION arm) to
+    # find the kernel — a second occurrence that only inherited an identity
+    # reached the compiler with function_ref None and raised
+    # "FUNCTION 'UPPER' has no function_ref - not bound". Visible wherever
+    # two occurrences of one call are compiled as separate expressions
+    # rather than one being an identifier reference to the other, which is
+    # exactly what the CASE -> IF_THEN_ELSE rewrite does with
+    # `CASE WHEN ... THEN UPPER(name) ELSE UPPER(name) END`.
+    #
+    # Read the node's CURRENT type, not the `node_type` local captured
+    # before this block ran. The ConstantColumn arm above REPLACES the node
+    # with a LITERAL (a nullary constant function — PI(), E() — folds to its
+    # value), which leaves the local stale and node.value holding a float.
+    # Binding a function reference off that called the catalog's
+    # `resolve(name: str)` with 3.14159..., and Cython's argument coercion
+    # raised `Argument 'name' has incorrect type (expected str, got float)`
+    # from inside _bind_function_reference — surfacing as an
+    # IncompatibleTypesError that named neither the function nor the query.
+    # `SELECT PI() AS a, PI() AS b` was unrunnable, and so was any second
+    # mention of one nullary constant function in a projection, while
+    # `SELECT PI() AS a` alone was fine: it takes the mint-a-new-column path
+    # and never reaches here.
+    #
+    # Not for a `$project` reference (above): it is never compiled as an
+    # expression, and its parameters are deliberately left unbound, so there
+    # is no overload to choose.
+    if (
+        schema_name != "$project"
+        and node.node_type == NodeType.FUNCTION
+        and node.function_ref is None
+    ):
+        _bind_function_reference(node, context)
+
+    return node, context
+
+
+def _bind_new_column(node, node_type, column_name, context, schemas):
+    """Mint the column a FUNCTION / AGGREGATOR / CASE / CAST / operator node
+    computes, its children already bound, and add it to the scope's `$derived`
+    (`schemas`, the scope as it was before the children bound). Returns the node,
+    which a fixed-value function replaces by its LITERAL. Called by the compiled
+    core (binder_core.inner_binder)."""
+    if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
+        # we need to add this new column to the schema
+        aliases = [node.alias] if node.alias else []
+        result_type = None
+        fixed_function_result = None
+        if len(node.parameters) == 0:
+            result_type, fixed_function_result = fixed_value_function(node.value, context)
+        if result_type:
+            # fixed_value_function returns (ColumnType, value) directly — no lookup needed.
+            schema_column = context.plan_context.columns.constant(
+                column_name,
+                column_type=result_type,
+                aliases=aliases,
+                value=fixed_function_result,
+                nullable=False,
+            )
+            # A fixed-value function IS its value: a new LITERAL in its place.
+            node = Literal(
+                type=result_type,
+                value=native_literal_value(fixed_function_result, result_type),
+                origin=node.origin_id,
+                alias=node.alias,
+                query_column=node.query_column,
+                relations=node.relations,
+                arena=context.plan_context.expressions,
+            )
+        else:
+            element_type = None  # for types with elements (ARRAYs)
+            precision = 38  # Maximum precision for Decimal128
+            scale = 21  # A reasonable scale that's less than precision
+
+            # DECIMAL carries precision/scale as parameters — extract before catalog lookup
+            if node.value == "DECIMAL" and len(node.parameters) > 1:
+                precision = node.parameters[1].value
+                scale = node.parameters[2].value if len(node.parameters) > 2 else scale
+
+            # Ask the catalog for the return type (catalog owns type reasoning)
+            _resolved = _bind_function_reference(node, context)
+            if _resolved is not None:
+                result_type = _resolved.inferred_return_type
+                element_type = _resolved.inferred_element_type
+            elif node_type == NodeType.AGGREGATOR:
+                # Aggregates are not in the function catalog (dispatched at
+                # runtime by the aggregate operators). The binder still needs
+                # a result type so expressions like `0.2 * AVG(col)` and
+                # downstream comparisons type-check correctly.
+                result_type = _aggregate_return_type(node)
+                if result_type is None:
+                    result_type = _CT_NULL
             else:
-                element_type = None  # for types with elements (ARRAYs)
-                precision = 38  # Maximum precision for Decimal128
-                scale = 21  # A reasonable scale that's less than precision
+                result_type = _CT_NULL  # unknown function; type resolved at runtime
 
-                # DECIMAL carries precision/scale as parameters — extract before catalog lookup
-                if node.value == "DECIMAL" and len(node.parameters) > 1:
-                    precision = node.parameters[1].value
-                    scale = node.parameters[2].value if len(node.parameters) > 2 else scale
+            # Phase 5: result_type is always ColumnType (catalog + aggregate + fallback).
+            _result_type_lc = result_type.category if result_type is not None else None
 
-                # Ask the catalog for the return type (catalog owns type reasoning)
-                _resolved = _bind_function_reference(node, context)
-                if _resolved is not None:
-                    result_type = _resolved.inferred_return_type
-                    element_type = _resolved.inferred_element_type
-                elif node_type == NodeType.AGGREGATOR:
-                    # Aggregates are not in the function catalog (dispatched at
-                    # runtime by the aggregate operators). The binder still needs
-                    # a result type so expressions like `0.2 * AVG(col)` and
-                    # downstream comparisons type-check correctly.
-                    result_type = _aggregate_return_type(node)
-                    if result_type is None:
-                        result_type = _CT_NULL
-                else:
-                    result_type = _CT_NULL  # unknown function; type resolved at runtime
-
-                # Phase 5: result_type is always ColumnType (catalog + aggregate + fallback).
-                _result_type_lc = result_type.category if result_type is not None else None
-
-                # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
-                # This is NOT type inference; it's making literals consistent with the
-                # surrounding expression's type after the catalog has declared the return
-                # type. Runs over VALUE args only (_value_arg_start below excludes IIF's
-                # condition) so it now covers IIF's literal branches too, not just
-                # COALESCE/IFNULL/IFNOTNULL — those previously fell through to the
-                # descriptor-coercion pass below, which retypes but (for the non-DECIMAL
-                # case it was written for) never needed to re-quantize a value's digits.
-                #
-                # Builds a FRESH Node + ConstantColumn per coerced literal rather than
-                # mutating `param`/`param.schema_column` in place: a bare literal like
-                # `0` is commonly INTERNED — the same ConstantColumn object shared by
-                # every textually-identical "0" elsewhere in the query (found_column
-                # adoption above, and again downstream when other passes re-resolve a
-                # copied subtree by name). Retyping that SHARED object to this one
-                # call's result type silently retyped every OTHER "0" in the query too:
-                # `COALESCE(ws_qty, 0)` (INTEGER) picked up `COALESCE(ws_wc, 0)`'s
-                # DECIMAL(7,2) literal type from a later-bound copy, and
-                # `IFNULL(ws_qty,0) + IFNULL(cs_qty,0)` died with "not supported" for
-                # an INTEGER+DECIMAL mix that was never really there.
-                _fn_name = (
-                    _resolved.function_definition.name if _resolved is not None else node.value
-                )
-                _value_arg_start = _NULL_CONDITIONAL_VALUE_ARG.get(_fn_name)
-                if _value_arg_start is not None and _result_type_lc not in (
-                    None,
-                    LogicalCategory.NULL,
-                ):
-                    _params = list(node.parameters)
-                    for _i in range(_value_arg_start, len(_params)):
-                        param = _params[_i]
-                        if not (
-                            param.node_type == NodeType.LITERAL
-                            and param.value is not None
-                            and param.value != set()
-                        ):
-                            continue
-                        _new_value = native_literal_value(
-                            parse_value(_result_type_lc, param.value), result_type
-                        )
-                        if _result_type_lc == LogicalCategory.DECIMAL and result_type.logical is not None:
-                            # A written literal's digits are not re-quantized to the
-                            # declared scale by parse_value/_parse_decimal (it keeps
-                            # whatever str(value) produced) — an inexact value would
-                            # silently misread at the wrong scale downstream:
-                            # _materialise_constant_literal derives its physical tier
-                            # from precision alone and never re-rounds. Quantize here
-                            # and fail loud instead of letting a wrong value through.
-                            # An explicit widened context: opteryx/__init__.py pins
-                            # getcontext().prec = 28 globally, but DECIMAL128 holds up
-                            # to 38 significant digits — quantizing under the ambient
-                            # (28) context would silently round/reject a legitimate
-                            # wide value before it ever reaches the engine.
-                            _quantum = decimal.Decimal(1).scaleb(-int(result_type.logical.scale))
-                            _rescaled = _new_value.quantize(_quantum, context=decimal.Context(prec=38))
-                            if _rescaled != _new_value:
-                                raise IncompatibleTypesError(
-                                    message=(
-                                        f"{node.value}: literal {param.value!r} cannot be "
-                                        f"represented exactly as {result_type} — CAST to "
-                                        "align the branches."
-                                    )
+            # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
+            # This is NOT type inference; it's making literals consistent with the
+            # surrounding expression's type after the catalog has declared the return
+            # type. Runs over VALUE args only (_value_arg_start below excludes IIF's
+            # condition) so it now covers IIF's literal branches too, not just
+            # COALESCE/IFNULL/IFNOTNULL — those previously fell through to the
+            # descriptor-coercion pass below, which retypes but (for the non-DECIMAL
+            # case it was written for) never needed to re-quantize a value's digits.
+            #
+            # Builds a FRESH Node + ConstantColumn per coerced literal rather than
+            # mutating `param`/`param.schema_column` in place: a bare literal like
+            # `0` is commonly INTERNED — the same ConstantColumn object shared by
+            # every textually-identical "0" elsewhere in the query (found_column
+            # adoption above, and again downstream when other passes re-resolve a
+            # copied subtree by name). Retyping that SHARED object to this one
+            # call's result type silently retyped every OTHER "0" in the query too:
+            # `COALESCE(ws_qty, 0)` (INTEGER) picked up `COALESCE(ws_wc, 0)`'s
+            # DECIMAL(7,2) literal type from a later-bound copy, and
+            # `IFNULL(ws_qty,0) + IFNULL(cs_qty,0)` died with "not supported" for
+            # an INTEGER+DECIMAL mix that was never really there.
+            _fn_name = (
+                _resolved.function_definition.name if _resolved is not None else node.value
+            )
+            _value_arg_start = _NULL_CONDITIONAL_VALUE_ARG.get(_fn_name)
+            if _value_arg_start is not None and _result_type_lc not in (
+                None,
+                LogicalCategory.NULL,
+            ):
+                _params = list(node.parameters)
+                for _i in range(_value_arg_start, len(_params)):
+                    param = _params[_i]
+                    if not (
+                        param.node_type == NodeType.LITERAL
+                        and param.value is not None
+                        and param.value != set()
+                    ):
+                        continue
+                    _new_value = native_literal_value(
+                        parse_value(_result_type_lc, param.value), result_type
+                    )
+                    if _result_type_lc == LogicalCategory.DECIMAL and result_type.logical is not None:
+                        # A written literal's digits are not re-quantized to the
+                        # declared scale by parse_value/_parse_decimal (it keeps
+                        # whatever str(value) produced) — an inexact value would
+                        # silently misread at the wrong scale downstream:
+                        # _materialise_constant_literal derives its physical tier
+                        # from precision alone and never re-rounds. Quantize here
+                        # and fail loud instead of letting a wrong value through.
+                        # An explicit widened context: opteryx/__init__.py pins
+                        # getcontext().prec = 28 globally, but DECIMAL128 holds up
+                        # to 38 significant digits — quantizing under the ambient
+                        # (28) context would silently round/reject a legitimate
+                        # wide value before it ever reaches the engine.
+                        _quantum = decimal.Decimal(1).scaleb(-int(result_type.logical.scale))
+                        _rescaled = _new_value.quantize(_quantum, context=decimal.Context(prec=38))
+                        if _rescaled != _new_value:
+                            raise IncompatibleTypesError(
+                                message=(
+                                    f"{node.value}: literal {param.value!r} cannot be "
+                                    f"represented exactly as {result_type} — CAST to "
+                                    "align the branches."
                                 )
-                            _new_value = _rescaled
-                        if _new_value == param.value and result_type == param.type:
-                            continue
-                        _new_param = param.copy()
-                        _new_param.value = _new_value
-                        _new_param.type = result_type
-                        _old_sc = param.schema_column
-                        _new_param.schema_column = context.plan_context.columns.constant(
-                            _old_sc.name if _old_sc is not None else str(_new_value),
-                            column_type=result_type,
-                            aliases=list(_old_sc.aliases) if _old_sc is not None and _old_sc.aliases else [],
-                            value=_new_value,
-                            nullable=False,
-                        )
-                        _params[_i] = _new_param
-                    node.parameters = _params
-
-                # Descriptor coercion for the same family (plus IIF). These
-                # functions hand back one argument VERBATIM, so an argument whose
-                # descriptor differs from the declared result reinterprets its own
-                # payload at the wrong scale/unit — COALESCE(ts_ms, ts_us) returned
-                # 1970-01-20 for a 2024 timestamp. The kernel cannot catch it:
-                # nc_dispatch types on the physical tag, and the DrakenVector
-                # carries neither scale nor unit (§11/§14), so both branches look
-                # identical to it. Alignment therefore has to happen HERE, at bind
-                # time — the same move as the CASE branch coercion below and the
-                # UNION-leg coercion in set_ops.
-                #
-                # Two different rules, by family:
-                #   - DECIMAL/DECIMAL128 (either side): ALWAYS CAST on any mismatch,
-                #     regardless of whether the physical tag matches. DECIMAL cannot
-                #     self-promote — scale is out-of-band on the vector — so unlike
-                #     the plain-fixed family below, there is no kernel-side promotion
-                #     to defer to. This is what lets COALESCE(decimal_col, 0.0) reach
-                #     nc_dispatch with the decimal_col branch already rescaled/
-                #     retagged to the resolved result type (FLOAT64 once FLOAT wins,
-                #     find_compatible_type; or an exact DECIMAL(p,s) otherwise).
-                #   - everything else: limited to same-physical descriptor mismatches
-                #     (TIMESTAMP/TIME unit). A CROSS-physical pair (narrow int vs
-                #     INT64, int vs float) is the kernel's own promotion to make
-                #     (nc_promote_fixed), and inserting casts there would take work
-                #     off a path that is already correct.
-                if _value_arg_start is not None and result_type is not None:
-                    _params = list(node.parameters)
-                    for _i in range(_value_arg_start, len(_params)):
-                        _arg = _params[_i]
-                        _arg_sc = _arg.schema_column
-                        if _arg_sc is None or _arg_sc.column_type is None:
-                            continue
-                        _arg_ct = _arg_sc.column_type
-                        # A typed NULL has no value to convert (mirrors the NULL-literal
-                        # case in set_ops._cast_leg_columns_to).
-                        if _arg_ct == result_type or _arg_ct == _CT_NULL:
-                            continue
-                        if (
-                            _arg_ct.category == LogicalCategory.DECIMAL
-                            or result_type.category == LogicalCategory.DECIMAL
-                        ):
-                            _params[_i] = _bound_cast_node(
-                                _arg, result_type, plan_context=context.plan_context
                             )
-                            continue
-                        if _arg_ct.physical != result_type.physical:
-                            continue
-                        if not _descriptor_carries_meaning(result_type):
-                            continue
+                        _new_value = _rescaled
+                    if _new_value == param.value and result_type == param.type:
+                        continue
+                    _new_param = param.copy()
+                    _new_param.value = _new_value
+                    _new_param.type = result_type
+                    _old_sc = param.schema_column
+                    _new_param.schema_column = context.plan_context.columns.constant(
+                        _old_sc.name if _old_sc is not None else str(_new_value),
+                        column_type=result_type,
+                        aliases=list(_old_sc.aliases) if _old_sc is not None and _old_sc.aliases else [],
+                        value=_new_value,
+                        nullable=False,
+                    )
+                    _params[_i] = _new_param
+                node.parameters = _params
+
+            # Descriptor coercion for the same family (plus IIF). These
+            # functions hand back one argument VERBATIM, so an argument whose
+            # descriptor differs from the declared result reinterprets its own
+            # payload at the wrong scale/unit — COALESCE(ts_ms, ts_us) returned
+            # 1970-01-20 for a 2024 timestamp. The kernel cannot catch it:
+            # nc_dispatch types on the physical tag, and the DrakenVector
+            # carries neither scale nor unit (§11/§14), so both branches look
+            # identical to it. Alignment therefore has to happen HERE, at bind
+            # time — the same move as the CASE branch coercion below and the
+            # UNION-leg coercion in set_ops.
+            #
+            # Two different rules, by family:
+            #   - DECIMAL/DECIMAL128 (either side): ALWAYS CAST on any mismatch,
+            #     regardless of whether the physical tag matches. DECIMAL cannot
+            #     self-promote — scale is out-of-band on the vector — so unlike
+            #     the plain-fixed family below, there is no kernel-side promotion
+            #     to defer to. This is what lets COALESCE(decimal_col, 0.0) reach
+            #     nc_dispatch with the decimal_col branch already rescaled/
+            #     retagged to the resolved result type (FLOAT64 once FLOAT wins,
+            #     find_compatible_type; or an exact DECIMAL(p,s) otherwise).
+            #   - everything else: limited to same-physical descriptor mismatches
+            #     (TIMESTAMP/TIME unit). A CROSS-physical pair (narrow int vs
+            #     INT64, int vs float) is the kernel's own promotion to make
+            #     (nc_promote_fixed), and inserting casts there would take work
+            #     off a path that is already correct.
+            if _value_arg_start is not None and result_type is not None:
+                _params = list(node.parameters)
+                for _i in range(_value_arg_start, len(_params)):
+                    _arg = _params[_i]
+                    _arg_sc = _arg.schema_column
+                    if _arg_sc is None or _arg_sc.column_type is None:
+                        continue
+                    _arg_ct = _arg_sc.column_type
+                    # A typed NULL has no value to convert (mirrors the NULL-literal
+                    # case in set_ops._cast_leg_columns_to).
+                    if _arg_ct == result_type or _arg_ct == _CT_NULL:
+                        continue
+                    if (
+                        _arg_ct.category == LogicalCategory.DECIMAL
+                        or result_type.category == LogicalCategory.DECIMAL
+                    ):
                         _params[_i] = _bound_cast_node(
                             _arg, result_type, plan_context=context.plan_context
                         )
-                    node.parameters = _params
-
-                # Phase 5: result_type is ColumnType — use directly.
-                _ct = result_type
-                schema_column = context.plan_context.columns.computed(
-                    FunctionColumn,
-                    column_name,
-                    column_type=_ct,
-                    aliases=aliases,
-                )
-            _append_derived(context, schemas, schema_column)
-            node.schema_column = schema_column
-            node.query_column = node.alias or column_name
-
-        elif node_type == NodeType.CASE:
-            aliases = [node.alias] if node.alias else []
-            branch_nodes = list(node.results or [])
-            if node.else_result is not None:
-                branch_nodes.append(node.else_result)
-            typed_branches = [
-                (branch, branch.schema_column.column_type)
-                for branch in branch_nodes
-                if branch.schema_column is not None
-                and branch.schema_column.column_type is not None
-                and branch.schema_column.column_type != _CT_NULL
-            ]
-            _check_case_branches_compatible(typed_branches, node.alias or column_name)
-
-            # The promoted common type across every branch (mirrors COALESCE/
-            # IFNULL and the UNION-leg coercion in set_ops.py) rather than
-            # "whichever branch came first" — D-4 Phase 2 carries the full
-            # ColumnType (precision/scale/element_type), not just a category.
-            # Short-circuit when every branch already carries the identical
-            # ColumnType: find_compatible_type's DECIMAL path has no "already
-            # equal" fast case and always recomputes a precision/scale via
-            # Plus-style promotion (or a wide DECIMAL(38,18) default for a
-            # single input) — widening a same-scale-everywhere CASE for no
-            # reason.
-            #
-            # Otherwise, a DECIMAL mix uses the SELECTION rule
-            # (compute_selection_result_type), not find_compatible_type's
-            # additive one: CASE returns one branch verbatim, so the result
-            # only has to REPRESENT each branch. Plus-style promotion sized
-            # `THEN decimal_col ELSE 0` for `decimal_col + 0` and pushed an
-            # ordinary DECIMAL(15,2) to DECIMAL(22,2), across the int64/int128
-            # tier. Everything else (strings, temporals, the FLOAT mix) keeps
-            # find_compatible_type.
-            _branch_cts = [ct for _, ct in typed_branches]
-            if _branch_cts and all(ct == _branch_cts[0] for ct in _branch_cts):
-                result_ct = _branch_cts[0]
-            elif _branch_cts:
-                result_ct = compute_selection_result_type(
-                    [
-                        (
-                            ct,
-                            branch.value
-                            if branch.node_type == NodeType.LITERAL
-                            else NOT_LITERAL,
-                        )
-                        for branch, ct in typed_branches
-                    ]
-                )
-                if result_ct is None:
-                    result_ct = _lt.find_compatible_type(_branch_cts)
-            else:
-                result_ct = None
-
-            # Coerce LITERAL branches to the resolved result type in place;
-            # CAST-wrap every other (non-literal) branch whose physical type
-            # doesn't already match. draken_if_then_else — the native kernel
-            # this CASE may lower to — blends identical-physical-type branches
-            # only (plus a DECIMAL/DECIMAL128 widening exception) and performs
-            # no promotion of its own, so every branch must carry the same
-            # physical type by the time it reaches execution.
-            if result_ct is not None:
-                _result_cat = result_ct.category
-
-                def _coerce_case_branch(branch):
-                    if branch is None:
-                        return branch
-                    sc = branch.schema_column
-                    if sc is None or sc.column_type is None or sc.column_type == _CT_NULL:
-                        return branch
-                    if branch.node_type == NodeType.LITERAL and branch.value is not None:
-                        branch.value = native_literal_value(
-                            parse_value(_result_cat, branch.value), result_ct
-                        )
-                        branch.type = result_ct  # ColumnType
-                        branch.schema_column = context.plan_context.columns.retype(
-                            sc, result_ct
-                        )
-                        return branch
-                    if sc.column_type == result_ct:
-                        return branch
-                    # A matching physical tag is enough only for types whose tag
-                    # tells the whole story — see _descriptor_carries_meaning.
-                    # A decimal at another scale, or a timestamp at another unit,
-                    # goes through a real rescale cast instead of blending raw.
-                    if (sc.column_type.physical == result_ct.physical
-                            and not _descriptor_carries_meaning(result_ct)):
-                        return branch
-                    # Inserted fully bound (own schema_column) — this runs
-                    # inside the CASE's own bind step, after its branches are
-                    # already bound, so nothing will traverse into a freshly-
-                    # inserted CAST to bind it a second time.
-                    return _bound_cast_node(branch, result_ct, plan_context=context.plan_context)
-
-                node.results = [_coerce_case_branch(b) for b in (node.results or [])]
-                if node.else_result is not None:
-                    node.else_result = _coerce_case_branch(node.else_result)
-            schema_column = context.plan_context.columns.computed(
-                FunctionColumn,
-                column_name,
-                column_type=result_ct,
-                aliases=aliases,
-            )
-            _append_derived(context, schemas, schema_column)
-            node.schema_column = schema_column
-            node.query_column = node.alias or column_name
-
-        elif node_type == NodeType.CAST:
-            # Handle CAST operations (CAST(expr AS type))
-            # The source expression is already bound via recursive traversal above
-            # node.value contains the target type name (e.g., "VARCHAR", "INTEGER", "DOUBLE", "BLOB")
-
-            # Define aliases for the schema column
-            aliases = [node.alias] if node.alias else []
-
-            # Map type name to LogicalCategory
-            target_type_name = node.value.upper()
-            # Strip TRY_ prefix for safe casts — the prefix is kept in node.value for the evaluator
-            if target_type_name.startswith("TRY_"):
-                target_type_name = target_type_name[4:]
-
-            # Extract unit from internal temporal type forms (e.g., "_TIMESTAMP_MS" → unit="ms")
-            unit = None
-            if target_type_name.startswith("_TIMESTAMP_"):
-                # Internal form detected - extract unit
-                unit_map = {
-                    "_TIMESTAMP_NS": "ns",
-                    "_TIMESTAMP_MS": "ms",
-                    "_TIMESTAMP_S": "s",
-                    "_TIMESTAMP_US": "us",
-                    "_TIMESTAMP_DAYS": "days",
-                }
-                if target_type_name in unit_map:
-                    unit = unit_map[target_type_name]
-                    target_type_name = "TIMESTAMP"
-                else:
-                    raise IncompatibleTypesError(
-                        message=f"Unknown temporal unit form: {target_type_name}. "
-                        "Use the public form: `CAST(expr AS TIMESTAMP[ns])`, "
-                        "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, `CAST(expr AS TIMESTAMP[us])`, or `CAST(expr AS TIMESTAMP[d])`."
+                        continue
+                    if _arg_ct.physical != result_type.physical:
+                        continue
+                    if not _descriptor_carries_meaning(result_type):
+                        continue
+                    _params[_i] = _bound_cast_node(
+                        _arg, result_type, plan_context=context.plan_context
                     )
+                node.parameters = _params
 
-            # Validate TIMESTAMP casts from INTEGER — require explicit unit
-            if target_type_name == "TIMESTAMP" and node.left:
-                source_type = determine_type(node.left)
-                if source_type is not None and source_type.category == LogicalCategory.INTEGER:
-                    if unit is None:
-                        raise IncompatibleTypesError(
-                            message="Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
-                            "Use `expr::TIMESTAMP[ms]`, `expr::TIMESTAMP[s]`, or `expr::TIMESTAMP[us]`."
-                        )
-
-            element_type = None
-            precision = 38
-            scale = 21
-
-            # Handle type-specific parameters.
-            # CAST(expr AS DECIMAL(precision, scale)): `node.parameters` carries the
-            # TYPE's parenthesized arguments only — parameters[0]=precision,
-            # parameters[1]=scale (the cast expression is in node.left/centre, NOT
-            # parameters[0]). A prior off-by-one read parameters[1]/[2], so
-            # `DECIMAL(32, 2)` resolved to a corrupt (precision=2, scale=21) — which
-            # was silently dropped (column_type=None) until the D-4 invariant made it
-            # fail loud. The runtime cast reads the params independently, so this only
-            # corrects the schema-column metadata.
-            if target_type_name == "DECIMAL":
-                # Both parameters are always present here: a parsed cast without
-                # them is refused by the cast builder (logical_planner_builders,
-                # _decimal_needs_precision_and_scale), the only place that knows how
-                # the user spelled it, and every synthesized DECIMAL cast carries
-                # the pair from its target ColumnType.
-                precision = int(node.parameters[0].value)
-                scale = int(node.parameters[1].value)
-
-            if (
-                target_type_name == "ARRAY"
-                and node.parameters is not None
-                and len(node.parameters) > 0
-            ):
-                # CAST(expr AS ARRAY(element_type)) - extract the element type
-                element_param = node.parameters[0]
-                if element_param.node_type == NodeType.LITERAL and element_param.value is not None:
-                    element_type = parse_column_type(element_param.text().upper())
-                else:
-                    element_type = _lt.VARIANT
-
-            if target_type_name == "DECIMAL":
-                _ct = _lt.DECIMAL(precision, scale)
-            elif target_type_name == "ARRAY":
-                _ct = _lt.ARRAY(element_type if element_type is not None else _lt.VARIANT)
-            else:
-                _ct = parse_column_type(target_type_name)
+            # Phase 5: result_type is ColumnType — use directly.
+            _ct = result_type
             schema_column = context.plan_context.columns.computed(
                 FunctionColumn,
                 column_name,
                 column_type=_ct,
                 aliases=aliases,
             )
-            # NO identity override here. Identity is the engine's per-column handle
-            # and MUST be unique; FunctionColumn.__post_init__ mints `$derived_<rand>`
-            # for exactly that reason. This arm used to stamp the RENDERED EXPRESSION
-            # TEXT over that minted id, so every CAST that rendered the same string
-            # became the SAME column — across scopes, across relations, across join
-            # legs. Two derived tables each computing `CAST(ts AS TIMESTAMP)` over
-            # their own `ts` both got identity `ts::TIMESTAMP`, and the join then
-            # emitted one leg's values for both columns: a SILENT wrong answer.
-            # Expression REUSE is matched by NAME (the `schema.find_column(column_name)`
-            # lookup above), never by identity, so minting is safe here.
-            _append_derived(context, schemas, schema_column)
-            node.schema_column = schema_column
-            node.query_column = node.alias or column_name
+        _append_derived(context, schemas, schema_column)
+        node.schema_column = schema_column
+        node.query_column = node.alias or column_name
 
-        elif node_type == NodeType.COMPARISON_OPERATOR and node.value.startswith(
-            (
-                "AnyOp",
-                "AllOp",
-            )
-        ):
-            if node.right.node_type == NodeType.LITERAL:
-                if type(node.right.value) is not tuple:
-                    try:
-                        node.right.value = tuple(node.right.value)
-                    except TypeError as e:
-                        raise IncompatibleTypesError(
-                            message=f"Cannot construct ARRAY from incompatible types."
-                        ) from e
-                # LIKE/ILIKE patterns must all be strings.
-                # ⛔ AnyOpNotLike / AnyOpNotILike are RETIRED, not live operators:
-                # nothing constructs them any more. `NOT LIKE ANY` is refused in the
-                # planner (its two readings differ, and the engine used to silently
-                # answer the ALL one), and the AND'd-NOT-LIKE fusion now emits the
-                # correctly named AllOpNotLike. They are listed here only so this
-                # guard stays exhaustive over the family; do not read their presence
-                # as evidence the spelling works.
-                if node.value in (
-                    "AnyOpLike",
-                    "AnyOpNotLike",
-                    "AnyOpILike",
-                    "AnyOpNotILike",
-                    "AllOpLike",
-                    "AllOpNotLike",
-                    "AllOpILike",
-                    "AllOpNotILike",
-                ):
-                    for pat in node.right.value:
-                        if pat is not None and not isinstance(pat, (str, bytes)):
-                            raise IncompatibleTypesError(
-                                message=f"LIKE patterns must be strings, got {type(pat).__name__}."
-                            )
-            schema_column = context.plan_context.columns.computed(
-                ExpressionColumn, column_name, column_type=_lt.BOOLEAN
-            )
-            node.schema_column = schema_column
-            _append_derived(context, schemas, schema_column)
-        else:
-            # VARCHAR/NVARCHAR/VARBINARY literals must be coerced to bytes at bind
-            # time, on EVERY comparison operator — not just InList/NotInList. The
-            # execution engine's canonical string representation is bytes (VARCHAR
-            # and VARBINARY are byte-identical past the type tag), and downstream
-            # optimizer passes (e.g. statistics_refresh's range-constraint merge)
-            # compare literal bounds from different operators against each other.
-            # Coercing only the InList side left scalar comparisons (Eq/Lt/Gt/...)
-            # holding `str` while InList held `bytes`, so a query mixing both against
-            # the same column crashed with `'>' not supported between bytes and str`.
-            #
-            # This coercion is CONFINED TO THE STRING FAMILY, where str -> bytes is a
-            # change of representation and nothing else: the literal's ColumnType tag
-            # stays true after it. It must never cross a type category. It used to
-            # also map FLOAT->float / INTEGER->int / BOOLEAN->bool, which rewrote the
-            # VALUE while leaving `.type` and `schema_column.column_type` describing
-            # the ORIGINAL literal — a vector whose payload and type tag disagree.
-            # Two live wrong answers came out of that: `int_col = 4.5` silently
-            # truncated the literal to 4 and matched row 4, and a DECIMAL(18,6)
-            # literal against an INT64 column kept its DECIMAL tag over an int
-            # payload, so `4` was read as 0.000004 and matched nothing. A numeric
-            # literal is now left exactly as written, and the comparison kernels
-            # resolve the mixed-type compare (or the engine refuses it loudly).
-            if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
-                "Eq",
-                "NotEq",
-                "Lt",
-                "LtEq",
-                "Gt",
-                "GtEq",
-                "InList",
-                "NotInList",
-            ):
-                from opteryx.types.logical_type import LogicalCategory as _OT
+    elif node_type == NodeType.CASE:
+        aliases = [node.alias] if node.alias else []
+        branch_nodes = list(node.results or [])
+        if node.else_result is not None:
+            branch_nodes.append(node.else_result)
+        typed_branches = [
+            (branch, branch.schema_column.column_type)
+            for branch in branch_nodes
+            if branch.schema_column is not None
+            and branch.schema_column.column_type is not None
+            and branch.schema_column.column_type != _CT_NULL
+        ]
+        _check_case_branches_compatible(typed_branches, node.alias or column_name)
 
-                def _literal_text(v):
-                    return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
-
-                # UUID against a string LITERAL (docs/UUID_TYPE_DESIGN.md, ruling U7):
-                # the literal is parsed strictly NOW and becomes a UUID literal —
-                # value, type and schema column together, so payload and type tag
-                # never disagree. A non-UUID string fails here, at bind. Only a
-                # literal: a VARCHAR column against a UUID stays a type mismatch.
-                def _retype_uuid_literal(literal_node, other_node):
-                    if other_node is None or other_node.schema_column is None:
-                        return
-                    if other_node.schema_column.category != _OT.UUID:
-                        return
-                    if literal_node.schema_column is None or literal_node.schema_column.category not in (
-                        _OT.VARCHAR, _OT.NVARCHAR, _OT.ARRAY
-                    ):
-                        return
-                    from opteryx.types.logical_type import ARRAY as _ARRAY
-                    from opteryx.types.logical_type import UUID as _UUID
-                    from opteryx.types.scalars.value_parsing import _parse_uuid
-                    from opteryx.types.scalars.value_parsing import is_uuid_text
-
-                    value = literal_node.value
-                    items = value if isinstance(value, (list, tuple)) else (value,)
-                    if not all(isinstance(v, (str, bytes)) or v is None for v in items):
-                        return
-                    for v in items:
-                        if v is not None and not is_uuid_text(v):
-                            raise IncompatibleTypesError(
-                                message=(
-                                    f"{_literal_text(v)!r} is compared with a UUID column but "
-                                    "is not a UUID - a UUID literal is 8-4-4-4-12 hex digits, "
-                                    "for example '550e8400-e29b-41d4-a716-446655440000'"
-                                )
-                            )
-                    if isinstance(value, (list, tuple)):
-                        new_value = type(value)(None if v is None else _parse_uuid(v) for v in value)
-                        new_type = _ARRAY(_UUID)
-                    else:
-                        new_value = _parse_uuid(value)
-                        new_type = _UUID
-                    _old_sc = literal_node.schema_column
-                    literal_node.value = new_value
-                    literal_node.type = new_type
-                    literal_node.schema_column = context.plan_context.columns.constant(
-                        _old_sc.name,
-                        column_type=new_type,
-                        aliases=list(_old_sc.aliases) if _old_sc.aliases else [],
-                        value=new_value,
-                        nullable=False,
+        # The promoted common type across every branch (mirrors COALESCE/
+        # IFNULL and the UNION-leg coercion in set_ops.py) rather than
+        # "whichever branch came first" — D-4 Phase 2 carries the full
+        # ColumnType (precision/scale/element_type), not just a category.
+        # Short-circuit when every branch already carries the identical
+        # ColumnType: find_compatible_type's DECIMAL path has no "already
+        # equal" fast case and always recomputes a precision/scale via
+        # Plus-style promotion (or a wide DECIMAL(38,18) default for a
+        # single input) — widening a same-scale-everywhere CASE for no
+        # reason.
+        #
+        # Otherwise, a DECIMAL mix uses the SELECTION rule
+        # (compute_selection_result_type), not find_compatible_type's
+        # additive one: CASE returns one branch verbatim, so the result
+        # only has to REPRESENT each branch. Plus-style promotion sized
+        # `THEN decimal_col ELSE 0` for `decimal_col + 0` and pushed an
+        # ordinary DECIMAL(15,2) to DECIMAL(22,2), across the int64/int128
+        # tier. Everything else (strings, temporals, the FLOAT mix) keeps
+        # find_compatible_type.
+        _branch_cts = [ct for _, ct in typed_branches]
+        if _branch_cts and all(ct == _branch_cts[0] for ct in _branch_cts):
+            result_ct = _branch_cts[0]
+        elif _branch_cts:
+            result_ct = compute_selection_result_type(
+                [
+                    (
+                        ct,
+                        branch.value
+                        if branch.node_type == NodeType.LITERAL
+                        else NOT_LITERAL,
                     )
-
-                if node.right is not None and node.right.node_type == NodeType.LITERAL:
-                    _retype_uuid_literal(node.right, node.left)
-                elif node.left is not None and node.left.node_type == NodeType.LITERAL:
-                    _retype_uuid_literal(node.left, node.right)
-
-                _COERCE = {
-                    _OT.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                    _OT.NVARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                    _OT.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
-                }
-
-                def _coerce_literal(literal_node, other_node):
-                    other_type = (
-                        other_node.schema_column.category
-                        if other_node.schema_column is not None
-                        else None
-                    )
-                    coerce = _COERCE.get(other_type)
-                    if coerce is None:
-                        return
-                    # An IN-list literal is a collection. `build_literal_node` maps
-                    # BOTH list and tuple to ARRAY, and the two spellings reach here
-                    # from different front doors — SQL's `IN (...)` builds a list,
-                    # while a visibility filter's list is tuple-ised by
-                    # `dnf.simplify_dnf` (it needs hashable clauses to dedup). Handling
-                    # only `list` sent the whole tuple through the scalar branch.
-                    # Rebuild in the container we were given: the ARRAY tag does not
-                    # distinguish them, but nothing downstream should see its literal
-                    # silently change shape either.
-                    value = literal_node.value
-                    if isinstance(value, (list, tuple)):
-                        literal_node.value = type(value)(
-                            None if v is None else coerce(v) for v in value
-                        )
-                    elif value is not None:
-                        literal_node.value = coerce(value)
-
-                if node.right is not None and node.right.node_type == NodeType.LITERAL:
-                    _coerce_literal(node.right, node.left)
-                elif node.left is not None and node.left.node_type == NodeType.LITERAL:
-                    _coerce_literal(node.left, node.right)
-
-            # Capture like_selectivity_decay at BIND time, before predicate_rewriter
-            # later mutates node.value from Like/ILike/NotLike/NotILike to
-            # InStr/IInStr/NotInStr/NotIInStr IN PLACE ON THIS SAME NODE (see
-            # predicate_rewriter.INSTR_REWRITES) — the char-class LIKE selectivity
-            # estimator (the native instr estimator, src/cpp/planner/selectivity.hpp)
-            # reads it via plain attribute access. Same reasoning as match_threshold's
-            # bind-time capture above: a compiled plan must keep answering the
-            # selectivity question it was compiled for, so a later SET cannot reach
-            # back and change an already-bound plan's estimate.
-            if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
-                "Like",
-                "ILike",
-                "NotLike",
-                "NotILike",
-            ):
-                node.like_selectivity_decay = context.execution_context.variables[
-                    "like_selectivity_decay"
+                    for branch, ct in typed_branches
                 ]
-
-            # The type-mismatch check recurses the whole subtree for AND/OR/XOR
-            # nodes, but inner_binder already visits every comparison leaf
-            # bottom-up (each gets its own check before its parent connective is
-            # reached), so re-checking at each connective is pure O(n^2)
-            # re-walking on deep predicate chains. Only check at the nodes that do
-            # the actual per-comparison work; connectives just OR their children's
-            # results, which are already covered.
-            if node_type not in (NodeType.AND, NodeType.OR, NodeType.XOR):
-                mismatches = get_mismatched_condition_column_types(node, relaxed=True)
-                if mismatches:
-                    raise IncompatibleTypesError(**mismatches)
-
-            # RLIKE's kernel takes only a compiled pattern, so compiling it is a
-            # lowering every query needs, done here rather than in a strategy that
-            # can be switched off. After the type check, so a wrongly-typed pattern
-            # is reported as that.
-            if node_type == NodeType.COMPARISON_OPERATOR and node.value in ("RLike", "NotRLike"):
-                compile_rlike_pattern(node, plan_context=context.plan_context)
-
-            result_type = determine_type(node)  # ColumnType | None (Phase 2)
-            # D-2: when the result is DECIMAL, also derive (precision, scale).
-            # determine_type() now returns ColumnType; use .category for LogicalCategory
-            # comparisons. Only attempt parameter derivation for binary arithmetic on
-            # numeric operands — other results (BOOLEAN comparisons, etc.) don't land here.
-            _result_cat = result_type.category if result_type is not None else None
-            result_ct_final = None
-            if (
-                _result_cat == LogicalCategory.DECIMAL
-                and node_type == NodeType.BINARY_OPERATOR
-                and node.value in ("Plus", "Minus", "Multiply", "Divide")
-                and node.left is not None
-                and node.right is not None
-            ):
-                left_ct = _operand_column_type(node.left)
-                right_ct = _operand_column_type(node.right)
-                if left_ct is not None and right_ct is not None:
-                    from opteryx.types.type_unification import compute_result_logical_type
-
-                    result_ct_final = compute_result_logical_type(
-                        left_ct, right_ct, node.value, LogicalCategory.DECIMAL
-                    )
-            elif _result_cat == LogicalCategory.DECIMAL and node_type == NodeType.NESTED:
-                # NESTED is a parenthesised expression wrapping `node.centre`.
-                # Inherit the centre's column_type directly (single source of truth).
-                centre = node.centre
-                centre_sc = centre.schema_column if centre else None
-                if centre_sc is not None and centre_sc.column_type is not None:
-                    result_ct_final = centre_sc.column_type
-
-            _schema_ct = result_ct_final if result_ct_final is not None else result_type
-            schema_column = context.plan_context.columns.computed(
-                ExpressionColumn,
-                column_name,
-                column_type=_schema_ct,
-                aliases=[node.alias] if node.alias else [],
             )
-            _append_derived(context, schemas, schema_column)
-            node.schema_column = schema_column
-            node.query_column = node.alias or column_name
+            if result_ct is None:
+                result_ct = _lt.find_compatible_type(_branch_cts)
+        else:
+            result_ct = None
 
-    identifiers = get_all_nodes_of_type(node, (NodeType.IDENTIFIER,))
-    sources = []
-    for col in identifiers:
-        if col.source is not None:
-            sources.append(col.source)
-        if col.schema_column is not None:
-            sources.extend(col.schema_column.origin or [])
-    node.relations = set(sources)
+        # Coerce LITERAL branches to the resolved result type in place;
+        # CAST-wrap every other (non-literal) branch whose physical type
+        # doesn't already match. draken_if_then_else — the native kernel
+        # this CASE may lower to — blends identical-physical-type branches
+        # only (plus a DECIMAL/DECIMAL128 widening exception) and performs
+        # no promotion of its own, so every branch must carry the same
+        # physical type by the time it reaches execution.
+        if result_ct is not None:
+            _result_cat = result_ct.category
 
-    context.schemas = schemas
-    return node, context
+            def _coerce_case_branch(branch):
+                if branch is None:
+                    return branch
+                sc = branch.schema_column
+                if sc is None or sc.column_type is None or sc.column_type == _CT_NULL:
+                    return branch
+                if branch.node_type == NodeType.LITERAL and branch.value is not None:
+                    branch.value = native_literal_value(
+                        parse_value(_result_cat, branch.value), result_ct
+                    )
+                    branch.type = result_ct  # ColumnType
+                    branch.schema_column = context.plan_context.columns.retype(
+                        sc, result_ct
+                    )
+                    return branch
+                if sc.column_type == result_ct:
+                    return branch
+                # A matching physical tag is enough only for types whose tag
+                # tells the whole story — see _descriptor_carries_meaning.
+                # A decimal at another scale, or a timestamp at another unit,
+                # goes through a real rescale cast instead of blending raw.
+                if (sc.column_type.physical == result_ct.physical
+                        and not _descriptor_carries_meaning(result_ct)):
+                    return branch
+                # Inserted fully bound (own schema_column) — this runs
+                # inside the CASE's own bind step, after its branches are
+                # already bound, so nothing will traverse into a freshly-
+                # inserted CAST to bind it a second time.
+                return _bound_cast_node(branch, result_ct, plan_context=context.plan_context)
+
+            node.results = [_coerce_case_branch(b) for b in (node.results or [])]
+            if node.else_result is not None:
+                node.else_result = _coerce_case_branch(node.else_result)
+        schema_column = context.plan_context.columns.computed(
+            FunctionColumn,
+            column_name,
+            column_type=result_ct,
+            aliases=aliases,
+        )
+        _append_derived(context, schemas, schema_column)
+        node.schema_column = schema_column
+        node.query_column = node.alias or column_name
+
+    elif node_type == NodeType.CAST:
+        # Handle CAST operations (CAST(expr AS type))
+        # The source expression is already bound via recursive traversal above
+        # node.value contains the target type name (e.g., "VARCHAR", "INTEGER", "DOUBLE", "BLOB")
+
+        # Define aliases for the schema column
+        aliases = [node.alias] if node.alias else []
+
+        # Map type name to LogicalCategory
+        target_type_name = node.value.upper()
+        # Strip TRY_ prefix for safe casts — the prefix is kept in node.value for the evaluator
+        if target_type_name.startswith("TRY_"):
+            target_type_name = target_type_name[4:]
+
+        # Extract unit from internal temporal type forms (e.g., "_TIMESTAMP_MS" → unit="ms")
+        unit = None
+        if target_type_name.startswith("_TIMESTAMP_"):
+            # Internal form detected - extract unit
+            unit_map = {
+                "_TIMESTAMP_NS": "ns",
+                "_TIMESTAMP_MS": "ms",
+                "_TIMESTAMP_S": "s",
+                "_TIMESTAMP_US": "us",
+                "_TIMESTAMP_DAYS": "days",
+            }
+            if target_type_name in unit_map:
+                unit = unit_map[target_type_name]
+                target_type_name = "TIMESTAMP"
+            else:
+                raise IncompatibleTypesError(
+                    message=f"Unknown temporal unit form: {target_type_name}. "
+                    "Use the public form: `CAST(expr AS TIMESTAMP[ns])`, "
+                    "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, `CAST(expr AS TIMESTAMP[us])`, or `CAST(expr AS TIMESTAMP[d])`."
+                )
+
+        # Validate TIMESTAMP casts from INTEGER — require explicit unit
+        if target_type_name == "TIMESTAMP" and node.left:
+            source_type = determine_type(node.left)
+            if source_type is not None and source_type.category == LogicalCategory.INTEGER:
+                if unit is None:
+                    raise IncompatibleTypesError(
+                        message="Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
+                        "Use `expr::TIMESTAMP[ms]`, `expr::TIMESTAMP[s]`, or `expr::TIMESTAMP[us]`."
+                    )
+
+        element_type = None
+        precision = 38
+        scale = 21
+
+        # Handle type-specific parameters.
+        # CAST(expr AS DECIMAL(precision, scale)): `node.parameters` carries the
+        # TYPE's parenthesized arguments only — parameters[0]=precision,
+        # parameters[1]=scale (the cast expression is in node.left/centre, NOT
+        # parameters[0]). A prior off-by-one read parameters[1]/[2], so
+        # `DECIMAL(32, 2)` resolved to a corrupt (precision=2, scale=21) — which
+        # was silently dropped (column_type=None) until the D-4 invariant made it
+        # fail loud. The runtime cast reads the params independently, so this only
+        # corrects the schema-column metadata.
+        if target_type_name == "DECIMAL":
+            # Both parameters are always present here: a parsed cast without
+            # them is refused by the cast builder (logical_planner_builders,
+            # _decimal_needs_precision_and_scale), the only place that knows how
+            # the user spelled it, and every synthesized DECIMAL cast carries
+            # the pair from its target ColumnType.
+            precision = int(node.parameters[0].value)
+            scale = int(node.parameters[1].value)
+
+        if (
+            target_type_name == "ARRAY"
+            and node.parameters is not None
+            and len(node.parameters) > 0
+        ):
+            # CAST(expr AS ARRAY(element_type)) - extract the element type
+            element_param = node.parameters[0]
+            if element_param.node_type == NodeType.LITERAL and element_param.value is not None:
+                element_type = parse_column_type(element_param.text().upper())
+            else:
+                element_type = _lt.VARIANT
+
+        if target_type_name == "DECIMAL":
+            _ct = _lt.DECIMAL(precision, scale)
+        elif target_type_name == "ARRAY":
+            _ct = _lt.ARRAY(element_type if element_type is not None else _lt.VARIANT)
+        else:
+            _ct = parse_column_type(target_type_name)
+        schema_column = context.plan_context.columns.computed(
+            FunctionColumn,
+            column_name,
+            column_type=_ct,
+            aliases=aliases,
+        )
+        # NO identity override here. Identity is the engine's per-column handle
+        # and MUST be unique; FunctionColumn.__post_init__ mints `$derived_<rand>`
+        # for exactly that reason. This arm used to stamp the RENDERED EXPRESSION
+        # TEXT over that minted id, so every CAST that rendered the same string
+        # became the SAME column — across scopes, across relations, across join
+        # legs. Two derived tables each computing `CAST(ts AS TIMESTAMP)` over
+        # their own `ts` both got identity `ts::TIMESTAMP`, and the join then
+        # emitted one leg's values for both columns: a SILENT wrong answer.
+        # Expression REUSE is matched by NAME (the `schema.find_column(column_name)`
+        # lookup above), never by identity, so minting is safe here.
+        _append_derived(context, schemas, schema_column)
+        node.schema_column = schema_column
+        node.query_column = node.alias or column_name
+
+    elif node_type == NodeType.COMPARISON_OPERATOR and node.value.startswith(
+        (
+            "AnyOp",
+            "AllOp",
+        )
+    ):
+        if node.right.node_type == NodeType.LITERAL:
+            if type(node.right.value) is not tuple:
+                try:
+                    node.right.value = tuple(node.right.value)
+                except TypeError as e:
+                    raise IncompatibleTypesError(
+                        message=f"Cannot construct ARRAY from incompatible types."
+                    ) from e
+            # LIKE/ILIKE patterns must all be strings.
+            # ⛔ AnyOpNotLike / AnyOpNotILike are RETIRED, not live operators:
+            # nothing constructs them any more. `NOT LIKE ANY` is refused in the
+            # planner (its two readings differ, and the engine used to silently
+            # answer the ALL one), and the AND'd-NOT-LIKE fusion now emits the
+            # correctly named AllOpNotLike. They are listed here only so this
+            # guard stays exhaustive over the family; do not read their presence
+            # as evidence the spelling works.
+            if node.value in (
+                "AnyOpLike",
+                "AnyOpNotLike",
+                "AnyOpILike",
+                "AnyOpNotILike",
+                "AllOpLike",
+                "AllOpNotLike",
+                "AllOpILike",
+                "AllOpNotILike",
+            ):
+                for pat in node.right.value:
+                    if pat is not None and not isinstance(pat, (str, bytes)):
+                        raise IncompatibleTypesError(
+                            message=f"LIKE patterns must be strings, got {type(pat).__name__}."
+                        )
+        schema_column = context.plan_context.columns.computed(
+            ExpressionColumn, column_name, column_type=_lt.BOOLEAN
+        )
+        node.schema_column = schema_column
+        _append_derived(context, schemas, schema_column)
+    else:
+        # VARCHAR/NVARCHAR/VARBINARY literals must be coerced to bytes at bind
+        # time, on EVERY comparison operator — not just InList/NotInList. The
+        # execution engine's canonical string representation is bytes (VARCHAR
+        # and VARBINARY are byte-identical past the type tag), and downstream
+        # optimizer passes (e.g. statistics_refresh's range-constraint merge)
+        # compare literal bounds from different operators against each other.
+        # Coercing only the InList side left scalar comparisons (Eq/Lt/Gt/...)
+        # holding `str` while InList held `bytes`, so a query mixing both against
+        # the same column crashed with `'>' not supported between bytes and str`.
+        #
+        # This coercion is CONFINED TO THE STRING FAMILY, where str -> bytes is a
+        # change of representation and nothing else: the literal's ColumnType tag
+        # stays true after it. It must never cross a type category. It used to
+        # also map FLOAT->float / INTEGER->int / BOOLEAN->bool, which rewrote the
+        # VALUE while leaving `.type` and `schema_column.column_type` describing
+        # the ORIGINAL literal — a vector whose payload and type tag disagree.
+        # Two live wrong answers came out of that: `int_col = 4.5` silently
+        # truncated the literal to 4 and matched row 4, and a DECIMAL(18,6)
+        # literal against an INT64 column kept its DECIMAL tag over an int
+        # payload, so `4` was read as 0.000004 and matched nothing. A numeric
+        # literal is now left exactly as written, and the comparison kernels
+        # resolve the mixed-type compare (or the engine refuses it loudly).
+        if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
+            "Eq",
+            "NotEq",
+            "Lt",
+            "LtEq",
+            "Gt",
+            "GtEq",
+            "InList",
+            "NotInList",
+        ):
+            from opteryx.types.logical_type import LogicalCategory as _OT
+
+            def _literal_text(v):
+                return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+
+            # UUID against a string LITERAL (docs/UUID_TYPE_DESIGN.md, ruling U7):
+            # the literal is parsed strictly NOW and becomes a UUID literal —
+            # value, type and schema column together, so payload and type tag
+            # never disagree. A non-UUID string fails here, at bind. Only a
+            # literal: a VARCHAR column against a UUID stays a type mismatch.
+            def _retype_uuid_literal(literal_node, other_node):
+                if other_node is None or other_node.schema_column is None:
+                    return
+                if other_node.schema_column.category != _OT.UUID:
+                    return
+                if literal_node.schema_column is None or literal_node.schema_column.category not in (
+                    _OT.VARCHAR, _OT.NVARCHAR, _OT.ARRAY
+                ):
+                    return
+                from opteryx.types.logical_type import ARRAY as _ARRAY
+                from opteryx.types.logical_type import UUID as _UUID
+                from opteryx.types.scalars.value_parsing import _parse_uuid
+                from opteryx.types.scalars.value_parsing import is_uuid_text
+
+                value = literal_node.value
+                items = value if isinstance(value, (list, tuple)) else (value,)
+                if not all(isinstance(v, (str, bytes)) or v is None for v in items):
+                    return
+                for v in items:
+                    if v is not None and not is_uuid_text(v):
+                        raise IncompatibleTypesError(
+                            message=(
+                                f"{_literal_text(v)!r} is compared with a UUID column but "
+                                "is not a UUID - a UUID literal is 8-4-4-4-12 hex digits, "
+                                "for example '550e8400-e29b-41d4-a716-446655440000'"
+                            )
+                        )
+                if isinstance(value, (list, tuple)):
+                    new_value = type(value)(None if v is None else _parse_uuid(v) for v in value)
+                    new_type = _ARRAY(_UUID)
+                else:
+                    new_value = _parse_uuid(value)
+                    new_type = _UUID
+                _old_sc = literal_node.schema_column
+                literal_node.value = new_value
+                literal_node.type = new_type
+                literal_node.schema_column = context.plan_context.columns.constant(
+                    _old_sc.name,
+                    column_type=new_type,
+                    aliases=list(_old_sc.aliases) if _old_sc.aliases else [],
+                    value=new_value,
+                    nullable=False,
+                )
+
+            if node.right is not None and node.right.node_type == NodeType.LITERAL:
+                _retype_uuid_literal(node.right, node.left)
+            elif node.left is not None and node.left.node_type == NodeType.LITERAL:
+                _retype_uuid_literal(node.left, node.right)
+
+            _COERCE = {
+                _OT.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
+                _OT.NVARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
+                _OT.VARBINARY: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
+            }
+
+            def _coerce_literal(literal_node, other_node):
+                other_type = (
+                    other_node.schema_column.category
+                    if other_node.schema_column is not None
+                    else None
+                )
+                coerce = _COERCE.get(other_type)
+                if coerce is None:
+                    return
+                # An IN-list literal is a collection. `build_literal_node` maps
+                # BOTH list and tuple to ARRAY, and the two spellings reach here
+                # from different front doors — SQL's `IN (...)` builds a list,
+                # while a visibility filter's list is tuple-ised by
+                # `dnf.simplify_dnf` (it needs hashable clauses to dedup). Handling
+                # only `list` sent the whole tuple through the scalar branch.
+                # Rebuild in the container we were given: the ARRAY tag does not
+                # distinguish them, but nothing downstream should see its literal
+                # silently change shape either.
+                value = literal_node.value
+                if isinstance(value, (list, tuple)):
+                    literal_node.value = type(value)(
+                        None if v is None else coerce(v) for v in value
+                    )
+                elif value is not None:
+                    literal_node.value = coerce(value)
+
+            if node.right is not None and node.right.node_type == NodeType.LITERAL:
+                _coerce_literal(node.right, node.left)
+            elif node.left is not None and node.left.node_type == NodeType.LITERAL:
+                _coerce_literal(node.left, node.right)
+
+        # Capture like_selectivity_decay at BIND time, before predicate_rewriter
+        # later mutates node.value from Like/ILike/NotLike/NotILike to
+        # InStr/IInStr/NotInStr/NotIInStr IN PLACE ON THIS SAME NODE (see
+        # predicate_rewriter.INSTR_REWRITES) — the char-class LIKE selectivity
+        # estimator (the native instr estimator, src/cpp/planner/selectivity.hpp)
+        # reads it via plain attribute access. Same reasoning as match_threshold's
+        # bind-time capture above: a compiled plan must keep answering the
+        # selectivity question it was compiled for, so a later SET cannot reach
+        # back and change an already-bound plan's estimate.
+        if node_type == NodeType.COMPARISON_OPERATOR and node.value in (
+            "Like",
+            "ILike",
+            "NotLike",
+            "NotILike",
+        ):
+            node.like_selectivity_decay = context.execution_context.variables[
+                "like_selectivity_decay"
+            ]
+
+        # The type-mismatch check recurses the whole subtree for AND/OR/XOR
+        # nodes, but inner_binder already visits every comparison leaf
+        # bottom-up (each gets its own check before its parent connective is
+        # reached), so re-checking at each connective is pure O(n^2)
+        # re-walking on deep predicate chains. Only check at the nodes that do
+        # the actual per-comparison work; connectives just OR their children's
+        # results, which are already covered.
+        if node_type not in (NodeType.AND, NodeType.OR, NodeType.XOR):
+            mismatches = get_mismatched_condition_column_types(node, relaxed=True)
+            if mismatches:
+                raise IncompatibleTypesError(**mismatches)
+
+        # RLIKE's kernel takes only a compiled pattern, so compiling it is a
+        # lowering every query needs, done here rather than in a strategy that
+        # can be switched off. After the type check, so a wrongly-typed pattern
+        # is reported as that.
+        if node_type == NodeType.COMPARISON_OPERATOR and node.value in ("RLike", "NotRLike"):
+            compile_rlike_pattern(node, plan_context=context.plan_context)
+
+        result_type = determine_type(node)  # ColumnType | None (Phase 2)
+        # D-2: when the result is DECIMAL, also derive (precision, scale).
+        # determine_type() now returns ColumnType; use .category for LogicalCategory
+        # comparisons. Only attempt parameter derivation for binary arithmetic on
+        # numeric operands — other results (BOOLEAN comparisons, etc.) don't land here.
+        _result_cat = result_type.category if result_type is not None else None
+        result_ct_final = None
+        if (
+            _result_cat == LogicalCategory.DECIMAL
+            and node_type == NodeType.BINARY_OPERATOR
+            and node.value in ("Plus", "Minus", "Multiply", "Divide")
+            and node.left is not None
+            and node.right is not None
+        ):
+            left_ct = _operand_column_type(node.left)
+            right_ct = _operand_column_type(node.right)
+            if left_ct is not None and right_ct is not None:
+                from opteryx.types.type_unification import compute_result_logical_type
+
+                result_ct_final = compute_result_logical_type(
+                    left_ct, right_ct, node.value, LogicalCategory.DECIMAL
+                )
+        elif _result_cat == LogicalCategory.DECIMAL and node_type == NodeType.NESTED:
+            # NESTED is a parenthesised expression wrapping `node.centre`.
+            # Inherit the centre's column_type directly (single source of truth).
+            centre = node.centre
+            centre_sc = centre.schema_column if centre else None
+            if centre_sc is not None and centre_sc.column_type is not None:
+                result_ct_final = centre_sc.column_type
+
+        _schema_ct = result_ct_final if result_ct_final is not None else result_type
+        schema_column = context.plan_context.columns.computed(
+            ExpressionColumn,
+            column_name,
+            column_type=_schema_ct,
+            aliases=[node.alias] if node.alias else [],
+        )
+        _append_derived(context, schemas, schema_column)
+        node.schema_column = schema_column
+        node.query_column = node.alias or column_name
+
+
+    return node

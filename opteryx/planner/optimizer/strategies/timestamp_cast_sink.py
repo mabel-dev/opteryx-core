@@ -158,6 +158,10 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
         # (`casted`), and `_classify` finds those in the roots `_classified_roots`
         # yields. So a plan with no such CAST in them leaves `complete` nothing to do
         # (it returns the plan as it found it), and `visit` only copies steps.
+        # A query whose arena never held such a CAST cannot have one in any plan
+        # (ExprArena.any_value), so that answers no without walking the plan.
+        if not plan.plan_context.expressions.any_value(NodeType.CAST, _RETAG_TIMESTAMP_UNITS):
+            return False
         roots = [
             root
             for _, node in plan.nodes(True)

@@ -229,7 +229,11 @@ class LogicalPlanStepType(int, Enum):
 
 
 class LogicalPlan(PlanGraph):
-    """A logical plan: typed plan steps in the query's native plan graph."""
+    """A logical plan: typed plan steps in the query's native plan graph, counted
+    by step kind (PlanGraph.has_step / steps_of)."""
+
+    def __init__(self, plan_context):
+        super().__init__(plan_context, step_kinds=True)
 
 
 def _set_operation_leg_columns(leg_plan: LogicalPlan) -> Optional[list]:
@@ -3719,14 +3723,14 @@ def create_node_relation(relation: dict, *, plan_context):
         function = relation["relation"]["Table"]
         function_name = relation_name.upper()
 
-        # READ_JSONL/READ_PARQUET/READ_CSV/READ_AVRO derive their column names from the file's
+        # READ_JSONL/READ_PARQUET/READ_CSV/READ_AVRO/READ_ORC derive their column names from the file's
         # schema at bind time (not yet implemented), so unlike UNNEST/VALUES/
         # GENERATE_SERIES they don't require an AS alias(columns) clause to name
         # their output columns.
         # GENERATE_SERIES is likewise exempt: with no alias its relation and its one
         # column are both named `generate_series`, as DuckDB names them.
         requires_column_alias = function_name not in (
-            "READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO", "GENERATE_SERIES",
+            "READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO", "READ_ORC", "GENERATE_SERIES",
         )
 
         if function["alias"] is None and requires_column_alias:

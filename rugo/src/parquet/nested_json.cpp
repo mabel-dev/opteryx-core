@@ -229,10 +229,6 @@ std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& n
         err = "'" + name + "' is a repeated group (a LIST of STRUCT/MAP), which this reader does not render";
         return nullptr;
     }
-    if (top->logical_type == "array") {
-        err = "'" + name + "' is a LIST; a LIST of STRUCT/MAP is not rendered as JSON text";
-        return nullptr;
-    }
     try {
         Builder b{name};
         auto plan = std::make_shared<Plan>();

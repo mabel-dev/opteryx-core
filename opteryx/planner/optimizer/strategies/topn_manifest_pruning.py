@@ -81,7 +81,6 @@ from opteryx.types.logical_type import LogicalCategory
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
 class TopNManifestPruningStrategy(OptimizationStrategy):
@@ -137,7 +136,7 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,)):
+        for _, node in plan.steps_of((LogicalPlanStepType.Scan,)):
             if node.topn_limit and node.manifest is not None:
                 return True
         return False

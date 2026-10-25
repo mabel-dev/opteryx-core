@@ -347,8 +347,6 @@ def test_glob_with_no_match():
      "applies to gs:// and s3:// paths only"),
     ("SELECT * FROM READ_AVRO('gcs://bucket/f.avro')", InvalidFunctionParameterError, "'gcs://' is not a supported scheme"),
     (f"SELECT * FROM READ_AVRO('file://{SAMPLE}')", InvalidFunctionParameterError, "'file://' is not a supported scheme"),
-    ("SELECT * FROM READ_AVRO('gs://bucket/*.avro')", NotSupportedError, "glob patterns are not supported for gs://"),
-    ("SELECT * FROM READ_AVRO('s3://bucket/*.avro')", NotSupportedError, "glob patterns are not supported for s3://"),
     (f"SELECT * FROM READ_AVRO('{SAMPLE}') AS t(a, b)", NotSupportedError, r"AS alias\(\.\.\.\) is not supported"),
 ])
 def test_argument_refusals(sql, error, match):

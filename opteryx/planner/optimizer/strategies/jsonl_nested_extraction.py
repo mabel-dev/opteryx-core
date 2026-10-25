@@ -244,7 +244,7 @@ class JsonlNestedExtractionStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for _, node in plan.nodes(True):
-            if node.node_type == LogicalPlanStepType.FunctionDataset and node.function == "READ_JSONL":
+        for _, node in plan.steps_of((LogicalPlanStepType.FunctionDataset,)):
+            if node.function == "READ_JSONL":
                 return True
         return False

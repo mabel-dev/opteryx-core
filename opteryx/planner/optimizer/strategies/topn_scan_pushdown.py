@@ -58,7 +58,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
 class TopNScanPushdownStrategy(OptimizationStrategy):
@@ -137,6 +136,4 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        return len(
-            get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.HeapSort,))
-        ) > 0
+        return plan.has_step(LogicalPlanStepType.HeapSort)

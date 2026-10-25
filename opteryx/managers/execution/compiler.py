@@ -4957,6 +4957,8 @@ class _Compiler:
             return self._compile_jsonl_scan(scan)
         if kind == "AvroReadNode":
             return self._compile_avro_scan(scan)
+        if kind == "OrcReadNode":
+            return self._compile_orc_scan(scan)
         if kind in ("FunctionDatasetNode", "ReaderNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
@@ -6863,6 +6865,7 @@ class _Compiler:
         block headers."""
         from opteryx.operators._operators import AvroScanPlan
 
+        urls, auth_header = scan.native_scan_locations()
         expected = scan.columns or []
         physical = list(scan.avro_physical_columns)
         zero_columns = not physical
@@ -6871,7 +6874,7 @@ class _Compiler:
         identities = [col.schema_column.identity for col in expected]
         plan = AvroScanPlan(
             list(scan.avro_files),
-            scan.native_file_locations(),
+            urls,
             scan.avro_reader_schema,
             decode_names,
             identities,
@@ -6880,6 +6883,9 @@ class _Compiler:
             # The Source's own decode pool, as the JSONL Source's: every core. The unit
             # of work is a batch of whole blocks, so even one file uses the whole pool.
             max(1, os.cpu_count() or 1),
+            # A catalog table's files are matched to the table's columns by field id.
+            scan.avro_require_field_ids,
+            auth_header,
         )
         plan.scan_identity = scan.identity
         self.scan_sources[scan.identity] = "NativeAvroScanSource"
@@ -6893,6 +6899,52 @@ class _Compiler:
         p = self.nplan.new_pipeline()
         self.nplan.set_native_avro_scan_source(p, plan)
         self._avro_scan_columns[p] = (identities, physical)
+        self._remember_types(scan.columns)
+        return p, identities
+
+    def _compile_orc_scan(self, scan):
+        """An ORC scan: an OrcScanPlan and a NativeOrcScanSource.
+
+        The Source's own decode pool claims stripes across every file and decodes them
+        through rugo's C++ ORC reader while execution consumes them. Fixed here, once:
+        the files and where each is read from (local, or a gs:// / s3:// URL with the
+        credential the platform filesystem declares - AvroReadNode's twin
+        `native_scan_locations`), the reader columns every file is read as,
+        and the columns to decode - each once, though one can feed several identities. A
+        zero-column projection (COUNT(*)) decodes nothing: the row counts come from the
+        stripe footers."""
+        from opteryx.operators._operators import OrcScanPlan
+
+        urls, auth_header = scan.native_scan_locations()
+        expected = scan.columns or []
+        physical = list(scan.orc_physical_columns)
+        zero_columns = not physical
+        decode_names = list(dict.fromkeys(physical))
+        decode_index = {name: i for i, name in enumerate(decode_names)}
+        identities = [col.schema_column.identity for col in expected]
+        plan = OrcScanPlan(
+            list(scan.orc_files),
+            urls,
+            auth_header,
+            list(scan.orc_reader_columns),
+            decode_names,
+            identities,
+            [decode_index[name] for name in physical],
+            zero_columns,
+            scan.orc_match_by_id,
+            max(1, os.cpu_count() or 1),
+        )
+        plan.scan_identity = scan.identity
+        self.scan_sources[scan.identity] = "NativeOrcScanSource"
+        self.scan_facts[scan.identity] = {
+            "files_read": len(scan.orc_files),
+            "row_groups_read": 0,
+            "row_groups_pruned": 0,
+            "parquet_rows_before_filter": 0,
+            "columns_read": len(decode_names),
+        }
+        p = self.nplan.new_pipeline()
+        self.nplan.set_native_orc_scan_source(p, plan)
         self._remember_types(scan.columns)
         return p, identities
 

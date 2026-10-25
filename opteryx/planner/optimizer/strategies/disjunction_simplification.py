@@ -270,8 +270,8 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for _nid, node in plan.nodes(True):
-            if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
+        for _nid, node in plan.steps_of((LogicalPlanStepType.Filter,)):
+            if node.condition is not None:
                 for conjunct in _split_and(node.condition):
                     unwrapped = _unwrap_nested(conjunct)
                     if unwrapped is not None and unwrapped.node_type == NodeType.OR:

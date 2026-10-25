@@ -33,6 +33,7 @@ cdef extern from "avro/avro_reader.hpp" namespace "rugo::avro":
         uint8_t precision
         uint8_t scale
         DrakenType child_type
+        uint8_t array_depth
 
     cppclass AvroFile:
         AvroFile(const uint8_t* data, size_t size, const vector[string]& columns,
@@ -141,7 +142,8 @@ def read_avro_column_types(data, reader_schema=None):
     Returns a list of dicts, one per column in schema order: 'name', 'type' (a
     DrakenType), 'logical_kind' (0 NONE, 1 TIMESTAMP, 2 TIME, 3 DECIMAL — TIMESTAMP
     and TIME are microseconds, UTC), 'precision', 'scale', and 'child_type' (an
-    ARRAY's element DrakenType, else None). Types are DrakenType ordinals.
+    ARRAY's innermost element DrakenType, else None) and 'array_depth' (its levels of
+    nesting, 1 for a plain array, else None). Types are DrakenType ordinals.
     """
     cdef const uint8_t[::1] buf = data
     cdef size_t n = buf.shape[0]
@@ -164,5 +166,6 @@ def read_avro_column_types(data, reader_schema=None):
             "precision": types[i].precision,
             "scale": types[i].scale,
             "child_type": <int>types[i].child_type if <int>types[i].type == 80 else None,
+            "array_depth": types[i].array_depth if <int>types[i].type == 80 else None,
         })
     return out

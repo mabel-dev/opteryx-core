@@ -5432,6 +5432,11 @@ cdef class FunctionDatasetStep(PlanStep):
     cdef dict _avro_physical_by_identity
     cdef tuple _avro_physical_columns
     cdef str _avro_reader_schema
+    cdef object _orc_credentialed_filesystem
+    cdef tuple _orc_files
+    cdef dict _orc_physical_by_identity
+    cdef tuple _orc_physical_columns
+    cdef tuple _orc_reader_columns
     cdef tuple _column_aliases
     cdef object _connector
     cdef object _csv_fail_on_error
@@ -5465,7 +5470,7 @@ cdef class FunctionDatasetStep(PlanStep):
         _row_str(self._relation, self._row.relation)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, orc_credentialed_filesystem=None, orc_files=None, orc_physical_by_identity=None, orc_physical_columns=None, orc_reader_columns=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
         self.node_type = _step_types().FunctionDataset
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -5475,6 +5480,11 @@ cdef class FunctionDatasetStep(PlanStep):
         self.avro_physical_by_identity = avro_physical_by_identity
         self.avro_physical_columns = avro_physical_columns
         self.avro_reader_schema = avro_reader_schema
+        self.orc_credentialed_filesystem = orc_credentialed_filesystem
+        self.orc_files = orc_files
+        self.orc_physical_by_identity = orc_physical_by_identity
+        self.orc_physical_columns = orc_physical_columns
+        self.orc_reader_columns = orc_reader_columns
         self.column_aliases = column_aliases
         self.connector = connector
         self.csv_fail_on_error = csv_fail_on_error
@@ -5565,6 +5575,51 @@ cdef class FunctionDatasetStep(PlanStep):
     def avro_reader_schema(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._avro_reader_schema = value
+
+    @property
+    def orc_credentialed_filesystem(self):
+        return self._orc_credentialed_filesystem
+
+    @orc_credentialed_filesystem.setter
+    def orc_credentialed_filesystem(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._orc_credentialed_filesystem = value
+
+    @property
+    def orc_files(self):
+        return self._orc_files
+
+    @orc_files.setter
+    def orc_files(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._orc_files = _frozen_list("FunctionDatasetStep.orc_files", value)
+
+    @property
+    def orc_physical_by_identity(self):
+        return self._orc_physical_by_identity
+
+    @orc_physical_by_identity.setter
+    def orc_physical_by_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._orc_physical_by_identity = value
+
+    @property
+    def orc_physical_columns(self):
+        return self._orc_physical_columns
+
+    @orc_physical_columns.setter
+    def orc_physical_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._orc_physical_columns = _frozen_list("FunctionDatasetStep.orc_physical_columns", value)
+
+    @property
+    def orc_reader_columns(self):
+        return self._orc_reader_columns
+
+    @orc_reader_columns.setter
+    def orc_reader_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._orc_reader_columns = _frozen_list("FunctionDatasetStep.orc_reader_columns", value)
 
     @property
     def column_aliases(self):
@@ -5842,6 +5897,11 @@ cdef class FunctionDatasetStep(PlanStep):
         out["avro_physical_by_identity"] = self._avro_physical_by_identity
         out["avro_physical_columns"] = self._avro_physical_columns
         out["avro_reader_schema"] = self._avro_reader_schema
+        out["orc_credentialed_filesystem"] = self._orc_credentialed_filesystem
+        out["orc_files"] = self._orc_files
+        out["orc_physical_by_identity"] = self._orc_physical_by_identity
+        out["orc_physical_columns"] = self._orc_physical_columns
+        out["orc_reader_columns"] = self._orc_reader_columns
         out["column_aliases"] = self._column_aliases
         out["connector"] = self._connector
         out["csv_fail_on_error"] = self._csv_fail_on_error
@@ -5888,6 +5948,11 @@ cdef class FunctionDatasetStep(PlanStep):
         new._avro_physical_by_identity = _copy_field(self._avro_physical_by_identity, memo)
         new._avro_physical_columns = _copy_field(self._avro_physical_columns, memo)
         new._avro_reader_schema = _copy_field(self._avro_reader_schema, memo)
+        new._orc_credentialed_filesystem = _copy_field(self._orc_credentialed_filesystem, memo)
+        new._orc_files = _copy_field(self._orc_files, memo)
+        new._orc_physical_by_identity = _copy_field(self._orc_physical_by_identity, memo)
+        new._orc_physical_columns = _copy_field(self._orc_physical_columns, memo)
+        new._orc_reader_columns = _copy_field(self._orc_reader_columns, memo)
         new._column_aliases = _copy_field(self._column_aliases, memo)
         new._connector = _copy_field(self._connector, memo)
         new._csv_fail_on_error = _copy_field(self._csv_fail_on_error, memo)
@@ -5929,6 +5994,11 @@ cdef class FunctionDatasetStep(PlanStep):
         new._avro_physical_by_identity = self._avro_physical_by_identity
         new._avro_physical_columns = self._avro_physical_columns
         new._avro_reader_schema = self._avro_reader_schema
+        new._orc_credentialed_filesystem = self._orc_credentialed_filesystem
+        new._orc_files = self._orc_files
+        new._orc_physical_by_identity = self._orc_physical_by_identity
+        new._orc_physical_columns = self._orc_physical_columns
+        new._orc_reader_columns = self._orc_reader_columns
         new._column_aliases = self._column_aliases
         new._connector = self._connector
         new._csv_fail_on_error = self._csv_fail_on_error
@@ -11149,6 +11219,11 @@ cpdef frozenset steps_with(str field):
             "avro_physical_by_identity": frozenset({T.FunctionDataset}),
             "avro_physical_columns": frozenset({T.FunctionDataset}),
             "avro_reader_schema": frozenset({T.FunctionDataset}),
+            "orc_credentialed_filesystem": frozenset({T.FunctionDataset}),
+            "orc_files": frozenset({T.FunctionDataset}),
+            "orc_physical_by_identity": frozenset({T.FunctionDataset}),
+            "orc_physical_columns": frozenset({T.FunctionDataset}),
+            "orc_reader_columns": frozenset({T.FunctionDataset}),
             "arguments": frozenset({T.CallProcedure}),
             "asof_condition": frozenset({T.Join}),
             "asof_left_column": frozenset({T.Join}),

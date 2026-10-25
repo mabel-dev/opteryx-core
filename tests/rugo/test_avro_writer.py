@@ -555,7 +555,7 @@ def test_flat_arrays_of_every_plain_scalar():
     assert payload.startswith(b"\x02\x06\x02\x02\x02\x04\x02\x06\x00")  # i row 0: branch, count 3, items 1 2 3, end
 
 
-def test_nested_arrays_write_and_read_back_as_json():
+def test_nested_arrays_write_and_read_back_as_a_nested_array():
     import draken.draken_native as dn
 
     rows = [[[1, 2], [3]], None, [[], [None]], [None, [4, 5, 6]], []]
@@ -567,15 +567,14 @@ def test_nested_arrays_write_and_read_back_as_json():
     }
     assert _columns_of(_fastavro_rows(data), ["n"]) == {"n": rows}
     assert _columns_of(_apache_rows(data), ["n"]) == {"n": rows}
-    # rugo renders an array of arrays as JSON text (reader design §17.2).
-    got = _rugo_columns(data)["n"]
-    assert [None if g is None else json.loads(g) for g in got] == rows
+    # rugo reads an array of arrays of a plain scalar as a nested ARRAY, as the parquet scan does.
+    assert _rugo_columns(data)["n"] == rows
 
 
 def test_array_of_timestamps_is_written_with_its_logical_type():
     """ARRAY<TIMESTAMP> from the engine (array_child retagged as TIMESTAMP64): the items
-    carry the logical type; fastavro and Apache avro read datetimes. rugo's reader
-    refuses an array of a logical type (no Draken ARRAY child for it) — asserted."""
+    carry the logical type; fastavro and Apache avro read datetimes. rugo's reader gives an
+    array of a logical type back as a JSON array (no Draken ARRAY child for it)."""
     import datetime as dt
 
     m = _sql_morsel(
@@ -591,8 +590,7 @@ def test_array_of_timestamps_is_written_with_its_logical_type():
     want = [[dt.datetime(2020, 1, 2, 3, 4, 5, tzinfo=utc), dt.datetime(2021, 6, 7, 8, 9, 10, tzinfo=utc)]]
     assert _columns_of(_fastavro_rows(data), ["tss"]) == {"tss": want}
     assert _columns_of(_apache_rows(data), ["tss"]) == {"tss": want}
-    with pytest.raises(RuntimeError, match="array of a logical type"):
-        _rugo_columns(data)
+    assert [json.loads(x) for x in _rugo_columns(data)["tss"]] == [["2020-01-02T03:04:05+00:00", "2021-06-07T08:09:10+00:00"]]
 
 
 def test_array_column_with_no_elements_anywhere():

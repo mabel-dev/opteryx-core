@@ -10,9 +10,15 @@ from typing import Dict
 from typing import List
 from typing import Set
 
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.managers.virtual_datasets import derived
 from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
+from opteryx.models.manifest import Manifest
+
+# The step kinds that hold a schema / a manifest, resolved on first use (the step
+# types resolve lazily: the logical planner imports the plan steps).
+_MANIFEST_STEPS = None
 
 
 @dataclass
@@ -131,13 +137,13 @@ class BindingContext:
         before schemas were immutable: a branch binds against its own copy
         (RelationSchema.branch_copy), so a branch's re-bind never reaches the
         scan it was copied from."""
-        from opteryx.compiled.structures.plan_steps import steps_with
-        from opteryx.models.manifest import Manifest
-
+        global _MANIFEST_STEPS
         if old is new:
             return
+        # Values are replaced in place - no key is added or removed - so the
+        # scopes are walked directly rather than through a copy of their items.
         for scope in (self.schemas, self.outer_schemas):
-            for key, schema in list(scope.items()):
+            for key, schema in scope.items():
                 if schema is old:
                     scope[key] = new
         rebound: Dict[int, Any] = {}
@@ -149,13 +155,15 @@ class BindingContext:
                 rebound[id(manifest)] = existing
             return existing
 
-        for key, manifest in list(self.manifests.items()):
+        for key, manifest in self.manifests.items():
             if manifest is not None and manifest.schema is old:
                 self.manifests[key] = _rebound(manifest)
+        if _MANIFEST_STEPS is None:
+            _MANIFEST_STEPS = steps_with("manifest")
         for step in self.schema_steps:
             if step.schema is old:
                 step.schema = new
-            if step.node_type in steps_with("manifest"):
+            if step.node_type in _MANIFEST_STEPS:
                 manifest = step.manifest
                 if manifest is not None and manifest.schema is old:
                     step.manifest = _rebound(manifest)

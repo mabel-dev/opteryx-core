@@ -123,3 +123,15 @@ def test_rewrite_to_signed_url_keeps_service_account_key_path(monkeypatch):
 
     assert "service_account_email" not in fake_blob.calls[0]
     assert "access_token" not in fake_blob.calls[0]
+
+
+@pytest.mark.parametrize(
+    "path, url",
+    [
+        ("gs://bucket/data/part-0.avro", "https://storage.googleapis.com/bucket/data%2Fpart-0.avro"),
+        ("bucket/a/b/c.orc", "https://storage.googleapis.com/bucket/a%2Fb%2Fc.orc"),
+        ("gs://bucket/dir with space/x.avro", "https://storage.googleapis.com/bucket/dir%20with%20space%2Fx.avro"),
+    ],
+)
+def test_object_url_is_the_json_api_url_with_the_object_name_encoded_whole(path, url):
+    assert OpteryxGcsFileSystem.object_url(path) == url

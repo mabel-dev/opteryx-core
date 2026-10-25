@@ -60,7 +60,6 @@ from .join_elimination import _right_columns_used_above
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import flip_join_leg_labels
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.expressions import And
 
 
@@ -209,9 +208,7 @@ class JoinRewriteStrategy(OptimizationStrategy):
         # This always runs (not gated by size/idiom-matching): it's the only way
         # a right-outer join can execute at all, since the engine has no native
         # RIGHT OUTER mode.
-        for join_nid, join_node in get_nodes_of_type_from_logical_plan(
-            plan, (LogicalPlanStepType.Join,)
-        ):
+        for join_nid, join_node in plan.steps_of((LogicalPlanStepType.Join,)):
             if join_node.type != "right outer":
                 continue
             join_node.type = "left outer"
@@ -233,5 +230,5 @@ class JoinRewriteStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan):
-        candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
+        candidates = plan.steps_of((LogicalPlanStepType.Join,))
         return any(node.type in ("left outer", "right outer") for _, node in candidates)

@@ -50,7 +50,7 @@ def visit_comment(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
     if not can_perform_action(context.execution_context, node.object_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to comment on {node.object_name}")
 
-    if "variables" in dir(node.connector):
+    if node.connector.requires_variables:
         node.connector.variables = context.execution_context.variables
 
     # COMMENT nodes don't have columns (non-tabular result)

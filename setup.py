@@ -957,6 +957,23 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # A bound relation's schema (immutable; its columns are ColumnTable rows).
+    Extension(
+        "opteryx.compiled.planner.relation_schema",
+        sources=["opteryx/compiled/planner/relation_schema.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    # The binder's per-node core (name resolution, reuse, scope merging); its
+    # per-kind arms stay Python in opteryx/planner/binder/binder.py.
+    Extension(
+        "opteryx.compiled.planner.binder_core",
+        sources=["opteryx/compiled/planner/binder_core.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # The plan graph behind every logical and physical plan: node ids, edges and
     # edge roles native and Python-free (src/cpp/planner/plan_topology.hpp); steps
     # are its Python payload, held by the bridge (src/cpp/planner/_plan_graph.hpp).
@@ -1181,6 +1198,9 @@ extensions = [
         "rugo/src/avro/avro_schema.cpp",
         "rugo/src/avro/avro_container.cpp",
         "rugo/src/avro/avro_reader.cpp",
+        # NativeOrcScanSource (src/cpp/engine/native_orc_scan_source.hpp): the same
+        # arrangement for ORC (docs/ORC_READER_DESIGN.md).
+        "rugo/src/orc/orc_reader.cpp",
         # Avro's snappy block codec. Compiled in rather than left for the loader to
         # find in pool_reader.so (the only other carrier): stateless, no cross-TU
         # state, and an undefined symbol would surface only when a scan first met a

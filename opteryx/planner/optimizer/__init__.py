@@ -476,7 +476,7 @@ class OptimizerVisitor:
                 before = (len(current_plan), current_plan.edge_count())
                 previous_plan = current_plan
                 pre_epoch = current_plan.mutation_epoch
-                pre_writes = _step_writes(current_plan)
+                pre_writes = current_plan.step_writes()
                 current_plan = self.traverse(current_plan, strategy)
                 # Did the strategy actually change anything? Every plan change
                 # goes through a Graph mutator (node replace, add/remove of
@@ -490,7 +490,7 @@ class OptimizerVisitor:
                 # graph; every field setter bumps the step's write_count, so a moved
                 # sum of write counts is a changed plan too (architect ruling Q2:
                 # typed-field writes mark statistics stale).
-                step_written = _step_writes(current_plan) != pre_writes
+                step_written = current_plan.step_writes() != pre_writes
                 if current_plan is previous_plan:
                     plan_changed = current_plan.mutation_epoch != pre_epoch or step_written
                 else:
@@ -523,10 +523,6 @@ class OptimizerVisitor:
         # DEBUG: print(current_plan.draw())
         return current_plan
 
-
-def _step_writes(plan) -> int:
-    """The total field writes of `plan`'s steps (see PlanStep.write_count)."""
-    return sum(step.write_count for _nid, step in plan.nodes(True))
 
 
 def do_optimizer(

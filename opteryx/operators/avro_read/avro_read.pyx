@@ -16,7 +16,9 @@
 """
 Avro Read Node
 
-SQL Query Execution Plan Node for `READ_AVRO(path)`.
+SQL Query Execution Plan Node for `READ_AVRO(path)` and for a catalog Scan of a table
+whose data files are Avro: an Iceberg table or a folder of .avro files
+(docs/ICEBERG_AVRO_ORC_DATA_FILES_DESIGN.md).
 
 This node is PLANNING ONLY. Execution is the native Source
 (src/cpp/engine/native_avro_scan_source.hpp, compiled by
@@ -29,12 +31,18 @@ What this node fixes at plan time:
   an exact path — length 1 for a non-glob path.
 - `avro_physical_columns`: the optimizer's projection, as the file's top-level field
   names (pre-alias). No predicate is pushed into the reader.
-- `avro_reader_schema`: the first file's writer schema. Every file is read with it as
+- `avro_reader_schema`: READ_AVRO and a folder dataset: the first file's writer schema,
+  fields matched by name. A catalog table's Scan: the TABLE's schema, one field per
+  column named by its field id (opteryx.connectors.avro_io.table_reader_schema). Every file is read with it as
   the reader schema, so files whose schemas evolved resolve onto the bound relation
   (docs/AVRO_READER_DESIGN.md §19.3) and a file that cannot fails loud naming it.
-- `native_file_locations()`: where each file is read from — the READ_JSONL rules.
+- `native_file_locations()`: where each file is read from — the READ_JSONL rules for
+  READ_AVRO; local files only for a catalog Scan (no authenticated remote reads yet).
 """
 
+from opteryx.connectors.io_systems.native_locations import function_scan_urls
+from opteryx.connectors.io_systems.native_locations import native_locations
+from opteryx.connectors.io_systems.native_locations import remote_files
 from opteryx.exceptions import NotSupportedError
 from opteryx.models import QueryProperties
 
@@ -48,63 +56,63 @@ cdef class AvroReadNode(ReaderNode):
     cdef public list avro_physical_columns  # pushed-down projection, pre-alias field names
     cdef public str avro_reader_schema
     cdef public object avro_credentialed_filesystem
+    cdef public bint avro_manifest_scan  # a manifest-backed Scan, not READ_AVRO
+    cdef public bint avro_require_field_ids  # every file's fields must carry a field-id
 
-    def __init__(self, properties: QueryProperties, step, list avro_physical_columns) -> None:
-        """A READ_AVRO FunctionDataset step. `avro_physical_columns` is the physical
-        planner's translation of the step's pruned columns to field names."""
+    def __init__(
+        self,
+        properties: QueryProperties,
+        step,
+        list avro_physical_columns,
+        list avro_files,
+        str avro_reader_schema,
+        object avro_credentialed_filesystem,
+        bint avro_manifest_scan,
+        bint avro_require_field_ids,
+    ) -> None:
+        """A READ_AVRO FunctionDataset step, or a manifest-backed Scan of an Avro
+        dataset. The physical planner supplies everything the reader needs: the files,
+        the pruned columns translated to reader-schema field names (parallel to the
+        step's columns), the reader schema, and (READ_AVRO `credentials =>` only) the
+        filesystem that signs each file's URL."""
         ReaderNode.__init__(self, properties, step)
-        self.avro_files = list(step.avro_files)
+        self.avro_files = avro_files
         self.avro_physical_columns = avro_physical_columns
-        self.avro_reader_schema = step.avro_reader_schema
-        self.avro_credentialed_filesystem = step.avro_credentialed_filesystem
+        self.avro_reader_schema = avro_reader_schema
+        self.avro_credentialed_filesystem = avro_credentialed_filesystem
+        self.avro_manifest_scan = avro_manifest_scan
+        self.avro_require_field_ids = avro_require_field_ids
 
     @property
     def name(self) -> str:  # pragma: no cover
         return "Avro Reader"
 
     def native_file_locations(self) -> list:
-        """Where the native Source reads each of `avro_files` from: a list parallel to
-        it holding "" for a local path (memory-mapped) or the URL to GET with no
-        credentials. Raises NotSupportedError for anything else, before any byte is
-        read.
+        """Where the native Source reads each of `avro_files` from (READ_AVRO): "" for a local
+        path (memory-mapped) or the URL to GET. The rule - never the platform's credentials -
+        lives in `function_scan_urls`. A manifest-backed Scan has its own method,
+        `native_scan_locations`."""
+        return function_scan_urls("READ_AVRO", self.dataset, self.avro_files, self.avro_credentialed_filesystem)
 
-        SECURITY: as READ_JSONL — READ_AVRO is a bare dataset function, so a
-        user-supplied gs:// / s3:// path is NEVER read with this process's platform
-        credentials. It is rewritten to its public object URL by the anonymous
-        filesystems the binder read its header through; the store's own ACL decides.
-        With `credentials =>` each file goes as a short-lived URL signed with the
-        customer's stored secret (the binder checked every file against its SCOPE)."""
-        if self.avro_credentialed_filesystem is not None:
-            return [
-                self.avro_credentialed_filesystem.rewrite_to_signed_url(file, expiry_seconds=900)
-                for file in self.avro_files
-            ]
-        path = self.dataset
-        protocol = path.split("://")[0] if "://" in path else ""
-        if protocol == "":
-            return ["" for _ in self.avro_files]
-        if protocol in ("http", "https"):
-            return list(self.avro_files)
-        if protocol == "gs":
-            from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
-                anonymous_gcs_filesystem,
-            )
+    def native_scan_locations(self) -> tuple:
+        """(urls, auth_header) for the native Source: where each of `avro_files` is read
+        from and how a remote read authenticates (docs/REMOTE_AVRO_ORC_DATA_FILES_DESIGN.md).
 
-            filesystem = anonymous_gcs_filesystem()
-        elif protocol == "s3":
-            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
-                anonymous_s3_filesystem,
-            )
-
-            filesystem = anonymous_s3_filesystem()
-        else:
+        READ_AVRO: the anonymous / credentialed rules of `native_file_locations`, no
+        header. A catalog table (Iceberg shape): the platform filesystem's own declaration -
+        a bearer header (GCS) or signed URLs (S3) - via `native_locations`. A folder of
+        .avro files stays local only: reading its schema at bind time downloads the whole
+        first file (design doc §7, phase 2)."""
+        if not self.avro_manifest_scan:
+            return self.native_file_locations(), ""
+        remote = remote_files(self.avro_files)
+        if remote and not self.avro_require_field_ids:
             raise NotSupportedError(
-                f"READ_AVRO('{path}'): '{protocol}://' is not a supported scheme; "
-                "READ_AVRO reads local paths, http(s):// URLs and public gs:// / s3:// objects."
+                f"The Avro data file '{remote[0]}' of {self.relation} is remote; a folder of "
+                ".avro files is read from local paths only."
             )
-        if filesystem.native_auth_header() is not None:
-            raise NotSupportedError(f"READ_AVRO('{path}'): an authenticated read is not supported.")
-        return [filesystem.rewrite_to_signed_url(file) for file in self.avro_files]
+        filesystem = resolve_scan_filesystem(self.connector, self.avro_files)[0] if remote else None
+        return native_locations(filesystem, self.avro_files, str(self.relation))
 
     def read_morsels(self):
         from opteryx.exceptions import InvalidInternalStateError

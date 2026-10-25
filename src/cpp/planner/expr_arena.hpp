@@ -156,6 +156,41 @@ public:
 
     size_t size() const { return rows_.size(); }
 
+    // Every kind a row of this arena has ever been written with: a SUPERSET of the
+    // kinds in any plan of the query (a row stays after its expression leaves the
+    // plan), so a clear bit proves absence and a set bit proves nothing.
+    void note_kind(int32_t kind) {
+        if (kind < 0 || kind >= 64) {
+            throw std::out_of_range("expression kind outside the arena's kind mask");
+        }
+        kinds_seen_ |= uint64_t{1} << kind;
+    }
+
+    bool has_kind(int32_t kind) const {
+        return kind >= 0 && kind < 64 && ((kinds_seen_ >> kind) & 1u) != 0;
+    }
+
+    // Whether any row of `kind` holds one of `values` as its operator / function /
+    // cast name. Rows mirror their expression's current value, and every expression
+    // in a plan has a row, so false proves no expression in any plan of the query
+    // matches; true proves nothing.
+    bool any_value(int32_t kind, const std::vector<std::string>& values) const {
+        if (!has_kind(kind)) {
+            return false;
+        }
+        for (const ExprRow& r : rows_) {
+            if (r.kind != kind) {
+                continue;
+            }
+            for (const std::string& v : values) {
+                if (r.value == v) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // The interned id of a relation name.
     uint32_t relation(const std::string& name) {
         auto found = relation_ids_.find(name);
@@ -174,6 +209,7 @@ private:
     std::vector<ExprRow> rows_;
     std::vector<std::string> relation_names_;
     std::unordered_map<std::string, uint32_t> relation_ids_;
+    uint64_t kinds_seen_ = 0;
 };
 
 // An expression's children in their declared order (Expression.children): a

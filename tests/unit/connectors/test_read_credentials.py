@@ -223,11 +223,16 @@ def test_a_resolver_refusal_reaches_the_caller(resolver):
         _rows(f"SELECT * FROM READ_PARQUET('{SCOPE}a.parquet', credentials => 'analytics.reader')")
 
 
-def test_no_secret_is_inferred_from_the_path(resolver):
-    """Without the option the read is anonymous even though a secret would cover it."""
+def test_no_secret_is_inferred_from_the_path(resolver, monkeypatch):
+    """Without the option the read is anonymous even though a secret would cover it: the glob is
+    LISTED anonymously (here against a closed local port, so the suite makes no real request),
+    and the secret resolver is never consulted."""
+    import opteryx.connectors.io_systems.object_listing as object_listing
+
+    monkeypatch.setattr(object_listing, "GCS_API", "http://127.0.0.1:9")
     with pytest.raises(Exception) as raised:
         _rows(f"SELECT * FROM READ_CSV('{SCOPE}2026/*.csv')")
-    assert "glob patterns are not supported" in str(raised.value)
+    assert "Unable to list" in str(raised.value)
     assert resolver["calls"] == []
 
 

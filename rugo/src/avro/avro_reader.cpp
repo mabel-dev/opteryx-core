@@ -32,12 +32,14 @@ void AvroColumn::steal(AvroColumn& o) noexcept {
     precision = o.precision; scale = o.scale;
     offsets = o.offsets; child_validity = o.child_validity;
     child_type = o.child_type; child_length = o.child_length;
+    child_col = std::move(o.child_col);
     o.disown();
 }
 
 void AvroColumn::release_all() noexcept {
     draken_free(data); draken_free(validity); draken_free(slots); draken_free(arena); draken_free(codes);
     draken_free(offsets); draken_free(child_validity);
+    child_col.reset();   // frees the nested child's own buffers
     disown();
 }
 
@@ -388,12 +390,20 @@ private:
         }
     }
 
-    // Nested shapes rendered as JSON text: records, maps, and arrays of nested shapes.
+    // What sits at the bottom of an array nest.
+    static const Node* array_core(const Node* t) {
+        while (t->kind == Kind::Array) t = unwrap(t->items);
+        return t;
+    }
+
+    // Nested shapes rendered as JSON text: records, maps, and arrays (of arrays ...) whose elements are
+    // records / maps, or a scalar Draken ARRAY cannot hold (a logical type, an enum)
+    // (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md ND1/ND2). An array nest over a plain scalar is a nested
+    // ARRAY, as the parquet scan builds it.
     static bool is_json(const Node* t) {
         if (t->kind == Kind::Record || t->kind == Kind::Map) return true;
         if (t->kind != Kind::Array) return false;
-        const Kind k = unwrap(t->items)->kind;
-        return k == Kind::Record || k == Kind::Array || k == Kind::Map;
+        return !array_scalar(array_core(t));
     }
 
     // May a value written as `w` be read as `r`? (the spec's promotions)
@@ -405,6 +415,10 @@ private:
             case Kind::Float:  return r == Kind::Double;
             case Kind::String: return r == Kind::Bytes;
             case Kind::Bytes:  return r == Kind::String;
+            // Not in the Avro spec: an Iceberg `fixed(L)` column binds as VARBINARY, whose reader
+            // schema can only say `bytes`. The file's fixed is read as the same bytes (length checked
+            // by the file's own fixed size); the reader never needs to know L.
+            case Kind::Fixed:  return r == Kind::Bytes;
             default:           return false;
         }
     }
@@ -412,7 +426,7 @@ private:
     void check_compatible(const Node* w, const Node* r, const std::string& col) {
         if (!promotes(w->kind, r->kind))
             fail("column '" + col + "': the file's " + kind_name(w->kind) + " cannot be read as " + kind_name(r->kind));
-        if (w->kind == Kind::Fixed && w->fixed_size != r->fixed_size)
+        if (w->kind == Kind::Fixed && r->kind == Kind::Fixed && w->fixed_size != r->fixed_size)
             fail("column '" + col + "': the file's fixed(" + std::to_string(w->fixed_size) + ") cannot be read as fixed(" +
                  std::to_string(r->fixed_size) + ")");
         if (w->kind == Kind::Enum)
@@ -444,10 +458,6 @@ private:
         if (w->kind == Kind::Array) {
             if (r->kind != Kind::Array)
                 fail("column '" + name + "': the file's array cannot be read as " + kind_name(r->kind));
-            if (!array_scalar(unwrap(w->items)))
-                fail("column '" + name + "' is an array of " +
-                     (unwrap(w->items)->kind == Kind::Enum ? std::string("enum") : std::string("a logical type")) +
-                     ", which ARRAY cannot hold; not supported");
             ColSpec child;
             child.name = name + "[]";
             child.hidden = true;
@@ -1680,6 +1690,12 @@ private:
                 out.offsets = s.offsets.release();
                 out.child_type = ch.spec->type;
                 out.child_length = ch.n;
+                if (ch.spec->kind == OutKind::Array) {
+                    // An array of arrays: the child is a whole Array column of its own.
+                    out.child_col = std::make_unique<AvroColumn>();
+                    finish_col(ch, ch.n, *out.child_col);
+                    break;
+                }
                 out.child_validity = take_validity(ch, ch.n);
                 if (ch.spec->kind == OutKind::String) {
                     out.slots = ch.slots.release();
@@ -1849,6 +1865,13 @@ const std::vector<std::string>& AvroFile::pass2_columns() const {
 AvroFile::~AvroFile() = default;
 
 const std::string& AvroFile::schema_json() const { return impl_->header.schema_json; }
+bool AvroFile::writer_fields_have_ids() const {
+    const Node* root = impl_->writer.root();
+    if (root->fields.empty()) return false;
+    for (const Field& f : root->fields)
+        if (f.field_id < 0) return false;
+    return true;
+}
 const std::vector<std::pair<std::string, std::string>>& AvroFile::metadata() const { return impl_->header.metadata; }
 const std::vector<std::string>& AvroFile::column_names() const { return impl_->names; }
 
@@ -1867,7 +1890,15 @@ std::vector<AvroColumnType> AvroFile::column_types() const {
             t.precision = cs.precision;
             t.scale = cs.scale;
         }
-        if (cs.kind == OutKind::Array) t.child_type = p.cols[cs.child].type;
+        if (cs.kind == OutKind::Array) {
+            const ColSpec* inner = &p.cols[cs.child];
+            t.array_depth = 1;
+            while (inner->kind == OutKind::Array) {
+                inner = &p.cols[inner->child];
+                ++t.array_depth;
+            }
+            t.child_type = inner->type;
+        }
     }
     return out;
 }

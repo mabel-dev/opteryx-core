@@ -197,14 +197,11 @@ class GroupJoinStrategy(OptimizationStrategy):
     requires = ("project-fused", "predicates-pushed")
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        has_agg = False
-        has_join = False
-        for _nid, node in plan.nodes(True):
-            if node.node_type == LogicalPlanStepType.AggregateAndGroup:
-                has_agg = True
-            elif node.node_type == LogicalPlanStepType.Join and node.type in _PAIR_JOINS:
-                has_join = True
-        return has_agg and has_join
+        if not plan.has_step(LogicalPlanStepType.AggregateAndGroup):
+            return False
+        return any(
+            node.type in _PAIR_JOINS for _nid, node in plan.steps_of((LogicalPlanStepType.Join,))
+        )
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context

@@ -1,4 +1,5 @@
-// Native STRUCT / MAP parquet columns rendered as JSON text.
+// Native STRUCT / MAP parquet columns (and a LIST whose elements are STRUCT / MAP, however
+// deeply listed) rendered as JSON text.
 //
 // A parquet STRUCT or MAP is stored as several leaf column chunks ("s.a",
 // "s.b.c", "m.key_value.key", ...), each carrying repetition/definition levels.
@@ -21,7 +22,10 @@
 //   * DATE/TIMESTAMP/TIME = quoted ISO-8601, the shared fmt_*_quoted renderers
 //   * BINARY        = quoted base64 (mabel bintob64)
 //   * STRING        = JSON-escaped UTF-8 (shared json_string)
-//   * nesting       = arbitrary: STRUCT/MAP/LIST in any combination
+//   * nesting       = arbitrary: STRUCT/MAP/LIST in any combination. A top-level LIST is
+//                     this renderer's business only when a STRUCT/MAP sits under it (one JSON
+//                     array per row); a LIST of scalars, or of lists of scalars, is the ARRAY
+//                     path, not this one (metadata.cpp ListHoldsGroups).
 //
 // Anything it cannot render — an unsupported leaf type, a MAP with a non-string key,
 // a malformed LIST/MAP shape, a NULL map key — is an error, never a NULL.

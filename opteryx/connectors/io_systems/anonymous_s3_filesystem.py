@@ -21,9 +21,11 @@ fetched with NO signature and NO Authorization header, via OpteryxHttpFileSystem
 S3's own bucket policy / object ACL decides the outcome: a public object is read;
 a private one is refused by S3 itself. Opteryx makes no allow/deny decision.
 
-Deliberately has no `list_files`: bucket LISTING is a separate permission from
-object GET and is not assumed granted anonymously, so glob patterns over s3:// are
-rejected outright by callers rather than silently escalating to a signed listing.
+LISTING is tried ANONYMOUSLY too (docs/ANONYMOUS_REMOTE_READS_DESIGN.md): `list_files` sends an
+UNSIGNED ListObjectsV2 through the credential-free `object_listing` module, so a glob over a public
+bucket works. A bucket that does not allow anonymous listing answers 403 and the query fails
+saying so - it is NEVER retried with a signed request. That is the rule this class exists to
+keep: READ_* never uses the platform's identity.
 """
 
 import urllib.parse
@@ -42,6 +44,38 @@ class AnonymousS3FileSystem:
         # decide WHERE an anonymous request goes, never what it may read.
         self.endpoint = (config.get("AWS_S3_ENDPOINT") or "").rstrip("/")
         self.region = _resolve_region()
+
+    def _page_url(self, bucket: str, query: dict) -> str:
+        """The UNSIGNED URL of one ListObjectsV2 page, addressed as the object URLs are."""
+        from opteryx.connectors.io_systems.s3_filesystem import endpoint_parts
+
+        scheme, host, path_prefix = endpoint_parts(bucket, self.endpoint, self.region)
+        return urllib.parse.urlunsplit(
+            (scheme, host, f"{path_prefix}/", urllib.parse.urlencode(query, quote_via=urllib.parse.quote), "")
+        )
+
+    def list_file_infos(self, base_dir: str, recursive: bool = True) -> list:
+        """The objects under `base_dir` (s3://bucket/prefix), listed anonymously."""
+        from opteryx.connectors.io_systems.object_listing import anonymous_listing_limit
+        from opteryx.connectors.io_systems.object_listing import list_s3_objects
+
+        def get(url, headers):
+            # An anonymous request carries NO headers - the client call below cannot even express one.
+            if headers:
+                raise ValueError("an anonymous listing carries no request headers")
+            return self._http.http_client.get(url)
+
+        return list_s3_objects(
+            get,
+            self._page_url,
+            base_dir,
+            recursive,
+            anonymous=True,
+            limit=anonymous_listing_limit(),
+        )
+
+    def list_files(self, base_dir: str, recursive: bool = True) -> list:
+        return [info.path for info in self.list_file_infos(base_dir, recursive)]
 
     def _to_public_url(self, path: str) -> str:
         from opteryx.connectors.io_systems.s3_filesystem import _quote_key

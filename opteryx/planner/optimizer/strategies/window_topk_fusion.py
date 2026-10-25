@@ -58,7 +58,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 # Node types the search may walk through looking for the qualifying Filter —
 # purely column-reshaping (Project/Subquery) or independently-evaluated
@@ -117,7 +116,7 @@ def _match_topk_filter(condition, target_identity: str):
 
 class WindowTopKFusionStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Window,))) > 0
+        return plan.has_step(LogicalPlanStepType.Window)
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.Window:

@@ -194,7 +194,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
         # their behavior hasn't been vetted against this pass.
         is_pushable_function_dataset = (
             node.node_type == LogicalPlanStepType.FunctionDataset
-            and node.function in ("READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO")
+            and node.function in ("READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO", "READ_ORC")
         )
         if (
             (

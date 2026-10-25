@@ -52,6 +52,7 @@ after a join, we add conditions to the JOIN.
 
 from draken.draken_native import TimestampUnit
 
+from opteryx import config
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -918,8 +919,6 @@ class PredicatePushdownStrategy(OptimizationStrategy):
     provides = ("predicates-pushed",)
 
     def should_i_run(self, plan):
-        from opteryx import config
-
         return not config.features.disable_predicate_pushdown
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:

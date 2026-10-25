@@ -36,10 +36,14 @@ from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from cpython.ref cimport PyObject
 
+from opteryx.compiled.structures.plan_steps cimport PlanStep
 from opteryx.exceptions import InvalidInternalStateError
 
 
 cdef extern from "planner/_plan_graph.hpp":
+    cdef int32_t kNoStepKind "opteryx::planner::kNoStepKind"
+    cdef int32_t kStepKindSlots "opteryx::planner::kStepKindSlots"
+
     cdef enum CEdgeRole "opteryx::planner::EdgeRole":
         EDGE_NONE "opteryx::planner::EDGE_NONE"
         EDGE_LEFT "opteryx::planner::EDGE_LEFT"
@@ -65,17 +69,19 @@ cdef extern from "planner/_plan_graph.hpp":
         const CPlanNode& node(uint32_t id) except +
         PyObject* step(uint32_t id) except +
         PyObject* step_at(size_t position)
-        void add(uint32_t id, PyObject* step) except +
-        void replace(uint32_t id, PyObject* step) except +
+        int32_t kind_at(size_t position)
+        uint32_t kind_count(int32_t kind) except +
+        void add(uint32_t id, PyObject* step, int32_t kind) except +
+        void replace(uint32_t id, PyObject* step, int32_t kind) except +
         void add_edge(uint32_t source, uint32_t target, CEdgeRole role) except +
         cbool remove_edge(uint32_t source, uint32_t target, CEdgeRole role) except +
         cbool relationship(uint32_t source, uint32_t target, CEdgeRole* role) except +
         cbool legs(uint32_t id, uint32_t* left, uint32_t* right) except +
         void remove(uint32_t id, cbool heal) except +
-        void insert_before(uint32_t id, PyObject* step, uint32_t before) except +
-        void insert_after(uint32_t id, PyObject* step, uint32_t after) except +
+        void insert_before(uint32_t id, PyObject* step, int32_t kind, uint32_t before) except +
+        void insert_after(uint32_t id, PyObject* step, int32_t kind, uint32_t after) except +
         void absorb(const CPlanGraph& other) except +
-        CPlanGraph* remapped(const vector[uint32_t]& ids, const vector[PyObject*]& steps) except +
+        CPlanGraph* remapped(const vector[uint32_t]& ids, const vector[PyObject*]& steps, const vector[int32_t]& kinds) except +
         vector[pair[uint32_t, uint32_t]] visit_order(uint32_t root) except +
         vector[uint32_t] exit_points()
 
@@ -136,7 +142,12 @@ cdef class PlanGraph:
     """A plan: steps under per-query node ids, joined by producer -> consumer edges.
 
     Subclassed by LogicalPlan and PhysicalPlan; both are built with the query's
-    PlanContext, which mints their node ids."""
+    PlanContext, which mints their node ids.
+
+    With `step_kinds` (LogicalPlan), every step is a PlanStep and the graph keeps a
+    count per step kind, so `has_step` / `steps_of` answer without walking the
+    steps; anything but a PlanStep put into such a plan is refused. A PhysicalPlan
+    holds operators, which have no step kind, and does not count them."""
 
     cdef CPlanGraph* _graph
     cdef readonly object plan_context
@@ -146,6 +157,7 @@ cdef class PlanGraph:
     # keeps the borrowed graph alive and is what `unwrap` hands back untouched.
     cdef bint _borrowed
     cdef object _source
+    cdef bint _step_kinds
 
     def __cinit__(self, *args, **kwargs):
         self._graph = new CPlanGraph()
@@ -154,8 +166,9 @@ cdef class PlanGraph:
         if not self._borrowed:
             del self._graph
 
-    def __init__(self, plan_context):
+    def __init__(self, plan_context, bint step_kinds=False):
         self._bind(plan_context)
+        self._step_kinds = step_kinds
 
     cdef int _bind(self, object plan_context) except -1:
         self.plan_context = plan_context
@@ -166,7 +179,28 @@ cdef class PlanGraph:
         """A new, empty graph of this graph's own class over the same query."""
         cdef PlanGraph graph = type(self).__new__(type(self))
         graph._bind(self.plan_context)
+        graph._step_kinds = self._step_kinds
         return graph
+
+    cdef inline int32_t _kind_of(self, object step) except? -2:
+        """The kind `step` is counted under: its LogicalPlanStepType value in a
+        plan that counts kinds (refusing anything but a PlanStep), none otherwise."""
+        cdef int32_t kind
+        if not self._step_kinds:
+            return kNoStepKind
+        kind = (<PlanStep?>step)._row.kind
+        if kind == kNoStepKind:
+            raise InvalidInternalStateError(f"A plan step with no step kind was put into a plan: {step!r}.")
+        return kind
+
+    cdef inline int32_t _kind_code(self, object kind) except? -2:
+        """A LogicalPlanStepType as the native kind; refused on a plan that does not
+        count kinds, which could only ever answer 'none'."""
+        if not self._step_kinds:
+            raise InvalidInternalStateError(
+                f"{type(self).__name__} does not count step kinds; it cannot be asked for steps by kind."
+            )
+        return <int32_t>kind.value
 
     cdef inline int _own(self) except -1:
         """Before a mutation: a borrowed view takes its own copy of the structure
@@ -226,9 +260,10 @@ cdef class PlanGraph:
         """Add `step` and return its id: a newly minted one, or `nid` to re-add a
         step under an id this query already minted (architect ruling 2026-09-27:
         the plan allocates node ids)."""
+        cdef int32_t kind = self._kind_of(step)
         cdef uint32_t placed = self._allocate(nid)
         self._own()
-        self._graph.add(placed, <PyObject*>step)
+        self._graph.add(placed, <PyObject*>step, kind)
         return placed
 
     def __getitem__(self, nid):
@@ -236,9 +271,10 @@ cdef class PlanGraph:
 
     def __setitem__(self, nid, step):
         """Replace the step behind `nid`, which must be in the plan."""
+        cdef int32_t kind = self._kind_of(step)
         cdef uint32_t placed = self._present(nid)
         self._own()
-        self._graph.replace(placed, <PyObject*>step)
+        self._graph.replace(placed, <PyObject*>step, kind)
 
     def __contains__(self, nid) -> bool:
         return type(nid) is int and nid >= 0 and self._graph.contains(<uint32_t>nid)
@@ -265,6 +301,47 @@ cdef class PlanGraph:
                 out.append(self._graph.node_at(i).id)
         return out
 
+    def has_step(self, kind) -> bool:
+        """Whether the plan holds a step of `kind` (a LogicalPlanStepType)."""
+        return self._graph.kind_count(self._kind_code(kind)) != 0
+
+    def count_steps(self, kind) -> int:
+        """How many steps of `kind` (a LogicalPlanStepType) the plan holds."""
+        return self._graph.kind_count(self._kind_code(kind))
+
+    def step_writes(self) -> int:
+        """The total field writes of the plan's steps (PlanStep.write_count): a
+        moved total is a plan whose steps changed without a graph mutation."""
+        cdef unsigned long long total = 0
+        cdef size_t i
+        if not self._step_kinds:
+            raise InvalidInternalStateError(
+                f"{type(self).__name__} does not hold plan steps; it has no step writes to count."
+            )
+        for i in range(self._graph.size()):
+            total += (<PlanStep>self._graph.step_at(i)).write_count
+        return total
+
+    def steps_of(self, kinds) -> list:
+        """`(id, step)` for each step whose kind is one of `kinds` (a tuple of
+        LogicalPlanStepType), in insertion order."""
+        cdef uint64_t wanted = 0
+        cdef uint32_t present = 0
+        cdef int32_t code
+        cdef size_t i
+        cdef size_t n = self._graph.size()
+        for kind in kinds:
+            code = self._kind_code(kind)
+            wanted |= (<uint64_t>1) << code
+            present += self._graph.kind_count(code)
+        out = []
+        if present == 0:
+            return out
+        for i in range(n):
+            if (wanted >> self._graph.kind_at(i)) & 1:
+                out.append((self._graph.node_at(i).id, <object>self._graph.step_at(i)))
+        return out
+
     def remove_node(self, nid, heal: bool = False):
         """Remove a node and its edges; with `heal`, wire each of its producers to
         each of its consumers."""
@@ -275,19 +352,21 @@ cdef class PlanGraph:
     def insert_node_before(self, step, before_nid, *, nid=None) -> int:
         """Put `step` between `before_nid` and everything feeding it; its id (new,
         or `nid` for a re-add) is returned."""
+        cdef int32_t kind = self._kind_of(step)
         cdef uint32_t before = self._present(before_nid)
         cdef uint32_t placed = self._allocate(nid)
         self._own()
-        self._graph.insert_before(placed, <PyObject*>step, before)
+        self._graph.insert_before(placed, <PyObject*>step, kind, before)
         return placed
 
     def insert_node_after(self, step, after_nid, *, nid=None) -> int:
         """Put `step` between `after_nid` and everything it feeds; its id (new, or
         `nid` for a re-add) is returned."""
+        cdef int32_t kind = self._kind_of(step)
         cdef uint32_t after = self._present(after_nid)
         cdef uint32_t placed = self._allocate(nid)
         self._own()
-        self._graph.insert_after(placed, <PyObject*>step, after)
+        self._graph.insert_after(placed, <PyObject*>step, kind, after)
         return placed
 
     # -- edges ------------------------------------------------------------------
@@ -518,6 +597,7 @@ cdef class PlanGraph:
         cdef size_t n = self._graph.size()
         cdef vector[uint32_t] ids
         cdef vector[PyObject*] steps
+        cdef vector[int32_t] kinds
         copied = []
         id_map = {}
         for i in range(n):
@@ -528,9 +608,10 @@ cdef class PlanGraph:
             step_copy = (<object>self._graph.step_at(i)).copy(memo)
             copied.append(step_copy)
             steps.push_back(<PyObject*>step_copy)
+            kinds.push_back(self._kind_of(step_copy))
         cdef PlanGraph graph = self._empty_like()
         del graph._graph
-        graph._graph = self._graph.remapped(ids, steps)
+        graph._graph = self._graph.remapped(ids, steps, kinds)
         if fresh_ids:
             return graph, id_map
         return graph
@@ -541,6 +622,10 @@ cdef class PlanGraph:
         cdef size_t i
         if other.plan_context is not self.plan_context:
             raise InvalidInternalStateError("Cannot merge plans from two different queries.")
+        if other._step_kinds != self._step_kinds:
+            raise InvalidInternalStateError(
+                f"Cannot merge a {type(other).__name__} into a {type(self).__name__}."
+            )
         for i in range(other._graph.size()):
             if self._graph.contains(other._graph.node_at(i).id):
                 raise InvalidInternalStateError(

@@ -86,11 +86,15 @@ def test_read_csv_private_gcs_object_fails_loud_not_silent(anonymous_http):
         _run("SELECT * FROM READ_CSV('gs://opteryx_data/some/private/file.csv')")
 
 
-def test_read_csv_gcs_glob_is_rejected_before_any_network_call(anonymous_http):
-    with pytest.raises(NotSupportedError):
+def test_read_csv_gcs_glob_denied_listing_fails_loud_and_never_uses_a_credential(anonymous_http):
+    # A glob LISTS the prefix anonymously (docs/ANONYMOUS_REMOTE_READS_DESIGN.md). A bucket that
+    # denies it fails the query saying so; nothing is retried with a credential
+    # (`get_storage_credentials` is rigged to blow up) and no object is fetched.
+    with pytest.raises(DatasetReadError, match="Unable to list"):
         _run("SELECT * FROM READ_CSV('gs://opteryx/rugo_examples/*.csv')")
 
-    assert anonymous_http.requested == []
+    assert anonymous_http.requested, "the listing must be attempted"
+    assert all("/storage/v1/b/" in url for url in anonymous_http.requested), anonymous_http.requested
 
 
 def test_read_csv_gcs_scheme_is_rejected_not_treated_as_gs_alias(anonymous_http):

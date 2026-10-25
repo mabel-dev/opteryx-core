@@ -344,6 +344,8 @@ cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine
         cppvector[string] out_identities
         cppvector[uint32_t] emit_index
         bint zero_columns
+        bint require_field_ids
+        string auth_header
         int decode_workers
         int64_t rows_read
         int64_t bytes_read
@@ -351,6 +353,30 @@ cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine
         int64_t batches_read
         int64_t two_pass_batches
         int64_t single_pass_batches
+
+cdef extern from "engine/native_orc_scan_source.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass OrcScanSpec:
+        cppvector[string] files
+        cppvector[string] urls
+        string auth_header
+        cppvector[string] reader_names
+        cppvector[int64_t] reader_field_ids
+        cppvector[int32_t] reader_types
+        cppvector[uint32_t] reader_precision
+        cppvector[uint32_t] reader_scale
+        cppvector[int32_t] reader_child_types
+        cppvector[uint32_t] reader_array_depths
+        cppvector[uint8_t] reader_nullable
+        cppvector[string] decode_names
+        cppvector[string] out_identities
+        cppvector[uint32_t] emit_index
+        bint zero_columns
+        bint match_by_id
+        int decode_workers
+        int64_t rows_read
+        int64_t bytes_read
+        int64_t files_read
+        int64_t stripes_read
 
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
@@ -584,6 +610,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
         void set_native_avro_scan_source(size_t p, const AvroScanSpec* spec)
+        void set_native_orc_scan_source(size_t p, const OrcScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -2628,6 +2655,84 @@ cdef class JsonlScanPlan:
         return self.spec.chunks_read
 
 
+cdef class OrcScanPlan:
+    """Owns the C++ OrcScanSpec NativeOrcScanSource borrows for one ORC scan.
+
+    A plain holder, not a planner: the compiler resolved the files, the reader columns
+    every file is read as, the columns to decode (each once), and the identities to emit
+    under with the decoded column each one reads. This pins them in C++ storage that
+    outlives the driver.
+    """
+
+    cdef OrcScanSpec spec
+    cdef public object scan_identity
+
+    def __init__(self, list files, list urls, str auth_header, list reader_columns,
+                 list decode_names, list out_identities, list emit_index, bint zero_columns,
+                 bint match_by_id, int decode_workers):
+        if len(out_identities) != len(emit_index):
+            raise ValueError("OrcScanPlan: out_identities and emit_index must be parallel")
+        if len(set(decode_names)) != len(decode_names):
+            raise ValueError("OrcScanPlan: decode_names must be unique")
+        for index in emit_index:
+            if not 0 <= index < len(decode_names):
+                raise ValueError("OrcScanPlan: emit_index out of range")
+        if zero_columns and (decode_names or out_identities):
+            raise ValueError("OrcScanPlan: a zero-column scan decodes no columns")
+        if not zero_columns and not out_identities:
+            raise ValueError("OrcScanPlan: a projected scan needs at least one column")
+        if not files:
+            raise ValueError("OrcScanPlan: no files to read")
+        if len(urls) != len(files):
+            raise ValueError("OrcScanPlan: files and urls must be parallel")
+        if decode_workers <= 0:
+            raise ValueError("OrcScanPlan: decode_workers must be positive")
+        cdef int64_t field_id
+        cdef int32_t dtype
+        cdef uint32_t precision, scale
+        cdef int32_t child
+        cdef uint32_t depth
+        cdef uint8_t nullable
+        for path in files:
+            self.spec.files.push_back((<str>path).encode("utf-8"))
+        for url in urls:
+            self.spec.urls.push_back((<str>url).encode("utf-8"))
+        self.spec.auth_header = auth_header.encode("utf-8")
+        for name, field_id_obj, dtype_obj, precision_obj, scale_obj, nullable_obj, child_obj, depth_obj in reader_columns:
+            field_id = -1 if field_id_obj is None else field_id_obj
+            dtype = dtype_obj
+            precision = precision_obj
+            scale = scale_obj
+            child = child_obj
+            depth = depth_obj
+            nullable = 1 if nullable_obj else 0
+            self.spec.reader_names.push_back((<str>name).encode("utf-8"))
+            self.spec.reader_field_ids.push_back(field_id)
+            self.spec.reader_types.push_back(dtype)
+            self.spec.reader_precision.push_back(precision)
+            self.spec.reader_scale.push_back(scale)
+            self.spec.reader_child_types.push_back(child)
+            self.spec.reader_array_depths.push_back(depth)
+            self.spec.reader_nullable.push_back(nullable)
+        for name in decode_names:
+            self.spec.decode_names.push_back((<str>name).encode("utf-8"))
+        for identity in out_identities:
+            self.spec.out_identities.push_back(<bytes>identity)
+        # A typed local, not an inline expression (see AvroScanPlan).
+        cdef uint32_t emit_slot
+        for index in emit_index:
+            emit_slot = index
+            self.spec.emit_index.push_back(emit_slot)
+        self.spec.zero_columns = zero_columns
+        self.spec.match_by_id = match_by_id
+        self.spec.decode_workers = decode_workers
+        self.spec.rows_read = -1
+        self.spec.bytes_read = -1
+        self.spec.files_read = -1
+        self.spec.stripes_read = -1
+        self.scan_identity = None
+
+
 cdef class AvroScanPlan:
     """Owns the C++ AvroScanSpec NativeAvroScanSource borrows for one READ_AVRO scan.
 
@@ -2643,7 +2748,8 @@ cdef class AvroScanPlan:
     cdef public object scan_identity
 
     def __init__(self, list files, list urls, str reader_schema, list decode_names,
-                 list out_identities, list emit_index, bint zero_columns, int decode_workers):
+                 list out_identities, list emit_index, bint zero_columns, int decode_workers,
+                 bint require_field_ids, str auth_header):
         if len(out_identities) != len(emit_index):
             raise ValueError("AvroScanPlan: out_identities and emit_index must be parallel")
         if len(set(decode_names)) != len(decode_names):
@@ -2679,6 +2785,8 @@ cdef class AvroScanPlan:
             emit_slot = index
             self.spec.emit_index.push_back(emit_slot)
         self.spec.zero_columns = zero_columns
+        self.spec.require_field_ids = require_field_ids
+        self.spec.auth_header = auth_header.encode("utf-8")
         self.spec.decode_workers = decode_workers
         self.spec.rows_read = -1
         self.spec.bytes_read = -1
@@ -2733,6 +2841,7 @@ cdef class NativePlan:
     cdef public list postgres_scan_plans  # PostgresScanPlan objects the Postgres Source borrows
     cdef public list jsonl_scan_plans  # JsonlScanPlan objects the JSONL Source borrows
     cdef public list avro_scan_plans  # AvroScanPlan objects the Avro Source borrows
+    cdef public list orc_scan_plans  # OrcScanPlan objects the ORC Source borrows
     # Top-N runtime boundaries armed on this plan: (scan identity, boundary slot).
     # Read after the run to report each scan's `row_groups_pruned_topn`; empty for
     # every plan that armed none.
@@ -2749,6 +2858,7 @@ cdef class NativePlan:
         self.postgres_scan_plans = []
         self.jsonl_scan_plans = []
         self.avro_scan_plans = []
+        self.orc_scan_plans = []
         self.topn_boundary_scans = []
         self.vector_admission_scans = []
         # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
@@ -2959,6 +3069,14 @@ cdef class NativePlan:
         lifetime."""
         self.avro_scan_plans.append(plan)
         self._e.set_native_avro_scan_source(p, &plan.spec)
+
+    def set_native_orc_scan_source(self, size_t p, OrcScanPlan plan):
+        """Source = the native ORC scan (NativeOrcScanSource): its own decode pool
+        decodes stripes through rugo's C++ ORC reader while execution consumes them.
+        The Source borrows ``plan``'s spec; this plan holds it alive for the driver's
+        lifetime."""
+        self.orc_scan_plans.append(plan)
+        self._e.set_native_orc_scan_source(p, &plan.spec)
 
     def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan,
                                      CompiledBytecode filter_bc=None,
@@ -4584,6 +4702,7 @@ include "vector_index_build/vector_index_build.pyx"
 include "vector_index_build/vector_index_carry.pyx"
 include "vector_index_build/vector_index_search.pyx"
 include "avro_read/avro_read.pyx"
+include "orc_read/orc_read.pyx"
 include "csv_read/csv_read.pyx"
 include "explain/explain.pyx"
 include "function_dataset/function_dataset.pyx"

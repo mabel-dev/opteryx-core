@@ -505,11 +505,11 @@ it is looked at.
 marker; more is refused.
 
 **Built since §18:**
-- Nested output per §17.2: whole record / map / array of records or arrays → NVARCHAR
+- Nested output per §17.2: whole record / map / array of records (or of arrays of records) → NVARCHAR
   JSON text using parquet's renderer helpers (`draken/interop/value_format.hpp`, ryu,
-  mabel base64); array of a plain scalar → ARRAY (numeric, or string-family child,
-  nullable elements). An array of a logical type or an enum is refused: Draken's ARRAY
-  child cannot carry one.
+  mabel base64); array of a plain scalar, or of arrays of one (to any depth, since 2026-10-25), → ARRAY
+  (numeric, or string-family child, nullable elements). An array of a logical type or an enum is a JSON array (since
+  2026-10-25, UUID_AND_NESTED_COLUMNS_DESIGN.md §9): Draken's ARRAY child cannot carry one.
 - Iceberg: `tests/rugo/test_avro_iceberg_manifests.py`. PyIceberg-written v1 and v2
   tables (partitioned, appends + a copy-on-write delete) have every manifest-list and
   manifest entry compared with PyIceberg's own decoder: status, snapshot id, content,

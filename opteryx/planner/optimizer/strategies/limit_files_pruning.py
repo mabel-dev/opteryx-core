@@ -37,7 +37,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
 class LimitFilesPruningStrategy(OptimizationStrategy):
@@ -59,7 +58,7 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
         # visit() acts only on a Scan carrying a pushed limit.
         return any(
             node.limit is not None
-            for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,))
+            for _, node in plan.steps_of((LogicalPlanStepType.Scan,))
         )
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:

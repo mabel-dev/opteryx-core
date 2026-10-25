@@ -152,9 +152,7 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         # puts a full statistics refresh on the query's path, so only answer yes
         # when an actual candidate exists — a semi/anti join whose probe leg is
         # an inner join.
-        for nid, node in plan.nodes(True):
-            if node.node_type != LogicalPlanStepType.Join:
-                continue
+        for nid, node in plan.steps_of((LogicalPlanStepType.Join,)):
             if node.type not in _PUSHABLE_TYPES:
                 continue
             legs = _resolve_legs(plan, nid)

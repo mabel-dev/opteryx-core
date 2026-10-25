@@ -237,6 +237,14 @@ class LengthOnlyColumnStrategy(OptimizationStrategy):
         # operation (`needs`), and `_classify` finds those in the roots
         # `_classified_roots` yields. A plan with none of them in those roots leaves
         # `complete` nothing to annotate, and `visit` only copies steps.
+        # A query whose arena never held such an operation cannot have one in any
+        # plan (ExprArena.any_value), so that answers no without walking the plan.
+        arena = plan.plan_context.expressions
+        if not (
+            arena.any_value(NodeType.UNARY_OPERATOR, _LENGTH_ONLY_UNARY_OPS)
+            or arena.any_value(NodeType.FUNCTION, _LENGTH_ONLY_FUNCTIONS)
+        ):
+            return False
         return any(
             node.value in _LENGTH_ONLY_UNARY_OPS
             if node.node_type == NodeType.UNARY_OPERATOR

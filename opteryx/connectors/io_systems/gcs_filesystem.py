@@ -78,16 +78,6 @@ class GcsFile:
         self._data = b""
 
 
-def _rfc3339_to_ns(stamp: str) -> int:
-    """Nanoseconds since the epoch for an RFC 3339 timestamp (the object listing's
-    `updated`). Integer arithmetic, so no float rounding moves the value."""
-    import datetime
-
-    moment = datetime.datetime.fromisoformat(stamp)
-    delta = moment - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-    return (delta // datetime.timedelta(microseconds=1)) * 1000
-
-
 class OpteryxGcsFileSystem:
     """
     Custom GCS filesystem using direct HTTP API for optimal performance.
@@ -224,56 +214,11 @@ class OpteryxGcsFileSystem:
         Paginates: a dataset can exceed the API's 1000-object page limit, and a truncated
         listing would silently under-read a dataset rather than fail.
         """
-        import json
+        from opteryx.connectors.io_systems.object_listing import list_gcs_objects
 
-        from opteryx.connectors.io_systems._file_info import FileInfoLike
-
-        path = base_dir[5:] if base_dir.startswith("gs://") else base_dir
-        path = path.strip("/")
-        if not path:
-            raise ValueError("list_files: a GCS path must include a bucket")
-
-        bucket, _, object_prefix = path.partition("/")
-        # Trailing slash = directory semantics (see docstring). An empty object_prefix
-        # means the whole bucket, where no prefix filter is correct.
-        prefix = f"{object_prefix}/" if object_prefix else ""
-
-        api = f"https://storage.googleapis.com/storage/v1/b/{urllib.parse.quote(bucket, safe='')}/o"
-        bearer = self._bearer
-        blobs: list = []
-        page_token = None
-
-        while True:
-            params = {"prefix": prefix, "fields": "items(name,size,updated),nextPageToken"}
-            if not recursive:
-                # GCS is flat; a delimiter is what makes a listing non-recursive.
-                params["delimiter"] = "/"
-            if page_token:
-                params["pageToken"] = page_token
-
-            url = f"{api}?{urllib.parse.urlencode(params)}"
-            try:
-                raw = self.http_client.get(url, headers={"Authorization": bearer})
-            except RuntimeError as err:
-                raise DatasetReadError(f"Unable to list '{base_dir}' - {err}") from err
-
-            payload = json.loads(raw) if raw else {}
-            for item in payload.get("items", ()):
-                name = item.get("name")
-                # Skip the zero-byte placeholder objects the console creates for "folders" —
-                # they are not readable data files.
-                if name and not name.endswith("/"):
-                    blobs.append(
-                        FileInfoLike(
-                            path=f"gs://{bucket}/{name}",
-                            size=int(item["size"]),
-                            mtime=_rfc3339_to_ns(item["updated"]),
-                        )
-                    )
-
-            page_token = payload.get("nextPageToken")
-            if not page_token:
-                return blobs
+        return list_gcs_objects(
+            self.http_client.get, base_dir, recursive, headers={"Authorization": self._bearer}
+        )
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
@@ -295,14 +240,6 @@ class OpteryxGcsFileSystem:
         if single_path:
             paths = [paths]
 
-        from opteryx.utils import paths as path_utils
-
-        def _object_url(path: str) -> str:
-            norm_path = path[5:] if path.startswith("gs://") else path
-            bucket, _, _, _ = path_utils.get_parts(norm_path)
-            object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
-            return f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-
         def _content_length(path: str, headers: dict) -> int:
             # head()/head_many() already raise on 4xx/5xx; a 2xx HEAD without
             # content-length leaves the object's size unknown - fail rather
@@ -321,7 +258,7 @@ class OpteryxGcsFileSystem:
         # Fast path: avoid batch overhead for the common single-path case.
         if len(paths) == 1:
             headers = self.http_client.head(
-                _object_url(paths[0]),
+                self.object_url(paths[0]),
                 headers={"Authorization": bearer},
             )
             size = _content_length(paths[0], headers)
@@ -334,7 +271,7 @@ class OpteryxGcsFileSystem:
         # pool would force each worker thread to cross back into the
         # interpreter once per path, which is off-limits outside the
         # planning/execution hand-off.
-        requests = [(_object_url(path), {"Authorization": bearer}) for path in paths]
+        requests = [(self.object_url(path), {"Authorization": bearer}) for path in paths]
         headers_list = self.http_client.head_many(requests)
         infos = [
             FileInfo(path=path, type=FileType.File, size=_content_length(path, headers))
@@ -425,6 +362,18 @@ class OpteryxGcsFileSystem:
             sink.write(mv[i : i + chunk_size])
             total += chunk_size if i + chunk_size <= len(data) else len(data) - i
         return total
+
+    @staticmethod
+    def object_url(path: str) -> str:
+        """The HTTPS URL of a ``gs://`` object, for a caller that authenticates by
+        header (``native_auth_header``) rather than by signing. The object name is
+        percent-encoded whole, slashes included, as the JSON API expects."""
+        from opteryx.utils import paths as path_utils
+
+        norm_path = path[5:] if path.startswith("gs://") else path
+        bucket, _, _, _ = path_utils.get_parts(norm_path)
+        object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
+        return f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
     def rewrite_to_signed_url(self, path: str, expiry_seconds: int = 3600) -> str:
         """Convert a gs:// path to a V4 signed HTTPS URL valid for expiry_seconds.

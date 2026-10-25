@@ -25,6 +25,8 @@ from opteryx.exceptions import DataError
 PARQUET = "PARQUET"
 JSONL = "JSONL"
 SKENE = "SKENE"
+AVRO = "AVRO"
+ORC = "ORC"
 
 # Recognised DATA file suffixes. Anything not listed here is not a data file
 # (manifests, sidecars, readmes) and takes no part in format discovery.
@@ -43,6 +45,8 @@ SUFFIX_TO_FORMAT = {
     ".jsonl.bz2": JSONL,
     ".jsonl.xz": JSONL,
     ".skene": SKENE,
+    ".avro": AVRO,
+    ".orc": ORC,
 }
 
 # Format → operator-registry reader name for catalog/filesystem Scans.
@@ -51,6 +55,8 @@ SCAN_READERS = {
     PARQUET: "Parquet Reader",
     JSONL: "JSONL Reader",
     SKENE: "Skene Reader",
+    AVRO: "Avro Reader",
+    ORC: "ORC Reader",
 }
 
 
@@ -79,9 +85,16 @@ def dataset_format(paths: Iterable[str], dataset: str = "") -> Optional[str]:
     Returns None for a listing with no data files (an empty relation).
     Raises MixedFormatDatasetError when they disagree.
     """
+    return single_format((format_for_path(path) for path in paths), dataset)
+
+
+def single_format(formats: Iterable[Optional[str]], dataset: str = "") -> Optional[str]:
+    """The one format a dataset's per-file formats (`format_for_path`'s answers,
+    None for a non-data file) agree on — `dataset_format` for a caller that has
+    already classified each path. None when there is no data file; raises
+    MixedFormatDatasetError when they disagree."""
     found: Optional[str] = None
-    for path in paths:
-        file_format = format_for_path(path)
+    for file_format in formats:
         if file_format is None:
             continue
         if found is None:

@@ -43,7 +43,7 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.types.literal_values import native_literal_value
 from opteryx.compiled.structures.plan_steps import ProjectStep
@@ -161,8 +161,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         # visit() acts on AggregateAndGroup nodes only.
         return (
-            len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.AggregateAndGroup,)))
-            > 0
+            plan.has_step(LogicalPlanStepType.AggregateAndGroup)
         )
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:

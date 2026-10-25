@@ -83,7 +83,6 @@ from opteryx.types.logical_type import LogicalCategory
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 _STRING_CATEGORIES = (
     LogicalCategory.VARCHAR,
@@ -177,7 +176,7 @@ class GroupLimitKeyBoundStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return any(
             node.limit is not None
-            for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Limit,))
+            for _, node in plan.steps_of((LogicalPlanStepType.Limit,))
         )
 
     def _producer(self, plan, nid):
