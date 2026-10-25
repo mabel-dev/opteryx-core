@@ -203,8 +203,16 @@ jobs:
         with:
           credentials_json: '${{ secrets.GCP_KEY }}'
 
+      # tests/fuzzing is NOT part of this run. The fuzzers seed themselves randomly,
+      # so a commit's result depended on which seeds it drew: a push went red
+      # because an oracle's precondition did not fire in 200 random cases, with no
+      # engine change behind it, and a red regression matrix blocks the release.
+      # Fuzzing is a search, not a gate: it runs on a clock in fuzzer.yaml (daily,
+      # 100k cases) and a failure there is reproduced by pinning the printed seed
+      # in tests/fuzzing/seeds/. The deterministic native-parser corpus replay
+      # (fuzz_native_replay.yaml) stays on every push - it is a regression test.
       - name: Run Regression Tests
-        run: python -m coverage run -m pytest --color=yes
+        run: python -m coverage run -m pytest --color=yes --ignore=tests/fuzzing
         env:
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;"
           MINIO_END_POINT: "s3.eu-west-2.amazonaws.com"

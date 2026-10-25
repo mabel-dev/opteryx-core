@@ -1,6 +1,7 @@
 #
-# CI runs short-form fuzz testing, this performs a larger set of iterations on a
-# schedule (currently 100k, daily).
+# Fuzzing runs here, on a clock (currently 100k iterations, daily), and nowhere
+# else: the regression suite ignores tests/fuzzing, because a random-seeded search
+# must not decide whether a commit or a release is green.
 #
 # TEST_ITERATIONS is honoured by every fuzzer in tests/fuzzing. It used to reach
 # only the hypothesis-driven files -- the SQL fuzzers carried a hardcoded case
