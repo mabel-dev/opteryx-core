@@ -1236,24 +1236,42 @@ cdef tuple _read_footer_payload(
     str path,
     int64_t file_size,
     ParquetFooterBytesCache footer_cache,
+    str auth_header=None,
 ):
     """Fetch the Parquet footer envelope. Pure C++ IO, typed cache.
 
     Returns (envelope_bytes, bytes_fetched). Pass file_size=-1 to auto-detect
     via stat() (local) or HEAD (http/gcs). Pass footer_cache=None to bypass
     the cache.
+
+    `auth_header` authenticates a REMOTE fetch for a filesystem that does not
+    pre-sign (`_native_auth_header`). The single-file C++ fetch cannot carry a
+    header, so a remote read with one goes through the batch fetch as a batch of
+    one; without it an evicted footer is re-read anonymously and a private bucket
+    answers 403.
     """
     cdef ParquetFooterResult result
     cdef size_t env_sz
     cdef const uint8_t* env_ptr
     cdef bytes envelope
+    cdef FooterFetchOutcome outcome
+    cdef vector[string] cpp_paths
+    cdef vector[int64_t] cpp_sizes
+    cdef string cpp_auth
 
     if footer_cache is not None:
         cached = footer_cache.get(path)
         if cached is not None:
             return cached, 0
 
-    cdef FooterFetchOutcome outcome = _fetch_footer_outcome(path.encode("utf-8"), file_size)
+    if auth_header and _is_remote_url(path):
+        cpp_paths.push_back(path.encode("utf-8"))
+        cpp_sizes.push_back(file_size)
+        cpp_auth = auth_header.encode("utf-8")
+        with nogil:
+            outcome = _fetch_footers_many_outcome(cpp_paths, cpp_sizes, cpp_auth)
+    else:
+        outcome = _fetch_footer_outcome(path.encode("utf-8"), file_size)
     if outcome.http_failed:
         _raise_footer_read_error(outcome)
     result = outcome.results[0]
@@ -2734,6 +2752,7 @@ cdef ParquetFooterRef _footer_after_acquire(
     dict file_sizes,
     ParquetFooterBytesCache footer_bytes_cache,
     ParquetFooterMap* footer_map,
+    str auth_header=None,
 ):
     """The parsed footer of `path` once `_acquire_remote_footers` has run over it:
     from `footer_map` for a remote file (its postcondition, holding for cache hits
@@ -2756,6 +2775,7 @@ cdef ParquetFooterRef _footer_after_acquire(
             fetch_url,
             file_sizes.get(path, -1) if file_sizes else -1,
             footer_bytes_cache,
+            auth_header,
         )
         buf_ptr = <const uint8_t*>envelope
         buf_size = <size_t>len(envelope)
@@ -2831,7 +2851,8 @@ cpdef list fetch_column_stats_many(
                             &footer_map, None, _native_auth_header(filesystem))
 
     for path in paths:
-        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map)
+        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
+                                       _native_auth_header(filesystem))
         agg_stats = AggregateColumnStats(deref(footer))
         out.append((
             deref(footer).num_rows,
@@ -2898,7 +2919,8 @@ cpdef list row_group_int_bounds(
                             &footer_map, None, _native_auth_header(filesystem))
 
     for path in paths:
-        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map)
+        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
+                                       _native_auth_header(filesystem))
         bounds = []
         for g in range(deref(footer).row_groups.size()):
             rg = &deref(footer).row_groups[g]
@@ -3053,6 +3075,7 @@ cpdef IpcRowGroupSource open_ipc_source(
                         orig_to_cpp.get(path, path),
                         file_sizes.get(path, -1) if file_sizes else -1,
                         footer_bytes_cache,
+                        _native_auth_header(filesystem),
                     )
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)
@@ -3231,6 +3254,7 @@ cpdef IpcRowGroupSource open_pass2_source(
                     orig_to_cpp.get(path, path),
                     file_sizes.get(path, -1) if file_sizes else -1,
                     footer_bytes_cache,
+                    _native_auth_header(filesystem),
                 )
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
@@ -3757,7 +3781,8 @@ cpdef NativeScanPlan open_native_scan_plan(
                 # parsed every remote footer into the cache.
                 _footer_t0 = time.perf_counter_ns()
                 envelope, _ = _read_footer_payload(
-                    fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None
+                    fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None,
+                    _native_auth_header(filesystem)
                 )
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
@@ -4248,7 +4273,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
         footer = _PARSED_FOOTER_CACHE.get(path)
         if footer.get() == NULL:
             envelope, _ = _read_footer_payload(
-                fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None
+                fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None, auth_header
             )
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
