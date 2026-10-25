@@ -748,4 +748,31 @@ MaterializedColumn materialize_bool(const DecodedColumn& col, int32_t num_rows) 
     return finish(DRAKEN_BOOL, n, data_owner, validity_owner, has_nulls);
 }
 
+bool logical_is_string(const std::string& lt) {
+    return lt == "varchar" || lt == "UTF8" || lt == "JSON" || lt == "BSON" || lt == "ENUM" ||
+           lt.rfind("array<string", 0) == 0 || lt.rfind("array<varchar", 0) == 0;
+}
+
+bool materialize_scalar(const DecodedColumn& col, int32_t num_rows, MaterializedColumn& out) {
+    if (col.absent || !col.success || !col.rep_levels.empty()) return false;
+    if (col.is_uuid)    { out = materialize_uuid(col, num_rows); return true; }
+    if (col.is_decimal) { out = materialize_decimal(col, num_rows); return true; }
+    if (col.type == "int64")      out = materialize_int(col, num_rows, false);
+    else if (col.type == "int32") out = materialize_int(col, num_rows, true);
+    else if (col.type == "byte_array")
+        out = materialize_string(col, num_rows, logical_is_string(col.logical_type));
+    else if (col.type == "boolean") out = materialize_bool(col, num_rows);
+    else if (col.type == "float32") out = materialize_float(col, num_rows, true);
+    else if (col.type == "float64") out = materialize_float(col, num_rows, false);
+    else return false;
+    return true;
+}
+
+void release_materialized(MaterializedColumn& mc) noexcept {
+    draken_free(mc.data);
+    draken_free(mc.validity);
+    draken_free(mc.arena);
+    mc = MaterializedColumn{};
+}
+
 }  // namespace rugo::_parquet

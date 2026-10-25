@@ -258,6 +258,24 @@ cdef extern from "core/mem_account.h" nogil:
     int64_t draken_mem_pressure_samples()
 
 
+cdef extern from "core/slab_pool.h" nogil:
+    ctypedef struct DrakenSlabStats:
+        int64_t reserved_bytes
+        int64_t mapped_bytes
+        int64_t faulted_bytes
+        int64_t in_use_bytes
+        int64_t free_faulted_bytes
+        int64_t class_slabs
+        int64_t acquires
+        int64_t faults
+        int64_t give_backs
+        int64_t huge_pages
+    void draken_slab_configure(int64_t budget_bytes, int64_t prefault_bytes)
+    int64_t draken_slab_budget_bytes()
+    int64_t draken_slab_prefault_bytes()
+    DrakenSlabStats draken_slab_stats()
+
+
 cdef extern from "core/chunk_cache.h" nogil:
     ctypedef struct DrakenChunkCacheStats:
         int64_t bytes
@@ -302,6 +320,45 @@ def configure_chunk_cache(int64_t container_bytes, int64_t memory_percent, int64
 def chunk_cache_budget_bytes() -> int:
     """The chunk cache's configured budget (0 = off)."""
     return draken_mem_cache_budget()
+
+
+def configure_slab_pool(int64_t budget_bytes, int64_t prefault_bytes) -> None:
+    """Set the slab pool's retained-free budget and boot prefault (slab_pool.h).
+
+    Called once at import with the config values; a prefault faults that many
+    bytes in right here."""
+    if budget_bytes < 0 or prefault_bytes < 0:
+        raise ValueError(
+            f"slab pool configuration out of range: budget={budget_bytes}, prefault={prefault_bytes}"
+        )
+    draken_slab_configure(budget_bytes, prefault_bytes)
+
+
+def slab_pool_budget_bytes() -> int:
+    """Bytes of free slots the slab pool keeps faulted."""
+    return draken_slab_budget_bytes()
+
+
+def slab_pool_prefault_bytes() -> int:
+    """Bytes the slab pool faulted in at import."""
+    return draken_slab_prefault_bytes()
+
+
+def slab_pool_stats() -> dict:
+    """Process-lifetime slab pool counters (slab_pool.h DrakenSlabStats)."""
+    cdef DrakenSlabStats s = draken_slab_stats()
+    return {
+        "reserved_bytes": s.reserved_bytes,
+        "mapped_bytes": s.mapped_bytes,
+        "faulted_bytes": s.faulted_bytes,
+        "in_use_bytes": s.in_use_bytes,
+        "free_faulted_bytes": s.free_faulted_bytes,
+        "class_slabs": s.class_slabs,
+        "acquires": s.acquires,
+        "faults": s.faults,
+        "give_backs": s.give_backs,
+        "huge_pages": s.huge_pages,
+    }
 
 
 def chunk_cache_stats() -> dict:

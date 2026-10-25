@@ -62,6 +62,12 @@ DS = "testdata.tpcds_1_skene."
 DS_PARQUET = "testdata.tpcds_1."
 DATASETS = (DS, DS_PARQUET)
 
+# TPC-DS SF1 is ~780MB across both formats and is not committed.
+pytestmark = pytest.mark.skipif(
+    not (os.path.isdir("testdata/tpcds_1_skene") and os.path.isdir("testdata/tpcds_1")),
+    reason="testdata/tpcds_1 and testdata/tpcds_1_skene not populated",
+)
+
 
 def _oracle_statements(ds):
 

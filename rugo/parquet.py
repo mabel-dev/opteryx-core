@@ -36,7 +36,10 @@ surviving morsels.
 
 import contextlib
 import decimal
+import functools
+import math
 import mmap
+import os
 import struct
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -128,6 +131,58 @@ def _mapped(path: str):
                 view.release()
         finally:
             mapping.close()
+
+
+# Decoded-size floor (bytes, estimated from the footer) below which a read stays serial:
+# under it the hand-off to the worker pool costs more than it saves. Tests lower it to 0
+# to drive the parallel path with small files.
+_PARALLEL_MIN_BYTES = _native.DEFAULT_PARALLEL_MIN_BYTES
+
+# vCPUs AWS Lambda grants per MB of configured memory (1 vCPU = 1,769 MB).
+_LAMBDA_MB_PER_VCPU = 1769
+
+
+@functools.lru_cache(maxsize=1)
+def _available_cpus() -> int:
+    """CPUs this process may actually use: the affinity mask, then a container CPU
+    quota (cgroup v2 `cpu.max`, v1 `cfs_quota_us`), then Lambda's memory-to-vCPU
+    ratio. `os.cpu_count()` alone reports the host's cores, which on a one-vCPU
+    Lambda or a CPU-limited container would oversubscribe the decode threads."""
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    limit = None
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as fh:
+            quota, period = fh.read().split()[:2]
+        if quota != "max":
+            limit = int(quota) / int(period)
+    except (OSError, ValueError):
+        try:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as fq, \
+                    open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as fp:
+                quota, period = int(fq.read()), int(fp.read())
+            if quota > 0 and period > 0:
+                limit = quota / period
+        except (OSError, ValueError):
+            pass
+    if limit is not None:
+        n = min(n, max(1, math.ceil(limit)))
+    lambda_mb = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    if lambda_mb and lambda_mb.isdigit() and int(lambda_mb) > 0:
+        n = min(n, max(1, math.ceil(int(lambda_mb) / _LAMBDA_MB_PER_VCPU)))
+    return max(1, n)
+
+
+def _resolve_threads(threads: Optional[int]) -> int:
+    """`threads=None` means "use the CPUs available to this process"; an explicit
+    count is honoured (the native side still clamps it to its worker pool)."""
+    if threads is None:
+        return _available_cpus()
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise ValueError(f"threads must be a positive integer or None, got {threads!r}")
+    return threads
 
 
 _UNSIGNED_LOGICAL_TYPES = frozenset(("uint8", "uint16", "uint32", "uint64"))
@@ -759,7 +814,8 @@ class _ParquetReader:
     surviving morsel is then filtered at the row level.
     """
 
-    def __init__(self, source: Source, columns, predicates):
+    def __init__(self, source: Source, columns, predicates, threads=None):
+        self._threads = _resolve_threads(threads)
         self._path = source if isinstance(source, str) else None
         self._data = None if self._path else _to_bytes(source)
         # Normalise the projection to str at the boundary: the native reader
@@ -811,13 +867,15 @@ class _ParquetReader:
             else:
                 mask = None
             morsels = _native.stream_parquet_from_path(
-                self._path, column_names=self._read_columns, row_group_mask=mask
+                self._path, column_names=self._read_columns, row_group_mask=mask,
+                threads=self._threads, min_parallel_bytes=_PARALLEL_MIN_BYTES
             )
         else:
             mask = (_row_group_mask(self._data, None, self._predicates)
                     if self._predicates else None)
             morsels = _native.stream_parquet(
-                self._data, column_names=self._read_columns, row_group_mask=mask
+                self._data, column_names=self._read_columns, row_group_mask=mask,
+                threads=self._threads, min_parallel_bytes=_PARALLEL_MIN_BYTES
             )
 
         for morsel in morsels:
@@ -836,6 +894,7 @@ def read_parquet(
     source: Source,
     columns: Optional[Sequence[str]] = None,
     predicates: Optional[Sequence[Predicate]] = None,
+    threads: Optional[int] = None,
 ) -> _ParquetReader:
     """Open a Parquet file or buffer for streaming reads.
 
@@ -853,6 +912,13 @@ def read_parquet(
             no predicate — not even `!=` or `not in`. An empty `in` collection
             matches nothing and an empty `not in` matches everything, null rows
             included, since neither asks a comparison.
+        threads: most worker threads to decode with. None (default) uses the CPUs
+            available to the process (affinity mask, container CPU quota, Lambda's
+            memory-to-vCPU ratio); 1 decodes serially on the calling thread. Row
+            groups are decoded as (row group, column) chunks on a shared pool, a
+            bounded number of row groups ahead of the consumer, and are always
+            yielded in file order with the GIL released while waiting. Small reads
+            (about a megabyte of decoded data or less) stay serial.
 
     Column names may be str or bytes in both `columns` and `predicates`.
     A predicate column need NOT appear in `columns`: it is read internally and
@@ -867,7 +933,7 @@ def read_parquet(
     the same thing either way, but a caller counting morsels must not read one
     as "a row group that matched".
     """
-    return _ParquetReader(source, columns, predicates)
+    return _ParquetReader(source, columns, predicates, threads)
 
 
 def read_metadata(source: Source):

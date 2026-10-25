@@ -96,6 +96,12 @@ _c7_configure(
     _c7_config.CHUNK_CACHE_RESERVE_BYTES,
 )
 
+# Slab pool (draken/core/slab_pool.h): the retained-free budget and the boot
+# prefault, once per process, from config.
+from opteryx.compiled.structures.memory_pool import configure_slab_pool as _slab_configure
+
+_slab_configure(_c7_config.SLAB_POOL_BUDGET_BYTES, _c7_config.SLAB_POOL_PREFAULT_BYTES)
+
 if OPTERYX_DEBUG:  # pragma: no cover
     from opteryx.debugging import OpteryxImportFinder
 

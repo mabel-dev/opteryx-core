@@ -28,7 +28,6 @@ from opteryx.exceptions import (
     InvalidInternalStateError,
     UnsupportedSyntaxError,
 )
-from opteryx.expression.operations import filter_operations
 from opteryx.models import LogicalColumn
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.timestamps._datetime_conversion import date_to_int64_days, timestamp_to_int64_us

@@ -35,7 +35,19 @@ Internal architecture reference for the Parquet, JSONL, and CSV readers.
 - Nested / list / map columns are not a primary decode target.
 - On partial decode failure, an individual column within a Morsel may be None.
 - `can_decode()` is a compatibility signal, not a strict guarantee.
-- Decode is designed for serial use per file. Opteryx parallelises by calling `read_parquet` concurrently across files.
+- `read_parquet(..., threads=None)` decodes on a shared worker pool: the unit of work is one
+  (row group, column) chunk, scheduled row-group-major, and scalar columns are scattered into
+  Draken buffers on the worker (`parallel_read.cpp`, `materialize_scalar`) so the consumer only
+  wraps them. Row groups are always yielded in file order, the GIL is released while waiting,
+  and at most a window of row groups (`ParallelRowGroupReader::AutoWindow`: two chunks per
+  worker, capped at 256 MB of estimated decoded data, minimum one row group) is in flight.
+  `threads=None` uses the CPUs the process may use (affinity, container quota, Lambda's
+  memory-to-vCPU ratio); `threads=1`, one usable CPU, or a read under ~1 MB of decoded data
+  takes the original serial loop. Runners never block on the consumer, so abandoned or
+  interleaved readers cannot starve the pool. Opteryx's own scan (`io_pipeline.hpp`) is a
+  separate pipeline and is unchanged.
+- The pool holds one thread per hardware thread for the life of the process; each carries
+  thread-local zstd/page scratch, so the first parallel read adds a few MB of resident memory.
 
 ### Source files
 

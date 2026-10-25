@@ -177,7 +177,7 @@ with open("out.parquet", "wb") as f:
 
 | Function                                      | Returns                                                    |
 |-----------------------------------------------|------------------------------------------------------------|
-| `read_parquet(source, columns=None, predicates=None)` | context manager yielding one Morsel per surviving row group |
+| `read_parquet(source, columns=None, predicates=None, threads=None)` | context manager yielding one Morsel per surviving row group, in file order; decodes on multiple cores (`threads=1` for serial) |
 | `read_metadata(source)`                      | `ParquetMetadata` (`num_rows`, `schema_columns`)           |
 | `write_parquet(morsel, compression="zstd")` | `bytes` (whole file)                                        |
 | `write_parquet_with_bounds(morsel)`         | `(bytes, {col_index: (min, max)})`                         |
@@ -328,7 +328,7 @@ spellings above pass it by construction.
 
 ### Performance
 
-Metadata reads (schema + row-group stats, no column data) are fast and comparable to PyArrow. The high-level `read_parquet()` path is correctness-first: it reconstructs Draken vectors from decoded columns and materializes through Python, so it is a serial utility rather than a throughput benchmark. The emphasis is on *reading less* — projection and row-group pruning — not on raw bulk scan speed.
+Metadata reads (schema + row-group stats, no column data) are fast and comparable to PyArrow. The high-level `read_parquet()` path decodes (row group, column) chunks and builds Draken vectors on a shared worker pool, so projected and filtered reads of multi-row-group files use all available cores; pass `threads=1` for the serial path. The emphasis is still on *reading less* — projection and row-group pruning.
 
 #### Wide file (50 cols, 200k rows, 55 MB)
 

@@ -506,6 +506,26 @@ CHUNK_CACHE_RESERVE_BYTES: int = int(get("CHUNK_CACHE_RESERVE_BYTES", 4 << 30))
 process memory account does not see (Python, allocations under 64 KiB,
 third-party libraries). See CHUNK_CACHE_MEMORY_PERCENT."""
 
+SLAB_POOL_BUDGET_BYTES: int = int(get("SLAB_POOL_BUDGET_BYTES", 4 << 30))
+"""Slab pool (draken/core/slab_pool.h): the engine's allocations of 64 KiB and up
+come from a process-wide pool of 2 MiB slots that are faulted in once and
+recycled, huge-page backed on Linux. This is how many bytes of FREE slots the
+pool keeps faulted between queries; a release past it gives pages back to the
+OS (the address space stays mapped) and the next query faults them again.
+Slots in use are never bounded by it. Faulted slots, used or free, are charged
+to the process memory account, so the chunk cache gives way to them.
+4 GiB is the knee of the measured curve (ClickBench hot sum vs the pre-pool
+tree, x86, 2026-10-25: 1 GiB 0.979, 2 GiB 0.975, 4 GiB 0.968, 8 GiB 0.966,
+16 GiB 0.966 - only the ~12 GB GROUP BYs Q32/Q33/Q34 move with it); it is also
+memory that stays resident and charged between queries. Process-wide; read at
+import."""
+
+SLAB_POOL_PREFAULT_BYTES: int = int(get("SLAB_POOL_PREFAULT_BYTES", 0))
+"""Bytes the slab pool faults in at import, before any query, so a server pays
+the first-touch cost at boot rather than on its first query. 0 = none (the pool
+faults slots as the first query acquires them). Counts toward the retained
+set: the pool keeps at least this much faulted. See SLAB_POOL_BUDGET_BYTES."""
+
 PARQUET_IO_MEMORY_BUDGET_BYTES: int = int(get("PARQUET_IO_MEMORY_BUDGET_BYTES", 0))
 """Memory admission budget for one parquet scan's IO pipeline, in BYTES.
 0 = auto: half of the cgroup memory limit when one is in effect (Cloud Run),

@@ -7464,6 +7464,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     from opteryx.compiled.structures.memory_pool import reset_process_memory_peak
     from opteryx.compiled.structures.memory_pool import flush_chunk_cache
     from opteryx.compiled.structures.memory_pool import chunk_cache_stats
+    from opteryx.compiled.structures.memory_pool import slab_pool_stats
     from opteryx.compiled.structures.memory_pool import chunk_cache_budget_bytes
     from opteryx.compiled.structures.memory_pool import chunk_cache_headroom
     from opteryx.operators._operators import native_trace_drain
@@ -7802,6 +7803,13 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                 # their fill would not fit the cache's headroom, and what they held back.
                 telemetry._reading["chunk_cache_scans_declined"] = _cc_scans_declined
                 telemetry._reading["chunk_cache_declined_bytes"] = _cc_declined_bytes
+                # Slab pool (draken/core/slab_pool.h), process-lifetime counters as of
+                # this query's end: what is faulted (charged), how much of it idles in
+                # the free runs, and the fault / give-back traffic so far.
+                _sp = slab_pool_stats()
+                for _k in ("faulted_bytes", "in_use_bytes", "free_faulted_bytes", "class_slabs",
+                           "acquires", "faults", "give_backs", "huge_pages"):
+                    telemetry._reading[f"slab_pool_{_k}"] = _sp[_k]
                 # Per-join build-side consolidation decisions. Same harvest point and
                 # the same reason as the scan diagnostics below: a native decision made
                 # once at finalize, which nothing in the plan can show. Consolidation

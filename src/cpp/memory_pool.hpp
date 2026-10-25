@@ -10,7 +10,7 @@
 #include <string>
 #include <stdexcept>
 #include <algorithm>
-#include <cstdlib>   // malloc / free / realloc (system allocator; mimalloc removed)
+#include <cstdlib>
 
 namespace opteryx {
 

@@ -4,7 +4,7 @@ from opteryx.connectors.opteryx_connector import OpteryxConnector
 from opteryx.connectors.opteryx_connector import OpteryxTable
 from opteryx.types import LogicalCategory
 from opteryx.types.logical_type import VARCHAR
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import RelationDescriptor
 
 
 def test_instantiates_class_catalog():
@@ -126,7 +126,7 @@ def test_bubbles_type_error_on_unexpected_kwargs():
         conn._get_catalog("ws")
 
 
-def test_normalize_external_schema_to_internal_relationschema():
+def test_normalize_external_schema_to_relation_descriptor():
     class ExternalColumn:
         def __init__(self, name, type_name, element_type=None):
             self.name = name
@@ -147,7 +147,7 @@ def test_normalize_external_schema_to_internal_relationschema():
 
     schema = OpteryxTable._normalize_schema(ExternalSchema(), relation_name="public.github.events")
 
-    assert isinstance(schema, RelationSchema)
+    assert isinstance(schema, RelationDescriptor)
     assert schema.name == "public.github.events"
     assert [c.name for c in schema.columns] == ["id", "tags", "payload"]
     assert schema.columns[0].category == LogicalCategory.INTEGER

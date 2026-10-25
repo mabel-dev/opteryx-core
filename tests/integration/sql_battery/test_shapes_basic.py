@@ -81,7 +81,8 @@ STATEMENTS = [
         # +1 for `write_coalesce_rows` (INSERT/CTAS coalescing threshold, USER/UNRESTRICTED).
         # +1 for `disable_topn_runtime_boundary` (Top-N runtime boundary switch, USER/UNRESTRICTED).
         # +1 for `disable_statistics_coverage` (statistics coverage switch, USER/UNRESTRICTED).
-        ("SHOW VARIABLES", 32, 5, None),
+        # +2 for `slab_pool_budget_bytes` / `slab_pool_prefault_bytes` (slab pool, SERVER/UNRESTRICTED).
+        ("SHOW VARIABLES", 34, 5, None),
         ("SELECT * FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM $VARIABLES", None, None, UnsupportedSyntaxError),

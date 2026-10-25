@@ -1,6 +1,6 @@
 #include "memory_pool.hpp"
 
-#include "core/alloc.h"   // the process memory account (mem_account.h)
+#include "core/alloc.h"   // draken_malloc / draken_realloc / draken_free (the slab pool at these sizes)
 
 namespace opteryx {
 
@@ -27,9 +27,8 @@ MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t
 }
 
 MemoryPool::~MemoryPool() {
-    if (used_size_ > 0) draken_mem_uncharge(used_size_);
     if (pool_) {
-        free(pool_);
+        draken_free(pool_);
         pool_ = nullptr;
     }
 }
@@ -145,14 +144,20 @@ void MemoryPool::compaction_no_lock() {
     segments_ = std::move(new_segments);
 }
 
+// The block is a draken allocation: at the pool's sizes (256 MiB and up) that is
+// a slab-pool run - prefaulted, recycled across scans, and charged to the memory
+// account by the slot the moment it exists. That charge replaced the per-segment
+// charging commit/release used to do: the block is memory the process holds
+// whether or not a segment is written yet.
 bool MemoryPool::ensure_pool_no_lock() {
     if (pool_ != nullptr) return true;
-    pool_ = static_cast<unsigned char*>(malloc(size_));
+    pool_ = static_cast<unsigned char*>(draken_malloc(static_cast<size_t>(size_)));
     return pool_ != nullptr;
 }
 
 bool MemoryPool::resize_pool_no_lock(int64_t new_size) {
-    unsigned char* new_pool = static_cast<unsigned char*>(realloc(pool_, new_size));
+    unsigned char* new_pool = static_cast<unsigned char*>(
+        draken_realloc(pool_, static_cast<size_t>(new_size)));
     if (!new_pool) {
         return false;
     }
@@ -280,7 +285,6 @@ int64_t MemoryPool::commit(const void* data, int64_t length) {
     metadata_[ref_id] = {seg_key, block_len, 0, length};
     used_size_ += block_len;
     if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
-    draken_mem_charge(block_len);
     commits_++;
 
     return ref_id;
@@ -343,7 +347,6 @@ void MemoryPool::release(int64_t ref_id) {
 
     it->second.is_free = true;
     used_size_ -= it->second.length;
-    draken_mem_uncharge(it->second.length);
 
     // Coalesce right neighbor
     auto right = std::next(it);
@@ -417,7 +420,6 @@ ReserveResult MemoryPool::reserve_for_write(int64_t size) {
     metadata_[ref_id] = {seg_key, block_len, 1, 0};
     used_size_ += block_len;
     if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
-    draken_mem_charge(block_len);
     commits_++;
     read_locks_++;
 
@@ -441,7 +443,6 @@ void MemoryPool::clear() {
 
     segments_.clear();
     metadata_.clear();
-    if (used_size_ > 0) draken_mem_uncharge(used_size_);
     used_size_    = 0;
     next_ref_id_  = 1;
     commits_      = 0;

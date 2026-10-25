@@ -155,20 +155,17 @@ def test_a_shared_cte_is_billed_once():
 def test_each_leg_of_a_union_is_billed():
     """Two scans of the same relation read it twice and are billed twice.
 
-    Compared against the FULL-WIDTH scan, not the one-column scan: projection
-    pushdown does not currently reach through a UNION leg, so each leg really
-    does decode all 19 columns (`native_scan_facts` reports columns_read=19).
-    The meter reports what the engine reads — pinning it against a narrowed
-    figure here would be asserting a pushdown that does not happen, and would
-    make this test fail the day someone fixes it for the wrong reason.
+    Compared against the one-column scan: projection pushdown reaches through
+    each UNION leg, so each leg reads (and is billed for) only the column it
+    selects. The meter reports what the engine reads.
     """
-    whole = _run("SELECT * FROM testdata.astronauts").billing_bytes
+    one_column = _run("SELECT name FROM testdata.astronauts").billing_bytes
     two_legs = _run(
         "SELECT name FROM testdata.astronauts "
         "UNION ALL SELECT name FROM testdata.astronauts"
     ).billing_bytes
 
-    assert two_legs == 2 * whole
+    assert two_legs == 2 * one_column
 
 
 def test_billing_event_is_emitted_without_draining_the_result(monkeypatch):

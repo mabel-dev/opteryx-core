@@ -669,6 +669,9 @@ def draken_rugo_extensions(parquet_created_by):
                 # here at load (RTLD_GLOBAL), so the process holds one account.
                 # Never add it to a consumer's sources.
                 "draken/core/mem_account.cpp",
+                # The slab pool behind draken_malloc's large tier (core/slab_pool.h):
+                # one reservation per process, so the same single-home rule.
+                "draken/core/slab_pool.cpp",
                 # The cross-query decompressed parquet chunk cache (core/chunk_cache.h),
                 # same single-home rule: rugo's decoder (pool_reader, rugo_native)
                 # resolves draken_cc_* from here. Never add it to a consumer.
@@ -847,6 +850,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet/page_index.cpp",
                     "rugo/src/parquet/decode_column.cpp",
                     "rugo/src/parquet/decode.cpp",
+                    "rugo/src/parquet/parallel_read.cpp",
                     "rugo/src/parquet/compression.cpp",
                     # miniz raw-DEFLATE inflate (tinfl_decompress): the gzip stream
                     # decoder of the JSONL / CSV readers (compression/stream_decompress.hpp).

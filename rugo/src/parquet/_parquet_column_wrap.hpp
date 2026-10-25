@@ -9,6 +9,7 @@
 #include <Python.h>
 
 #include "column_materialize.hpp"  // MaterializedColumn
+#include "parallel_read.hpp"        // PreMaterialized
 
 namespace rugo::_parquet {
 
@@ -16,5 +17,9 @@ namespace rugo::_parquet {
 // on success or failure. Creates a Python object — call under the GIL. Returns a
 // NEW reference, or NULL with an exception set on failure.
 PyObject* wrap_parquet_column(MaterializedColumn& mc);
+
+// Wrap a column a worker already materialized. Marks `pm` consumed (the buffers belong to
+// the Vector from here, or are freed on failure), then as wrap_parquet_column.
+PyObject* wrap_prematerialized(rugo::PreMaterialized& pm);
 
 }  // namespace rugo::_parquet

@@ -401,14 +401,12 @@ def _aggregate_window_support() -> OrderedDict[str, dict[str, bool]]:
     for aggregate in sorted(AGGREGATORS):
         # Test the name the PLANNER tests, not the one the user wrote. The builder
         # rewrites the DISTINCT spellings to their base aggregate carrying
-        # duplicate_treatment="Distinct" before the window gate runs, so the gate
-        # sees `COUNT` for `COUNT_DISTINCT(x)` and accepts it — while a literal
-        # membership test here answered False and made the catalog contradict the
-        # engine. `APPROX_COUNT_DISTINCT` is NOT such a spelling; it is an aggregate
-        # in its own right, reaches the gate under its own name, and is refused —
-        # which is why this resolves through DISTINCT_SPELLINGS rather than
-        # stripping a `_DISTINCT` suffix, a rule that would wrongly promote it.
-        framed = DISTINCT_SPELLINGS.get(aggregate, aggregate) in FRAMED_AGGREGATE_FUNCTIONS
+        # duplicate_treatment="Distinct" before the window gate runs, and a framed
+        # window then refuses DISTINCT outright (FramedWindowSink has no DISTINCT
+        # framing), so a DISTINCT spelling is never framed. `APPROX_COUNT_DISTINCT`
+        # is NOT such a spelling; it is an aggregate in its own right, reaches the
+        # gate under its own name, and is refused by it.
+        framed = aggregate not in DISTINCT_SPELLINGS and aggregate in FRAMED_AGGREGATE_FUNCTIONS
         # An ordered-set aggregate refuses OVER outright (the builder's
         # _ordered_set_aggregate), however it is supported as a plain aggregate.
         windowable = aggregate not in ORDERED_SET_AGGREGATES

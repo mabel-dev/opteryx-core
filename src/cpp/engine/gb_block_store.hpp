@@ -82,10 +82,13 @@ inline void reset() {
 }  // namespace gb_pool_tel
 
 // ---- block pool --------------------------------------------------------------------
-// Power-of-two size classes. A block larger than 2^kMaxClass bypasses the pool (it is
-// allocated and freed directly). Blocks the pool holds stay charged to the memory
-// account — they are memory the process holds — and the pool holds at most
-// kRetainBytes; anything returned beyond that is freed.
+// Power-of-two size classes. Classes from kSlabClass (64 KiB) up are the draken slab
+// pool's (draken/core/slab_pool.h): draken_malloc serves them from recycled, prefaulted
+// slots with its own per-thread lists, so this pool neither caches nor counts them -
+// two layers of free lists over the same blocks would retain twice. Below that, the
+// system allocator's small blocks are cached here. Blocks the pool holds stay charged
+// to the memory account — they are memory the process holds — and the pool holds at
+// most kRetainBytes; anything returned beyond that is freed.
 //
 // Each thread keeps a small cache per class and trades with the shared lists in
 // batches: one shared list per class behind one mutex was MEASURED as the regression
@@ -95,7 +98,9 @@ inline void reset() {
 class GBBlockPool {
   public:
     static constexpr int kMinClass = 8;    // 256 bytes
+    static constexpr int kSlabClass = 16;  // 64 KiB: this class and up are the slab pool's
     static constexpr int kMaxClass = 30;   // 1 GiB
+    static_assert((size_t(1) << kSlabClass) == DRAKEN_SLAB_MIN, "kSlabClass is the slab threshold");
     // Retained across queries. UNMEASURED — the redesign doc lists the pool's size and
     // release policy as open (§8.2); this is the first value, not a ruling.
     static constexpr int64_t kRetainBytes = int64_t(1) << 30;
@@ -120,7 +125,7 @@ class GBBlockPool {
     // whatever its last user left). Throws std::bad_alloc on failure.
     void* acquire(size_t bytes) {
         const int c = class_of(bytes);
-        if (c > kMaxClass) return from_system(bytes);
+        if (c >= kSlabClass) return from_slab(c > kMaxClass ? bytes : size_t(1) << c);
         std::vector<void*>& mine = local().cls[static_cast<size_t>(c)];
         if (mine.empty()) refill(c, mine);
         if (!mine.empty()) {
@@ -137,11 +142,8 @@ class GBBlockPool {
     void release(void* p, size_t bytes) noexcept {
         if (p == nullptr) return;
         const int c = class_of(bytes);
-        if (c > kMaxClass) {
-            gb_pool_tel::freed_bytes.fetch_add(static_cast<long long>(bytes),
-                                               std::memory_order_relaxed);
-            charge_small(p, false);
-            draken_free(p);
+        if (c >= kSlabClass) {
+            draken_free(p);   // back to the slab pool's lists
             return;
         }
         const int64_t sz = int64_t(1) << c;
@@ -215,7 +217,7 @@ class GBBlockPool {
     // threshold - on the way in from and out to the system. A block the pool
     // retains stays charged, as a large one already does.
     static void charge_small(void* p, bool charge) noexcept {
-        const int64_t n = static_cast<int64_t>(DRAKEN_USABLE_SIZE(p));
+        const int64_t n = static_cast<int64_t>(draken_usable_size(p));
         if (n <= 0 || n >= DRAKEN_MEM_ACCOUNT_MIN) return;
         if (charge) draken_mem_charge(n);
         else draken_mem_uncharge(n);
@@ -225,6 +227,16 @@ class GBBlockPool {
         void* p = draken_malloc(bytes);
         if (p == nullptr) throw std::bad_alloc();
         charge_small(p, true);
+        gb_pool_tel::misses.fetch_add(1, std::memory_order_relaxed);
+        gb_pool_tel::os_bytes.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
+        return p;
+    }
+
+    // A slab-class block: the slab pool charges it by the slot it lives in. Counted
+    // as a miss here (not served by THIS pool's lists), as it always was.
+    static void* from_slab(size_t bytes) {
+        void* p = draken_malloc(bytes);
+        if (p == nullptr) throw std::bad_alloc();
         gb_pool_tel::misses.fetch_add(1, std::memory_order_relaxed);
         gb_pool_tel::os_bytes.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
         return p;

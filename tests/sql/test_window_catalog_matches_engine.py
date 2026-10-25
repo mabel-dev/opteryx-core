@@ -43,6 +43,7 @@ import sys
 
 import pytest
 
+from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.operators.aggregate.helpers import AGGREGATORS
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
@@ -91,7 +92,7 @@ def _runs(sql: str):
     try:
         execute_and_get_arrow(sql)
         return True, None
-    except UnsupportedSyntaxError as error:
+    except (NotSupportedError, UnsupportedSyntaxError) as error:
         return False, error
 
 

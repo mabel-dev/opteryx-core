@@ -44,6 +44,8 @@ from opteryx.types.logical_type import LogicalCategory
 # it used to stop multiplying at 64, the parvi gate, which left the sink with a
 # truncated lower bound it could use for exactly one decision.
 _NDV_PRODUCT_CAP = 1 << 62
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
 # A scan this small IS its own group-count bound (the parvi gate's reach).
 _ROWS_ARE_THE_ESTIMATE = 64
 
@@ -148,6 +150,10 @@ def _column_int_range(column, scans: list) -> Optional[tuple]:
                 return None
             lo = low[1] if lo is None else min(lo, low[1])
             hi = high[1] if hi is None else max(hi, high[1])
+    # The sink's layout hint is int64; a UINT64 bound above INT64_MAX has no
+    # representation there, so the key is simply unbounded.
+    if lo < _INT64_MIN or hi > _INT64_MAX:
+        return None
     return lo, hi
 
 

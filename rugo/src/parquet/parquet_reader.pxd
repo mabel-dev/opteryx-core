@@ -1,5 +1,5 @@
 # parquet_reader.pxd
-from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t
+from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
@@ -251,6 +251,25 @@ cdef extern from "decode.hpp":
     DecodedTable ReadParquet(const uint8_t* data, size_t size) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names, const vector[uint8_t]& row_group_mask) nogil
     vector[DecodedColumn] DecodeRowGroupColumns(const uint8_t* data, size_t size, const vector[string]& column_names, const RowGroupStats& row_group, int row_group_index) except + nogil
+
+cdef extern from "parallel_read.hpp" namespace "rugo":
+    cdef cppclass PreMaterialized:
+        bint valid
+        int32_t rows
+
+    cdef cppclass ParallelRowGroupReader:
+        ParallelRowGroupReader(const uint8_t* data, size_t size,
+                               const vector[string]& column_names,
+                               const vector[RowGroupStats]& row_groups,
+                               vector[int] rg_indices, int threads,
+                               size_t window_rgs, bint prematerialize) except + nogil
+        bint next(vector[DecodedColumn]& out, vector[PreMaterialized]& pre,
+                  int& row_group_index) except + nogil
+        size_t window() nogil
+        @staticmethod
+        int pool_size() nogil
+        @staticmethod
+        size_t AutoWindow(int threads, size_t ncols, uint64_t rg_bytes, uint64_t budget_bytes) nogil
 
 cdef extern from "type_widening.hpp" namespace "parquet_simd":
     # SIMD-accelerated type widening functions

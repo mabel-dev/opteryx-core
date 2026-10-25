@@ -209,7 +209,16 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         from opteryx.types.logical_type import try_parse_column_type
 
         parsed = try_parse_column_type(str(candidate))
-        return default if parsed is None else parsed.category
+        if parsed is not None:
+            return parsed.category
+        # DECIMAL and ARRAY are stored bare, their precision/scale and element
+        # type in separate columns, so the bare name does not parse. They are
+        # still those categories - defaulting them to VARCHAR here silently
+        # turned every such column into a string.
+        bare = str(candidate).upper()
+        if bare in ("DECIMAL", "ARRAY"):
+            return LogicalCategory(bare)
+        return default
 
     @classmethod
     def _normalize_schema(

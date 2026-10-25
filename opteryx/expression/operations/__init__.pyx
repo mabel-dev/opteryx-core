@@ -15,27 +15,12 @@ this umbrella so the package compiles to a single .so. All cdef/cpdef
 helpers from those files live in this module's namespace.
 """
 
-import datetime
-
 from draken.vectors.bool_vector import BoolVector
-import draken.draken_native as _draken_native
 from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
 )
 from opteryx.compiled.nanobind.vectors import vector_in_list
-# Phase 4: draken_compare (string-keyed) deleted; use draken_compare_int with
-# bind-time-resolved op_code. The shim below stays plan-time-only.
-from opteryx.expression.evaluator.comparisons import draken_compare_int
-from opteryx.expression.evaluator._impl import _OP_CODE as _COMPARE_OP_CODE
-from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.scalars.value_parsing import parse_value
-from opteryx.types.timestamps._datetime_conversion import (
-    date_to_int64_days,
-    int64_days_to_date,
-    int64_us_to_datetime,
-    timestamp_to_int64_us,
-)
 
 # Leaf includes — the operator wrappers (comparisons / list_ops /
 # string_matching) route through the uniform Draken vector path. array_ops is
@@ -71,135 +56,6 @@ _SKIP_COMPRESSION_OPS = frozenset(
         "ArrayContainsAll",
     )
 )
-
-
-def _coerce_temporal_scalar(value, source_type, target_type):
-    """Normalize temporal scalars to the backing Python type for `target_type`."""
-
-    if target_type == LogicalCategory.DATE:
-        if isinstance(value, datetime.datetime):
-            value = value.date()
-        if isinstance(value, datetime.date):
-            return date_to_int64_days(value)
-        if isinstance(value, int):
-            if source_type == LogicalCategory.TIMESTAMP:
-                return date_to_int64_days(int64_us_to_datetime(value).date())
-            return date_to_int64_days(int64_days_to_date(value))
-        return date_to_int64_days(parse_value(LogicalCategory.DATE, value))
-
-    if target_type == LogicalCategory.TIMESTAMP:
-        if isinstance(value, datetime.datetime):
-            if value.tzinfo is not None:
-                value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-            return timestamp_to_int64_us(value)
-        if isinstance(value, datetime.date):
-            return timestamp_to_int64_us(value)
-        if isinstance(value, int):
-            if source_type == LogicalCategory.DATE:
-                return timestamp_to_int64_us(int64_days_to_date(value))
-            return value
-        return timestamp_to_int64_us(parse_value(LogicalCategory.TIMESTAMP, value))
-
-    return value
-
-
-def to_temporal_array(values, source_type, target_type):
-    """Coerce values to a Draken temporal vector natively."""
-    if values.__class__.__module__.startswith("draken.vectors."):
-        values = values.to_pylist()
-    elif not isinstance(values, (list, tuple)):
-        values = [values]
-
-    coerced = [
-        None if value is None else _coerce_temporal_scalar(value, source_type, target_type)
-        for value in values
-    ]
-
-    source_vec = _draken_native.vector_int64_from_sequence(coerced)
-    if target_type == LogicalCategory.DATE:
-        return _draken_native.vector_reinterpret_as_date32(source_vec)
-    if target_type == LogicalCategory.TIMESTAMP:
-        return _draken_native.vector_reinterpret_as_timestamp64(source_vec)
-    return source_vec
-
-
-def filter_operations(left_arr, left_type, operator, right_arr, right_type):
-    """Execute filter operation with appropriate fast path.
-
-    All inputs must be Draken vectors. Null handling is native to Draken.
-    """
-    from opteryx.exceptions import IncompatibleTypesError
-
-    # Empty arrays return empty result
-    if len(left_arr) == 0 or len(right_arr) == 0:
-        return BoolVector.from_scalar(None, 0)
-
-    # Type coercion: DECIMAL + INTEGER
-    if left_type == LogicalCategory.DECIMAL and right_type == LogicalCategory.INTEGER:
-        right_type = LogicalCategory.FLOAT
-    elif right_type == LogicalCategory.DECIMAL and left_type == LogicalCategory.INTEGER:
-        left_type = LogicalCategory.FLOAT
-
-    # Temporal type coercions — reject INT vs temporal comparisons.
-    temporal_types = {LogicalCategory.DATE, LogicalCategory.TIMESTAMP}
-    if (
-        LogicalCategory.INTEGER in (left_type, right_type)
-        or left_type in temporal_types
-        or right_type in temporal_types
-    ):
-        if left_type == LogicalCategory.INTEGER and right_type in temporal_types:
-            raise IncompatibleTypesError(
-                message="Ambiguous comparison: INTEGER = TIMESTAMP/DATE. "
-                "Provide a TIMESTAMP or DATE column instead. "
-                "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
-                "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
-            )
-        if right_type == LogicalCategory.INTEGER and left_type in temporal_types:
-            raise IncompatibleTypesError(
-                message="Ambiguous comparison: TIMESTAMP/DATE = INTEGER. "
-                "Provide a TIMESTAMP or DATE column instead. "
-                "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
-                "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
-            )
-
-        left_source_type = left_type
-        right_source_type = right_type
-        left_target_type = left_type
-        right_target_type = right_type
-
-        if {left_type, right_type} == temporal_types:
-            left_target_type = right_target_type = LogicalCategory.TIMESTAMP
-
-        left_arr = to_temporal_array(left_arr, left_source_type, left_target_type)
-        right_arr = to_temporal_array(right_arr, right_source_type, right_target_type)
-        left_type = left_target_type
-        right_type = right_target_type
-        # Plan-time call: resolve op-string and BCTypeCode, then dispatch to
-        # the int-keyed kernel. Hot path (BC_COMPARE) resolves at bind time.
-        _op_code = _COMPARE_OP_CODE.get(operator, 0)
-        if _op_code == 0:
-            raise NotImplementedError(
-                f"operations: unknown comparison op {operator!r}"
-            )
-        # BCTypeCode: 0=NONE, 1=DATE, 2=TIMESTAMP
-        _lc = 1 if left_type == LogicalCategory.DATE else (2 if left_type == LogicalCategory.TIMESTAMP else 0)
-        _rc = 1 if right_type == LogicalCategory.DATE else (2 if right_type == LogicalCategory.TIMESTAMP else 0)
-        return draken_compare_int(_op_code, left_arr, right_arr, _lc, _rc)
-
-    # Handle interval operations
-    if LogicalCategory.INTERVAL in (left_type, right_type):
-        from opteryx.expression.intervals import INTERVAL_KERNELS
-
-        function = INTERVAL_KERNELS.get((left_type, right_type, operator))
-        if function is None:
-            from opteryx.exceptions import UnsupportedTypeError
-
-            raise UnsupportedTypeError(
-                f"Cannot perform {operator.upper()} on {left_type} and {right_type}."
-            )
-        return function(left_arr, left_type, right_arr, right_type, operator)
-
-    return _inner_filter_operations(left_arr, operator, right_arr)
 
 
 def _inner_filter_operations(arr, operator, value):

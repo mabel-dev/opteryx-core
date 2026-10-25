@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "decode.hpp"           // DecodedColumn
 #include "core/buffers.h"       // DrakenType
@@ -51,5 +52,22 @@ MaterializedColumn materialize_string(const DecodedColumn& col, int32_t num_rows
 
 // Bit-packed BOOL from a decoded BOOLEAN column.
 MaterializedColumn materialize_bool(const DecodedColumn& col, int32_t num_rows);
+
+// True when a BYTE_ARRAY column's logical-type annotation declares TEXT (VARCHAR), false
+// for opaque binary. C++ twin of parquet_reader.pxi's `_logical_is_string`; keep the two
+// in step (tests/rugo/test_parquet_parallel_read.py checks they agree).
+bool logical_is_string(const std::string& logical_type);
+
+// The scalar materializer the Python edge would pick for this column: the same type
+// dispatch as `_morsel_from_row_group` (uuid, decimal, int64, int32, byte_array,
+// boolean, float32, float64 — dictionary, constant and dense shapes all go through one
+// materializer). Returns false, leaving `out` untouched, for a column that edge builds
+// another way (repeated/LIST, absent, failed, or an unknown type). Throws as the
+// materializers do; a caller on a worker thread catches and falls back to the edge so
+// the error surfaces there with its Python type.
+bool materialize_scalar(const DecodedColumn& col, int32_t num_rows, MaterializedColumn& out);
+
+// Free buffers that were materialized but never handed to wrap_parquet_column.
+void release_materialized(MaterializedColumn& mc) noexcept;
 
 }  // namespace rugo::_parquet

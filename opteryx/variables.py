@@ -62,6 +62,8 @@ from opteryx.compiled.agg_budgets import median_budget_bytes as _median_budget_b
 from opteryx.compiled.spill_budgets import spill_ceiling_bytes as _spill_ceiling_bytes
 from opteryx.compiled.spill_budgets import spill_flush_bytes as _spill_flush_bytes
 from opteryx.compiled.structures.memory_pool import chunk_cache_budget_bytes as _chunk_cache_budget_bytes
+from opteryx.compiled.structures.memory_pool import slab_pool_budget_bytes as _slab_pool_budget_bytes
+from opteryx.compiled.structures.memory_pool import slab_pool_prefault_bytes as _slab_pool_prefault_bytes
 from opteryx.exceptions import PermissionsError, VariableNotFoundError, md_code, md_column
 from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
 
@@ -538,6 +540,13 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         INT64, FromConfig("CHUNK_CACHE_RESERVE_BYTES"), VariableOwner.SERVER, Visibility.UNRESTRICTED),
     "chunk_cache_budget_bytes": (
         INT64, _chunk_cache_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    # Slab pool (draken/core/slab_pool.h): bytes of free 2 MiB slots kept faulted
+    # between queries, and bytes faulted at import. Read back from the pool itself
+    # (not config) so the row shows what the process is doing. Process-wide.
+    "slab_pool_budget_bytes": (
+        INT64, _slab_pool_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "slab_pool_prefault_bytes": (
+        INT64, _slab_pool_prefault_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
     # Morsel spill (engine/spill_budgets.hpp, docs/MORSEL_SPILL_DESIGN.md): the
     # flush trigger and the backpressure ceiling for buffered accumulation.
     # Enforced only when a spill root is configured (KVSTORE_LOCATION);

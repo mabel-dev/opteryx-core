@@ -26,4 +26,9 @@ PyObject* wrap_parquet_column(MaterializedColumn& mc) {
     }
 }
 
+PyObject* wrap_prematerialized(rugo::PreMaterialized& pm) {
+    pm.valid = false;
+    return wrap_parquet_column(pm.mc);
+}
+
 }  // namespace rugo::_parquet

@@ -221,6 +221,7 @@ q:
 	@$(MAKE) --no-print-directory chunk-cache-test
 	@$(MAKE) --no-print-directory simd-find-test
 	@$(MAKE) --no-print-directory gb-block-store-test
+	@$(MAKE) --no-print-directory slab-pool-test
 	@$(MAKE) --no-print-directory packed-codes-test
 	@$(MAKE) --no-print-directory carchar-set-test
 	@$(MAKE) --no-print-directory pipeline-latch-test
@@ -282,6 +283,7 @@ err-latch-test: ## Build (ASan) and run the executor ErrCtx message-lifetime tes
 	    $(CURDIR)/src/cpp/engine/test_err_latch.cpp \
 	    $(CURDIR)/draken/core/trace_bridge.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o test_err_latch
 	@/tmp/opteryx-tests/test_err_latch
 	$(call print_green,"✓ Executor error-latch test passed")
@@ -304,6 +306,7 @@ worker-exception-test: ## Build (ASan) and run the executor worker C++-exception
 	    $(CURDIR)/opteryx/compiled/thread_pool_bridge.cpp \
 	    $(CURDIR)/draken/core/trace_bridge.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o test_worker_exception
 	@/tmp/opteryx-tests/test_worker_exception
 	$(call print_green,"✓ Executor worker-exception test passed")
@@ -328,6 +331,7 @@ pipeline-latch-test: ## Build (ASan) and run the per-pipeline completion latch t
 	    $(CURDIR)/opteryx/compiled/thread_pool_bridge.cpp \
 	    $(CURDIR)/draken/core/trace_bridge.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o test_pipeline_latch
 	@/tmp/opteryx-tests/test_pipeline_latch
 	$(call print_green,"✓ Pipeline latch test passed")
@@ -349,7 +353,7 @@ medius-test: ## Build and run the Medius bounded middle-tier tests
 CARCHAR_CONTEST_CXX = clang++ -std=c++20 -O2 -Wall -Wextra -DNDEBUG -DCONTEST_WITH_PROD \
 	    -I$(CURDIR) -I$(CURDIR)/draken -I$(CURDIR)/draken/simd \
 	    -I$(CURDIR)/third_party/mabel/carchar -I$(CURDIR)/scratch/carchar_contest \
-	    $(CURDIR)/scratch/carchar_contest/contest.cpp $(CURDIR)/draken/core/mem_account.cpp
+	    $(CURDIR)/scratch/carchar_contest/contest.cpp $(CURDIR)/draken/core/mem_account.cpp $(CURDIR)/draken/core/slab_pool.cpp
 
 carchar-contest-check: ## Build and run the carchar beauty-contest correctness check (light; no timing)
 	$(call print_blue,"Building and running carchar contest correctness check...")
@@ -372,6 +376,7 @@ decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completen
 	    -I$(CURDIR)/third_party/ankerl \
 	    $(CURDIR)/rugo/src/parquet/decoded_column_reset_test.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o decoded_column_reset_test
 	@/tmp/opteryx-tests/decoded_column_reset_test
 	$(call print_green,"✓ DecodedColumn reset completeness test passed")
@@ -385,6 +390,7 @@ chunk-cache-test: ## Build and run the chunk cache policy tests (S3-FIFO admissi
 	    $(CURDIR)/draken/core/chunk_cache_test.cpp \
 	    $(CURDIR)/draken/core/chunk_cache.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o chunk_cache_test
 	@/tmp/opteryx-tests/chunk_cache_test
 	$(call print_green,"✓ chunk cache policy tests passed")
@@ -415,9 +421,22 @@ gb-block-store-test: ## Build and run the GROUP BY block store tests (pool, segm
 	    -I$(CURDIR)/draken -I$(CURDIR)/draken/core -I$(CURDIR)/src/cpp/engine \
 	    $(CURDIR)/src/cpp/engine/test_gb_block_store.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o /tmp/opteryx-tests/test_gb_block_store
 	@/tmp/opteryx-tests/test_gb_block_store
 	$(call print_green,"✓ GROUP BY block store tests passed")
+
+slab-pool-test: ## Build and run the draken slab pool tests (tiers, classes, runs, budget, threads) under ASan/UBSan
+	$(call print_blue,"Building and running slab pool tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -pthread \
+	    -I$(CURDIR)/draken -I$(CURDIR)/draken/core \
+	    $(CURDIR)/draken/core/test_slab_pool.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
+	    -o /tmp/opteryx-tests/test_slab_pool
+	@/tmp/opteryx-tests/test_slab_pool
+	$(call print_green,"✓ slab pool tests passed")
 
 packed-codes-test: ## Build and run the one-pass packed dictionary code decoder tests under ASan/UBSan
 	$(call print_blue,"Building and running packed dictionary code tests...")
@@ -428,6 +447,7 @@ packed-codes-test: ## Build and run the one-pass packed dictionary code decoder 
 	    $(CURDIR)/rugo/src/parquet/packed_codes_test.cpp \
 	    $(CURDIR)/rugo/src/parquet/decode_encodings.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o /tmp/opteryx-tests/packed_codes_test
 	@/tmp/opteryx-tests/packed_codes_test
 	$(call print_green,"✓ packed dictionary code tests passed")
@@ -488,6 +508,7 @@ rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 	    -I$(CURDIR)/third_party/miniz \
 	    $(CURDIR)/rugo/src/parquet/rle_direct_dict_test.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    -o rle_direct_dict_test
 	@/tmp/opteryx-tests/rle_direct_dict_test
 	$(call print_green,"✓ RLE direct-dict tests passed")
@@ -512,6 +533,7 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 DRAKEN_KERNEL_SRCS := \
 	$(CURDIR)/draken/core/vector_alloc.cpp \
 	$(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	$(CURDIR)/draken/ops/compare_dv.cpp \
 	$(CURDIR)/draken/ops/arithmetic_dv.cpp \
 	$(CURDIR)/draken/ops/kernels/error_handling.cpp \
@@ -624,6 +646,7 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 	    $(CURDIR)/draken/ops/kernels/function_json_validate.cpp \
 	    $(CURDIR)/draken/core/vector_alloc.cpp \
 	    $(CURDIR)/draken/core/mem_account.cpp \
+	    $(CURDIR)/draken/core/slab_pool.cpp \
 	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
 	    $(JSON_VALIDATE_BENCH_DIR)/yyjson.o \
 	    -o $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench

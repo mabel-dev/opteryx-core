@@ -1087,7 +1087,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                         curl_easy_strerror(ctx[i].res) + " url=" + redact_url(requests[i].first),
                         false, 0);
                 throw HttpError(std::string("get_many: HTTP ") +
-                    std::to_string(ctx[i].http_code) + ": " + requests[i].first,
+                    std::to_string(ctx[i].http_code) + ": " + redact_url(requests[i].first),
                     false, ctx[i].http_code);
             }
             retry_next.push_back(i);
@@ -1279,7 +1279,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                         curl_easy_strerror(ctx[i].res) + " url=" + redact_url(requests[i].first),
                         false, 0);
                 throw HttpError(std::string("head_many: HTTP ") +
-                    std::to_string(ctx[i].http_code) + ": " + requests[i].first,
+                    std::to_string(ctx[i].http_code) + ": " + redact_url(requests[i].first),
                     false, ctx[i].http_code);
             }
             retry_next.push_back(i);

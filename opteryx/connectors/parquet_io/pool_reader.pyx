@@ -1144,6 +1144,79 @@ cdef class CppIOPipeline:
         }
 
 
+# Remote footer fetches fail with the C++ HttpError (a std::runtime_error carrying the
+# HTTP status). Through the shared `except +` declaration it reaches Python as a bare
+# RuntimeError, where the status is lost and the failure is indistinguishable from an
+# engine fault. These wrappers catch HttpError ONLY - any other C++ exception still
+# propagates through `except +` exactly as before - and report it as a value, so the
+# Cython callers raise the typed storage error with an ordinary check. The message is
+# HttpError::what(), which names the object and has the URL's query (the presigned
+# credential) already redacted.
+cdef extern from *:
+    """
+    #include <string>
+    #include <vector>
+    #include "filesystem.hpp"
+    #include "http_client.hpp"
+
+    namespace opteryx_pool_footer {
+
+    struct FooterFetchOutcome {
+        std::vector<rugo::ParquetFooterResult> results;
+        bool http_failed = false;
+        long http_status = 0;
+        std::string message;
+    };
+
+    static inline FooterFetchOutcome fetch_footer(const std::string& path, int64_t file_size) {
+        FooterFetchOutcome out;
+        try {
+            out.results.push_back(rugo::FetchParquetFooter(path, file_size));
+        } catch (const HttpError& err) {
+            out.http_failed = true;
+            out.http_status = err.http_status;
+            out.message = err.what();
+        }
+        return out;
+    }
+
+    static inline FooterFetchOutcome fetch_footers_many(
+            const std::vector<std::string>& paths, const std::vector<int64_t>& sizes,
+            const std::string& auth_header) {
+        FooterFetchOutcome out;
+        try {
+            out.results = rugo::FetchParquetFootersMany(paths, sizes, auth_header);
+        } catch (const HttpError& err) {
+            out.http_failed = true;
+            out.http_status = err.http_status;
+            out.message = err.what();
+        }
+        return out;
+    }
+
+    }  // namespace opteryx_pool_footer
+    """
+    cdef cppclass FooterFetchOutcome "opteryx_pool_footer::FooterFetchOutcome":
+        vector[ParquetFooterResult] results
+        bint http_failed
+        long http_status
+        string message
+
+    FooterFetchOutcome _fetch_footer_outcome "opteryx_pool_footer::fetch_footer"(
+        const string& path, int64_t file_size) except + nogil
+    FooterFetchOutcome _fetch_footers_many_outcome "opteryx_pool_footer::fetch_footers_many"(
+        const vector[string]& paths, const vector[int64_t]& sizes,
+        const string& auth_header) except + nogil
+
+
+cdef int _raise_footer_read_error(const FooterFetchOutcome& outcome) except -1:
+    """Raise the typed storage error for a footer fetch that failed over HTTP."""
+    raise DatasetDataReadError(
+        "Unable to read a Parquet footer from storage: "
+        + outcome.message.decode("utf-8", "replace")
+    )
+
+
 cdef tuple _read_footer_payload(
     str path,
     int64_t file_size,
@@ -1165,7 +1238,10 @@ cdef tuple _read_footer_payload(
         if cached is not None:
             return cached, 0
 
-    result = FetchParquetFooter(path.encode("utf-8"), file_size)
+    cdef FooterFetchOutcome outcome = _fetch_footer_outcome(path.encode("utf-8"), file_size)
+    if outcome.http_failed:
+        _raise_footer_read_error(outcome)
+    result = outcome.results[0]
 
     env_sz = result.envelope.size()
     env_ptr = result.envelope.data()
@@ -1199,9 +1275,13 @@ cdef list _fetch_footers_many(list urls, list sizes, str auth_header=None):
         cpp_paths.push_back(url.encode("utf-8"))
         cpp_sizes.push_back(<int64_t>sizes[i])
 
-    cdef vector[ParquetFooterResult] results
+    cdef FooterFetchOutcome outcome
     with nogil:
-        results = FetchParquetFootersMany(cpp_paths, cpp_sizes, cpp_auth)
+        outcome = _fetch_footers_many_outcome(cpp_paths, cpp_sizes, cpp_auth)
+    if outcome.http_failed:
+        _raise_footer_read_error(outcome)
+    cdef vector[ParquetFooterResult] results
+    results.swap(outcome.results)
 
     cdef list out = []
     cdef size_t k

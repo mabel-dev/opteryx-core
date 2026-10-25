@@ -44,6 +44,7 @@ hadro = pytest.importorskip("hadro", reason="hadro (S3 test server) is not impor
 
 import opteryx  # noqa: E402
 from opteryx.connectors.io_systems.s3_filesystem import reset_credential_cache  # noqa: E402
+from opteryx.exceptions import DatasetDataReadError  # noqa: E402
 from opteryx.exceptions import DatasetReadError  # noqa: E402
 from opteryx.exceptions import NotSupportedError  # noqa: E402
 
@@ -228,12 +229,15 @@ def test_read_functions_never_sign(s3, sql):
 # ── Catalog table with s3:// data files (the production route) ──────────────
 
 
-@pytest.fixture(scope="module")
-def s3_catalog_table(s3, s3_root, tmp_path_factory):
+def _catalog_table(s3, s3_root, tmp_path_factory):
     """A real SimpleDataset whose manifest points at s3:// data files.
 
     The catalog's own metadata stays on local disk: this is testing the
     engine's reads of data files, which is the part that differs by store.
+
+    Every call writes its data files under a key prefix of its own. The
+    cross-query chunk cache is keyed by object path, so two tables sharing paths
+    share cached bytes.
     """
     opteryx_catalog = pytest.importorskip("opteryx_catalog")  # noqa: F841
     from draken.interop.vector_sequence import vector_from_sequence
@@ -282,9 +286,10 @@ def s3_catalog_table(s3, s3_root, tmp_path_factory):
     location = str(tmp_path_factory.mktemp("s3ws"))
     os.makedirs(f"{location}/metadata", exist_ok=True)
 
+    prefix = os.path.basename(location)
     files = {
-        "data/f1.parquet": [1, 2, 3, 4, 5, 6, 7, 8],
-        "data/f2.parquet": [100, 101, 102, 103],
+        f"{prefix}/f1.parquet": [1, 2, 3, 4, 5, 6, 7, 8],
+        f"{prefix}/f2.parquet": [100, 101, 102, 103],
     }
     entries = []
     for key, values in files.items():
@@ -331,6 +336,9 @@ def s3_catalog_table(s3, s3_root, tmp_path_factory):
     dataset.io = _ManifestWriterCatalog.io
 
     class _FakeCatalog:
+        # Serves its catalog records as the relation, like the native store.
+        serves_catalog_records = True
+
         def __init__(self, workspace=None, **kwargs):
             self.workspace = workspace
             self.io = dataset.io
@@ -365,6 +373,17 @@ def s3_catalog_table(s3, s3_root, tmp_path_factory):
         connectors._connector_cache.update(saved_cache)
 
 
+@pytest.fixture(scope="module")
+def s3_catalog_table(s3, s3_root, tmp_path_factory):
+    yield from _catalog_table(s3, s3_root, tmp_path_factory)
+
+
+@pytest.fixture
+def s3_cold_catalog_table(s3, s3_root, tmp_path_factory):
+    """A table no earlier test has read, so nothing of it is in the chunk cache."""
+    yield from _catalog_table(s3, s3_root, tmp_path_factory)
+
+
 def test_catalog_scan_reads_s3_data_files(s3_catalog_table):
     values = sorted(r["a"] for r in _rows(f"SELECT a FROM {s3_catalog_table}"))
     assert values == [1, 2, 3, 4, 5, 6, 7, 8, 100, 101, 102, 103]
@@ -380,14 +399,21 @@ def test_catalog_aggregate_forces_a_read(s3_catalog_table):
     assert _rows(f"SELECT SUM(a) AS s FROM {s3_catalog_table}") == [{"s": 36 + 406}]
 
 
-def test_catalog_scan_signs_with_platform_credentials(s3_catalog_table):
+def test_catalog_scan_signs_with_platform_credentials(s3_cold_catalog_table):
     """The catalog route DOES sign - and the server really is checking: with
-    the wrong secret, the same scan is refused."""
+    the wrong secret, the same scan is refused. The table is one no earlier test
+    has read: bytes already in the chunk cache are served without a request, and
+    a request is the only thing the signature can fail."""
     os.environ["AWS_SECRET_ACCESS_KEY"] = "not-the-secret"
     reset_credential_cache()
     try:
-        with pytest.raises(DatasetReadError):
-            _rows(f"SELECT SUM(a) AS s FROM {s3_catalog_table}")
+        with pytest.raises(DatasetDataReadError) as refused:
+            _rows(f"SELECT SUM(a) AS s FROM {s3_cold_catalog_table}")
+        # The refusal names the object and the status, never the presigned
+        # credential the URL carried.
+        assert "403" in str(refused.value)
+        assert "X-Amz-Signature" not in str(refused.value)
+        assert "X-Amz-Credential" not in str(refused.value)
     finally:
         os.environ["AWS_SECRET_ACCESS_KEY"] = SECRET_KEY
         reset_credential_cache()

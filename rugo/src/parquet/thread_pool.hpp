@@ -118,4 +118,18 @@ inline PageDecodePool& get_page_decode_pool() {
     return *pool;
 }
 
+// Separate pool for the streaming reader's (row group, column) chunk decode
+// (parallel_read.cpp). It must not be PageDecodePool: a chunk decode can itself
+// dispatch page tasks to that pool and wait for them, so chunk tasks sharing its
+// threads could all block on page tasks queued behind them.
+inline PageDecodePool& get_read_pool() {
+    static std::once_flag init_flag;
+    static PageDecodePool* pool = nullptr;
+    std::call_once(init_flag, []() {
+        int hw = (int)std::thread::hardware_concurrency();
+        pool = new PageDecodePool((size_t)((hw > 0) ? hw : 4));
+    });
+    return *pool;
+}
+
 } // namespace rugo_pool

@@ -941,6 +941,7 @@ cdef extern from "parquet/column_materialize.hpp" namespace "rugo::_parquet":
 
 cdef extern from "parquet/_parquet_column_wrap.hpp" namespace "rugo::_parquet":
     PyObject* wrap_parquet_column(MaterializedColumn& mc) except NULL
+    PyObject* wrap_prematerialized(parquet_reader.PreMaterialized& pm) except NULL
 
 
 # DECIMAL (p<=18, int64) or DECIMAL128 (p>18, int128). The value on the wire already
@@ -1562,7 +1563,8 @@ cdef Vector _make_array_vector(
     return Vector(_dn.vector_array_from_sequence(out, el_type, D))
 
 
-cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_group_columns, list col_names):
+cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_group_columns, list col_names,
+                                   vector[parquet_reader.PreMaterialized]* pre=NULL):
     """Build one Morsel from one row group's already-decoded columns.
 
     Shared by the eager (whole-file list, _decode_from_buffer) and streaming
@@ -1572,6 +1574,10 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
     when this runs — this function itself only ever touches one row group's.
     Caller skips calling this for an empty (pruned, or zero-column-projection)
     row group.
+
+    `pre`, when given, is parallel to `row_group_columns`: a column a pool worker already
+    scattered into Draken buffers (ParallelRowGroupReader) is only wrapped here; every
+    other column takes the ordinary path below.
     """
     cdef list vectors = []
     cdef list successful_col_names = []
@@ -1611,7 +1617,18 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
 
         _t0 = _time.perf_counter()
 
-        if cp[0].rep_levels.size() > 0:
+        if pre != NULL and pre[0][col_idx].valid:
+            # Built by a worker, which then dropped the decoded form, so there is nothing to
+            # redo it from: a column whose row count differs from its row group's is a file
+            # that contradicts itself.
+            if pre[0][col_idx].rows != num_rows:
+                raise ValueError(
+                    "parquet column %r has %d rows but its row group has %d"
+                    % (col_names[col_idx], pre[0][col_idx].rows, num_rows)
+                )
+            vec = Vector(_rugo_steal(wrap_prematerialized(pre[0][col_idx])))
+            _TEL["cython_other_s"] += _time.perf_counter() - _t0
+        elif cp[0].rep_levels.size() > 0:
             # Repeated (LIST) column — reconstruct nested vector from
             # rep/def levels. Must precede the scalar type branches so a
             # list<int64> / list<float64> etc. is never flattened.
@@ -1871,7 +1888,95 @@ def read_parquet_from_path(str path, column_names=None, row_group_mask=None):
             unmap_memory_c(mapped_ptr, mapped_len)
 
 
-def stream_parquet(data, column_names=None, row_group_mask=None):
+# Below this much estimated decoded data the pool hand-off costs more than it saves.
+DEFAULT_PARALLEL_MIN_BYTES = 1048576
+
+
+def parallel_window(int threads, size_t ncols, unsigned long long rg_bytes):
+    """Row groups the parallel reader keeps in flight for `threads` workers over `ncols`
+    projected columns when a row group decodes to about `rg_bytes` (test/diagnostic)."""
+    return parquet_reader.ParallelRowGroupReader.AutoWindow(threads, ncols, rg_bytes, 268435456)
+
+
+cdef bint _parallel_worthwhile(parquet_reader.FileStats& fs, size_t ncols,
+                               vector[uint8_t]& mask, int threads, double min_bytes):
+    """True when decoding the selected row groups on the pool beats the serial loop:
+    more than one thread asked for, at least two (row group, column) chunks, and
+    enough data (footer row-group sizes, scaled to the projection) to repay the
+    hand-off to the pool."""
+    cdef size_t i, n_sel = 0
+    cdef double est = 0.0
+    cdef size_t ncols_rg
+    if threads <= 1 or ncols == 0:
+        return False
+    for i in range(fs.row_groups.size()):
+        if i < mask.size() and mask[i] == 0:
+            continue
+        n_sel += 1
+        ncols_rg = fs.row_groups[i].columns.size()
+        if ncols_rg > 0:
+            est += (<double>fs.row_groups[i].total_byte_size) * min(ncols, ncols_rg) / ncols_rg
+    return n_sel * ncols >= 2 and est >= min_bytes
+
+
+cdef class _ParallelRowGroups:
+    """Row-group Morsels decoded on the shared worker pool, yielded in file order.
+
+    Owns the footer stats (the native reader borrows them) and the reader. The caller
+    owns the buffer and must call close() BEFORE releasing it: close() cancels the job
+    and waits for chunks still decoding, which read from that buffer.
+    """
+    cdef parquet_reader.ParallelRowGroupReader* rdr
+    cdef parquet_reader.FileStats fs
+    cdef vector[string] names
+    cdef list col_names
+
+    def __cinit__(self):
+        self.rdr = NULL
+
+    def __dealloc__(self):
+        self.close()
+
+    cdef void start(self, const uint8_t* data, size_t size, parquet_reader.FileStats& fs_in,
+                    vector[string]& names_in, list col_names, vector[uint8_t]& mask,
+                    int threads) except *:
+        cdef vector[int] rgs
+        cdef size_t i
+        self.fs = fs_in
+        self.names = names_in
+        self.col_names = col_names
+        for i in range(self.fs.row_groups.size()):
+            if i < mask.size() and mask[i] == 0:
+                continue
+            rgs.push_back(<int>i)
+        with nogil:
+            self.rdr = new parquet_reader.ParallelRowGroupReader(
+                data, size, self.names, self.fs.row_groups, rgs, threads, 0, True)
+
+    cdef object next_morsel(self):
+        cdef vector[parquet_reader.DecodedColumn] cols
+        cdef vector[parquet_reader.PreMaterialized] pre
+        cdef int rg = -1
+        cdef bint more
+        while True:
+            with nogil:
+                more = self.rdr.next(cols, pre, rg)
+            if not more:
+                return None
+            if cols.size() == 0:
+                continue
+            return _morsel_from_row_group(cols, self.col_names, &pre)
+
+    cpdef close(self):
+        cdef parquet_reader.ParallelRowGroupReader* r = self.rdr
+        self.rdr = NULL
+        if r != NULL:
+            with nogil:
+                del r
+
+
+def stream_parquet(data, column_names=None, row_group_mask=None, threads=1,
+                   min_parallel_bytes=DEFAULT_PARALLEL_MIN_BYTES):
     """Read parquet data from memory, yielding ONE row group's Morsel at a time.
 
     Unlike read_parquet() (which decodes and retains every row group into a
@@ -1915,6 +2020,23 @@ def stream_parquet(data, column_names=None, row_group_mask=None):
             _mbit = 1 if m else 0
             cpp_mask.push_back(_mbit)
 
+    cdef int nthreads = min(<int>threads, parquet_reader.ParallelRowGroupReader.pool_size())
+    cdef _ParallelRowGroups par
+    if _parallel_worthwhile(fs, cpp_column_names.size(), cpp_mask, nthreads,
+                            <double>min_parallel_bytes):
+        par = _ParallelRowGroups()
+        par.start(&mem_view[0], <size_t>mem_view.shape[0], fs, cpp_column_names,
+                  col_names, cpp_mask, nthreads)
+        try:
+            while True:
+                morsel = par.next_morsel()
+                if morsel is None:
+                    break
+                yield morsel
+        finally:
+            par.close()
+        return
+
     for rg_idx in range(<Py_ssize_t>fs.row_groups.size()):
         if <size_t>rg_idx < cpp_mask.size() and cpp_mask[rg_idx] == 0:
             continue
@@ -1927,7 +2049,8 @@ def stream_parquet(data, column_names=None, row_group_mask=None):
         yield _morsel_from_row_group(row_group_columns, col_names)
 
 
-def stream_parquet_from_path(str path, column_names=None, row_group_mask=None):
+def stream_parquet_from_path(str path, column_names=None, row_group_mask=None, threads=1,
+                             min_parallel_bytes=DEFAULT_PARALLEL_MIN_BYTES):
     """Read a Parquet file from disk via mmap, yielding ONE row group's Morsel
     at a time — see stream_parquet()'s docstring for why. The mmap is held for
     the lifetime of the generator, released in `finally`: an early break out of
@@ -1948,6 +2071,8 @@ def stream_parquet_from_path(str path, column_names=None, row_group_mask=None):
     cdef list col_names
     cdef Py_ssize_t rg_idx
     cdef uint8_t _mbit
+    cdef int nthreads
+    cdef _ParallelRowGroups par
 
     with nogil:
         rc = read_all_mmap(c_path, &mapped_ptr, &mapped_len)
@@ -1971,6 +2096,23 @@ def stream_parquet_from_path(str path, column_names=None, row_group_mask=None):
             for m in row_group_mask:
                 _mbit = 1 if m else 0
                 cpp_mask.push_back(_mbit)
+
+        nthreads = min(<int>threads, parquet_reader.ParallelRowGroupReader.pool_size())
+        if _parallel_worthwhile(fs, cpp_column_names.size(), cpp_mask, nthreads,
+                            <double>min_parallel_bytes):
+            par = _ParallelRowGroups()
+            par.start(mapped_ptr, mapped_len, fs, cpp_column_names, col_names,
+                      cpp_mask, nthreads)
+            try:
+                while True:
+                    morsel = par.next_morsel()
+                    if morsel is None:
+                        break
+                    yield morsel
+            finally:
+                # Workers read the mapping: stop them before the outer finally unmaps it.
+                par.close()
+            return
 
         for rg_idx in range(<Py_ssize_t>fs.row_groups.size()):
             if <size_t>rg_idx < cpp_mask.size() and cpp_mask[rg_idx] == 0:
