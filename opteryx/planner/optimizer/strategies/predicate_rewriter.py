@@ -1393,9 +1393,14 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry, *, plan_context)
     # New nodes carrying the input's identity (it computes the same thing), never
     # edits of the input: it can be held elsewhere, and in a SELECT list its
     # identity is what the projected column is referenced by.
+    #
+    # The bounds are IPV4 literals, not bare integers: the rendering of an address
+    # comes from the literal's descriptor (formatter._format_literal), and the cast
+    # that carried it on the column was just unwrapped. An integer bound printed the
+    # plan as `BETWEEN 3232236544 AND 3232236799`. Same physical UINT32, same value.
     if prefix == 32:
         return predicate.replace(value="Eq", left=addr_node, right=build_literal_node(
-            int(base), plan_context=plan_context
+            int(base), suggested_type=_lt.IPV4, plan_context=plan_context
         )
         )
 
@@ -1405,8 +1410,8 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry, *, plan_context)
     return Between(
         value=(True, True),
         left=addr_node,
-        right=build_literal_node(int(base), plan_context=plan_context),
-        centre=build_literal_node(int(upper), plan_context=plan_context),
+        right=build_literal_node(int(base), suggested_type=_lt.IPV4, plan_context=plan_context),
+        centre=build_literal_node(int(upper), suggested_type=_lt.IPV4, plan_context=plan_context),
         alias=predicate.alias,
         query_column=predicate.query_column,
         schema_column=predicate.schema_column,

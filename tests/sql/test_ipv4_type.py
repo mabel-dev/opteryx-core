@@ -1041,6 +1041,20 @@ def test_cidr_pushdown_survives_a_join():
     assert telemetry.get("optimization_predicate_pushdown_into_scan") is not None
 
 
+def test_cidr_range_bounds_render_as_addresses():
+    """The rewrite unwraps the IPV4 cast off the column, so the bounds are the only
+    thing left carrying the type. NOT keeps the filter above the scan, which is what
+    puts the range in the plan text."""
+    session = opteryx.session()
+    details = []
+    for morsel in session.execute_to_morsels(
+        f"EXPLAIN SELECT label FROM {IPV4_TABLE} WHERE NOT addr::IPV4 <<= '10.0.0.0/16'"
+    ):
+        details.extend(morsel.column("details").to_pylist())
+    text = " ".join(d.decode() if type(d) is bytes else str(d) for d in details if d is not None)
+    assert "BETWEEN 10.0.0.0 AND 10.0.255.255" in text, text
+
+
 def test_cidr_rewrite_selects_exactly_what_the_kernel_selects():
     """The rewrite is only legitimate if it is an identity on the row set. Compared
     against the containment kernel itself, per bound, on both operand orders."""

@@ -2,7 +2,8 @@
 
 Status: **v1 (any program, any dict type) ON HOLD — step 0 (2026-10-17) contradicted its
 premise; see §10. The integer-dictionary form (§11) was BUILT 2026-10-24 on the generalised
-page-search path; measurements in §11.6.**
+page-search path; measurements in §11.6. RULED KEEP 2026-10-25 (architect): the x86 residual
+is ~1% search cost plus a placement effect that deleting the search would not remove (§11.6.1).**
 Date: 2026-10-17. Follows `docs/PARQUET_PACKED_CODES_ONE_PASS_DESIGN.md` (ruled D; one-pass
 kept on both arches, 3d reverted). This is the "count over runs" step of that ruling, written
 up as the general mechanism it turns out to need.

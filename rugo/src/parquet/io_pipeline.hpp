@@ -159,6 +159,162 @@ private:
 };
 
 
+// ── Local file table (process lifetime) ──────────────────────────────────────
+// One descriptor and, on first need, one whole-file read-only mapping per LOCAL
+// parquet path, shared by every scan in the process. Keyed by path ALONE: files
+// are immutable (architect ruling 2026-09-28), so a path names the same bytes for
+// the life of the process and nothing is revalidated.
+//
+// Why process lifetime (MEASURED 2026-10-25, Mac M5 Pro, 16 workers, ClickBench
+// Q01 over 100 files): the per-pipeline descriptor and mapping caches this
+// replaces opened (and mapped) every file on every query, and took a global
+// mutex per chunk; those opens, maps and lock waits were most of the workers'
+// non-idle time on short queries. docs/PARQUET_LOCAL_LAZY_MAPPING.md.
+//
+// The lookup happens at SUBMIT (once per block, on the submitting thread) and the
+// work item carries its file's handle, so workers read with no table access.
+//
+// Bounded: at most RLIMIT_NOFILE/16 (soft limit) entries, process-wide, so
+// concurrent queries and the HTTP client's sockets keep headroom. Over the cap,
+// entries no work item holds are dropped least-recently-used first; a held handle
+// is never closed under its reader (its descriptor and mapping go when the last
+// holder releases it). A dropped file is opened again on its next use.
+//
+// One table per extension (a function-local static does not merge across .so
+// boundaries); a pipeline reaches it through the pointer bound when it is
+// constructed (ParquetIOPipeline::files_), so this header's code compiled into
+// another extension (the consumer's inline-decode path) uses the same table.
+class LocalFileTable {
+public:
+    class File {
+    public:
+        explicit File(std::string p) : path_(std::move(p)) {}
+        File(const File&) = delete;
+        File& operator=(const File&) = delete;
+        ~File() {
+            const int fd = fd_.load(std::memory_order_relaxed);
+            if (fd >= 0) close(fd);
+            // Off the caller's thread: a whole-file munmap costs ~0.65 ms.
+            if (map_state_.load(std::memory_order_relaxed) == kMapped)
+                MappingReaper::instance().submit({MappingReaper::Mapping{base_, len_}});
+        }
+
+        // The descriptor, opened on first use; -1 when the open fails. A failed
+        // open is not remembered: the next caller tries again, and the reader
+        // raises "Cannot open file" exactly as a fresh open would.
+        int fd() {
+            const int fd = fd_.load(std::memory_order_acquire);
+            if (fd >= 0) return fd;
+            std::lock_guard<std::mutex> lk(mu_);
+            return open_locked();
+        }
+
+        // The whole file, mapped PROT_READ | MAP_SHARED on first use. False when
+        // it cannot be mapped; the reader then preads. A failed open is not
+        // remembered (as fd()); a failed fstat/mmap, or an empty file, is — the
+        // reader falls back to pread without retrying the map per row group.
+        bool mapping(void*& base, size_t& len) {
+            int st = map_state_.load(std::memory_order_acquire);
+            if (st == kUnknown) {
+                std::lock_guard<std::mutex> lk(mu_);
+                st = map_state_.load(std::memory_order_relaxed);
+                if (st == kUnknown) {
+                    const int fd = open_locked();
+                    if (fd < 0) return false;
+                    st = kFailed;
+                    struct stat sb;
+                    if (fstat(fd, &sb) == 0 && sb.st_size > 0) {
+                        void* b = mmap(nullptr, static_cast<size_t>(sb.st_size),
+                                       PROT_READ, MAP_SHARED, fd, 0);
+                        if (b != MAP_FAILED) {
+                            base_ = b;
+                            len_  = static_cast<size_t>(sb.st_size);
+                            st = kMapped;
+                        }
+                    }
+                    map_state_.store(st, std::memory_order_release);
+                }
+            }
+            if (st != kMapped) return false;
+            base = base_;
+            len  = len_;
+            return true;
+        }
+
+    private:
+        static constexpr int kUnknown = 0, kMapped = 1, kFailed = 2;
+        int open_locked() {
+            int fd = fd_.load(std::memory_order_relaxed);
+            if (fd >= 0) return fd;
+            fd = open(path_.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) fd_.store(fd, std::memory_order_release);
+            return fd;
+        }
+
+        const std::string path_;
+        std::mutex mu_;                      // first open / first map only
+        std::atomic<int> fd_{-1};
+        std::atomic<int> map_state_{kUnknown};
+        void*  base_ = nullptr;              // published by map_state_ (release)
+        size_t len_  = 0;
+    };
+
+    static LocalFileTable& instance() {
+        // Leaked, like MappingReaper: no static destruction racing a scan at exit.
+        static LocalFileTable* t = new LocalFileTable();
+        return *t;
+    }
+
+    // The handle for `path`, created unopened on a miss. No IO.
+    std::shared_ptr<File> get(const std::string& path) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = files_.find(path);
+        if (it != files_.end()) {
+            it->second.last_use = ++tick_;
+            return it->second.file;
+        }
+        if (files_.size() >= cap_) evict_locked();
+        auto f = std::make_shared<File>(path);
+        files_.emplace(path, Entry{f, ++tick_});
+        return f;
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<File> file;
+        uint64_t last_use = 0;
+    };
+
+    LocalFileTable() {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+            throw std::runtime_error("getrlimit(RLIMIT_NOFILE) failed");
+        const rlim_t soft = rl.rlim_cur == RLIM_INFINITY ? static_cast<rlim_t>(1) << 20 : rl.rlim_cur;
+        cap_ = std::max<size_t>(1, static_cast<size_t>(soft / 16));
+    }
+
+    // Drop least-recently-used entries no work item holds until a slot is free.
+    // Under mu_, so no new holder can appear while use_count() is read. Held
+    // entries stay: the table may exceed the cap by what is in flight.
+    void evict_locked() {
+        while (files_.size() >= cap_) {
+            auto victim = files_.end();
+            for (auto j = files_.begin(); j != files_.end(); ++j)
+                if (j->second.file.use_count() == 1 &&
+                    (victim == files_.end() || j->second.last_use < victim->second.last_use))
+                    victim = j;
+            if (victim == files_.end()) return;
+            files_.erase(victim);
+        }
+    }
+
+    std::mutex mu_;
+    std::unordered_map<std::string, Entry> files_;
+    uint64_t tick_ = 0;
+    size_t cap_ = 1;
+};
+
+
 // C-ABI sink for handing decoded columns to the opteryx side. Pure C types only
 // — rugo must not depend on opteryx/draken; the opteryx adapter fills these in
 // (opteryx/compiled/structures/pool_sink_adapter.hpp).
@@ -1862,6 +2018,9 @@ class ParquetIOPipeline {
         // worker folds them back into ONE JSON-text column at the group's first slot
         // (docs: nested_json.hpp). Null for every ordinary projection.
         std::shared_ptr<const NestedSpec> nested;
+        // A LOCAL row group's file in the process table (resolved once at
+        // submit); null for a remote one.
+        std::shared_ptr<LocalFileTable::File> file;
     };
 
     // ── Fetch block ──────────────────────────────────────────────────────────
@@ -2041,142 +2200,10 @@ class ParquetIOPipeline {
     // row group is the column the worker searches.
     std::vector<std::string> search_cols_;
 
-    // PROTOTYPE (2026-08-14, unratified) — H6: per-pipeline whole-file mmap
-    // cache for LOCAL files. Previously every row-group decode opened the file
-    // and mapped its own column span, then unmapped it: with 100 files x 5 row
-    // groups that is 500 open/mmap/munmap cycles per query, and each munmap on
-    // a ~30-thread process pays cross-CPU TLB-shootdown IPIs. Mapping each file
-    // ONCE per pipeline (whole file, PROT_READ) and slicing every row group out
-    // of that single mapping cuts the syscall count 5x and drops the shootdowns
-    // to scan teardown. Pages of unprojected columns are never touched, so a
-    // whole-file mapping costs address space (14GB for the full ClickBench
-    // split set) but no memory or IO. Remote paths are untouched.
-    // Lifetime: mappings live until the pipeline is destroyed (after
-    // wait_shutdown(), so no worker can still hold a slice). Failures are
-    // cached too — a file whose open/mmap fails once falls back to per-column
-    // pread for every row group without retrying the map per item.
-    struct LocalFileMapping {
-        void*  base = MAP_FAILED;
-        size_t len  = 0;
-    };
-    std::unordered_map<std::string, LocalFileMapping> local_mmap_cache_;
-    std::mutex local_mmap_mutex_;
-
-    LocalFileMapping local_file_mapping(const std::string& path) {
-        {
-            std::lock_guard<std::mutex> lk(local_mmap_mutex_);
-            auto it = local_mmap_cache_.find(path);
-            if (it != local_mmap_cache_.end()) return it->second;
-        }
-        LocalFileMapping m;  // MAP_FAILED unless every step below succeeds
-        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd >= 0) {
-            struct stat st;
-            if (fstat(fd, &st) == 0 && st.st_size > 0) {
-                void* b = mmap(nullptr, static_cast<size_t>(st.st_size),
-                               PROT_READ, MAP_SHARED, fd, 0);
-                if (b != MAP_FAILED) {
-                    m.base = b;
-                    m.len  = static_cast<size_t>(st.st_size);
-                }
-            }
-            close(fd);
-        }
-        std::lock_guard<std::mutex> lk(local_mmap_mutex_);
-        auto it = local_mmap_cache_.find(path);
-        if (it != local_mmap_cache_.end()) {
-            // Another worker mapped it while we were outside the lock: keep
-            // theirs, release ours.
-            if (m.base != MAP_FAILED) munmap(m.base, m.len);
-            return it->second;
-        }
-        local_mmap_cache_.emplace(path, m);
-        return m;
-    }
-
-    // Local file descriptors held for the pipeline's (= the query's) life. Every
-    // small-chunk pread and every per-row-group span mmap used to open() and close()
-    // the file itself — one open per CHUNK, ~166 ms CPU of a hot ClickBench Q10, most
-    // of it kernel contention on the same vnodes. Files are immutable for the life
-    // of a query, so one descriptor per file serves every read of it.
-    //
-    // Bounded: at most local_fd_cap_ descriptors are held — RLIMIT_NOFILE/16 of the
-    // soft limit, so concurrent queries and the HTTP client's sockets keep headroom.
-    // Over the cap, IDLE descriptors (no lease) are closed least-recently-used first;
-    // a leased descriptor is never closed under its reader.
-    struct LocalFd {
-        int      fd = -1;
-        uint32_t leases = 0;
-        uint64_t last_use = 0;
-    };
-    std::unordered_map<std::string, LocalFd> local_fds_;
-    std::mutex local_fd_mutex_;
-    uint64_t local_fd_tick_ = 0;
-    const size_t local_fd_cap_ = []() -> size_t {
-        struct rlimit rl;
-        if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
-            throw std::runtime_error("getrlimit(RLIMIT_NOFILE) failed");
-        const rlim_t soft = rl.rlim_cur == RLIM_INFINITY ? static_cast<rlim_t>(1) << 20 : rl.rlim_cur;
-        return std::max<size_t>(1, static_cast<size_t>(soft / 16));
-    }();
-
-    int acquire_local_fd(const std::string& path) {
-        {
-            std::lock_guard<std::mutex> lk(local_fd_mutex_);
-            auto it = local_fds_.find(path);
-            if (it != local_fds_.end()) {
-                ++it->second.leases;
-                return it->second.fd;
-            }
-        }
-        // open() outside the lock: concurrent first opens of different files must
-        // not serialise on the table. -1 on failure, no lease taken — the caller
-        // reports it (the pread path raises "Cannot open file" inside the decode's
-        // error capture, exactly as before).
-        const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) return -1;
-        std::lock_guard<std::mutex> lk(local_fd_mutex_);
-        auto [it, inserted] = local_fds_.try_emplace(path);
-        if (!inserted) close(fd);  // another worker opened it first: use theirs
-        else it->second.fd = fd;
-        ++it->second.leases;
-        return it->second.fd;
-    }
-
-    void release_local_fd(const std::string& path) {
-        std::lock_guard<std::mutex> lk(local_fd_mutex_);
-        auto it = local_fds_.find(path);
-        if (it == local_fds_.end() || it->second.leases == 0)
-            throw std::logic_error("release_local_fd: no lease held on " + path);
-        --it->second.leases;
-        it->second.last_use = ++local_fd_tick_;
-        while (local_fds_.size() > local_fd_cap_) {
-            auto victim = local_fds_.end();
-            for (auto j = local_fds_.begin(); j != local_fds_.end(); ++j)
-                if (j->second.leases == 0 &&
-                    (victim == local_fds_.end() || j->second.last_use < victim->second.last_use))
-                    victim = j;
-            if (victim == local_fds_.end()) break;  // every held descriptor is leased
-            close(victim->second.fd);
-            local_fds_.erase(victim);
-        }
-    }
-
-    // One row group's hold on its file's descriptor: opened on first use, released
-    // when the row group's decode ends (any return path). get() is -1 when the
-    // file cannot be opened.
-    struct LocalFdLease {
-        ParquetIOPipeline* owner;
-        const std::string path;  // a copy: the item may be moved from before release
-        int fd = -1;
-        int get() {
-            if (fd < 0) fd = owner->acquire_local_fd(path);
-            return fd;
-        }
-        ~LocalFdLease() {
-            if (fd >= 0) owner->release_local_fd(path);
-        }
-    };
+    // Local files: the process-lifetime table (LocalFileTable, above) every local
+    // path resolves through. Bound at construction, so every pipeline the
+    // constructing extension builds shares one table.
+    LocalFileTable* const files_ = &LocalFileTable::instance();
 
     // Q24 latmat: pushed pass-1 predicate (opteryx callback). Set once before any
     // submit; workers read it const, no sync.
@@ -2861,8 +2888,9 @@ class ParquetIOPipeline {
         }
     }
 
-    // A local range read on a descriptor the caller holds (LocalFdLease); fd -1 is
-    // the lease's open failure and raises the same "Cannot open file" read_range does.
+    // A local range read on a descriptor the caller holds (its row group's table
+    // handle); fd -1 is a failed open and raises the same "Cannot open file"
+    // read_range does.
     std::pair<std::vector<uint8_t>, uint64_t> read_local_range(
             int fd, const std::string& path, int64_t offset, int64_t size) {
         auto t0 = std::chrono::steady_clock::now();
@@ -2905,10 +2933,11 @@ class ParquetIOPipeline {
         } else
 #endif
         {
-            // Local file: POSIX pread on a descriptor opened for this one read.
-            int fd = open(path.c_str(), O_RDONLY);
+            // Local file: POSIX pread on the process table's descriptor (the
+            // handle is held across the read, so eviction cannot close it).
+            const std::shared_ptr<LocalFileTable::File> lf = files_->get(path);
+            const int fd = lf->fd();
             const ssize_t n = fd < 0 ? -1 : pread_into(fd, offset, size, bytes);
-            if (fd >= 0) close(fd);
             check_local_read(fd, n, path, size);
         }
 
@@ -3255,10 +3284,9 @@ class ParquetIOPipeline {
         uint64_t total_decode_ns = 0;
 
         // For local files, slice this row group's column chunks out of the
-        // pipeline's whole-file mapping (local_file_mapping above — one
-        // open+mmap per FILE per pipeline, not per row group). Falls back to
-        // read_range() for HTTP/GCS, and to per-column pread when the map
-        // failed. PROTOTYPE H6 — see local_file_mapping's comment.
+        // file's whole-file mapping in the process table (LocalFileTable — one
+        // open+mmap per FILE per process). Remote row groups read their fetch
+        // block; local ones pread small chunks (H15) and when the map failed.
         const bool is_local = path_is_local(item.path);
 
         void*   mmap_base   = MAP_FAILED;
@@ -3288,8 +3316,11 @@ class ParquetIOPipeline {
         }();
 
         bool per_rg_mapped = false;  // true when THIS row group owns the mapping
-        // Declared before anything that reads the file, so it outlives every read.
-        LocalFdLease fd_lease{this, item.path};
+        // The row group's file: its descriptor and mapping belong to the process
+        // table and stay open while this item holds the handle.
+        LocalFileTable::File* const file = item.file.get();
+        if (is_local && file == nullptr)
+            throw std::logic_error("local row group submitted without its file handle: " + item.path);
         // Resolved on the FIRST chunk that reads through the mapping: a row group
         // whose chunks all take the small-chunk pread (H15 below) never maps its
         // file. Q01-class scans (one narrow int column, every chunk a few KB) used
@@ -3300,9 +3331,7 @@ class ParquetIOPipeline {
             map_resolved = true;
             auto t_map = std::chrono::steady_clock::now();
             if (use_mmap_cache) {
-                LocalFileMapping m = local_file_mapping(item.path);
-                mmap_base = m.base;
-                mmap_len  = m.len;
+                file->mapping(mmap_base, mmap_len);   // leaves MAP_FAILED when unmappable
             } else {
                 int64_t span_min = INT64_MAX, span_max = 0;
                 for (const auto& cs : item.column_stats) {
@@ -3316,7 +3345,7 @@ class ParquetIOPipeline {
                 long page_size  = sysconf(_SC_PAGESIZE);
                 mmap_offset     = (span_min / page_size) * page_size;
                 mmap_len        = static_cast<size_t>(span_max - mmap_offset);
-                const int fd = fd_lease.get();
+                const int fd = file->fd();
                 if (fd >= 0)
                     mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_SHARED, fd, mmap_offset);
                 per_rg_mapped = (mmap_base != MAP_FAILED);
@@ -3882,7 +3911,7 @@ class ParquetIOPipeline {
                             std::chrono::steady_clock::now() - t_dec).count();
                     } else {
                     auto [raw_bytes, read_ns] =
-                        read_local_range(fd_lease.get(), item.path, base_offset, chunk_size);
+                        read_local_range(file->fd(), item.path, base_offset, chunk_size);
                     result.bytes_fetched += chunk_size;
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
@@ -4268,9 +4297,8 @@ class ParquetIOPipeline {
             result.columns = std::move(folded_cols);
         }
 
-        // H6: a cached mapping is pipeline-owned (local_mmap_cache_) — released
-        // in the destructor after wait_shutdown(). Only the toggle's per-RG arm
-        // unmaps here.
+        // A whole-file mapping belongs to the process table (LocalFileTable).
+        // Only the toggle's per-RG arm unmaps here.
         if (per_rg_mapped)
             munmap(mmap_base, mmap_len);
 
@@ -4686,22 +4714,6 @@ class ParquetIOPipeline {
 
     ~ParquetIOPipeline() {
         wait_shutdown();
-        // H6: release the whole-file mappings only after wait_shutdown() — no
-        // ticket can still hold a slice into them. No lock needed: workers are
-        // done and the destructor is single-threaded by definition.
-        //
-        // The munmaps are handed to the MappingReaper rather than done here: serially they
-        // cost ~0.65 ms per file on the query's critical path (see MappingReaper).
-        std::vector<MappingReaper::Mapping> to_reap;
-        for (auto& kv : local_mmap_cache_) {
-            if (kv.second.base != MAP_FAILED)
-                to_reap.push_back({kv.second.base, kv.second.len});
-        }
-        local_mmap_cache_.clear();
-        MappingReaper::instance().submit(std::move(to_reap));
-        // Every lease ended with its decode; the descriptors close with the query.
-        for (auto& kv : local_fds_) close(kv.second.fd);
-        local_fds_.clear();
     }
 
     // Wire the destination MemoryPool. Must be called before any submit; the
@@ -4905,6 +4917,7 @@ class ParquetIOPipeline {
             blk->path = path;
             blk->ncols = column_names.size();
         }
+        const std::shared_ptr<LocalFileTable::File> file = remote ? nullptr : files_->get(path);
         std::vector<WorkItem> members;
         members.reserve(rg_idx.size());
         for (size_t m = 0; m < rg_idx.size(); ++m) {
@@ -4919,6 +4932,7 @@ class ParquetIOPipeline {
             item.est_compressed_bytes = sum_column_bytes(column_stats[m], true);
             item.block = blk;
             item.member = m;
+            item.file = file;
             members.push_back(std::move(item));
         }
         enqueue_block(std::move(blk), std::move(members));

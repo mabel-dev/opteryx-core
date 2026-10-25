@@ -50,10 +50,10 @@ namespace rugo {
 static constexpr int64_t  kParquetFooterSuffix  = 8;       // 4-byte len + 4-byte magic
 
 // How many bytes to read from the END of a Parquet file to reach its whole
-// footer in ONE request — the single sizing rule for every footer read (local
-// and remote, native and the Python schema read via pool_reader's
-// footer_suffix_bytes). A short guess costs a second, dependent request; a
-// long one costs only bytes.
+// footer in ONE request — the sizing rule for every REMOTE footer read (native
+// and the Python schema read via pool_reader's footer_suffix_bytes). A short
+// guess costs a second, dependent request; a long one costs only bytes. A local
+// native footer read does not use it: see fetch_local_footer.
 //
 // A footer's size scales with row groups x columns, so for a fixed row-group
 // size it scales with the FILE size. Measured on rugo's 64k-row-group layout:
@@ -229,6 +229,45 @@ static inline std::vector<uint8_t> build_footer_envelope(
     return envelope;
 }
 
+// A local footer is read as exactly the bytes it occupies: the 8-byte trailer
+// names the footer's length, then the footer is read whole — two dependent
+// preads on one open fd. The remote rule (footer_suffix_bytes) over-reads on
+// purpose to save a second REQUEST; a local read has no round trip to save, and
+// an over-read costs real device bytes on a cold cache. Measured on ClickBench
+// hits (100 files, x86 cold, 2026-10-25): the file/256 suffix read ~388 KB per
+// file against a ~200 KB footer, +15.8 MB per cold query.
+static inline ParquetFooterResult fetch_local_footer(const std::string& path,
+                                                     int64_t file_size) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        throw std::runtime_error("Cannot open file: " + path);
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { close(fd); }
+    } guard{fd};
+
+    auto pread_exact = [&](uint8_t* dst, int64_t offset, int64_t size) {
+        ssize_t n = pread(fd, dst, static_cast<size_t>(size), offset);
+        if (n < 0)
+            throw std::runtime_error("pread() error: " + path);
+        if (static_cast<int64_t>(n) != size)
+            throw std::runtime_error("Short read in " + path +
+                " (expected " + std::to_string(size) +
+                ", got " + std::to_string(n) + ")");
+    };
+
+    std::vector<uint8_t> trailer(static_cast<size_t>(kParquetFooterSuffix));
+    pread_exact(trailer.data(), file_size - kParquetFooterSuffix, kParquetFooterSuffix);
+    uint32_t footer_length_u32 = parse_footer_length(trailer, file_size - kParquetFooterSuffix, path);
+
+    std::vector<uint8_t> footer(static_cast<size_t>(footer_length_u32));
+    pread_exact(footer.data(),
+                file_size - kParquetFooterSuffix - static_cast<int64_t>(footer_length_u32),
+                static_cast<int64_t>(footer_length_u32));
+    return {build_footer_envelope(footer.data(), footer_length_u32),
+            kParquetFooterSuffix + static_cast<int64_t>(footer_length_u32)};
+}
+
 /**
  * Fetch and assemble the Parquet footer envelope for `path`.
  *
@@ -242,6 +281,9 @@ inline ParquetFooterResult FetchParquetFooter(const std::string& path,
 
     if (file_size < kParquetFooterSuffix)
         throw std::runtime_error("File too small to be valid Parquet: " + path);
+
+    if (!is_remote_path(path))
+        return fetch_local_footer(path, file_size);
 
     int64_t prefetch_size   = std::min(footer_suffix_bytes(file_size), file_size);
     int64_t prefetch_offset = file_size - prefetch_size;
