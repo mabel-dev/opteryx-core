@@ -245,17 +245,6 @@ def test_schema_normalization_is_unchanged_for_every_name_the_catalog_stores_tod
         assert by_name[stored] == want, f"{stored} drifted to {by_name[stored]}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PRE-EXISTING, unrelated to the parse-first change and NOT fixed here: "
-    "the DECIMAL and ARRAY branches of _normalize_schema are unreachable for the "
-    "catalog's actual stored format. Both gate on `_ot`, which comes from "
-    "_normalize_type(raw) -- and bare 'DECIMAL'/'ARRAY' have never resolved to a "
-    "type (they are stored bare, with precision/scale and element-type in SEPARATE "
-    "columns), so _ot falls to the VARCHAR default and neither branch fires. A "
-    "catalog DECIMAL column therefore reads back as VARCHAR. Verified identical "
-    "under the pre-change code. Remove this marker when the read path is fixed.",
-)
 def test_bare_decimal_and_array_still_read_their_separate_parameter_columns():
     """DECIMAL and ARRAY are stored BARE, with precision/scale and element-type in
     separate catalog columns. Those bare names must NOT parse — they have to fall

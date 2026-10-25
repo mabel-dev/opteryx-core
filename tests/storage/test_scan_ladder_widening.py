@@ -31,6 +31,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from opteryx.exceptions import NativeScanRefusedError
 
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
@@ -103,10 +104,10 @@ def test_unwidenable_mismatch_still_fails():
     """A divergence that is NOT a legal widening must still fail, loudly.
 
     VARCHAR against INT64 is on no ladder, so nothing coerces it — this is the
-    test that keeps the coercion from becoming a silent-mismatch hole. The error
-    names the column and both types, so the failure is diagnosable from the
-    message alone (it was not: it used to say only "all inputs must share one
-    type", which is the whole of what an OPTIMIZE of gdelt_events reported).
+    test that keeps the coercion from becoming a silent-mismatch hole. The native
+    scan's footer gate refuses it, naming the column, the file, the type the file
+    stores and the type the relation needs, so the failure is diagnosable from the
+    message alone.
 
     A declared width NARROWER than a file's stored width is the other refusal
     `is_legal_widen` makes, and it is covered at the mechanism instead of here:
@@ -118,12 +119,15 @@ def test_unwidenable_mismatch_still_fails():
     try:
         _write(folder, "a.parquet", [1, 2], pa.int64())
         _write(folder, "b.parquet", ["x"], pa.string())
-        with pytest.raises(Exception) as err:
+        with pytest.raises(NativeScanRefusedError) as err:
             _read(folder)
         message = str(err.value)
-        assert "must share one type" in message, message
-        assert "'n'" in message, message
-        assert "VARCHAR" in message and "INT64" in message, message
+        # The footer gate names the column, the offending file, what the file
+        # stores and what the relation needs it to decode as.
+        assert "column 'n'" in message, message
+        assert "widen_mismatch_tmp/b.parquet" in message, message
+        assert "'varchar'" in message, message
+        assert "do not decode as 'int'" in message, message
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
