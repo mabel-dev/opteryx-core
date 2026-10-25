@@ -395,16 +395,16 @@ every query. Wall and process-CPU medians, B/A.**
 
 | query | Mac wall | Mac CPU | x86 wall | x86 CPU |
 |---|---|---|---|---|
-| Q01 `AdvEngineID <> 0` | 1.009 (3/5) | 0.992 | X86Q01 | |
-| Q07 (same filter, GROUP BY) | 0.984 (4/5) | 1.000 | X86Q07 | |
-| `= 0` (99% pass, every page whole) | 0.986 | 0.998 | X86EQ0 | |
-| `IN (2, 3)` | 0.972 (4/5) | 0.996 | X86IN | |
-| `> 0` (range-settled from stats, never searched) | 0.985 | 1.024 | X86GT | |
-| `<> 1` no-prune canary (every entry passes; stats cannot answer) | 0.982 (5/5) | 0.997 | X86NE1 | |
-| `SUM(AdvEngineID) GROUP BY OS` canary | 0.997 | 0.997 | X86SUM | |
-| Q39-shape `CounterID = 62 AND IsRefresh = 0 AND DontCountHits = 0` | 1.008 | 0.985 | X86Q39 | |
-| `TraficSourceID IN (-1, 6) AND IsRefresh = 0` (55% pass, all pages whole) | 0.993 | 1.005 | X86TRAF | |
-| `OS NOT IN (2, 44, 56)` (18.6% pass, all pages whole) | 0.984 | 1.004 | X86OS | |
+| Q01 `AdvEngineID <> 0` | 1.009 (3/5) | 0.992 | 0.947 (5/5) | 0.926 |
+| Q07 (same filter, GROUP BY) | 0.984 (4/5) | 1.000 | 0.946 (5/5) | 0.925 |
+| `= 0` (99% pass, every page whole) | 0.986 | 0.998 | 1.015 (1/5) | 1.040 |
+| `IN (2, 3)` | 0.972 (4/5) | 0.996 | 0.915 (5/5) | 0.842 |
+| `> 0` (range-settled from stats, never searched) | 0.985 | 1.024 | 0.964 (5/5) | 0.958 |
+| `<> 1` no-prune canary (every entry passes; stats cannot answer) | 0.982 (5/5) | 0.997 | 1.008 (3/5) | 0.997 |
+| `SUM(AdvEngineID) GROUP BY OS` canary | 0.997 | 0.997 | 1.011 (1/5) | 1.011 |
+| Q39-shape `CounterID = 62 AND IsRefresh = 0 AND DontCountHits = 0` | 1.008 | 0.985 | 0.999 | 1.006 |
+| `TraficSourceID IN (-1, 6) AND IsRefresh = 0` (55% pass, all pages whole) | 0.993 | 1.005 | 1.002 | 1.003 |
+| `OS NOT IN (2, 44, 56)` (18.6% pass, all pages whole) | 0.984 | 1.004 | 1.042 (0/5) | 1.044 |
 
 Mac: M5 Pro, 16 workers, `scratch.hits_rg64k_b4`, no allocator preload (none on macOS). x86:
 i5-8500, 6 cores, mimalloc preload, `hits_rugo_262k` (the same rows in 8 files of 216 row
@@ -418,8 +418,44 @@ at 1/8 with a full verdict walk per page — 1.151 / 1.195; with a 4,096-value p
 itself was the cost on bit-packed pages; x86 Q01 0.941, Q07 0.918, `IN` 0.899).
 
 **Verdict.** Q01/Q07 are flat on the Mac (the targets; their wall is not made of decode work,
-§11.7) and X86VERDICT on x86. No canary or control moved beyond noise on either machine. The
-keep rule of §8.2 (Q1/Q7 ≤ 0.90) is not met on the Mac and X86RULE on x86.
+§11.7) and win 5–9% on x86 (Q01 0.947, Q07 0.946, `IN` 0.915, all 5/5; CPU 0.93 / 0.93 / 0.84). No canary or control moved beyond noise on either machine. The
+keep rule of §8.2 (Q1/Q7 ≤ 0.90) is not met on the Mac and not met on x86 either (0.947 / 0.946 against ≤ 0.90). The x86 residual on all-whole integer predicates is attributed in §11.6.1: about 1% is the
+search's own probe and bookkeeping, the rest a code-placement effect on the unchanged one-pass
+decoder that also hits unarmed decodes. Whether a 5–9% x86 win on the targets
+is worth a 4% x86 cost on no-gain integer predicates is the architect's call; the default here
+is to keep it and attribute the residual, not to delete.
+
+### 11.6.1 The x86 residual, attributed (2026-10-25)
+
+`perf` on the box (both arms relinked unstripped — `INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE=YES`
+only drops the link-time strip, code layout unchanged), interleaved base/cand/cand/base, 15 s
+loops, quiet box under the shared `/home/pi/.bench_lock`. Wall: `OS NOT IN` 71.6 → 73.6 ms
+(+2.7%, both pairs), `= 0` 42.7 → 42.2 ms (no residual this time).
+
+| per query run | base | cand |
+|---|---|---|
+| `OS NOT IN` cycles (all symbols) | 520.7 | 543.5 (1.044) |
+| of which `decode_codes_packed<uint8>` (one-pass code decode) | 115.6 | 127.9 (1.106) |
+| `OS <> 9999` canary cycles (search DECLINED, no new code runs) | 845.9 | 858.7 (1.015) |
+| of which `decode_codes_packed<uint8>` | 117.5 | 129.3 (1.101) |
+| one-pass decoder calls (uprobe), both queries | 1,526 | 1,526 |
+| `DecodeColumnFromChunk` calls | 4,425 | 4,425 |
+| verdict-walk calls (`OS NOT IN` / canary) | 0 / 0 | 1,590 / 0 |
+
+- About **half** of the residual is the unchanged one-pass decoder taking 10% more cycles. Its
+  machine code is byte-identical in both binaries (845 instructions, diffed), its hot
+  instructions sit at the same offsets within 32 bytes (so not the jump-conditional-code
+  erratum), it is called the same number of times on the same pages, and it slows down by the
+  same 10% in the canary where the search never runs. That is a placement effect of the
+  rebuilt `pool_reader` binary (the function moved from 48 to 16 bytes into its 64-byte line,
+  among other address shifts), not work the search adds, and it applies to every integer
+  dictionary decode on x86, armed or not. It is not removable by deleting the search: any
+  edit to that translation unit reshuffles it.
+- The search's **own** cost on all-whole chunks is the 512-value probe (1,590 calls a run) and
+  per-page bookkeeping in `DecodeColumnFromChunk`: together about 1% of the query's CPU.
+- Not done: forcing function/loop alignment (`-falign-functions=64` or an attribute on the
+  decoder) in both arms to prove the placement claim directly. That is a build-flag
+  experiment, so it is listed rather than run.
 
 ### 11.7 Where Q01's wall actually is (the finding of this work)
 

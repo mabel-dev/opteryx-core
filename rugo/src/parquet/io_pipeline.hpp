@@ -3290,7 +3290,14 @@ class ParquetIOPipeline {
         bool per_rg_mapped = false;  // true when THIS row group owns the mapping
         // Declared before anything that reads the file, so it outlives every read.
         LocalFdLease fd_lease{this, item.path};
-        if (is_local && !item.column_stats.empty()) {
+        // Resolved on the FIRST chunk that reads through the mapping: a row group
+        // whose chunks all take the small-chunk pread (H15 below) never maps its
+        // file. Q01-class scans (one narrow int column, every chunk a few KB) used
+        // to open+mmap every file of the dataset per query and read none of it.
+        bool map_resolved = false;
+        auto ensure_mapping = [&]() -> bool {
+          if (!map_resolved) {
+            map_resolved = true;
             auto t_map = std::chrono::steady_clock::now();
             if (use_mmap_cache) {
                 LocalFileMapping m = local_file_mapping(item.path);
@@ -3328,7 +3335,9 @@ class ParquetIOPipeline {
             }
             total_read_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - t_map).count();
-        }
+          }
+          return mmap_base != MAP_FAILED;
+        };
 
         // Remote: the row group's bytes come from its FETCH BLOCK — planned and
         // fetched once for every kept row group of the block (plan_block), so a
@@ -3816,7 +3825,7 @@ class ParquetIOPipeline {
                 const bool small_chunk_pread =
                     is_local && pread_below > 0 &&
                     static_cast<size_t>(chunk_size) < pread_below;
-                if (mmap_base != MAP_FAILED && !small_chunk_pread) {
+                if (is_local && !small_chunk_pread && ensure_mapping()) {
                     // Zero-copy: slice directly into the mmap — no heap allocation.
                     const uint8_t* chunk_ptr =
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);

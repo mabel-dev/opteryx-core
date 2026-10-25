@@ -222,10 +222,17 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         "starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` "
         "start where they say. `stop` is included when it falls on a step "
         "boundary. A step pointing away from `stop` yields an EMPTY array; a step "
-        "of zero is refused. Arguments must be integer CONSTANTS. To get one ROW "
+        "of zero is refused. Arguments must be CONSTANTS. With DATE or TIMESTAMP "
+        "bounds and an INTERVAL step - `GENERATE_SERIES(CAST('2025-01-01' AS "
+        "TIMESTAMP), CAST('2025-01-02' AS TIMESTAMP), INTERVAL '5' MINUTE)` - the "
+        "result is an ARRAY<TIMESTAMP>; a DATE bound is midnight of its day and a "
+        "month step clamps the day and carries the clamp forward (31 Jan, 28 Feb, "
+        "28 Mar), as DuckDB does. A NULL integer bound gives a NULL array. The scalar "
+        "form holds at most 1,000,000 elements. To get one ROW "
         "per value instead - which is what gap-filling and joining against a dense "
         "axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, "
-        "which also accepts floats and, with an INTERVAL step, timestamps."
+        "which also accepts floats and string dates. Without an alias the table "
+        "spelling's column is named `generate_series`."
     )
     _gs_start = ParameterSpec(
         name="start", type_family="integer", constant_only=True,
@@ -240,11 +247,27 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         documentation="Distance between consecutive values; may be negative, never zero.",
     )
 
-    def _generate_series_overload(overload_id, params, cost):
+    # The temporal spelling takes DATE or TIMESTAMP bounds (`datetime`) and an
+    # INTERVAL step; the integer overloads above reject those families, so the
+    # two sets never compete for the same call.
+    _gs_ts_start = ParameterSpec(
+        name="start", type_family="datetime", constant_only=True,
+        documentation="First value of the series (a DATE is midnight of its day).",
+    )
+    _gs_ts_stop = ParameterSpec(
+        name="stop", type_family="datetime", constant_only=True,
+        documentation="Last value of the series, included when the step lands on it.",
+    )
+    _gs_ts_step = ParameterSpec(
+        name="step", type_family="interval", constant_only=True,
+        documentation="Distance between consecutive values; may be negative, never zero.",
+    )
+
+    def _generate_series_overload(overload_id, params, cost, element=_CT_INT64):
         return FunctionOverload(
             id=overload_id,
             parameters=params,
-            return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_ARRAY(_CT_INT64)),
+            return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_ARRAY(element)),
             kernel=KernelSpec(
                 engine="draken",
                 id="default",
@@ -261,13 +284,17 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             volatility="immutable",
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
-            summary="Build an array of evenly spaced integers.",
+            summary="Build an array of evenly spaced integers or timestamps.",
             documentation=_gs_docs,
             overloads=(
                 _generate_series_overload("GENERATE_SERIES_1", (_gs_stop,), 120.0),
                 _generate_series_overload("GENERATE_SERIES_2", (_gs_start, _gs_stop), 130.0),
                 _generate_series_overload(
                     "GENERATE_SERIES_3", (_gs_start, _gs_stop, _gs_step), 140.0),
+                # Id is the kernel name (draken_generate_series_timestamp), not an arity.
+                _generate_series_overload(
+                    "GENERATE_SERIES_TIMESTAMP", (_gs_ts_start, _gs_ts_stop, _gs_ts_step),
+                    400.0, element=_CT_TIMESTAMP()),
             ),
         ),
         _make(

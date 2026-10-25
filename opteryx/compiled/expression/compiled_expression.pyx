@@ -2909,6 +2909,44 @@ cdef Py_ssize_t _linearize(
                         slot.ctx_ptr = <void*>(<unsigned long long>_dd_ctx.ctx_ptr)
                     return sub_depth - 2 + 1
 
+        # GENERATE_SERIES(start, stop, step) over DATE / TIMESTAMP bounds — the temporal
+        # overload. The kernel needs each bound's TimestampUnit (a LogicalType detail the
+        # DrakenVector does not carry), so they travel in a binary_op_ctx
+        # (left_unit = start, right_unit = stop) exactly as DATEDIFF's do. All three
+        # operands are constants (enforced above) and are pushed as ordinary vectors.
+        # The integer overloads take no ctx and stay on the generic route below.
+        if func_val.upper() == "GENERATE_SERIES" and n == 3 \
+                and node.parameters[0] != NULL and node.parameters[1] != NULL \
+                and node.parameters[2] != NULL \
+                and node.parameters[0].schema_column != NULL \
+                and node.parameters[1].schema_column != NULL:
+            _gsr_s_sc = <object>node.parameters[0].schema_column
+            _gsr_e_sc = <object>node.parameters[1].schema_column
+            _gsr_s_ct = (_gsr_s_sc.column_type if _gsr_s_sc is not None else None)
+            _gsr_e_ct = (_gsr_e_sc.column_type if _gsr_e_sc is not None else None)
+            _gsr_s_phys = (_gsr_s_ct.physical.name if _gsr_s_ct is not None else "")
+            _gsr_e_phys = (_gsr_e_ct.physical.name if _gsr_e_ct is not None else "")
+            if _gsr_s_phys in ("DATE32", "TIMESTAMP64") \
+                    and _gsr_e_phys in ("DATE32", "TIMESTAMP64"):
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _gsr_alloc
+                _gsr_fn, _gsr_ctx = _resolve_kernel_and_context(
+                    "draken_generate_series_timestamp", _gsr_alloc,
+                    (0, 0, 0, 0, 0, _binop_ts_unit(_gsr_s_ct), _binop_ts_unit(_gsr_e_ct)))
+                if _gsr_fn is not None:
+                    sub_depth = _linearize(node.parameters[0], bc, depth)
+                    sub_depth = _linearize(node.parameters[1], bc, sub_depth)
+                    sub_depth = _linearize(node.parameters[2], bc, sub_depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 3
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE
+                    slot.kernel_fn = <void*>(<unsigned long long>_gsr_fn)
+                    if _gsr_ctx is not None:
+                        bc._hold(_gsr_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_gsr_ctx.ctx_ptr)
+                    return sub_depth - 3 + 1
+
         # TIMEDIFF(time1, time2) / TIME_DIFF — DATEDIFF with diff-kind hardcoded to
         # hours at bind time (same binary_op_ctx vehicle; see the nanobind
         # dispatch_time_diff reference this mirrors).

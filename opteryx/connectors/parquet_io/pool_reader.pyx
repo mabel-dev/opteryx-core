@@ -1210,10 +1210,25 @@ cdef extern from *:
 
 
 cdef int _raise_footer_read_error(const FooterFetchOutcome& outcome) except -1:
-    """Raise the typed storage error for a footer fetch that failed over HTTP."""
+    """Raise the typed storage error for a footer fetch that failed over HTTP.
+
+    The native message names the object (bucket and path), which is operational
+    detail: it is logged in full and the user-facing text carries only what the
+    status says about the cause."""
+    _logger.error(
+        "Parquet footer fetch failed (HTTP %d): %s",
+        outcome.http_status,
+        outcome.message.decode("utf-8", "replace"),
+    )
+    if outcome.http_status in (401, 403):
+        cause = "access to the data file was denied"
+    elif outcome.http_status == 404:
+        cause = "the data file was not found"
+    else:
+        cause = "the read did not complete"
     raise DatasetDataReadError(
-        "Unable to read a Parquet footer from storage: "
-        + outcome.message.decode("utf-8", "replace")
+        f"Unable to read a Parquet footer from storage, {cause}. "
+        "The cause has been logged."
     )
 
 

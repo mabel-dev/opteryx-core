@@ -3723,7 +3723,11 @@ def create_node_relation(relation: dict, *, plan_context):
         # schema at bind time (not yet implemented), so unlike UNNEST/VALUES/
         # GENERATE_SERIES they don't require an AS alias(columns) clause to name
         # their output columns.
-        requires_column_alias = function_name not in ("READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO")
+        # GENERATE_SERIES is likewise exempt: with no alias its relation and its one
+        # column are both named `generate_series`, as DuckDB names them.
+        requires_column_alias = function_name not in (
+            "READ_JSONL", "READ_PARQUET", "READ_CSV", "READ_AVRO", "GENERATE_SERIES",
+        )
 
         if function["alias"] is None and requires_column_alias:
             from opteryx.exceptions import UnnamedColumnError
@@ -3758,6 +3762,9 @@ def create_node_relation(relation: dict, *, plan_context):
             function_step.alias = f"$unnest-{random_string(6)}"
             function_step.relation = function_step.alias
             function_step.unnest_target = function["alias"]["name"]["value"]
+        elif function_name == "GENERATE_SERIES" and function["alias"] is None:
+            function_step.alias = "generate_series"
+            function_step.series_column = "generate_series"
         elif function["alias"] is not None:
             function_step.alias = function["alias"]["name"]["value"]
             if function_name == "GENERATE_SERIES":

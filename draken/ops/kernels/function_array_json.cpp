@@ -76,6 +76,9 @@
 #include "ops/kernels/kernel_context.h"   // in_list_ctx; cast_array_ctx
 #include "ops/kernels/result_helpers.h"   // vecresult_from_string_buffers
 #include "ops/int64_compare.h"               // draken::ops::cmp_constant_bool_result / cmp_dict_bool_result
+#include "ops/interval_ops.h"              // interval_add_to_us — GENERATE_SERIES over timestamps
+#include "core/interval_slot.h"
+#include "logical_type.h"                    // TimestampUnit / ts_to_us
 #include "yyjson.h"
 
 namespace {
@@ -2000,6 +2003,107 @@ inline bool gs_scalar_int(const DrakenVector* v, const char* who, const char* ro
 
 }  // namespace
 
+namespace {
+
+// ONE series -> an ARRAY result of `n` identical rows, each holding `row[0..count)`.
+// The arguments are constants, so every row's array holds the SAME values; they are
+// materialized per row rather than shared, which is the uniform §11 access pattern
+// every consumer already handles. `null_row` makes every row NULL (a NULL bound has
+// no series) with an empty child. `child_unit` is the TimestampUnit for a
+// TIMESTAMP64 child, 0xFF (unset) otherwise. Shared by the integer and the
+// timestamp spellings so the two cannot build different array shapes.
+VecResult gs_array_result(uint32_t n, int64_t count, bool null_row, DrakenType child_type,
+                          uint8_t child_unit, const int64_t* row) {
+    const uint64_t total64 = static_cast<uint64_t>(n) * static_cast<uint64_t>(count);
+    if (total64 > 0xFFFFFFFFull)
+        return draken_error_sentinel(
+            "draken_generate_series: the series is too large to materialize once per "
+            "row. Use the table form `FROM GENERATE_SERIES(...) AS g`.");
+    const uint32_t total = static_cast<uint32_t>(total64);
+
+    int32_t* offsets = static_cast<int32_t*>(
+        draken_malloc((static_cast<size_t>(n) + 1u) * sizeof(int32_t)));
+    if (!offsets) throw std::bad_alloc();
+    struct OffGuard {
+        int32_t* p; bool released = false;
+        ~OffGuard() { if (!released) draken_free(p); }
+    } og{offsets};
+    for (uint32_t i = 0u; i <= n; ++i)
+        offsets[i] = static_cast<int32_t>(static_cast<int64_t>(i) * count);
+
+    const size_t cbytes = static_cast<size_t>(total) * sizeof(int64_t);
+    int64_t* cdata = static_cast<int64_t*>(draken_malloc(cbytes > 0u ? cbytes : 8u));
+    if (!cdata) throw std::bad_alloc();
+    struct ChildGuard {
+        int64_t* p; bool released = false;
+        ~ChildGuard() { if (!released) draken_free(p); }
+    } cg{cdata};
+    for (uint32_t i = 0u; i < n; ++i)
+        if (count > 0)
+            std::memcpy(cdata + static_cast<size_t>(i) * count, row,
+                        static_cast<size_t>(count) * sizeof(int64_t));
+
+    VecResult cr{};
+    cr.data           = cdata;
+    cr.validity       = nullptr;      // a generated series has no null elements
+    cr.selection      = draken_identity_sel(total);
+    cr.owns_selection = false;
+    cr.data_length    = total;
+    cr.length         = total;
+    cr.type           = child_type;
+    cr.flags          = DRAKEN_SEL_IDENTITY;
+    cr.ts_unit        = child_unit;
+    cg.released       = true;
+    VecResult* child  = new VecResult(cr);
+
+    uint8_t* validity = nullptr;
+    if (null_row && n > 0u) {
+        validity = ar_alloc_validity(n);
+        if (!validity) { delete child; throw std::bad_alloc(); }
+        for (uint32_t i = 0u; i < n; ++i)
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+    }
+
+    og.released = true;
+    VecResult r{};
+    r.data           = offsets;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_ARRAY;
+    r.flags          = DRAKEN_SEL_IDENTITY;
+    r.child          = child;
+    return r;
+}
+
+// One DATE32 / TIMESTAMP64 operand, required to be a constant, as µs since epoch.
+// `unit` is the TimestampUnit the binder supplied for a TIMESTAMP64 operand (a DATE
+// is days and ignores it). `present` is false when the value is NULL.
+inline bool gs_scalar_us(const DrakenVector* v, unsigned char unit, const char* role,
+                         int64_t& out, bool& present, std::string& err) {
+    if (!v) { err = std::string("draken_generate_series: missing ") + role; return false; }
+    if (!draken_is_constant(v)) {
+        err = std::string("draken_generate_series: ") + role +
+              " must be a constant, not a column - a per-row series is not supported";
+        return false;
+    }
+    if (v->type != DRAKEN_DATE32 && v->type != DRAKEN_TIMESTAMP64) {
+        err = std::string("draken_generate_series: ") + role + " must be a DATE or TIMESTAMP";
+        return false;
+    }
+    if (v->length == 0u || !aj_row_valid(v, 0u)) { present = false; return true; }
+    const uint32_t phys = v->selection[0];
+    out = (v->type == DRAKEN_DATE32)
+        ? static_cast<int64_t>(static_cast<const int32_t*>(v->data)[phys]) * 86400000000LL
+        : ts_to_us(static_cast<const int64_t*>(v->data)[phys], static_cast<TimestampUnit>(unit & 3u));
+    present = true;
+    return true;
+}
+
+}  // namespace
+
 VecResult draken_generate_series(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     (void)ctx;
     try {
@@ -2058,77 +2162,111 @@ VecResult draken_generate_series(void* ctx, const DrakenVector* const* args, uin
             // expects when they happen to cross.
         }
 
-        // One row per input row. The arguments are constants, so every row's array
-        // holds the SAME values; they are materialized per row rather than shared,
-        // which is the uniform §11 access pattern every consumer already handles.
-        const uint32_t n = args[0]->length;
-        const uint64_t total64 = static_cast<uint64_t>(n) * static_cast<uint64_t>(count);
-        if (total64 > 0xFFFFFFFFull)
-            return draken_error_sentinel(
-                "draken_generate_series: the series is too large to materialize once per "
-                "row. Use the table form `FROM GENERATE_SERIES(...) AS g`.");
-        const uint32_t total = static_cast<uint32_t>(total64);
-
-        int32_t* offsets = static_cast<int32_t*>(
-            draken_malloc((static_cast<size_t>(n) + 1u) * sizeof(int32_t)));
-        if (!offsets) throw std::bad_alloc();
-        struct OffGuard {
-            int32_t* p; bool released = false;
-            ~OffGuard() { if (!released) draken_free(p); }
-        } og{offsets};
-        for (uint32_t i = 0u; i <= n; ++i)
-            offsets[i] = static_cast<int32_t>(static_cast<int64_t>(i) * count);
-
-        const size_t cbytes = static_cast<size_t>(total) * sizeof(int64_t);
-        int64_t* cdata = static_cast<int64_t*>(draken_malloc(cbytes > 0u ? cbytes : 8u));
-        if (!cdata) throw std::bad_alloc();
-        struct ChildGuard {
-            int64_t* p; bool released = false;
-            ~ChildGuard() { if (!released) draken_free(p); }
-        } cg{cdata};
         // Values are computed as start + k*step rather than by accumulation: the
         // same answer for integers, and it keeps ONE definition of the k-th element.
-        for (int64_t k = 0; k < count; ++k) cdata[k] = start + k * step;
-        for (uint32_t i = 1u; i < n; ++i)
-            std::memcpy(cdata + static_cast<size_t>(i) * count, cdata,
-                        static_cast<size_t>(count) * sizeof(int64_t));
-
-        VecResult cr{};
-        cr.data           = cdata;
-        cr.validity       = nullptr;      // a generated series has no null elements
-        cr.selection      = draken_identity_sel(total);
-        cr.owns_selection = false;
-        cr.data_length    = total;
-        cr.length         = total;
-        cr.type           = DRAKEN_INT64;
-        cr.flags          = DRAKEN_SEL_IDENTITY;
-        cg.released       = true;
-        VecResult* child  = new VecResult(cr);
-
-        uint8_t* validity = nullptr;
-        if (null_row && n > 0u) {
-            validity = ar_alloc_validity(n);
-            if (!validity) { delete child; throw std::bad_alloc(); }
-            for (uint32_t i = 0u; i < n; ++i)
-                validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
-        }
-
-        og.released = true;
-        VecResult r{};
-        r.data           = offsets;
-        r.validity       = validity;
-        r.selection      = draken_identity_sel(n);
-        r.owns_selection = false;
-        r.data_length    = n;
-        r.length         = n;
-        r.type           = DRAKEN_ARRAY;
-        r.flags          = DRAKEN_SEL_IDENTITY;
-        r.child          = child;
-        return r;
+        std::vector<int64_t> row(static_cast<size_t>(count));
+        for (int64_t k = 0; k < count; ++k) row[static_cast<size_t>(k)] = start + k * step;
+        return gs_array_result(args[0]->length, count, null_row, DRAKEN_INT64, 0xFFu, row.data());
     } catch (const std::exception& e) {
         return draken_error_sentinel(e.what());
     } catch (...) {
         return draken_error_sentinel("Unknown error in draken_generate_series");
+    }
+}
+
+// GENERATE_SERIES(start, stop, step) over DATE / TIMESTAMP with an INTERVAL step
+// -> ARRAY<TIMESTAMP> (microseconds). The temporal spelling of the scalar form, in
+// DuckDB's shape: `stop` is INCLUDED when the cursor lands on it, a DATE bound is
+// midnight of its day and the elements are TIMESTAMPs either way, and a NULL
+// bound makes the whole series NULL.
+//
+// The cursor is advanced by REPEATED application of the step (interval_add_to_us),
+// not re-anchored on `start`, so a month step clamps and then carries the clamp
+// forward: 31 Jan, 28 Feb, 28 Mar - which is what DuckDB answers and what the table
+// spelling's add_interval does.
+//
+// A step pointing away from `stop` yields an EMPTY array (DuckDB, and the integer
+// spelling above). A step of ZERO is still refused, deliberately: DuckDB answers an
+// empty array there, but a zero step is a mistake that an empty result would hide.
+//
+// ctx is a binary_op_ctx whose left_unit / right_unit are the TimestampUnits of
+// start / stop (a unit is a LogicalType detail the DrakenVector does not carry).
+VecResult draken_generate_series_timestamp(void* ctx, const DrakenVector* const* args,
+                                           uint32_t nargs) {
+    try {
+        if (!args || nargs != 3u || !args[0] || !args[1] || !args[2])
+            return draken_error_sentinel(
+                "draken_generate_series: expects (start, stop, step)");
+        if (ctx == nullptr)
+            return draken_error_sentinel(
+                "draken_generate_series: missing ctx (timestamp units)");
+        const auto* c = static_cast<const binary_op_ctx*>(ctx);
+
+        std::string err;
+        int64_t start = 0, stop = 0;
+        bool p_start = false, p_stop = false;
+        if (!gs_scalar_us(args[0], c->left_unit, "start", start, p_start, err) ||
+            !gs_scalar_us(args[1], c->right_unit, "stop", stop, p_stop, err))
+            return draken_error_sentinel(err.c_str());
+
+        const DrakenVector* sv = args[2];
+        if (!draken_is_constant(sv))
+            return draken_error_sentinel(
+                "draken_generate_series: step must be a constant, not a column - a per-row "
+                "series is not supported");
+        if (sv->type != DRAKEN_INTERVAL)
+            return draken_error_sentinel("draken_generate_series: step must be an INTERVAL");
+        const bool p_step = sv->length != 0u && aj_row_valid(sv, 0u);
+        DrakenIntervalSlot step{0, 0};
+        if (p_step)
+            step = static_cast<const DrakenIntervalSlot*>(sv->data)[sv->selection[0]];
+
+        const bool null_row = !p_start || !p_stop || !p_step;
+        std::vector<int64_t> row;
+        if (!null_row) {
+            if (step.months == 0 && step.us == 0)
+                return draken_error_sentinel(
+                    "draken_generate_series: step must not be zero - the series would never "
+                    "reach its end");
+
+            const bool ascending = start <= stop;
+            int64_t cursor = start;
+            if (start != stop) {
+                // The step must move the cursor TOWARDS stop. It is tested by applying
+                // it once, not by reading signs off the pair: the two components can
+                // disagree (+1 month, -40 days) and only the calendar knows which wins.
+                const int64_t first = draken::ops::interval_add_to_us(start, step.months, step.us);
+                if (ascending ? first <= start : first >= start)
+                    return gs_array_result(args[0]->length, 0, false, DRAKEN_TIMESTAMP64,
+                                           static_cast<uint8_t>(TimestampUnit::MICROSECONDS),
+                                           nullptr);
+            }
+            while (ascending ? cursor <= stop : cursor >= stop) {
+                if (static_cast<int64_t>(row.size()) >= kGsMaxElements)
+                    return draken_error_sentinel_fmt(
+                        "draken_generate_series: the series has more than %lld elements. "
+                        "Narrow the bounds, widen the step, or use the table form "
+                        "`FROM GENERATE_SERIES(...) AS g`, which streams rows instead of "
+                        "building one array.",
+                        (long long)kGsMaxElements);
+                row.push_back(cursor);
+                if (start == stop) break;
+                const int64_t next = draken::ops::interval_add_to_us(cursor, step.months, step.us);
+                if (ascending ? next <= cursor : next >= cursor)
+                    return draken_error_sentinel(
+                        "draken_generate_series: the INTERVAL step stopped advancing the series "
+                        "part-way through (its month and time components pull in opposite "
+                        "directions)");
+                cursor = next;
+            }
+        }
+        return gs_array_result(args[0]->length, static_cast<int64_t>(row.size()), null_row,
+                               DRAKEN_TIMESTAMP64,
+                               static_cast<uint8_t>(TimestampUnit::MICROSECONDS), row.data());
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_generate_series_timestamp");
     }
 }
 

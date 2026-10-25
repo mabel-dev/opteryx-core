@@ -4390,9 +4390,18 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
     # could not fetch bytes it was planned to read. Raised as DatasetDataReadError
     # (a DatasetReadError, the class every non-native read path raises for the same
     # failure) because by this point the metadata was read and the plan was built.
+    # The native message names the failing object (bucket and path) and the transfer
+    # detail: operational information, logged in full and kept out of the user-facing
+    # text, as the Parquet pipeline's own read failures are.
     if errslot.code == 3:
         from opteryx.exceptions import DatasetDataReadError
-        return DatasetDataReadError(errslot.message() or "unknown read error")
+        from opteryx.logging import get_logger
+
+        get_logger(__name__).error("Native scan read error: %s", errslot.message() or "unknown read error")
+        return DatasetDataReadError(
+            "Unable to read data from storage, the read did not complete. "
+            "The cause has been logged."
+        )
     return RuntimeError(
         "[%d]: %s" % (errslot.code, errslot.message() or "unknown")
     )

@@ -130,6 +130,30 @@ Opteryx does not infer temporal types as eagerly as DuckDB.
 
 ---
 
+## `GENERATE_SERIES`
+
+Opteryx follows DuckDB's `generate_series` for the shared forms: `stop` is included when
+the cursor lands on it, a DATE bound yields TIMESTAMPs, a step pointing away from `stop`
+gives an empty series, and a month step clamps the day and carries the clamp forward
+(31 Jan, 28 Feb, 28 Mar). The scalar form returns an `ARRAY`; `FROM GENERATE_SERIES(...)`
+returns one row per value, and with no alias its relation and column are both named
+`generate_series`. The differences below are **deliberate**:
+
+- **`GENERATE_SERIES(n)` starts at 1;** DuckDB starts at 0. `GENERATE_SERIES(3)` is
+  `[1, 2, 3]`, and is the same as `GENERATE_SERIES(1, 3)`.
+- **A zero step is an error;** DuckDB returns an empty series. A zero step is a mistake
+  that an empty result would hide.
+- **The table form also accepts float and string arguments** (`GENERATE_SERIES(0.5, 10,
+  0.5)`, `GENERATE_SERIES('2024-01-01', '2025-01-01', '1mo')`); DuckDB rejects both. The
+  scalar form is integer-and-temporal only, and takes constants only.
+- **A series is limited to 1,000,000 elements in the scalar form;** use the table form,
+  which streams rows, for more.
+- **A NULL `TIMESTAMP` bound cannot currently be written.** The kernel returns a NULL
+  array for a NULL bound, as DuckDB does, but `CAST(NULL AS TIMESTAMP)` reaches the
+  function untyped and is refused (see *NULL handling*). A typed NULL integer works.
+
+---
+
 ## Ordering and `LIMIT`
 
 ### Tie-breaking among equal sort keys is unspecified

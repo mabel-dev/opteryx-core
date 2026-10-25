@@ -1865,7 +1865,7 @@
     "GENERATE_SERIES": {
         "catalog_name": "GENERATE_SERIES",
         "aliases": [],
-        "summary": "Build an array of evenly spaced integers.",
+        "summary": "Build an array of evenly spaced integers or timestamps.",
         "volatility": "immutable",
         "deterministic": true,
         "foldable": false,
@@ -1882,7 +1882,7 @@
                 "id": "GENERATE_SERIES_1",
                 "label": "GENERATE_SERIES(stop)",
                 "category": "Utility Functions",
-                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be integer CONSTANTS. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and, with an INTERVAL step, timestamps.",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be CONSTANTS. With DATE or TIMESTAMP bounds and an INTERVAL step - `GENERATE_SERIES(CAST('2025-01-01' AS TIMESTAMP), CAST('2025-01-02' AS TIMESTAMP), INTERVAL '5' MINUTE)` - the result is an ARRAY<TIMESTAMP>; a DATE bound is midnight of its day and a month step clamps the day and carries the clamp forward (31 Jan, 28 Feb, 28 Mar), as DuckDB does. A NULL integer bound gives a NULL array. The scalar form holds at most 1,000,000 elements. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and string dates. Without an alias the table spelling's column is named `generate_series`.",
                 "related_functions": [
                     "COALESCE",
                     "IFNULL",
@@ -1928,7 +1928,7 @@
                 "id": "GENERATE_SERIES_2",
                 "label": "GENERATE_SERIES(start, stop)",
                 "category": "Utility Functions",
-                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be integer CONSTANTS. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and, with an INTERVAL step, timestamps.",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be CONSTANTS. With DATE or TIMESTAMP bounds and an INTERVAL step - `GENERATE_SERIES(CAST('2025-01-01' AS TIMESTAMP), CAST('2025-01-02' AS TIMESTAMP), INTERVAL '5' MINUTE)` - the result is an ARRAY<TIMESTAMP>; a DATE bound is midnight of its day and a month step clamps the day and carries the clamp forward (31 Jan, 28 Feb, 28 Mar), as DuckDB does. A NULL integer bound gives a NULL array. The scalar form holds at most 1,000,000 elements. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and string dates. Without an alias the table spelling's column is named `generate_series`.",
                 "related_functions": [
                     "COALESCE",
                     "IFNULL",
@@ -1989,7 +1989,7 @@
                 "id": "GENERATE_SERIES_3",
                 "label": "GENERATE_SERIES(start, stop, step)",
                 "category": "Utility Functions",
-                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be integer CONSTANTS. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and, with an INTERVAL step, timestamps.",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be CONSTANTS. With DATE or TIMESTAMP bounds and an INTERVAL step - `GENERATE_SERIES(CAST('2025-01-01' AS TIMESTAMP), CAST('2025-01-02' AS TIMESTAMP), INTERVAL '5' MINUTE)` - the result is an ARRAY<TIMESTAMP>; a DATE bound is midnight of its day and a month step clamps the day and carries the clamp forward (31 Jan, 28 Feb, 28 Mar), as DuckDB does. A NULL integer bound gives a NULL array. The scalar form holds at most 1,000,000 elements. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and string dates. Without an alias the table spelling's column is named `generate_series`.",
                 "related_functions": [
                     "COALESCE",
                     "IFNULL",
@@ -2047,6 +2047,82 @@
                     {
                         "label": "step",
                         "type": "integer",
+                        "documentation": "Distance between consecutive values; may be negative, never zero. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "GENERATE_SERIES_TIMESTAMP",
+                "label": "GENERATE_SERIES(start, stop, step)",
+                "category": "Utility Functions",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be CONSTANTS. With DATE or TIMESTAMP bounds and an INTERVAL step - `GENERATE_SERIES(CAST('2025-01-01' AS TIMESTAMP), CAST('2025-01-02' AS TIMESTAMP), INTERVAL '5' MINUTE)` - the result is an ARRAY<TIMESTAMP>; a DATE bound is midnight of its day and a month step clamps the day and carries the clamp forward (31 Jan, 28 Feb, 28 Mar), as DuckDB does. A NULL integer bound gives a NULL array. The scalar form holds at most 1,000,000 elements. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and string dates. Without an alias the table spelling's column is named `generate_series`.",
+                "related_functions": [
+                    "COALESCE",
+                    "IFNULL",
+                    "IFNOTNULL",
+                    "NULLIF",
+                    "IIF"
+                ],
+                "return_type": "ARRAY<TIMESTAMP[US]>",
+                "returns": {
+                    "type": "ARRAY<TIMESTAMP[US]>",
+                    "documentation": "Returns the computed result as `ARRAY<TIMESTAMP[US]>`."
+                },
+                "arity": {
+                    "minimum": 3,
+                    "maximum": 3,
+                    "variadic": false
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 400.0
+                },
+                "parameters": [
+                    {
+                        "label": "start",
+                        "type": "temporal",
+                        "documentation": "First value of the series (a DATE is midnight of its day). Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "stop",
+                        "type": "temporal",
+                        "documentation": "Last value of the series, included when the step lands on it. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "step",
+                        "type": "interval",
                         "documentation": "Distance between consecutive values; may be negative, never zero. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,

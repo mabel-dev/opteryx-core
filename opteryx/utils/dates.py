@@ -71,10 +71,9 @@ def date_range(start_date, end_date, interval: tuple):
 
     `interval` is a ``(months, microseconds)`` pair - see `add_interval`.
 
-    The interval must move the cursor TOWARDS `end_date`, and it must move it at
-    all. An interval of zero, or one pointing the wrong way, describes a series
-    with no end: the loop below would run until the process died. Both are
-    refused up front, by name, rather than being allowed to hang.
+    An interval of zero describes a series with no end - the loop below would run
+    until the process died - and is refused up front, by name. An interval pointing
+    away from `end_date` yields an empty series.
     """
     start_date = parse_iso(start_date)
     end_date = parse_iso(end_date)
@@ -94,28 +93,30 @@ def date_range(start_date, end_date, interval: tuple):
             "reach its end."
         )
 
+    # A step pointing away from the end yields an EMPTY series (DuckDB, and the scalar
+    # spelling). The step is tested by applying it once rather than by reading the sign
+    # off the pair, because the two components can disagree (INTERVAL '1' MONTH minus a
+    # day carries a positive month and negative microseconds) and only the calendar
+    # knows which wins. An equal start and end is the one-element series either way.
+    if start_date == end_date:
+        yield start_date
+        return
+
     descending = start_date > end_date
-    if descending:
-        # A descending series needs a NEGATIVE interval, and vice versa. The step
-        # is tested by applying it once rather than by reading the sign off the
-        # pair, because the two components can disagree (INTERVAL '1' MONTH minus
-        # a day carries a positive month and negative microseconds) and only the
-        # calendar knows which wins.
-        if add_interval(start_date, interval) >= start_date:
-            raise InvalidFunctionParameterError(
-                "GENERATE_SERIES was given a start after its end and an INTERVAL that "
-                "does not count down. Swap the bounds, or negate the INTERVAL."
-            )
-    elif add_interval(start_date, interval) <= start_date:
-        raise InvalidFunctionParameterError(
-            "GENERATE_SERIES was given a start before its end and an INTERVAL that "
-            "does not count up. Swap the bounds, or negate the INTERVAL."
-        )
+    first = add_interval(start_date, interval)
+    if (first >= start_date) if descending else (first <= start_date):
+        return
 
     cursor = start_date
     while (cursor >= end_date) if descending else (cursor <= end_date):
         yield cursor
-        cursor = add_interval(cursor, interval)
+        following = add_interval(cursor, interval)
+        if (following >= cursor) if descending else (following <= cursor):
+            raise InvalidFunctionParameterError(
+                "GENERATE_SERIES: the INTERVAL step stopped advancing the series part-way "
+                "through (its month and time components pull in opposite directions)."
+            )
+        cursor = following
 
 
 def parse_iso(value):

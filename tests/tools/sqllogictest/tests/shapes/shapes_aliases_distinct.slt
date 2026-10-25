@@ -30,7 +30,7 @@ SELECT * FROM UNNEST(('foo', 'bar', 'baz', 'qux', 'corge', 'garply', 'waldo', 'f
 statement error UnsupportedSyntaxError
 SELECT * FROM testdata.astronauts LEFT JOIN UNNEST(missions) as s
 
-statement error UnnamedColumnError
+query shape 10 1
 SELECT * FROM generate_series(1, 10)
 
 query shape 10 1

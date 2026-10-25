@@ -782,6 +782,37 @@ static inline int64_t iv_days_in_month(int year, int month) noexcept {
     return ta_ymd_to_days(ny, nm, 1) - ta_ymd_to_days(year, month, 1);
 }
 
+// ONE timestamp (µs since epoch) + ONE interval component pair, months first with
+// day-clamping, then the µs component. This is steps 1-4 of the algorithm above
+// for a single value; interval_apply_to_temporal and GENERATE_SERIES (which steps
+// a cursor by repeated application, so Jan 31 +1mo = Feb 28, +1mo = Mar 28 —
+// DuckDB's drift, not a re-anchor on the start) both call it, so there is exactly
+// one definition of what "+ INTERVAL" means. `months` / `sub_us` are already
+// signed. Unchecked: the caller owns range validation.
+static inline int64_t interval_add_to_us(int64_t us, int64_t months, int64_t sub_us) noexcept {
+    const int64_t US_PER_DAY = 86400000000LL;
+    int64_t epoch_days = ta_floor_div(us, US_PER_DAY);
+    int64_t day_us = us - epoch_days * US_PER_DAY;
+
+    if (months != 0) {
+        int year, month, day;
+        ta_days_to_ymd(epoch_days, &year, &month, &day);
+        const int64_t month_index = static_cast<int64_t>(month - 1) + months;
+        const int64_t month_div   = ta_floor_div(month_index, 12);
+        year  = static_cast<int>(year + month_div);
+        month = static_cast<int>(month_index - month_div * 12 + 1);
+        const int64_t last_day = iv_days_in_month(year, month);
+        if (day > last_day) day = static_cast<int>(last_day);
+        epoch_days = ta_ymd_to_days(year, month, day);
+    }
+
+    const int64_t us_total = day_us + sub_us;
+    const int64_t carry_days = ta_floor_div(us_total, US_PER_DAY);
+    day_us = us_total - carry_days * US_PER_DAY;
+    epoch_days += carry_days;
+    return epoch_days * US_PER_DAY + day_us;
+}
+
 static inline VecResult interval_apply_to_temporal(
     const DrakenVector& temporal, const DrakenVector& interval,
     bool src_is_date, int src_unit, int signum)
@@ -816,43 +847,14 @@ static inline VecResult interval_apply_to_temporal(
             dst[i] = 0;
             continue;
         }
-        // 1. (epoch_days, day_us) from the source temporal value.
-        int64_t epoch_days, day_us;
-        if (src_is_date) {
-            epoch_days = static_cast<int64_t>(date_data[temporal.selection[i]]);
-            day_us = 0;
-        } else {
-            const int64_t us = ts_to_us(
-                ts_data[temporal.selection[i]],
-                static_cast<TimestampUnit>(src_unit));
-            epoch_days = ta_floor_div(us, US_PER_DAY);
-            day_us = us - epoch_days * US_PER_DAY;
-        }
+        // The source value as µs since epoch (a DATE is midnight of its day).
+        const int64_t src_us = src_is_date
+            ? static_cast<int64_t>(date_data[temporal.selection[i]]) * US_PER_DAY
+            : ts_to_us(ts_data[temporal.selection[i]], static_cast<TimestampUnit>(src_unit));
 
         const DrakenIntervalSlot& s = iv[interval.selection[i]];
-
-        // 2. months component with day-clamping (applied FIRST, per DuckDB).
-        const int64_t month_delta = s.months * static_cast<int64_t>(signum);
-        if (month_delta != 0) {
-            int year, month, day;
-            ta_days_to_ymd(epoch_days, &year, &month, &day);
-            const int64_t month_index = static_cast<int64_t>(month - 1) + month_delta;
-            const int64_t month_div   = ta_floor_div(month_index, 12);
-            year  = static_cast<int>(year + month_div);
-            month = static_cast<int>(month_index - month_div * 12 + 1);
-            const int64_t last_day = iv_days_in_month(year, month);
-            if (day > last_day) day = static_cast<int>(last_day);
-            epoch_days = ta_ymd_to_days(year, month, day);
-        }
-
-        // 3. sub-month component → carry into days. The slot's `us` field holds
-        //    MICROSECONDS, so it combines directly with day_us (also µs).
-        const int64_t us_total = day_us + s.us * static_cast<int64_t>(signum);
-        const int64_t carry_days = ta_floor_div(us_total, US_PER_DAY);
-        day_us = us_total - carry_days * US_PER_DAY;
-        epoch_days += carry_days;
-
-        dst[i] = epoch_days * US_PER_DAY + day_us;
+        dst[i] = interval_add_to_us(src_us, s.months * static_cast<int64_t>(signum),
+                                    s.us * static_cast<int64_t>(signum));
         if (out_null) iv_set_valid(out_null, i);
     }
 

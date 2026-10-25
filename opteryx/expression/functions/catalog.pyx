@@ -392,6 +392,8 @@ class FunctionCatalog:
                 return 0.0 if node_type == LogicalCategory.DATE else _INF
             if type_family == "timestamp":
                 return 0.0 if node_type == LogicalCategory.TIMESTAMP else _INF
+            if type_family == "interval":
+                return 0.0 if node_type == LogicalCategory.INTERVAL else _INF
 
             return 1.0
 
@@ -436,6 +438,7 @@ class FunctionCatalog:
                 "datetime": "TIMESTAMP",
                 "date": "DATE",
                 "timestamp": "TIMESTAMP",
+                "interval": "INTERVAL",
                 "array": "ARRAY<VARCHAR>",
             }
             # Families whose name is not a type a reader could write.
