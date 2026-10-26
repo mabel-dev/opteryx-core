@@ -401,8 +401,11 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                     # thread — not comparable to time_taken_s. cpu_time_ms is the CPU
                     # actually consumed (CLOCK_THREAD_CPUTIME_ID), also thread-summed,
                     # which is near-zero for an operator that's mostly blocked waiting.
+                    # Measured for EXPLAIN ANALYZE runs only (execute_native's
+                    # measure_operator_cpu); absent, not 0, for every other query.
                     node_stat["self_time"] = native["execution_time"]
-                    node_stat["cpu_time_ms"] = native["cpu_time"] / 1_000_000
+                    if "cpu_time" in native:
+                        node_stat["cpu_time_ms"] = native["cpu_time"] / 1_000_000
                     # Degree of parallelism the node's pipeline ran at. A width, not
                     # a duration — never summed, and meaningful next to cpu_time_ms
                     # (cpu/wall against dop is what shows a parked pool).

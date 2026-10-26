@@ -72,6 +72,9 @@ inline uint64_t telem_now_ns() {
 //
 // Do not reorder these reads, and do not put anything but the measured call between
 // t0 and t1.
+//
+// Read only by run_worker_body<true>, i.e. when Pipeline::measure_cpu is set
+// (EXPLAIN ANALYZE). The unmeasured body reads the wall clock alone.
 inline uint64_t telem_cpu_now_ns() {
     timespec ts;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
@@ -160,7 +163,9 @@ struct PipelineSkew {
 // One worker's full body: claim disjoint morsels from the source (dynamic assignment =
 // load balance), push each through the operator chain, sink into thread-LOCAL state
 // (lock-free), combine local into shared global once at the end. Callers enter
-// through run_worker below, never this directly.
+// through run_worker below, never this directly. kMeasureCpu is Pipeline::measure_cpu
+// lifted to compile time: the unmeasured body has no CPU clock read and no branch.
+template <bool kMeasureCpu>
 inline void run_worker_body(WorkerCtx* ctx) {
     Pipeline& p = *ctx->p;
     ErrCtx& e = (*ctx->errs)[static_cast<size_t>(ctx->w)];
@@ -213,7 +218,7 @@ inline void run_worker_body(WorkerCtx* ctx) {
             ss.calls.fetch_add(1, relaxed);
             ss.rows_in.fetch_add(m ? m->num_rows() : 0, relaxed);
             ss.bytes_in.fetch_add(telem_nbytes(m), relaxed);
-            uint64_t c0 = telem_cpu_now_ns();  // read order is fixed — see telem_cpu_now_ns
+            uint64_t c0 = kMeasureCpu ? telem_cpu_now_ns() : 0;  // read order is fixed — see telem_cpu_now_ns
             // TC_SINK: closes the "operator waterfall goes blank for a plan
             // with no Operator-role nodes" gap — a Source->Sink-only pipeline
             // (e.g. scan with a baked-in residual filter -> TopN/Sort) had
@@ -224,9 +229,9 @@ inline void run_worker_body(WorkerCtx* ctx) {
             uint64_t t0 = telem_now_ns();
             p.sink->sink(m, *ctx->gsink, *lsink, e);
             uint64_t t1 = telem_now_ns();
-            uint64_t c1 = telem_cpu_now_ns();
+            uint64_t c1 = kMeasureCpu ? telem_cpu_now_ns() : 0;
             ss.exec_ns.fetch_add(t1 - t0, relaxed);
-            ss.cpu_ns.fetch_add(c1 - c0, relaxed);
+            if constexpr (kMeasureCpu) ss.cpu_ns.fetch_add(c1 - c0, relaxed);
             trace_end(sh, m ? static_cast<uint32_t>(m->num_rows()) : 0,
                       static_cast<uint32_t>(telem_nbytes(m)));
             return;
@@ -237,18 +242,18 @@ inline void run_worker_body(WorkerCtx* ctx) {
         os.bytes_in.fetch_add(telem_nbytes(m), relaxed);
         MorselPtr out;
         while (true) {
-            uint64_t c0 = telem_cpu_now_ns();  // read order is fixed — see telem_cpu_now_ns
+            uint64_t c0 = kMeasureCpu ? telem_cpu_now_ns() : 0;  // read order is fixed — see telem_cpu_now_ns
             // Phase 1 of docs/EXECUTION_TRACING_DESIGN.md: TC_OP_EXEC span, same
-            // bracket as the always-on exec_ns/cpu_ns sums above — a no-op branch
+            // bracket as the exec_ns (and, when measured, cpu_ns) sums — a no-op branch
             // when OPTERYX_TRACE is off (trace_begin short-circuits on the disabled
             // gate before touching the clock).
             TraceHandle th = trace_begin(TC_OP_EXEC, os.node_id, 0, 0xFFFFFFFFu, ctx->w);
             uint64_t t0 = telem_now_ns();
             OpResult orr = p.operators[stage]->execute(m, *op_states[stage], out, e);
             uint64_t t1 = telem_now_ns();
-            uint64_t c1 = telem_cpu_now_ns();
+            uint64_t c1 = kMeasureCpu ? telem_cpu_now_ns() : 0;
             os.exec_ns.fetch_add(t1 - t0, relaxed);  // SELF time — excludes forward
-            os.cpu_ns.fetch_add(c1 - c0, relaxed);
+            if constexpr (kMeasureCpu) os.cpu_ns.fetch_add(c1 - c0, relaxed);
             trace_end(th, out ? static_cast<uint32_t>(out->num_rows()) : 0,
                       static_cast<uint32_t>(telem_nbytes(out)));
             if (e.code != 0) return;
@@ -266,7 +271,7 @@ inline void run_worker_body(WorkerCtx* ctx) {
     MorselPtr in;
     while (true) {
         if (p.halt != nullptr && p.halt->load(std::memory_order_relaxed)) break;
-        uint64_t c0 = telem_cpu_now_ns();  // read order is fixed — see telem_cpu_now_ns
+        uint64_t c0 = kMeasureCpu ? telem_cpu_now_ns() : 0;  // read order is fixed — see telem_cpu_now_ns
         // TC_SOURCE_PULL: same gap-closing rationale as TC_SINK above — this
         // is the ONLY per-morsel timing signal for a scan whose predicate is
         // baked in rather than a separate Operator (GCS/trampoline scans).
@@ -274,9 +279,9 @@ inline void run_worker_body(WorkerCtx* ctx) {
         uint64_t t0 = telem_now_ns();
         SourceResult sr = p.source->get_morsel(*ctx->gsrc, *lsrc, in, e);
         uint64_t t1 = telem_now_ns();
-        uint64_t c1 = telem_cpu_now_ns();
+        uint64_t c1 = kMeasureCpu ? telem_cpu_now_ns() : 0;
         src.exec_ns.fetch_add(t1 - t0, relaxed);
-        src.cpu_ns.fetch_add(c1 - c0, relaxed);
+        if constexpr (kMeasureCpu) src.cpu_ns.fetch_add(c1 - c0, relaxed);
         trace_end(sph, in ? static_cast<uint32_t>(in->num_rows()) : 0,
                   static_cast<uint32_t>(telem_nbytes(in)));
         if (e.code != 0) return;
@@ -321,7 +326,8 @@ inline void run_worker_body(WorkerCtx* ctx) {
 inline void run_worker(WorkerCtx* ctx) {
     ErrCtx& e = (*ctx->errs)[static_cast<size_t>(ctx->w)];
     try {
-        run_worker_body(ctx);
+        if (ctx->p->measure_cpu) run_worker_body<true>(ctx);
+        else                     run_worker_body<false>(ctx);
     } catch (const std::exception& ex) {
         ctx->err_text.assign("unhandled C++ exception in pipeline worker: ");
         ctx->err_text.append(ex.what());

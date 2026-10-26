@@ -169,7 +169,8 @@ def _simplify_disjunction(condition: Expression) -> Optional[Expression]:
     if common_keys:
         # If any branch is exactly the common keys, the per-branch remainder is
         # empty: `J AND (... OR TRUE OR ...)` collapses to `J`.
-        common_preds = [branch_clauses[0][k] for k in sorted(common_keys)]
+        # First-branch order, not sorted(): a key ends in random column identities.
+        common_preds = [v for k, v in branch_clauses[0].items() if k in common_keys]
         remainder_nodes: List[Expression] = []
         any_empty_remainder = False
         for clause in branch_clauses:

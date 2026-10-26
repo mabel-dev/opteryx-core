@@ -383,7 +383,7 @@ def _replace_every(root, target, make_replacement):
     column, this one returns 2". Every position gets its own replacement node.
 
     A position can also hold a COPY of the subquery rather than the object itself.
-    The binder's `post_bind` (binder/traversal.py) swaps each repeat of an already
+    The binder's `post_bind` (compiled/planner/binder_core.pyx) swaps each repeat of an already
     bound calculated expression for a `.copy()` of the first one, and `Node.copy`
     deep-copies the embedded plan WITH ITS NODE IDS. Decorrelating that copy as a
     second subquery grafted a second plan whose nids collide with the first - one

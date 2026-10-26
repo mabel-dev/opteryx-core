@@ -18,7 +18,7 @@ using rugo_text::U_US;
 
 namespace {
 
-enum class NK : uint8_t { Scalar, Struct, List, Map, Repeated };
+enum class NK : uint8_t { Scalar, Struct, List, Map, Repeated, Missing };
 enum class SK : uint8_t { Bool, Int, UInt, F32, F64, String, Binary, Date, Timestamp, Time, Decimal, Uuid };
 
 struct Node {
@@ -64,14 +64,60 @@ int parse_unit(const std::string& lt, size_t open) {
 struct Plan {
     std::string name;
     Node root;
-    int32_t n_leaves = 0;
+    int32_t n_leaves = 0;                 // leaves the plan reads (== file_leaves unless a declared shape drops some)
+    int32_t file_leaves = 0;              // leaves the file's column has, in schema (DFS) order
+    std::vector<int32_t> used_index;      // plan leaf k -> its position among the file's leaves
 };
 
 namespace {
 
+int32_t count_leaves(const SchemaElement& e) {
+    if (e.children.empty()) return 1;
+    int32_t n = 0;
+    for (const SchemaElement& c : e.children) n += count_leaves(c);
+    return n;
+}
+
+const char* declared_word(int kind) {
+    return kind == 1 ? "a struct" : kind == 2 ? "a list" : kind == 3 ? "a map" : "a scalar";
+}
+
 struct Builder {
     const std::string& column;
-    int32_t leaf_ctr = 0;
+    int32_t leaf_ctr = 0;     // leaves the plan reads so far
+    int32_t file_ctr = 0;     // the file's leaves passed so far (schema DFS order)
+    std::vector<int32_t> used_index;
+    // The shape the TABLE declares (pre-order) and, per node, where its subtree ends. Null = none: the
+    // file's own names and structure are the schema.
+    const std::vector<DeclaredNode>* decl = nullptr;
+    std::vector<int> dend;
+
+    int end_of(int i) {
+        int j = i + 1;
+        for (int c = 0; c < (*decl)[static_cast<size_t>(i)].n_children; ++c) j = end_of(j);
+        dend[static_cast<size_t>(i)] = j;
+        return j;
+    }
+
+    void take_leaf() {
+        used_index.push_back(file_ctr++);
+        ++leaf_ctr;
+    }
+
+    // A file node against the declared node `di`: the same field (id) and the same kind of thing.
+    void check_declared(const SchemaElement& e, int di) {
+        const DeclaredNode& d = (*decl)[static_cast<size_t>(di)];
+        if (e.field_id < 0)
+            fail(column, "the file carries no field id for '" + e.full_name + "', so it cannot be matched to the "
+                         "table's field '" + d.name + "' (id " + std::to_string(d.field_id) + ")");
+        if (e.field_id != d.field_id)
+            fail(column, "the table declares '" + d.name + "' as field id " + std::to_string(d.field_id) +
+                         " but the file has id " + std::to_string(e.field_id) + " at '" + e.full_name + "'");
+        const int have = e.children.empty() ? 0 : e.logical_type == "array" ? 2 : e.logical_type == "map" ? 3 : 1;
+        if (have != d.kind)
+            fail(column, std::string("the table declares '") + d.name + "' (id " + std::to_string(d.field_id) + ") as " +
+                         declared_word(d.kind) + " but the file has " + declared_word(have));
+    }
 
     void scalar(const SchemaElement& e, Node& n) {
         const std::string& lt = e.logical_type;
@@ -126,8 +172,10 @@ struct Builder {
     }
 
     // `acc_def` / `acc_rep`: levels contributed by everything ABOVE `e`.
-    Node build(const SchemaElement& e, int32_t acc_def, int32_t acc_rep) {
+    Node build(const SchemaElement& e, int32_t acc_def, int32_t acc_rep, int di = -1) {
         if (e.repetition_type == 2) {
+            if (di >= 0)
+                fail(column, "'" + e.full_name + "' is a bare REPEATED field (a legacy list), not the list the table declares");
             // A bare REPEATED field (legacy list). No null state of its own: absent
             // means an empty list.
             Node r;
@@ -141,12 +189,13 @@ struct Builder {
             r.n_leaves = leaf_ctr - r.first_leaf;
             return r;
         }
-        return body(e, acc_def, acc_rep, false);
+        return body(e, acc_def, acc_rep, false, di);
     }
 
     // `counted`: the level of `e` itself is already in acc_def (a repeated node's
     // element, or a container's inner element whose repeated parent was counted).
-    Node body(const SchemaElement& e, int32_t acc_def, int32_t acc_rep, bool counted) {
+    Node body(const SchemaElement& e, int32_t acc_def, int32_t acc_rep, bool counted, int di = -1) {
+        if (di >= 0) check_declared(e, di);
         Node n;
         n.key = member_key(e.name);
         n.def = counted ? acc_def : acc_def + (e.repetition_type == 1 ? 1 : 0);
@@ -154,7 +203,7 @@ struct Builder {
 
         if (e.children.empty()) {
             scalar(e, n);
-            ++leaf_ctr;
+            take_leaf();
             n.n_leaves = 1;
             return n;
         }
@@ -167,17 +216,20 @@ struct Builder {
             const SchemaElement& rp = e.children[0];
             n.rep_def = n.def + 1;
             n.rep_level = acc_rep + 1;
+            if (di >= 0 && rp.children.size() != 1)
+                fail(column, "LIST '" + e.full_name + "' is not the standard group { repeated group { element } } "
+                             "shape the table's list is read through");
             if (rp.children.empty()) {
                 Node el;                       // legacy 2-level list: the repeated leaf IS the element
                 el.key = member_key(rp.name);
                 el.def = n.rep_def;
                 el.first_leaf = leaf_ctr;
                 scalar(rp, el);
-                ++leaf_ctr;
+                take_leaf();
                 el.n_leaves = 1;
                 n.children.push_back(std::move(el));
             } else if (rp.children.size() == 1) {
-                n.children.push_back(build(rp.children[0], n.rep_def, n.rep_level));
+                n.children.push_back(build(rp.children[0], n.rep_def, n.rep_level, di >= 0 ? di + 1 : -1));
             } else {                           // legacy: the repeated group IS a struct element
                 Node el;
                 el.kind = NK::Struct;
@@ -198,28 +250,67 @@ struct Builder {
             const SchemaElement& kv = e.children[0];
             n.rep_def = n.def + 1;
             n.rep_level = acc_rep + 1;
-            Node key = build(kv.children[0], n.rep_def, n.rep_level);
+            if (di >= 0 && kv.children.size() != 2)
+                fail(column, "MAP '" + e.full_name + "' has no value the table's map is read through");
+            Node key = build(kv.children[0], n.rep_def, n.rep_level, di >= 0 ? di + 1 : -1);
             if (key.kind != NK::Scalar || key.sk != SK::String)
                 fail(column, "MAP '" + e.full_name + "' has a non-string key ('" +
                              kv.children[0].logical_type + "' / '" + kv.children[0].physical_type +
                              "'); JSON object keys must be strings");
             n.children.push_back(std::move(key));
             if (kv.children.size() == 2)
-                n.children.push_back(build(kv.children[1], n.rep_def, n.rep_level));
+                n.children.push_back(build(kv.children[1], n.rep_def, n.rep_level, di >= 0 ? dend[static_cast<size_t>(di) + 1] : -1));
         } else {
             n.kind = NK::Struct;
-            for (const SchemaElement& c : e.children)
-                n.children.push_back(build(c, n.def, acc_rep));
+            if (di < 0) {
+                for (const SchemaElement& c : e.children)
+                    n.children.push_back(build(c, n.def, acc_rep));
+            } else {
+                // The table's members, in the table's order and under the table's names, each matched
+                // to the file's field of the same ID. A member the file lacks (added after it was
+                // written) is JSON null; a file field the table no longer has is not read at all.
+                const int32_t base = file_ctr;
+                std::vector<int32_t> start(e.children.size() + 1, base);
+                for (size_t j = 0; j < e.children.size(); ++j) start[j + 1] = start[j] + count_leaves(e.children[j]);
+                int ci = di + 1;
+                for (int k = 0; k < (*decl)[static_cast<size_t>(di)].n_children; ++k) {
+                    const DeclaredNode& dc = (*decl)[static_cast<size_t>(ci)];
+                    size_t hit = e.children.size();
+                    for (size_t j = 0; j < e.children.size(); ++j)
+                        if (e.children[j].field_id >= 0 && e.children[j].field_id == dc.field_id) { hit = j; break; }
+                    if (hit == e.children.size()) {
+                        for (const SchemaElement& c : e.children)
+                            if (c.field_id < 0)
+                                fail(column, "the file carries no field id for '" + c.full_name +
+                                             "', so its fields cannot be matched to the table's");
+                        Node m;
+                        m.kind = NK::Missing;
+                        m.key = member_key(dc.name);
+                        m.first_leaf = leaf_ctr;
+                        n.children.push_back(std::move(m));
+                    } else {
+                        file_ctr = start[hit];
+                        Node c = build(e.children[hit], n.def, acc_rep, ci);
+                        c.key = member_key(dc.name);
+                        n.children.push_back(std::move(c));
+                    }
+                    ci = dend[static_cast<size_t>(ci)];
+                }
+                file_ctr = start[e.children.size()];
+            }
         }
         n.n_leaves = leaf_ctr - n.first_leaf;
+        if (di >= 0 && n.n_leaves == 0)
+            fail(column, "none of the fields the table declares for '" + e.full_name +
+                         "' is in this file, so whether it is NULL cannot be told");
         return n;
     }
 };
 
 }  // namespace
 
-std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& name,
-                                       std::string& err) {
+std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& name, std::string& err,
+                                       const std::vector<DeclaredNode>* declared) {
     const SchemaElement* top = nullptr;
     for (const SchemaElement& e : fs.schema)
         if (e.name == name) { top = &e; break; }
@@ -231,10 +322,19 @@ std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& n
     }
     try {
         Builder b{name};
+        int di = -1;
+        if (declared != nullptr && !declared->empty()) {
+            b.decl = declared;
+            b.dend.assign(declared->size(), 0);
+            b.end_of(0);
+            di = 0;
+        }
         auto plan = std::make_shared<Plan>();
         plan->name = name;
-        plan->root = b.body(*top, 0, 0, false);
+        plan->root = b.body(*top, 0, 0, false, di);
         plan->n_leaves = b.leaf_ctr;
+        plan->file_leaves = count_leaves(*top);
+        plan->used_index = std::move(b.used_index);
         return plan;
     } catch (const std::runtime_error& ex) {
         err = ex.what();
@@ -243,6 +343,8 @@ std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& n
 }
 
 size_t leaf_count(const Plan& plan) { return static_cast<size_t>(plan.n_leaves); }
+size_t file_leaf_count(const Plan& plan) { return static_cast<size_t>(plan.file_leaves); }
+const std::vector<int32_t>& used_leaf_index(const Plan& plan) { return plan.used_index; }
 
 // ── assembly ────────────────────────────────────────────────────────────────
 
@@ -505,6 +607,9 @@ struct Assembler {
             o.push_back(']');
             return;
         }
+        case NK::Missing:
+            o.append("null");     // a member the table declares and this file does not have
+            return;
         case NK::Map: {
             const Leaf& f = L[n.first_leaf];
             if (f.pos >= f.n) bad("levels exhausted before the row ended");
@@ -620,15 +725,17 @@ bool has_prefix(const std::string& s, const std::string& name) {
 
 }  // namespace
 
-bool group_renderable(const FileStats& fs, const std::string& name, std::string& err) {
-    return nested::build_plan(fs, name, err) != nullptr;
+bool group_renderable(const FileStats& fs, const std::string& name, std::string& err,
+                      const std::vector<DeclaredNode>* declared) {
+    return nested::build_plan(fs, name, err, declared) != nullptr;
 }
 
 bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                         const std::vector<std::string>& projected,
                         std::vector<std::string>& names,
                         std::vector<std::vector<ColumnStats>>& stats,
-                        std::shared_ptr<const NestedSpec>& nested_out, std::string& err) {
+                        std::shared_ptr<const NestedSpec>& nested_out, std::string& err,
+                        const std::vector<std::vector<DeclaredNode>>* declared) {
     names.clear();
     stats.assign(rg_idxs.size(), {});
     nested_out.reset();
@@ -646,7 +753,8 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
             if (has_prefix(cs.name, projected[k])) prefixed = true;
         }
         if (exact || !prefixed) continue;
-        plans[k] = nested::build_plan(fs, projected[k], err);
+        plans[k] = nested::build_plan(fs, projected[k], err,
+                                      declared != nullptr && k < declared->size() ? &(*declared)[k] : nullptr);
         if (!plans[k]) return false;
         any_group = true;
     }
@@ -682,6 +790,8 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
             g.first = row_names.size();
             g.plan = plans[k];
             long prev = -1;
+            size_t group_first_chunk = 0;
+            size_t group_chunks = 0;
             for (size_t ci = 0; ci < rg.columns.size(); ++ci) {
                 const ColumnStats& cs = rg.columns[ci];
                 if (cs.name != projected[k] && !has_prefix(cs.name, projected[k])) continue;
@@ -689,18 +799,24 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                     err = "column '" + projected[k] + "': its leaf chunks are not contiguous in the row group";
                     return false;
                 }
+                if (prev < 0) group_first_chunk = ci;
                 prev = static_cast<long>(ci);
-                row_names.push_back(cs.name);
-                orig.push_back(static_cast<uint32_t>(k));
-                out.push_back(cs);
+                ++group_chunks;
             }
-            g.count = row_names.size() - g.first;
-            if (g.count != nested::leaf_count(*plans[k])) {
-                err = "column '" + projected[k] + "': the row group has " + std::to_string(g.count) +
+            if (group_chunks != nested::file_leaf_count(*plans[k])) {
+                err = "column '" + projected[k] + "': the row group has " + std::to_string(group_chunks) +
                       " leaf chunks but the schema declares " +
-                      std::to_string(nested::leaf_count(*plans[k]));
+                      std::to_string(nested::file_leaf_count(*plans[k]));
                 return false;
             }
+            // The leaves the plan reads, in the PLAN's order (the order assemble() takes them in): all
+            // of the group's chunks, unless a declared shape leaves some of the file's fields out.
+            for (int32_t file_leaf : nested::used_leaf_index(*plans[k])) {
+                row_names.push_back(rg.columns[group_first_chunk + static_cast<size_t>(file_leaf)].name);
+                orig.push_back(static_cast<uint32_t>(k));
+                out.push_back(rg.columns[group_first_chunk + static_cast<size_t>(file_leaf)]);
+            }
+            g.count = row_names.size() - g.first;
             groups.push_back(std::move(g));
         }
         if (m == 0) {

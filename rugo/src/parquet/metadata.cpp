@@ -442,8 +442,7 @@ static SchemaElement ParseSchemaElement(TInput &in) {
       break;
     }
     case 9: { // field_id
-      int32_t field_id = ReadI32(in);
-      (void)field_id;
+      elem.field_id = ReadI32(in);
       break;
     }
     case 10: { // logicalType (newer format)

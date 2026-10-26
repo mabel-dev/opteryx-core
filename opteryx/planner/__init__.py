@@ -733,13 +733,12 @@ def execute_logical_plan(
     if telemetry is None:
         telemetry = QueryTelemetry(query_id)
 
-    # Determine execution context for binder
+    # Determine execution context for binder. `connection` is a QuerySession (or
+    # None); a bare ExecutionContext is not accepted.
     if connection is None:
         conn_context = ExecutionContext(memberships=[])
-    elif "context" in dir(connection):
-        conn_context = connection.context
     else:
-        conn_context = connection
+        conn_context = connection.context
 
     # The query's planning context — see query_planner. The caller built the plan
     # with it (`LogicalPlan(plan_context)`: the context mints the plan's node ids),

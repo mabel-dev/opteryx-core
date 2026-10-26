@@ -94,8 +94,10 @@ cdef extern from "engine/parquet_stats_coverage.hpp" namespace "opteryx::engine"
 
 
 cdef extern from "nested_json.hpp" namespace "rugo":
-    # Can every leaf of STRUCT/MAP column `name` be rendered as JSON text? (footer only)
-    bint group_renderable(const FileStats& fs, const string& name, string& err) except +
+    # Can every leaf of STRUCT/MAP/LIST column `name` be rendered as JSON text - and, with `declared`
+    # (a table's declared shape, or NULL), matched to it by field id? (footer only)
+    bint group_renderable(const FileStats& fs, const string& name, string& err,
+                          const vector[DeclaredNode]* declared) except +
 
 
 cdef bint _has_group_chunks(const RowGroupStats* rg, const string& name):
@@ -3607,6 +3609,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     array_columns=None,
     logical_coerce=None,
     widen_types=None,
+    declared_shapes=None,
     hash_key_columns=None,
     length_only_columns=None,
     pool=None,
@@ -3720,6 +3723,14 @@ cpdef NativeScanPlan open_native_scan_plan(
     else:
         for _sti in range(len(column_names)):
             plan.array_columns.push_back(0)
+    # A catalog table's declared shape for each nested column ({name: NestedField.flatten()}), parallel
+    # to column_names; an empty entry means none.
+    cdef vector[DeclaredNode] _empty_declared
+    for _sti in range(len(column_names)):
+        _col = column_names[_sti]
+        _col = _col.decode("utf-8") if isinstance(_col, bytes) else _col
+        _flat = declared_shapes.get(_col) if declared_shapes is not None else None
+        plan.declared_shapes.push_back(_declared_nodes(_flat) if _flat is not None else _empty_declared)
 
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
@@ -4110,8 +4121,22 @@ cdef bint _int_file_reads_as_declared(const string& stored, const string& declar
     return fl == 1 and tl == 0 and tr > fr
 
 
+cdef vector[DeclaredNode] _declared_nodes(list flat):
+    """A NestedField.flatten() list as the nodes matches_declared_shape verifies against."""
+    cdef vector[DeclaredNode] out
+    cdef DeclaredNode node
+    for kind, field_id, name, n_children in flat:
+        node.kind = {"scalar": 0, "struct": 1, "list": 2, "map": 3}[kind]
+        node.field_id = field_id
+        node.name = (<str>name).encode("utf-8")
+        node.n_children = n_children
+        out.push_back(node)
+    return out
+
+
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=None,
-                                filesystem=None, footer_bytes_cache=None, dict absent=None):
+                                filesystem=None, footer_bytes_cache=None, dict absent=None,
+                                declared_shapes=None):
     """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
 
     Returns None when the scan is admitted, otherwise a one-line reason naming what
@@ -4126,6 +4151,12 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
       - has a footer physical/logical type that provably decodes to a shape the
         native Source can build (io_pipeline.hpp direct_kind_for + its Stage-4a
         logical gate, plus the Source's own pool-path decoders).
+
+    ``declared_shapes`` ({column name: NestedField.flatten() list}) is the shape a TABLE declares for
+    its nested columns. The scan renders those columns with the TABLE's member names, matching each
+    file's fields by field id (a member the file lacks is JSON null); this gate raises
+    NotImplementedError naming the field and the file for one that cannot be matched - no field ids,
+    or a different kind of thing under an id (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md §3.3, option (c)).
 
     Schema evolution: with ``absent`` (a dict the caller owns) a projected column a
     file does not hold is RECORDED instead of refused — ``absent[path]`` is the list
@@ -4216,6 +4247,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     # max_repetition_level >= 1 is the structural proof it really is a list.
     cdef string s_array = b"array<"
     cdef vector[string] wanted
+    cdef vector[DeclaredNode] declared_nodes
     cdef list kinds = []
     cdef list declared_types = []
     cdef vector[string] declared
@@ -4253,6 +4285,10 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
         request_sig.append(<string>(<str>expected_kinds[k]).encode("utf-8"))
         request_sig.push_back(0)
     request_sig.append(<string>(b"A" if absent is not None else b"R"))
+    if declared_shapes:
+        # The table's declared shapes are inputs to the per-file walk too (a file that passed
+        # against one declaration must not be waved through against another).
+        request_sig.append(<string>(<str>repr(sorted(declared_shapes.items()))).encode("utf-8"))
 
     # Transport eligibility, before any footer work: local, or remote-and-signable.
     # An unsignable remote path fails the gate — the pipeline's libcurl fetches carry
@@ -4496,11 +4532,21 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                     # (rugo/src/parquet/nested_json.hpp) when its leaves are renderable;
                     # otherwise the gate refuses and the trampoline raises loudly.
                     if kinds[k] == "varchar" and _has_group_chunks(rgp, wanted[<size_t>k]):
-                        if rg_i == 0 and not group_renderable(fsp[0], wanted[<size_t>k], group_err):
-                            # No other path can decode a STRUCT/MAP, so refuse HERE with the
-                            # precise reason rather than fall to a trampoline that cannot.
-                            raise NotImplementedError(
-                                f"cannot read {path}: {group_err.decode('utf-8')}")
+                        if rg_i == 0:
+                            declared_nodes.clear()
+                            if declared_shapes is not None:
+                                flat = declared_shapes.get(wanted[<size_t>k].decode("utf-8"))
+                                if flat is not None:
+                                    declared_nodes = _declared_nodes(flat)
+                            if not group_renderable(fsp[0], wanted[<size_t>k], group_err,
+                                                    &declared_nodes if declared_nodes.size() != 0 else NULL):
+                                # No other path can decode a STRUCT/MAP, so refuse HERE with the
+                                # precise reason rather than fall to a trampoline that cannot. With a
+                                # declared shape this is also where a file that cannot be matched to
+                                # the table's fields (no field ids, a different kind under an id)
+                                # is refused.
+                                raise NotImplementedError(
+                                    f"cannot read {path}: {group_err.decode('utf-8')}")
                         continue
                     if absent is None:
                         return (f"column '{wanted[<size_t>k].decode('utf-8', 'replace')}' is not in "

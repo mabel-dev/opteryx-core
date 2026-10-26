@@ -39,6 +39,8 @@ def _column_type(column: dict) -> ColumnType:
     if kind == _LOGICAL_TIMESTAMP:
         return _lt.TIMESTAMP(_lt.TimestampUnit.MICROSECONDS)
     if kind == _LOGICAL_TIME:
+        # Declared TIME, as READ_PARQUET declares a time column; the scan returns INT64 microseconds
+        # since midnight carrying the TIME logical type (parquet's convention).
         return _lt.TIME(_lt.TimestampUnit.MICROSECONDS)
     if kind == _LOGICAL_DECIMAL:
         return _lt.DECIMAL(column["precision"], column["scale"])

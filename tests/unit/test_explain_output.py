@@ -97,13 +97,28 @@ def test_explain_analyze_adds_stats_columns():
 
 def test_explain_analyze_has_cpu_and_dop():
     """cpu_ms/dop are the D1 active-vs-wait surface: time_ms is WALL, cpu_ms is
-    CPU actually burned, and both are summed across `dop` workers. The engine has
-    always recorded cpu_ns (OpStats, always-on) -- this asserts it is rendered."""
+    CPU actually burned, and both are summed across `dop` workers. The engine
+    records cpu_ns (OpStats) for EXPLAIN ANALYZE runs -- this asserts it is rendered."""
     _, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
     scan_idx = next(i for i, line in enumerate(data["tree"]) if "Parquet Read" in line)
     assert data["dop"][scan_idx] >= 1, data["dop"]
     # a scan that read real rows burned real CPU
     assert data["cpu_ms"][scan_idx] > 0.0, data["cpu_ms"]
+
+
+def test_plain_query_does_not_measure_operator_cpu():
+    """The per-operator CPU clock is a syscall per read on x86, so only EXPLAIN
+    ANALYZE arms it: an ordinary query's readings carry wall time and no cpu_time
+    (absent, not 0 -- an unmeasured 0 would read as "burned no CPU")."""
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(
+        "SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1"
+    ):
+        pass
+    stats = session._telemetry._reading["native_op_stats"]
+    assert stats, stats
+    assert all("execution_time" in s for s in stats.values()), stats
+    assert all("cpu_time" not in s for s in stats.values()), stats
 
 
 def test_explain_unknown_estimate_is_null_not_zero():

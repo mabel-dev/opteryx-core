@@ -66,7 +66,7 @@ from opteryx.compiled.morsel_queue cimport PyMorselQueue, MorselQueue
 from libcpp.vector cimport vector as cppvector
 from libcpp.pair cimport pair
 from libcpp.string cimport string
-from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline, ParquetBloomProbe
+from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline, ParquetBloomProbe, DeclaredNode
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterMap
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 
@@ -366,6 +366,7 @@ cdef extern from "engine/native_orc_scan_source.hpp" namespace "opteryx::engine"
         cppvector[uint32_t] reader_scale
         cppvector[int32_t] reader_child_types
         cppvector[uint32_t] reader_array_depths
+        cppvector[cppvector[DeclaredNode]] reader_declared
         cppvector[uint8_t] reader_nullable
         cppvector[string] decode_names
         cppvector[string] out_identities
@@ -537,6 +538,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         Engine() except +
         void set_current_identity(string s)
         void set_current_display_name(string s)
+        void set_measure_operator_cpu(bint on)
+        bint measures_operator_cpu()
         cppvector[OpReading] collect_op_stats()
         cppvector[PipelineReading] collect_pipeline_stats()
         cppvector[LoopReading] collect_loop_stats()
@@ -645,7 +648,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[uint8_t]* hash_key_columns,
                                     const cppvector[uint8_t]* array_columns,
                                     const cppvector[int]* widen_types,
-                                    int64_t row_limit)
+                                    int64_t row_limit,
+                                    const cppvector[cppvector[DeclaredNode]]* declared_shapes)
         void set_latmat_scan_source(size_t p, ParquetIOPipeline* p1_pipeline,
                                     const ParquetFooterMap* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -657,6 +661,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[int]* p1_logical_coerce,
                                     const cppvector[uint8_t]* p1_hash_key_columns,
                                     const cppvector[uint8_t]* p1_array_columns,
+                                    const cppvector[cppvector[DeclaredNode]]* p1_declared_shapes,
                                     ParquetIOPipeline* p2_pipeline,
                                     const cppvector[string]* p2_column_names,
                                     CppMemoryPool* p2_pool,
@@ -665,6 +670,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[int]* p2_logical_coerce,
                                     const cppvector[uint8_t]* p2_hash_key_columns,
                                     const cppvector[uint8_t]* p2_array_columns,
+                                    const cppvector[cppvector[DeclaredNode]]* p2_declared_shapes,
                                     void* pred_fn, void* pred_ctx,
                                     cppvector[int] pred_col_to_p1,
                                     int sort_p1_index, bint sort_ascending,
@@ -2692,13 +2698,15 @@ cdef class OrcScanPlan:
         cdef uint32_t precision, scale
         cdef int32_t child
         cdef uint32_t depth
+        cdef cppvector[DeclaredNode] declared_nodes
+        cdef DeclaredNode node
         cdef uint8_t nullable
         for path in files:
             self.spec.files.push_back((<str>path).encode("utf-8"))
         for url in urls:
             self.spec.urls.push_back((<str>url).encode("utf-8"))
         self.spec.auth_header = auth_header.encode("utf-8")
-        for name, field_id_obj, dtype_obj, precision_obj, scale_obj, nullable_obj, child_obj, depth_obj in reader_columns:
+        for name, field_id_obj, dtype_obj, precision_obj, scale_obj, nullable_obj, child_obj, depth_obj, declared_obj in reader_columns:
             field_id = -1 if field_id_obj is None else field_id_obj
             dtype = dtype_obj
             precision = precision_obj
@@ -2713,6 +2721,15 @@ cdef class OrcScanPlan:
             self.spec.reader_scale.push_back(scale)
             self.spec.reader_child_types.push_back(child)
             self.spec.reader_array_depths.push_back(depth)
+            declared_nodes.clear()
+            if declared_obj is not None:
+                for kind_name, node_id, node_name, node_children in declared_obj:
+                    node.kind = {"scalar": 0, "struct": 1, "list": 2, "map": 3}[kind_name]
+                    node.field_id = node_id
+                    node.name = (<str>node_name).encode("utf-8")
+                    node.n_children = node_children
+                    declared_nodes.push_back(node)
+            self.spec.reader_declared.push_back(declared_nodes)
             self.spec.reader_nullable.push_back(nullable)
         for name in decode_names:
             self.spec.decode_names.push_back((<str>name).encode("utf-8"))
@@ -2895,16 +2912,26 @@ cdef class NativePlan:
         cdef string s = (name if isinstance(name, bytes) else (<str>name).encode("utf-8"))
         self._e.set_current_display_name(s)
 
+    def set_measure_operator_cpu(self, bint on):
+        """Record each operator's CPU time (OpStats::cpu_ns) during ``run``. Off by
+        default: the per-thread CPU clock is read twice per operator call, a real
+        syscall on x86, so only EXPLAIN ANALYZE (its one reader) arms it. Call before
+        execution."""
+        self._e.set_measure_operator_cpu(on)
+
     def collect_op_stats(self):
         """Harvest the per-operator execution telemetry accumulated during ``run``.
         Returns a list of dicts, one per source/operator/sink; callers sum by
         ``identity`` (several rows can share one plan-node identity). Must be called
-        AFTER the run has drained — the counters accumulate as morsels flow."""
+        AFTER the run has drained — the counters accumulate as morsels flow.
+        ``cpu_time`` is present only when the run measured it
+        (set_measure_operator_cpu): an unmeasured 0 would read as "burned no CPU"."""
         cdef cppvector[OpReading] rows = self._e.collect_op_stats()
         cdef OpReading r
+        cdef bint with_cpu = self._e.measures_operator_cpu()
         out = []
         for r in rows:
-            out.append({
+            row = {
                 "identity": r.identity.decode("utf-8"),
                 "role": r.role.decode("utf-8"),
                 "calls": int(r.calls),
@@ -2913,13 +2940,15 @@ cdef class NativePlan:
                 "bytes_in": int(r.bytes_in),
                 "bytes_out": int(r.bytes_out),
                 "execution_time": int(r.exec_ns),
-                "cpu_time": int(r.cpu_ns),
                 # Breaker cost: the two Sink calls that run after the morsels stop.
                 # Zero except on sinks; see OpStats::combine_ns/finalize_ns.
                 "combine_time": int(r.combine_ns),
                 "finalize_time": int(r.finalize_ns),
                 "dop": int(r.dop),
-            })
+            }
+            if with_cpu:
+                row["cpu_time"] = int(r.cpu_ns)
+            out.append(row)
         return out
 
     def collect_pipeline_stats(self):
@@ -3269,7 +3298,7 @@ cdef class NativePlan:
                                        &splan.decimal_columns, &splan.logical_coerce,
                                        &splan.hash_key_columns, &splan.array_columns,
                                        &splan.widen_types,
-                                       c_row_limit)
+                                       c_row_limit, &splan.declared_shapes)
         # Remote bloom membership: the probes planning attached to this plan's
         # remote work items, issued by the Source in its first fetch round.
         if not splan.bloom_probes.empty():
@@ -3320,10 +3349,10 @@ cdef class NativePlan:
             p, p1_plan.pipeline_ptr, p1_plan.footer_map, &p1_plan.work_items,
             &p1_plan.column_names, p1_plan.in_flight_limit, p1_pool,
             &p1_plan.string_types, &p1_plan.decimal_columns, &p1_plan.logical_coerce,
-            &p1_plan.hash_key_columns, &p1_plan.array_columns,
+            &p1_plan.hash_key_columns, &p1_plan.array_columns, &p1_plan.declared_shapes,
             p2_plan.pipeline_ptr, &p2_plan.column_names, p2_pool,
             &p2_plan.string_types, &p2_plan.decimal_columns, &p2_plan.logical_coerce,
-            &p2_plan.hash_key_columns, &p2_plan.array_columns,
+            &p2_plan.hash_key_columns, &p2_plan.array_columns, &p2_plan.declared_shapes,
             <void*>pred_fn, <void*>pred_ctx, c_pred_map,
             sort_p1_index, sort_ascending, sort_nulls_first, topn_limit,
             c_from_p1, c_from_p2, c_names)

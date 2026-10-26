@@ -41,7 +41,7 @@ from opteryx.models.dataset_format import AVRO
 from opteryx.models.dataset_format import ORC
 from opteryx.models.dataset_format import manifest_format
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import SchemaColumn, RelationSchema, ColumnDescriptor, RelationDescriptor
+from opteryx.types.schema import SchemaColumn, RelationSchema, ColumnDescriptor, RelationDescriptor, NestedField
 
 
 def _accepts_include_expired(loader) -> bool:
@@ -109,6 +109,14 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     # reader decodes timestamps as the Avro schema declares them.
     supports_int64_timestamp_retag = True
     data_files_match_field_ids = True  # Iceberg Avro data files carry a field-id per field
+
+    def declared_nested_fields(self):
+        """{field id: NestedField} for each nested column the catalog declared a shape for."""
+        return {
+            column.field_id: column.nested
+            for column in self.schema.columns
+            if column.nested is not None and column.field_id is not None
+        }
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -330,11 +338,17 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                     _ct = _lt.ARRAY(_elem)
                 else:
                     _ct = _CATEGORY_TO_CANONICAL.get(_ot)
+                # A catalog that declares a nested column's shape (Iceberg) hands it over as plain
+                # tuples; this verifies data files against it (NestedField).
+                raw_nested = getattr(column, "nested", None)
+                if raw_nested is None and isinstance(column, dict):
+                    raw_nested = column.get("nested")
                 normalized = ColumnDescriptor(
                     name=name,
                     column_type=_ct,
                     nullable=getattr(column, "nullable", True),
                     field_id=raw_field_id,
+                    nested=None if raw_nested is None else NestedField.from_tuple(raw_nested),
                 )
 
             columns.append(normalized)

@@ -249,3 +249,113 @@ Accepted UD1–UD8 and ND1–ND6 as recommended; step 1 of §6 is built:
 - **Tests:** `tests/unit/operators/test_nested_json_scan.py::test_random_lists_of_groups_match_the_oracle`
   (40 random shapes, row groups / dictionary / codecs), `tests/unit/connectors/test_avro_arrays_of_logical_scalars.py`,
   and `lst` joins the five-way test for Parquet.
+
+## 10. Built — step 4 (declared nested shape, verify-or-refuse, Iceberg nested mapping), 2026-10-25
+
+Iceberg `struct` / `map` / `list` columns now read, for **Parquet and ORC** data files, with option (b):
+the table's declared nested shape is handed to the scan and each file is verified against it.
+
+- **`opteryx.types.schema.NestedField`** (frozen: field id, name, kind `struct|list|map|scalar`, children)
+  and **`ColumnDescriptor.nested`** (ND6; not compared, not persisted). `flatten()` is the pre-order
+  `(kind, id, name, n_children)` list the native readers take. A catalog hands the shape over as plain
+  tuples (`OpteryxConnector._normalize_schema` reads a `nested` attribute of the external column object -
+  the same duck-typing it already does for `precision` / `element_type`), and
+  `connector.declared_nested_fields()` answers `{field id: NestedField}` to the physical planner and the
+  plan compiler. (It is a connector lookup, not a field on the bound `SchemaColumn`, because that is a cdef
+  class shared by six planner extensions.)
+- **`opteryx-iceberg`:** `struct`, `map<string, *>`, and a list with a struct / map at the bottom bind to
+  `NVARCHAR`; `list<boolean|int|long|float|double|string>` binds to `ARRAY<…>` spelled as READ_PARQUET spells
+  it (ints as INT64, floats as FLOAT64); `IcebergSchemaColumn` carries the tree. Refused, naming it, at
+  schema time: a map with non-string keys, a list of lists of a scalar (the engine's Parquet footer
+  reports that nest one level short), a list of any other scalar.
+- **Parquet:** rugo now keeps each schema element's `field_id` (it parsed and dropped it).
+  `matches_declared_shape` (`nested_json.cpp`, shared `declared_shape.hpp`) compares node for node: field
+  id, kind, struct member count and names. A list's element and a map's key / value are compared by id
+  only. It runs in the native footer gate (`native_scan_rejection(..., declared_shapes=)`) beside
+  `group_renderable`, once per file, and RAISES `NotImplementedError` naming the field, the file, and what
+  each side says. The declared shapes are part of the gate's admission-cache key.
+- **ORC:** the same comparison in `OrcFile::bind` over the `iceberg.id` attribute that Iceberg's ORC writer
+  sets on every nested type. It runs at execution (a file is opened there), so the caller sees the engine's
+  generic read failure and the cause - naming the field and the file - in the log.
+- **Avro:** an Iceberg Avro table's nested column is still refused, by name ("primitive columns only"):
+  the table-side reader schema cannot express a nested type. Avro would be the easy place for option (c)
+  (its reader schema resolves by field id), which is a separate piece of work.
+- **What a rename or an add looks like.** A table's schema is resolved as of the snapshot being read
+  (`self.table.schema(snapshot.schema_id)`), so a rename alone breaks nothing: the old files are read under
+  the schema they were written with. The refusal fires when a snapshot written under the NEW schema
+  still contains a file from before the change - exactly the case where the names would silently differ
+  between files. Time travel to the old snapshot still reads.
+- **Tests:** `opteryx-iceberg/tests/test_nested_columns.py` (Parquet: unevolved reads; a nested rename and an
+  added member after a second append fail naming the field; the old snapshot still reads; a non-string-key
+  map and an Avro nested column are refused), `tests/test_nested_orc_data_files.py` (ORC: the same, plus
+  a file with column ids but no nested ids), `tests/unit/connectors/parquet_io/test_declared_nested_shape.py`
+  (the footer gate), `tests/unit/types/test_nested_field.py`.
+- **Not done:** option (c) (remap by id, so an evolved table reads instead of refusing); Avro nested for
+  Iceberg; nested bounds / pruning (the column is JSON text); `list<list<scalar>>` for Iceberg until the
+  Parquet footer's declared depth is fixed.
+
+## 11. Built — option (c): render by field id with the table's names, 2026-10-26
+
+Ruled: an evolved Iceberg nested table **reads** instead of refusing (§10 built the refusal, option (b)).
+For a nested column the table declares a shape for, both readers now render the JSON **with the table's
+names**, matching each file's fields **by field id**:
+
+- a **renamed** member renders under its new name in files written under the old one;
+- a member **added** since a file was written is JSON `null` in that file;
+- a member **dropped** since is not rendered (and not decoded);
+- the member **order** is the table's;
+- a list's element, a map's key and value, and a struct nested anywhere in a list or map follow the same
+  rule (the element / key / value are matched by id, their names are never compared).
+
+What is still refused, loudly, naming the field and the file: a file with **no field ids** (Parquet
+`field_id`, ORC `iceberg.id`) on a node it must match; a **different kind of thing under an id** (a scalar
+where the table has a struct, ...); a **top-level field id** that is not the table's (a column dropped and
+re-added under the same name is a different column); and, in Parquet, a declared struct **none of whose
+fields** the file has (its own presence cannot be told). A promoted scalar (int to long) needs nothing:
+the value renders as the file stored it.
+
+Mechanics: Parquet - `nested::build_plan(fs, name, err, declared)` builds the assembly plan over the
+declared members (a `Missing` node renders `null` and reads no leaf; unmatched file fields are skipped),
+`resolve_projection(..., declared)` hands the pipeline only the leaf chunks the plan reads, in plan order,
+and the shape reaches the Source through `NativeScanPlan.declared_shapes` (parallel to `column_names`;
+single-pass and late-materialisation scans). The footer gate runs `group_renderable(..., declared)` per
+file, so an unmatchable file fails at plan time. ORC - `build_node` carries the declared shape (`DeclCtx`)
+and matches subtypes by `iceberg.id` as it decodes (so the failure is raised at execution; the engine
+reports it generically and logs the cause). The strict (b) comparison (`matches_declared_shape`,
+`ShapeCheck`) is deleted.
+
+Tests: opteryx-iceberg `tests/test_nested_columns.py` (Parquet: rename, add, drop, reorder, a renamed
+member inside a list of structs, an old snapshot) and `tests/test_nested_orc_data_files.py` (ORC: rename,
+add, drop, no nested ids); core `tests/unit/connectors/parquet_io/test_declared_nested_shape.py` (the
+gate).
+
+Still not done: Avro data files of an Iceberg table with nested columns (refused by name);
+`list<list<scalar>>` for Iceberg (the Parquet footer reports that nest one level short); nested bounds.
+
+## 12. Ruled and built — TIME: parquet is canon, 2026-10-26
+
+Architect ruling: **the engine is a parquet engine first; other formats fold into parquet's convention.**
+Parquet's convention for `TIME` is **INT64 microseconds since midnight** (READ_PARQUET types a time
+column INT64 and scales a millisecond file up; a catalog-declared TIME is retagged INT64 + `LogicalKind::TIME`;
+`CAST(... AS TIME)` produces the same). So:
+
+- **Avro** (`time-micros`, `time-millis`) and **ORC** (`iceberg.long-type=TIME`) now surface a time as that
+  integer, not as a `TIME64` / `datetime.time`: the native scan builds INT64 + `LogicalKind::TIME` from
+  rugo's time carrier (`avro_detail::build_column`). rugo's own Python edge (the standalone wheel's
+  `read_avro` / `read_orc`) still returns `TIME64` vectors - it is rugo's API, not the engine's.
+- **READ_AVRO / READ_ORC and folder datasets declare it TIME**, exactly as READ_PARQUET does (declared TIME,
+  vector INT64 + `LogicalKind::TIME`). (An earlier cut of this change declared them INT64, which differed
+  from READ_PARQUET in `CAST(t AS VARCHAR)`; the five-format cast test caught it.)
+- **Iceberg `time` is un-held** (UD6): it binds as TIME and reads as that integer in Parquet, Avro and ORC
+  data files alike. `opteryx-iceberg` maps `TimeType` again.
+- Tests: core `tests/unit/connectors/test_time_across_formats.py` (READ_PARQUET us/ms, READ_AVRO
+  us/ms, READ_ORC, an Avro folder and an ORC folder return the same integers, and type alike), Iceberg
+  `tests/test_uuid_time_fixed_columns.py` (the same value as the same integer through a Parquet, an
+  Avro and an ORC data file).
+- **Fixed with it:** `CAST(time_column AS VARCHAR)` failed for READ_PARQUET itself ("cast time->string:
+  expected TIME64, got 4") because the kernel demanded a TIME64-tagged vector while parquet's convention is
+  INT64; `draken_cast_time_to_string` now accepts INT64 beside TIME64 (as the timestamp rescale already
+  accepts INT64 beside TIMESTAMP64). Tested through READ_PARQUET, READ_AVRO and READ_ORC.
+- **Still open, engine-wide (READ_PARQUET included):** there is no TIME comparison at all - `t > 3600000000`
+  is refused ("`TIME` and `INTEGER` do not work together") and so is `t > CAST('01:00:00' AS TIME)`
+  ("`TIME` and `TIME` ..."). A missing operator-map entry, not a reader problem.

@@ -21,6 +21,15 @@ from opteryx.compiled.thread_pool cimport CppThreadPool, PriorityPool
 from rugo.parquet_reader cimport ColumnStats, RowGroupStats, FileStats
 
 
+cdef extern from "../declared_shape.hpp" namespace "rugo":
+    # One node of the shape a TABLE declares for a nested column (pre-order; see NestedField.flatten()).
+    cdef cppclass DeclaredNode:
+        int kind
+        int64_t field_id
+        string name
+        int n_children
+
+
 cdef extern from "io_pipeline.hpp" namespace "rugo":
     cdef cppclass ColumnOut:
         int direct_kind      # 0=pool 1=int64 2=float32 3=float64 4=bool 5=decimal128 6=varchar
@@ -227,6 +236,10 @@ cdef class NativeScanPlan:
     # no direct kind — so this flag is what routes the pool blob to the native
     # TAG_ARRAY decoder rather than the decimal / varchar ones.
     cdef vector[uint8_t] array_columns
+    # Parallel to column_names: the shape a catalog table declares for a nested column (an empty
+    # entry = none). The native Source renders such a column with the TABLE's member names, matching
+    # each file's fields by field id.
+    cdef vector[vector[DeclaredNode]] declared_shapes
     # Parallel to column_names. The DECLARED numeric width for a column the
     # relation's schema types wider than some file stores it (0 = no widening).
     # The native Source coerces those files' vectors to it so every file in a
@@ -311,6 +324,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     array_columns=*,
     logical_coerce=*,
     widen_types=*,
+    declared_shapes=*,
     hash_key_columns=*,
     length_only_columns=*,
     pool=*,
@@ -330,6 +344,9 @@ cpdef NativeScanPlan open_native_scan_plan(
 # footers that every projected column, in every row group, decodes to a
 # DirectKind the Source supports (increment-1 scope: plain numerics only).
 # `absent`, when given, records the columns each file lacks instead of refusing.
+# `declared_shapes`, when given, is {column: NestedField.flatten()} each nested column of each file
+# is verified against.
 # `filesystem` supplies the signed-URL rewrite that makes a remote path eligible.
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=*,
-                                filesystem=*, footer_bytes_cache=*, dict absent=*)
+                                filesystem=*, footer_bytes_cache=*, dict absent=*,
+                                declared_shapes=*)

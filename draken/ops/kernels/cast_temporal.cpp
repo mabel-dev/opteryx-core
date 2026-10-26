@@ -680,16 +680,20 @@ VecResult draken_cast_string_to_time64(void* ctx, const DrakenVector* v) {
     });
 }
 
-// TIME64 -> VARCHAR: "HH:MM:SS.ffffff" (15 chars, extern — over the 12-byte
+// TIME -> VARCHAR: "HH:MM:SS.ffffff" (15 chars, extern — over the 12-byte
 // inline threshold, so this needs an arena, like the TIMESTAMP64 formatter
 // above). Values are int64 microseconds-since-midnight; the source unit is
 // always microseconds (draken_cast_string_to_time64 is TIME64's only
 // producer reachable from SQL CAST — TIME32 has no cast path).
+//
+// INT64 is accepted alongside TIME64, as the timestamp rescale below accepts it: parquet is the
+// engine's canon, and a parquet TIME column (and every other format's, which fold into it) is an
+// INT64 vector of microseconds carrying LogicalKind::TIME - the same 8-byte payload.
 VecResult draken_cast_time_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
-        if (v->type != DRAKEN_TIME64)
-            return draken_error_sentinel_fmt("cast time->string: expected TIME64, got %d", v->type);
+        if (v->type != DRAKEN_TIME64 && v->type != DRAKEN_INT64)
+            return draken_error_sentinel_fmt("cast time->string: expected TIME64/INT64, got %d", v->type);
         const uint32_t k = v->data_length;
         const int64_t* src = static_cast<const int64_t*>(v->data);
 

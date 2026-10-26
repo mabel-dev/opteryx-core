@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include "../declared_shape.hpp"   // DeclaredNode: the shape a table declares for a nested column
 #include "decode.hpp"
 #include "metadata.hpp"
 
@@ -47,11 +48,23 @@ struct Plan;   // immutable render plan for one top-level STRUCT / MAP column
 
 // Build the plan for top-level field `name` of `fs`. nullptr + `err` when the
 // column is not a STRUCT/MAP this renderer supports (and why).
+//
+// `declared`, when given (a catalog table's declared shape for this column, pre-order), is what the
+// JSON is rendered AS: the table's member names in the table's order, each matched to the file's field
+// of the same field id. A member the file lacks is JSON null; a field the file has and the table no
+// longer does is not read. Iceberg names a nested field by id and renames it freely, so this is what
+// makes a file written before a rename, an add or a drop render as the table says
+// (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md §3.3, option (c)). A file that cannot be matched (no field
+// ids, a different kind of thing under an id) is refused with `err` naming the field.
 std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& name,
-                                       std::string& err);
+                                       std::string& err,
+                                       const std::vector<DeclaredNode>* declared = nullptr);
 
-// Number of leaf column chunks the plan consumes, in schema (DFS) order.
+// Number of leaf column chunks the plan consumes, in plan order.
 size_t leaf_count(const Plan& plan);
+// Number of leaf chunks the file's column has, and for each leaf the plan reads its position among them.
+size_t file_leaf_count(const Plan& plan);
+const std::vector<int32_t>& used_leaf_index(const Plan& plan);
 
 // Assemble one JSON document per row from the decoded leaves (in schema order,
 // each decoded UNMASKED with its rep/def levels). `row_mask`, when non-null, is one
@@ -88,13 +101,19 @@ struct NestedSpec {
 //
 // Returns false with `err` when a group cannot be rendered. When no projected
 // column is a group, `nested` is null and `names` == `projected`.
+//
+// `declared`, parallel to `projected` (or null), holds each column's declared shape; an empty entry is
+// "none declared". See build_plan.
 bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                         const std::vector<std::string>& projected,
                         std::vector<std::string>& names,
                         std::vector<std::vector<ColumnStats>>& stats,
-                        std::shared_ptr<const NestedSpec>& nested, std::string& err);
+                        std::shared_ptr<const NestedSpec>& nested, std::string& err,
+                        const std::vector<std::vector<DeclaredNode>>* declared = nullptr);
 
-// Footer-gate probe: can every leaf of group `name` be rendered? (No decode.)
-bool group_renderable(const FileStats& fs, const std::string& name, std::string& err);
+// Footer-gate probe: can every leaf of group `name` be rendered - and, with `declared`, matched to
+// the table's shape? (No decode.)
+bool group_renderable(const FileStats& fs, const std::string& name, std::string& err,
+                      const std::vector<DeclaredNode>* declared = nullptr);
 
 }  // namespace rugo

@@ -330,6 +330,12 @@ public:
     std::string current_display_name_;
     void set_current_display_name(std::string s) { current_display_name_ = std::move(s); }
 
+    // Arms Pipeline::measure_cpu on every pipeline this engine runs: the per-operator
+    // CPU clock, read only for EXPLAIN ANALYZE. Set before run().
+    bool measure_operator_cpu_ = false;
+    void set_measure_operator_cpu(bool on) { measure_operator_cpu_ = on; }
+    bool measures_operator_cpu() const { return measure_operator_cpu_; }
+
     // Monotonic per-Engine (i.e. per-query) counter for OpStats.node_id — see
     // trace.hpp. Starts at 1; 0 is reserved for "untagged".
     uint32_t next_trace_node_id_ = 1;
@@ -1224,7 +1230,8 @@ public:
                                 const std::vector<uint8_t>* hash_key_columns = nullptr,
                                 const std::vector<uint8_t>* array_columns = nullptr,
                                 const std::vector<int>* widen_types = nullptr,
-                                int64_t row_limit = -1) {
+                                int64_t row_limit = -1,
+                                const std::vector<std::vector<rugo::DeclaredNode>>* declared_shapes = nullptr) {
         // docs/EXECUTION_TRACING_DESIGN.md: tag the rugo pipeline's trace spans
         // (TC_QUEUE_WAIT/TC_IO_REQUEST/TC_DECODE — currently node_id=0/untagged,
         // see io_pipeline.hpp's set_trace_node_id) with the SAME node_id this
@@ -1236,7 +1243,7 @@ public:
         uint32_t node_id = set_source_(p, std::make_unique<NativeParquetScanSource>(
             pipeline, footer_map, work_items, column_names, in_flight_limit,
             pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce,
-            hash_key_columns, array_columns, widen_types, row_limit));
+            hash_key_columns, array_columns, widen_types, row_limit, declared_shapes));
         if (pipeline != nullptr) pipeline->set_trace_node_id(node_id);
     }
     // R3 (`fused_topn`): the two-pass late-materialization scan Source. Everything the
@@ -1258,6 +1265,7 @@ public:
             const std::vector<int>* p1_logical_coerce,
             const std::vector<uint8_t>* p1_hash_key_columns,
             const std::vector<uint8_t>* p1_array_columns,
+            const std::vector<std::vector<rugo::DeclaredNode>>* p1_declared_shapes,
             rugo::ParquetIOPipeline* p2_pipeline,
             const std::vector<std::string>* p2_column_names,
             MemoryPool* p2_pool,
@@ -1266,6 +1274,7 @@ public:
             const std::vector<int>* p2_logical_coerce,
             const std::vector<uint8_t>* p2_hash_key_columns,
             const std::vector<uint8_t>* p2_array_columns,
+            const std::vector<std::vector<rugo::DeclaredNode>>* p2_declared_shapes,
             void* pred_fn, void* pred_ctx, std::vector<int> pred_col_to_p1,
             int sort_p1_index, bool sort_ascending, bool sort_nulls_first, int64_t topn_limit,
             std::vector<int> out_from_p1, std::vector<int> out_from_p2,
@@ -1295,6 +1304,7 @@ public:
         src->p1_build.logical_coerce = p1_logical_coerce;
         src->p1_build.hash_key_columns = p1_hash_key_columns;
         src->p1_build.array_columns = p1_array_columns;
+        src->p1_build.declared_shapes = p1_declared_shapes;
         src->p2_pipeline = p2_pipeline;
         src->p2_column_names = p2_column_names;
         src->p2_build.pool = p2_pool;
@@ -1303,6 +1313,7 @@ public:
         src->p2_build.logical_coerce = p2_logical_coerce;
         src->p2_build.hash_key_columns = p2_hash_key_columns;
         src->p2_build.array_columns = p2_array_columns;
+        src->p2_build.declared_shapes = p2_declared_shapes;
         src->pred_fn = reinterpret_cast<LatmatPredFn>(pred_fn);
         src->pred_ctx = pred_ctx;
         src->pred_col_to_p1 = pred_map;
@@ -1857,6 +1868,7 @@ public:
         for (auto& op : pn->operators) p.operators.push_back(op.get());
         p.sink = pn->sink.get();
         p.halt = &pn->halt;
+        p.measure_cpu = measure_operator_cpu_;
         int pdop = (pn->dop_override > 0 && pn->dop_override < dop)
                        ? pn->dop_override : dop;
         pn->dop_used = pdop;

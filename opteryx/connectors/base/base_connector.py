@@ -191,6 +191,11 @@ class BaseTable:
     # files; for Avro, as READ_AVRO).
     data_files_match_field_ids = False
 
+    def declared_nested_fields(self):
+        """{field id: NestedField}: the shape this source declares for each nested column, which a scan
+        verifies each data file against. None declared = {} (the file is the schema)."""
+        return {}
+
     # For a reader with NO file manifest (a remote database, where the rows come
     # over a socket rather than from files the engine reads itself): the
     # operator-registry name of the physical scan node that serves it. The

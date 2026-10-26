@@ -9,30 +9,17 @@ from typing import Any, Dict, Optional, Tuple
 
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import (
-    AmbiguousIdentifierError,
-    ColumnNotFoundError,
     IncompatibleTypesError,
-    InvalidInternalStateError,
-    UnexpectedDatasetReferenceError,
-    UnsupportedSyntaxError,
 )
 from opteryx.expression import ExpressionColumn
 from opteryx.expression import NodeType
-from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar import fixed_value_function
-from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.planner.binder.pattern_compile import compile_rlike_pattern
 from opteryx.types import logical_type as _lt
-from opteryx.types.logical_type import (
-    BOOLEAN as _CT_BOOLEAN,
-)
-from opteryx.types.logical_type import (
-    DATE as _CT_DATE,
-)
 from opteryx.types.logical_type import (
     FLOAT64 as _CT_FLOAT64,
 )
@@ -40,16 +27,7 @@ from opteryx.types.logical_type import (
     INT64 as _CT_INT64,
 )
 from opteryx.types.logical_type import (
-    INTERVAL as _CT_INTERVAL,
-)
-from opteryx.types.logical_type import (
     NULL as _CT_NULL,
-)
-from opteryx.types.logical_type import (
-    TIMESTAMP as _CT_TIMESTAMP,
-)
-from opteryx.types.logical_type import (
-    VARCHAR as _CT_VARCHAR,
 )
 from opteryx.types.logical_type import (
     ColumnType as _ColumnType,
@@ -59,7 +37,7 @@ from opteryx.types.logical_type import (
     parse_column_type,
 )
 from opteryx.types.scalars.value_parsing import parse_value
-from opteryx.types.schema import ConstantColumn, FunctionColumn, RelationSchema, SchemaColumn
+from opteryx.types.schema import ConstantColumn, FunctionColumn
 from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result_type
 from opteryx.types.literal_values import native_literal_value
 from opteryx.compiled.structures.expressions import Cast

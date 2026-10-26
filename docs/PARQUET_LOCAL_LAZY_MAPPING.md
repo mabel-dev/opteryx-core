@@ -450,10 +450,46 @@ Attribution (share of CPU samples):
   another session).
 
 Consumers of the per-operator `cpu_ns`: plan telemetry's per-node `cpu_time_ms`
-only. The per-PIPELINE CPU (process clock either side of `run_pipeline`, 2 reads
+and EXPLAIN ANALYZE's `cpu_ms` column (ruling D1, 2026-08-25 — this line first
+said "plan telemetry only", corrected in §13). The per-PIPELINE CPU (process clock either side of `run_pipeline`, 2 reads
 per pipeline) is separate and stays cheap.
 
 ⛔ x86 measurement trap: the box has 15 GB; `hits_rugo_262k` and
 `hits_rg64k_b4` do not both fit in page cache. An A/B over both in one job read
 the second from disk (kswapd busy, load 9–10 on 6 cores) and produced ratios
 from 0.52 to 1.30 at 3/5 — discarded. Measure one dataset per job, warm it first.
+
+## 13. Per-operator CPU clock armed for EXPLAIN ANALYZE only (RULED, BUILT)
+
+Architect's choice (2026-10-25): stop reading the thread-CPU clock per morsel on
+ordinary queries; keep per-operator `exec_ns` (wall) and the per-pipeline CPU;
+measure per-operator CPU only for EXPLAIN ANALYZE, so its `cpu_ms` column (D1)
+stays exact.
+
+Change:
+- `Pipeline::measure_cpu` (operator.hpp), set from `Engine::measure_operator_cpu_`
+  in `run_step_`. `run_worker_body<bool kMeasureCpu>` (executor.hpp): the
+  unmeasured body has no CPU clock read, no `cpu_ns` atomic add, no branch;
+  `run_worker` picks the instantiation once per worker. The read-order contract
+  for the measured body is unchanged.
+- `NativePlan.set_measure_operator_cpu`; `collect_op_stats` emits `cpu_time` only
+  when measured (an unmeasured 0 would read as "burned no CPU").
+- `execute_native(..., measure_operator_cpu=False)`; only `serial_engine.explain`'s
+  ANALYZE run passes True. `native_op_stats` and plan telemetry carry
+  `cpu_time` / `cpu_time_ms` for those runs only — absent, not 0, otherwise.
+  The profiling runners (tpch runner, `dev/tpch_profile.py`, ClickBench runner)
+  already drive EXPLAIN ANALYZE, so they keep their CPU column.
+- Test: `test_plain_query_does_not_measure_operator_cpu`; the D1 test
+  (`cpu_ms > 0` under ANALYZE) still passes.
+
+A/B (5 interleaved rounds, baseline = snapshot of main, candidate = the same
+snapshot + this change; deterministic digests identical — Q38–Q41 and Q21 vary
+within each arm, ties under OFFSET):
+- **x86** (box, `hits_rugo_262k`, mimalloc): Q01 19.01 → 18.00 ms **0.947** (5/5,
+  CPU 0.921), Q07 **0.968** (5/5, CPU 0.948), `> 0` **0.948** (5/5); Q36–Q42,
+  LIKE and SUM GROUP BY 0.987–1.014, CPU 0.984–1.003. Close to the §12 ceiling
+  probe (0.939).
+- **Mac** (`hits_rg64k_b4`, 16 workers): flat as expected for a 107 ns clock —
+  Q01 0.997, Q07 0.996, rest 0.98–1.01, no loser; the `> 0` control read 0.883
+  (5/5, CPU 0.797) — not explained by a 107 ns clock and not chased.
+

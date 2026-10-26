@@ -21,7 +21,7 @@ from opteryx.planner.binder.set_ops import visit_except, visit_intersect, visit_
 from opteryx.planner.binder.window import visit_window
 from opteryx.planner.binder.framed_window import visit_framed_window as _visit_framed_window
 from opteryx.planner.binder.subquery import visit_comment, visit_materialized_cte_ref, visit_subquery
-from opteryx.planner.binder.traversal import traverse
+from opteryx.compiled.planner.binder_core import traverse
 from opteryx.planner.binder.view import (
     visit_alter_view,
     visit_create_view,

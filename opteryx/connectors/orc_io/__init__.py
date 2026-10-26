@@ -31,6 +31,8 @@ def _column_type(column: dict) -> ColumnType:
     if physical == DrakenType.TIMESTAMP64:
         return _lt.TIMESTAMP(_lt.TimestampUnit.MICROSECONDS)
     if physical == DrakenType.TIME64:
+        # Declared TIME, as READ_PARQUET declares a time column; the scan returns INT64 microseconds
+        # since midnight carrying the TIME logical type (parquet's convention).
         return _lt.TIME(_lt.TimestampUnit.MICROSECONDS)
     if physical == DrakenType.ARRAY:
         array = ColumnType(DrakenType(column["child_type"]))
@@ -82,9 +84,11 @@ def _reader_type(column_type: ColumnType):
     return None
 
 
-def reader_columns(dataset: str, columns, match_by_id: bool) -> List[tuple]:
+def reader_columns(dataset: str, columns, match_by_id: bool, declared=None) -> List[tuple]:
     """What each projected column is to be read as: (name, field_id, DrakenType ordinal,
-    precision, scale, nullable, ARRAY element ordinal, ARRAY depth). `columns` are bound columns. Raises NotSupportedError,
+    precision, scale, nullable, ARRAY element ordinal, ARRAY depth, declared nested shape).
+    `declared` is {field id: NestedField} from the table's connector; a nested column with one is
+    verified against it in each file (None for the rest). `columns` are bound columns. Raises NotSupportedError,
     naming the column, for one the ORC scan cannot read - a table column with no field
     id when files are matched by id, or a type the reader does not read."""
     out = []
@@ -104,5 +108,8 @@ def reader_columns(dataset: str, columns, match_by_id: bool) -> List[tuple]:
                 f"Cannot read column '{column.name}' of {dataset}: ORC data files are read "
                 f"for primitive columns only, not {column.column_type}."
             )
-        out.append((column.name, column.field_id if match_by_id else None, *spec[:3], column.nullable, spec[3], spec[4]))
+        shape = None
+        if declared and column.field_id is not None and column.field_id in declared:
+            shape = declared[column.field_id].flatten()
+        out.append((column.name, column.field_id if match_by_id else None, *spec[:3], column.nullable, spec[3], spec[4], shape))
     return out

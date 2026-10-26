@@ -78,6 +78,49 @@ def _column_type_from_dict(data: Dict[str, Any]) -> Any:
     return raw_type
 
 
+@dataclasses.dataclass(frozen=True)
+class NestedField:
+    """One node of a nested column's declared shape, as the TABLE (a catalog) states it.
+
+    Iceberg identifies a nested field by id, and names change; a JSON object is made of names. A
+    scan that renders a nested column as JSON text verifies each data file against this tree and
+    refuses a file that disagrees, naming the field - it never renders file names that may have
+    drifted (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md §3.3, option (b)).
+
+    kind: "struct" (children are the members, in order), "list" (one child: the element), "map"
+    (two children: key, value) or "scalar". `name` is a struct member's name; a list's element and a
+    map's key / value are named "element", "key" and "value" and their names are never compared.
+    """
+
+    field_id: int
+    name: str
+    kind: str
+    children: tuple = ()
+
+    KINDS = ("struct", "list", "map", "scalar")
+
+    def __post_init__(self):
+        if self.kind not in self.KINDS:
+            raise ValueError(f"NestedField kind must be one of {self.KINDS}, not {self.kind!r}")
+        arity = {"list": 1, "map": 2, "scalar": 0}.get(self.kind)
+        if arity is not None and len(self.children) != arity:
+            raise ValueError(f"NestedField {self.name!r}: a {self.kind} has {arity} children, not {len(self.children)}")
+
+    @classmethod
+    def from_tuple(cls, node: tuple) -> "NestedField":
+        """From the dependency-free spelling a catalog hands over: (kind, field id, name, children)."""
+        kind, field_id, name, children = node
+        return cls(field_id, name, kind, tuple(cls.from_tuple(child) for child in children))
+
+    def flatten(self) -> list:
+        """Pre-order [(kind, field_id, name, number of children)] - the form the native readers verify
+        against."""
+        out = [(self.kind, self.field_id, self.name, len(self.children))]
+        for child in self.children:
+            out.extend(child.flatten())
+        return out
+
+
 @dataclasses.dataclass
 class ColumnDescriptor:
     """What a SOURCE says about one of its columns — and nothing the engine owns.
@@ -98,6 +141,9 @@ class ColumnDescriptor:
     default: Optional[Any] = None
     description: Optional[str] = None
     disposition: Optional[str] = None
+    # A STRUCT / MAP / LIST column's declared shape, when the source states one (a catalog table).
+    # Absent for READ_* and folder datasets: the file IS the schema there.
+    nested: Optional[NestedField] = dataclasses.field(default=None, compare=False)
 
     @property
     def category(self):

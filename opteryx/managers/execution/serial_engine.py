@@ -294,7 +294,9 @@ def explain(
 
             subplan = plan.shallow_copy()  # structure only: the operators are shared
             subplan.remove_node(head_nid, heal=True)
-            generator, _ = execute_native(subplan, telemetry=telemetry)
+            generator, _ = execute_native(
+                subplan, telemetry=telemetry, measure_operator_cpu=True
+            )
             for _ in generator:
                 pass
 
@@ -342,9 +344,10 @@ def explain(
         # time the node was not running: blocked on IO, on downstream
         # backpressure, or descheduled. That distinction — "expensive" vs
         # "starved" — is the first question anyone asks of a slow operator, and
-        # the engine has recorded it all along (OpStats::cpu_ns, always-on); it
-        # was simply never rendered. Architect ruling D1, 2026-08-25: publish the
-        # two honest columns side by side and let the reader subtract, rather than
+        # the engine records it (OpStats::cpu_ns, armed for EXPLAIN ANALYZE runs
+        # only: see execute_native's measure_operator_cpu). Architect ruling D1,
+        # 2026-08-25: publish the two honest columns side by side and let the
+        # reader subtract, rather than
         # a derived `wait_ms` that hides which of the two causes it was.
         #
         # An Operator cannot block (pure in-memory compute over a morsel), so a

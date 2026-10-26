@@ -721,7 +721,9 @@ def _build_scan_node(logical_node, query_properties, registry):
                 logical_node,
                 orc_physical_columns=[column.name for column in columns],
                 orc_files=logical_node.manifest.get_file_paths(),
-                orc_reader_columns=reader_columns(dataset, columns, match_by_id),
+                orc_reader_columns=reader_columns(
+                    dataset, columns, match_by_id, logical_node.connector.declared_nested_fields()
+                ),
                 orc_match_by_id=match_by_id,
                 orc_credentialed_filesystem=None,
                 orc_function_scan=False,

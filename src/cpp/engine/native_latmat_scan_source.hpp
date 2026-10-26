@@ -214,6 +214,7 @@ struct LatmatScanSource : Source {
     // `row_masks` is empty (pass 1) or parallel to `rg_idxs` (pass 2).
     bool submit(rugo::ParquetIOPipeline* pipeline,
                 const std::vector<std::string>& want_names,
+                const std::vector<std::vector<rugo::DeclaredNode>>* declared,
                 const std::string& path, const std::vector<int>& rg_idxs,
                 const std::vector<std::vector<uint8_t>>& row_masks, ErrCtx& err) {
         auto fit = footer_map->find(path);
@@ -230,7 +231,7 @@ struct LatmatScanSource : Source {
         std::shared_ptr<const rugo::NestedSpec> nested;
         std::string rerr;
         if (!rugo::resolve_projection(*fit->second, rg_idxs, want_names, names, stats,
-                                      nested, rerr)) {
+                                      nested, rerr, declared)) {
             static thread_local std::string resolve_err_buf;
             resolve_err_buf = "LatmatScanSource: " + rerr;
             err.code = 1;
@@ -332,7 +333,7 @@ struct LatmatScanSource : Source {
                     topn_boundary_->row_groups_skipped.fetch_add(topn_skipped_now,
                                                                  std::memory_order_relaxed);
                 if (!rg_idxs.empty()) {
-                    if (!submit(p1_pipeline, *p1_column_names,
+                    if (!submit(p1_pipeline, *p1_column_names, p1_build.declared_shapes,
                                 (*work_items)[static_cast<size_t>(submitted)].first,
                                 rg_idxs, {}, err))
                         return;
@@ -586,7 +587,7 @@ struct LatmatScanSource : Source {
                         rg_idxs.push_back(it.rg_idx);
                         masks.push_back(it.row_mask);
                     }
-                    if (!submit(p2_pipeline, *p2_column_names,
+                    if (!submit(p2_pipeline, *p2_column_names, p2_build.declared_shapes,
                                 g.work[static_cast<size_t>(b)].path, rg_idxs, masks, err))
                         return SourceResult::FINISHED;
                     b = e;

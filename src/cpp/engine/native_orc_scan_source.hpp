@@ -64,6 +64,8 @@ struct OrcScanSpec {
     std::vector<uint32_t>    reader_scale;
     std::vector<int32_t>     reader_child_types;  // an ARRAY's innermost element DrakenType ordinal; else unused
     std::vector<uint32_t>    reader_array_depths; // an ARRAY's levels of list nesting; else unused
+    // A nested column of a table: the shape the table declares, verified against each file; else empty.
+    std::vector<std::vector<rugo::DeclaredNode>> reader_declared;
     std::vector<uint8_t>     reader_nullable;
 
     // Per DECODED column: the reader column's name, once.
@@ -277,6 +279,7 @@ private:
             out[i].scale = static_cast<uint8_t>(spec_->reader_scale[i]);
             out[i].child_type = static_cast<DrakenType>(spec_->reader_child_types[i]);
             out[i].array_depth = static_cast<uint8_t>(spec_->reader_array_depths[i]);
+            out[i].declared = spec_->reader_declared[i];
             out[i].nullable = spec_->reader_nullable[i] != 0;
         }
         return out;

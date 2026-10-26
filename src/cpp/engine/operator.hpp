@@ -74,7 +74,9 @@ struct OpStats {
     std::atomic<uint64_t> bytes_out{0};
     std::atomic<uint64_t> exec_ns{0};    // wall time inside this operator's own call(s)
     std::atomic<uint64_t> cpu_ns{0};     // CPU time actually consumed (CLOCK_THREAD_CPUTIME_ID);
-                                          // excludes time blocked/asleep, unlike exec_ns
+                                          // excludes time blocked/asleep, unlike exec_ns.
+                                          // Recorded only when Pipeline::measure_cpu is set
+                                          // (EXPLAIN ANALYZE); 0 otherwise
     // ---- Breaker cost: the two Sink calls that run AFTER the morsels stop -------
     // Zero on Sources and Operators, which have neither call.
     //
@@ -173,6 +175,11 @@ struct Pipeline {
     // new morsels when set. Checked between morsels only — never mid-push, so no
     // partial results. nullptr = no early termination possible.
     std::atomic<bool>*     halt   = nullptr;
+    // Read the per-thread CPU clock around every source/operator/sink call into
+    // OpStats::cpu_ns. That clock is a real syscall on x86 under PTI (~800 ns a read,
+    // two per call; ~6% of a short query's CPU), so it is armed only for EXPLAIN
+    // ANALYZE, whose cpu_ms column is its one reader. Exec_ns (wall) is always on.
+    bool                   measure_cpu = false;
 };
 
 }  // namespace opteryx::engine

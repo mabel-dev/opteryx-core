@@ -461,6 +461,7 @@ __int128 read_varint128(const uint8_t*& p, const uint8_t* end) {
 
 using StreamMap = std::map<std::pair<uint32_t, uint32_t>, std::pair<uint64_t, uint64_t>>;
 struct NestedNode;
+struct DeclCtx;
 
 struct OrcFile::Impl {
     const uint8_t* data = nullptr;
@@ -485,7 +486,7 @@ struct OrcFile::Impl {
     void decode_nested(const StripeFooter& sf, const StreamMap& streams, const FileColumn& fc,
                        const ReaderColumn& rc, uint32_t rows, Column& out) const;
     NestedNode build_node(const StripeFooter& sf, const StreamMap& streams, uint32_t id, const std::string& name,
-                          const std::string& key, size_t n) const;
+                          const std::string& key, size_t n, const DeclCtx* decl = nullptr, int di = -1) const;
 };
 
 OrcFile::OrcFile(const uint8_t* data, size_t size) : impl_(new Impl) {
@@ -584,6 +585,7 @@ void OrcFile::bind(const std::vector<ReaderColumn>& reader, const std::vector<st
             if (!f.readable) fail("column '" + name + "': " + f.refusal);
             const std::string why = compatibility(f, *rc);
             if (!why.empty()) fail("column '" + name + "': " + why);
+
         }
         m.plan.push_back(std::move(cp));
     }
@@ -962,6 +964,24 @@ struct NestedNode {
     Column leaf;                   // a primitive: its n entries, nulls placed
     size_t pos = 0;                // render cursor: the next entry
     size_t vpos = 0;               // render cursor: the next present entry (LIST / MAP lengths)
+    bool missing = false;          // a member the table declares and this file lacks: JSON null, no entries
+};
+
+// The shape a TABLE declares for a nested column (pre-order) and where each node's subtree ends. The
+// column is rendered with the table's member names, each file's fields matched by `iceberg.id`
+// (docs/UUID_AND_NESTED_COLUMNS_DESIGN.md §3.3, option (c)).
+struct DeclCtx {
+    const std::vector<DeclaredNode>& nodes;
+    std::vector<int> end;
+
+    explicit DeclCtx(const std::vector<DeclaredNode>& n) : nodes(n), end(n.size(), 0) { end_of(0); }
+
+    int end_of(int i) {
+        int j = i + 1;
+        for (int c = 0; c < nodes[static_cast<size_t>(i)].n_children; ++c) j = end_of(j);
+        end[static_cast<size_t>(i)] = j;
+        return j;
+    }
 };
 
 namespace {
@@ -1047,7 +1067,8 @@ void render_value(std::string& o, NestedNode& nd, size_t e) {
                 if (i != 0) o.push_back(',');
                 rugo_text::json_string(o, nd.kids[i].key.data(), nd.kids[i].key.size());
                 o.push_back(':');
-                render_entry(o, nd.kids[i]);
+                if (nd.kids[i].missing) o.append("null");
+                else render_entry(o, nd.kids[i]);
             }
             o.push_back('}');
             return;
@@ -1164,7 +1185,8 @@ void fill_array(NestedNode& list, Column& out, uint8_t* validity) {
 }  // namespace
 
 NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& streams, uint32_t id,
-                                     const std::string& name, const std::string& key, size_t n) const {
+                                     const std::string& name, const std::string& key, size_t n,
+                                     const DeclCtx* decl, int di) const {
     NestedNode nd;
     nd.id = id;
     nd.key = key;
@@ -1177,6 +1199,30 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
     const ColumnEncoding enc = sf.columns[id];
     if (enc.kind > 3) fail(where + "it has column encoding " + std::to_string(enc.kind) + ", which this reader does not know");
     const bool v2 = enc.kind >= 2;
+
+    if (di >= 0) {
+        // This file node must be the table's field `di`: the same field id, the same kind of thing.
+        const DeclaredNode& d = decl->nodes[static_cast<size_t>(di)];
+        const std::string* idattr = t.attribute("iceberg.id");
+        if (idattr == nullptr)
+            fail(where + "the file carries no iceberg.id for it, so it cannot be matched to the table's field '" +
+                 d.name + "' (id " + std::to_string(d.field_id) + ")");
+        long long have_id = -1;
+        try {
+            have_id = std::stoll(*idattr);
+        } catch (const std::exception&) {
+            fail(where + "its iceberg.id attribute '" + *idattr + "' is not an integer");
+        }
+        if (have_id != d.field_id)
+            fail(where + "the table declares '" + d.name + "' as field id " + std::to_string(d.field_id) +
+                 " but the file has id " + std::to_string(have_id) + " there");
+        const int have = t.kind == Kind::Struct ? 1 : t.kind == Kind::List ? 2 : t.kind == Kind::Map ? 3 : 0;
+        if (have != d.kind) {
+            static const char* words[] = {"a scalar", "a struct", "a list", "a map"};
+            fail(where + "the table declares '" + d.name + "' (id " + std::to_string(d.field_id) + ") as " +
+                 words[d.kind] + " but the file has " + words[have]);
+        }
+    }
 
     if (!is_container(t.kind)) {
         nd.fc = describe_leaf(t, name, id);
@@ -1203,8 +1249,35 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
     }
 
     if (t.kind == Kind::Struct) {
-        for (size_t i = 0; i < t.subtypes.size(); ++i)
-            nd.kids.push_back(build_node(sf, streams, t.subtypes[i], name + "." + t.field_names[i], t.field_names[i], present));
+        if (di < 0) {
+            for (size_t i = 0; i < t.subtypes.size(); ++i)
+                nd.kids.push_back(build_node(sf, streams, t.subtypes[i], name + "." + t.field_names[i], t.field_names[i], present));
+            return nd;
+        }
+        // The table's members, in the table's order and under the table's names, each matched to the
+        // file's field of the same id. A member the file lacks (added after it was written) is JSON null;
+        // a field the file has and the table no longer does is never decoded.
+        int ci = di + 1;
+        for (int k = 0; k < decl->nodes[static_cast<size_t>(di)].n_children; ++k) {
+            const DeclaredNode& dc = decl->nodes[static_cast<size_t>(ci)];
+            const uint32_t none = UINT32_MAX;
+            uint32_t hit = none;
+            for (uint32_t sub : t.subtypes) {
+                const std::string* idattr = footer.types[sub].attribute("iceberg.id");
+                if (idattr == nullptr)
+                    fail(where + "the file carries no iceberg.id on one of its fields, so its fields cannot be matched to the table's");
+                if (std::to_string(dc.field_id) == *idattr) { hit = sub; break; }
+            }
+            if (hit == none) {
+                NestedNode m;
+                m.missing = true;
+                m.key = dc.name;
+                nd.kids.push_back(std::move(m));
+            } else {
+                nd.kids.push_back(build_node(sf, streams, hit, name + "." + dc.name, dc.name, present, decl, ci));
+            }
+            ci = decl->end[static_cast<size_t>(ci)];
+        }
         return nd;
     }
 
@@ -1221,17 +1294,24 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
         if (total > UINT32_MAX) fail(where + "has more than 4 billion nested values in a stripe");
     }
     if (t.kind == Kind::List) {
-        nd.kids.push_back(build_node(sf, streams, t.subtypes[0], name + "[]", std::string(), total));
+        nd.kids.push_back(build_node(sf, streams, t.subtypes[0], name + "[]", std::string(), total, decl,
+                                     di >= 0 ? di + 1 : -1));
     } else {
-        nd.kids.push_back(build_node(sf, streams, t.subtypes[0], name + ".key", "key", total));
-        nd.kids.push_back(build_node(sf, streams, t.subtypes[1], name + ".value", "value", total));
+        nd.kids.push_back(build_node(sf, streams, t.subtypes[0], name + ".key", "key", total, decl,
+                                     di >= 0 ? di + 1 : -1));
+        nd.kids.push_back(build_node(sf, streams, t.subtypes[1], name + ".value", "value", total, decl,
+                                     di >= 0 ? decl->end[static_cast<size_t>(di) + 1] : -1));
     }
     return nd;
 }
 
 void OrcFile::Impl::decode_nested(const StripeFooter& sf, const StreamMap& streams, const FileColumn& fc,
                                   const ReaderColumn& rc, uint32_t rows, Column& out) const {
-    NestedNode top = build_node(sf, streams, fc.type_id, fc.name, std::string(), rows);
+    // A declared shape applies to a column that renders as JSON; an ARRAY (a list of a plain scalar) has no
+    // names to drift.
+    std::unique_ptr<DeclCtx> decl;
+    if (!rc.declared.empty() && fc.type == DRAKEN_NVARCHAR) decl = std::make_unique<DeclCtx>(rc.declared);
+    NestedNode top = build_node(sf, streams, fc.type_id, fc.name, std::string(), rows, decl.get(), decl ? 0 : -1);
     out.type = rc.type;
     out.length = rows;
 

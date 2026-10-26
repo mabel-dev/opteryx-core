@@ -253,6 +253,10 @@ struct NativeScanColumnBuilder {
     // three pool shapes (decimal / varchar / array) are indistinguishable from the
     // DirectKind alone. null/empty for every scan with no array columns.
     const std::vector<uint8_t>* array_columns = nullptr;
+    // A catalog table's declared shape for each nested (JSON-rendered) column, parallel to
+    // column_names (an empty entry = none): the column is rendered with the TABLE's member names,
+    // each file's fields matched by field id (rugo/src/parquet/nested_json.hpp). Null = none declared.
+    const std::vector<std::vector<rugo::DeclaredNode>>* declared_shapes = nullptr;
 
     // R6: is projected column i a plan-flagged ARRAY column?
     bool is_array_column(size_t i) const {
@@ -1250,7 +1254,8 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                             const std::vector<uint8_t>* hash_key_columns_ = nullptr,
                             const std::vector<uint8_t>* array_columns_ = nullptr,
                             const std::vector<int>* widen_types_ = nullptr,
-                            int64_t row_limit_ = -1)
+                            int64_t row_limit_ = -1,
+                            const std::vector<std::vector<rugo::DeclaredNode>>* declared_shapes_ = nullptr)
         : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
           column_names(column_names_), in_flight_limit(in_flight_limit_),
           row_limit(row_limit_) {
@@ -1262,6 +1267,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         hash_key_columns = hash_key_columns_;
         array_columns = array_columns_;
         widen_types = widen_types_;
+        declared_shapes = declared_shapes_;
     }
 
     // R2: how many row groups, taken in work-item order, are enough to satisfy
@@ -1523,8 +1529,15 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         std::vector<std::vector<ColumnStats>> stats;
         std::shared_ptr<const rugo::NestedSpec> nested;
         std::string rerr;
+        // The declared shapes, parallel to the columns actually read.
+        std::vector<std::vector<rugo::DeclaredNode>> present_declared;
+        const std::vector<std::vector<rugo::DeclaredNode>>* read_declared = declared_shapes;
+        if (absent != nullptr && declared_shapes != nullptr) {
+            for (uint32_t pi : present_to_projected) present_declared.push_back((*declared_shapes)[pi]);
+            read_declared = &present_declared;
+        }
         if (!rugo::resolve_projection(*fit->second, rg_idxs, read_names, names, stats,
-                                      nested, rerr)) {
+                                      nested, rerr, read_declared)) {
             // ErrCtx::msg is a bare const char*: stash the text in a thread_local that
             // outlives this call (see the decode-error path in get_morsel).
             static thread_local std::string resolve_err_buf;

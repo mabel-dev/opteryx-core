@@ -93,8 +93,6 @@ def parameter_list_binder(node: Union[Dict, List], parameter_set: List[Any]) -> 
                     "Incorrect number of bindings supplied. More placeholders than parameters. Supply one value for each placeholder in the statement."
                 )
             placeholder_value = parameter_set.pop(0)
-            if "value" in dir(placeholder_value):
-                placeholder_value = placeholder_value.value
             return _build_literal_node(placeholder_value)
         return {k: parameter_list_binder(v, parameter_set) for k, v in node.items()}
 
@@ -108,8 +106,6 @@ def parameter_dict_binder(node: Union[Dict, List], parameter_set: Dict[str, Any]
     if isinstance(node, dict):
         if "Placeholder" in node:
             placeholder_name = node["Placeholder"]
-            if "value" in dir(placeholder_name):
-                placeholder_name = placeholder_name.value
             placeholder_name = placeholder_name[1:]
             if placeholder_name not in parameter_set:
                 raise ParameterError(f"Parameter not defined - {placeholder_name}. Supply a value for it, or remove the placeholder from the statement.")

@@ -173,6 +173,7 @@ struct SchemaElement {
   int32_t scale = 0;       // for DECIMAL
   int32_t precision = 0;   // for DECIMAL
   int32_t repetition_type = -1;
+  int32_t field_id = -1;   // the schema's field id (Iceberg writes one on every field); -1 = absent
   // Draken logical-descriptor kind (see ColumnStats::draken_logical_kind).
   // Stamped on TOP-LEVEL elements only — the annotation is keyed by the
   // column's top-level name. Carried here so the column-patch writer, which

@@ -383,7 +383,7 @@ def _view_store(view_name: str, context: BindingContext):
         raise ReadOnlyConnectorError(
             f"the catalog serving {md_table(view_name)} cannot store views"
         )
-    if "variables" in dir(store):
+    if store.requires_variables:
         store.variables = context.execution_context.variables
     return store
 

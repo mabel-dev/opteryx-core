@@ -18,7 +18,7 @@ TWO FAULTS, ONE SHAPE:
     set: the Project below the boundary narrows schemas to the columns it emits, so
     a relation contributing NO projected column - the `d` above, which only appears
     in the WHERE - had already lost its schema and survived the pop.
-  * `traverse` (planner/binder/traversal.py) merges each child's relations into the
+  * `traverse` (compiled/planner/binder_core.pyx) merges each child's relations into the
     shared context INSIDE the loop over children, so whatever the first sibling
     leaked was in the second sibling's starting scope. That merge is not a bug: it
     is the only thing that makes `FROM t, t` ambiguous, since peers are otherwise

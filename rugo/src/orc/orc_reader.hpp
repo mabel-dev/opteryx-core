@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "../declared_shape.hpp"   // DeclaredNode
 #include "avro/avro_reader.hpp"  // AvroColumn / AvroBatch: the shared column carrier
 #include "core/buffers.h"        // DrakenType
 #include "orc_proto.hpp"
@@ -38,6 +39,10 @@ struct ReaderColumn {
     uint8_t     scale = 0;
     DrakenType  child_type = DRAKEN_INT64;   // ARRAY: the innermost element type
     uint8_t     array_depth = 1;             // ARRAY: levels of list nesting
+    // A nested column of a TABLE: the shape the table declares, which each file's column must say
+    // too (same field ids, same struct member names) or the read fails naming the field. Empty =
+    // none declared (READ_ORC, a folder: the file is the schema).
+    std::vector<DeclaredNode> declared;
     bool        nullable = true;
 };
 

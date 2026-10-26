@@ -226,7 +226,8 @@ inline void build_column(rugo::avro::AvroColumn& c, CxxColumn& out) {
                                     c.validity, c.type, out);
             break;
         case OutKind::ConstRaw: {
-            DrakenVector v = draken_vector_from_dict(c.data, 1, c.codes, c.length, c.type, c.validity);
+            DrakenVector v = draken_vector_from_dict(c.data, 1, c.codes, c.length,
+                                                     c.type == DRAKEN_TIME64 ? DRAKEN_INT64 : c.type, c.validity);
             out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(c.data),
                                                     OwnedBuffer<uint8_t>(c.validity),
                                                     OwnedBuffer<void>(static_cast<void*>(c.codes)));
@@ -244,7 +245,11 @@ inline void build_column(rugo::avro::AvroColumn& c, CxxColumn& out) {
         }
         default: {
             // Raw, Decimal64/128, Timestamp, Time64, Ipv4: fixed-width data.
-            DrakenVector v = draken_vector_from_dense(c.data, c.length, c.type, c.validity);
+            // A TIME is the engine's TIME, which is parquet's: INT64 microseconds since midnight carrying
+            // LogicalKind::TIME (what CAST ... AS TIME produces and what the parquet scan retags a TIME
+            // column to), never a TIME64-tagged vector.
+            const DrakenType dtype = c.type == DRAKEN_TIME64 ? DRAKEN_INT64 : c.type;
+            DrakenVector v = draken_vector_from_dense(c.data, c.length, dtype, c.validity);
             out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(c.data),
                                                     OwnedBuffer<uint8_t>(c.validity));
             if (c.kind == OutKind::Ipv4) {
@@ -252,7 +257,8 @@ inline void build_column(rugo::avro::AvroColumn& c, CxxColumn& out) {
                 lt.kind = LogicalKind::IPV4;
                 out.own->logical_type = logical_type_intern(lt);
             } else {
-                out.own->logical_type = logical_for(c.type, c.precision, c.scale);
+                out.own->logical_type = logical_for(c.kind == OutKind::Time64 ? DRAKEN_TIME64 : c.type,
+                                                    c.precision, c.scale);
             }
             out.view = out.own->vec;
             break;

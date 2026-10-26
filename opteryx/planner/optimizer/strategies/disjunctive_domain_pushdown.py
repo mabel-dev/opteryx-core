@@ -337,15 +337,20 @@ def _derive_domain_predicates(
 
     branch_domains = [_branch_column_domains(branch) for branch in branches]
 
-    candidate_identities = set(branch_domains[0].keys())
-    for domains in branch_domains[1:]:
-        candidate_identities &= set(domains.keys())
+    # In the order the columns first appear in the query (the first branch's leaf
+    # order), never sorted by identity: identities carry a random suffix minted per
+    # bind, so sorting by them ordered the derived predicates differently every run.
+    candidate_identities = [
+        identity
+        for identity in branch_domains[0]
+        if all(identity in domains for domains in branch_domains[1:])
+    ]
     if not candidate_identities:
         return [], False
 
     derived: List[Expression] = []
     exact = False
-    for identity in sorted(candidate_identities):
+    for identity in candidate_identities:
         domain = _domain_for_column(branch_domains, identity)
         if domain is None:
             continue

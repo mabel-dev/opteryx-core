@@ -3499,6 +3499,22 @@ class _Compiler:
         self.nplan.set_current_display_name(node.kind)
         return result
 
+    @staticmethod
+    def _declared_nested_shapes(scan, read_scs):
+        """{column name: NestedField.flatten()} for each projected column the scan's source declared a
+        nested shape for (a catalog table), which every data file is verified against."""
+        if scan.connector is None:
+            return None
+        declared = scan.connector.declared_nested_fields()
+        if not declared:
+            return None
+        shapes = {
+            sc.name: declared[sc.field_id].flatten()
+            for sc in read_scs
+            if sc.field_id is not None and sc.field_id in declared
+        }
+        return shapes or None
+
     def _classify_scan_columns(self, read_scs):
         """Per-column native-decode classification for a scan read-set.
 
@@ -4294,7 +4310,8 @@ class _Compiler:
         rejection = native_scan_rejection(paths, names, kinds, file_sizes or None,
                                           filesystem=filesystem,
                                           footer_bytes_cache=scan_footer_bytes_cache(),
-                                          absent=absent)
+                                          absent=absent,
+                                          declared_shapes=self._declared_nested_shapes(scan, read_scs))
         if rejection is not None:
             # R7b: the footer gate (native_scan_rejection) rejected the scan — a row
             # group whose types are not all eligible, or a remote path the filesystem
@@ -4368,6 +4385,7 @@ class _Compiler:
             array_columns=array_columns,
             logical_coerce=logical_coerce,
             widen_types=widen_types,
+            declared_shapes=self._declared_nested_shapes(scan, read_scs),
             hash_key_columns=hash_key_columns,
             length_only_columns=length_only_columns,
             # Gap #3 Phase 2b Step 2: the query's exec pool is SHARED with this scan's
@@ -4679,7 +4697,8 @@ class _Compiler:
         # provably decodable, and schema evolution disqualifies the scan outright.
         rejection = native_scan_rejection(paths, p1_names + p2_names, p1_kinds + p2_kinds,
                                           file_sizes or None, filesystem=filesystem,
-                                          footer_bytes_cache=scan_footer_bytes_cache())
+                                          footer_bytes_cache=scan_footer_bytes_cache(),
+                                          declared_shapes=self._declared_nested_shapes(scan, list(p1_scs) + list(p2_scs)))
         if rejection is not None:
             self.scan_residual_reasons[scan.identity] = "footer_gate: " + rejection
             return None
@@ -4733,6 +4752,7 @@ class _Compiler:
                 array_columns=[1 if _physical_type(sc) == DrakenType.ARRAY else 0
                                for sc in scs],
                 logical_coerce=coerce,
+                declared_shapes=self._declared_nested_shapes(scan, scs),
                 hash_key_columns=[1 if sc.identity in _key_ids else 0 for sc in scs],
                 length_only_columns=[
                     1 if sc.identity in (scan._length_only_columns
@@ -5237,7 +5257,8 @@ class _Compiler:
         paths = manifest.get_file_paths()
         filesystem, _connector_type = resolve_scan_filesystem(scan.connector, paths)
         rejection = native_scan_rejection(paths, names, kinds, None, filesystem=filesystem,
-                                          footer_bytes_cache=scan_footer_bytes_cache())
+                                          footer_bytes_cache=scan_footer_bytes_cache(),
+                                          declared_shapes=self._declared_nested_shapes(scan, p1_scs))
         if rejection is not None:
             raise UnsupportedSyntaxError(f"{refusal}: {rejection}.")
         plan = open_native_scan_plan(
@@ -5246,6 +5267,7 @@ class _Compiler:
             string_types=string_types, decimal_columns=decimals,
             array_columns=[1 if _physical_type(sc) == DrakenType.ARRAY else 0 for sc in p1_scs],
             logical_coerce=coerce, pool=None, filesystem=filesystem,
+            declared_shapes=self._declared_nested_shapes(scan, p1_scs),
             footer_bytes_cache=scan_footer_bytes_cache(),
         )
         self.footer_fetch_ns += plan.footer_fetch_ns
@@ -7498,7 +7520,8 @@ def _chunk_cache_admission(fill_bytes, headroom):
     return admit
 
 
-def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=True):
+def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=True,
+                   measure_operator_cpu=False):
     """THE data executor: compile to the native pipeline graph and run it. Returns the
     ``(generator, ResultType)`` contract the cursor consumes. The generator drains the
     engine's output queue; the engine runs on its own native driver + worker pool.
@@ -7507,6 +7530,11 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     cross-query chunk cache whatever the session says - OPTIMIZE (data-file
     compaction) reads every row of the files it is about to replace. Same effect as
     ``SET chunk_cache_admit = false``: the cache is flushed and nothing is admitted.
+
+    ``measure_operator_cpu``: record each operator's CPU time (``cpu_time`` in
+    ``native_op_stats``). EXPLAIN ANALYZE only — the per-thread CPU clock it reads
+    twice per operator call is a real syscall on x86; every other query reports
+    wall time (``execution_time``) and per-pipeline CPU only.
 
     ``trace_sink``: an optional opteryx.models.trace_bundle.TraceBundle. When
     tracing is armed (config.OPTERYX_TRACE), the drained span blob and symbol
@@ -7577,6 +7605,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     _compile0 = _t.perf_counter_ns()
     (nplan, out_q, scan_sources, scan_facts,
      _footer_fetch_ns, _runtime_bounds_wired) = compile_to_native(plan, pool=pool)
+    nplan.set_measure_operator_cpu(measure_operator_cpu)
     _compile_ns = _t.perf_counter_ns() - _compile0 - _footer_fetch_ns
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
     # fact — recorded whether or not the GIL instrumentation is armed; the dict is
@@ -7758,7 +7787,6 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                             "bytes_out": row["bytes_out"],
                             "calls": row["calls"],
                             "execution_time": row["execution_time"],
-                            "cpu_time": row["cpu_time"],
                             # Breaker cost. Additive like calls/execution_time: a
                             # combine runs once per WORKER, and an identity spanning
                             # two pipelines genuinely paid both. Zero except on sinks.
@@ -7771,6 +7799,8 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                             # node actually ran at. Never summed: it is a width, not work.
                             "dop": row["dop"],
                         }
+                        if measure_operator_cpu:
+                            op_stats[ident]["cpu_time"] = row["cpu_time"]
                     else:
                         # records_out/bytes_out: last-row-wins is correct — the
                         # terminal stage's OUTPUT is the node's real output.
@@ -7788,7 +7818,8 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                         agg["bytes_out"] = row["bytes_out"]
                         agg["calls"] += row["calls"]
                         agg["execution_time"] += row["execution_time"]
-                        agg["cpu_time"] += row["cpu_time"]
+                        if measure_operator_cpu:
+                            agg["cpu_time"] += row["cpu_time"]
                         agg["combine_time"] += row["combine_time"]
                         agg["finalize_time"] += row["finalize_time"]
                         agg["dop"] = max(agg["dop"], row["dop"])

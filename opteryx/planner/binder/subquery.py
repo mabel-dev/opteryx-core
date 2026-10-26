@@ -222,7 +222,7 @@ def visit_subquery(self, node: PlanStep, context: BindingContext) -> Tuple[PlanS
     # A derived relation exposes ONE name - its alias - and the relations it was
     # built from are not among them. Both dicts are replaced wholesale for the same
     # reason: `traverse` re-attaches the ENCLOSING scope's relations on the way out
-    # of the boundary (see traversal.py), so anything left here is an internal name
+    # of the boundary (see traverse in binder_core.pyx), so anything left here is an internal name
     # escaping into a scope that cannot address it.
     #
     # This previously popped only the relations still present as `context.schemas`
