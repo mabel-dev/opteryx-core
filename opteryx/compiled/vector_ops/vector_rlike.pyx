@@ -21,59 +21,20 @@ cdef extern from "core/alloc.h":
     void  draken_free(void* p) nogil
 
 
+cdef extern from "ops/kernels/dfa_walk.h" nogil:
+    ctypedef struct DfaProgram "draken_dfa::DfaProgram":
+        pass
+    int dfa_decode "draken_dfa::decode"(const uint8_t* blob, size_t blob_len, DfaProgram* p)
+    int dfa_match "draken_dfa::match"(const DfaProgram* p, const uint8_t* s, uint32_t slen)
+
+
 # Pattern operand is a pre-compiled DFA blob (vector_dfa_compile.compile_rlike_dfa),
 # produced at bind time from a literal pattern by binder/pattern_compile.py's
 # compile_rlike_pattern — never a raw regex string. RE2 is not linked here; RE2's
-# parser only ever runs at plan time (vector_dfa_compile.pyx). A non-literal or
-# uncompilable pattern is refused with NotSupportedError before a predicate ever
-# reaches this function — see .claude/CLAUDE.md's plan-time-refusal precedent.
-cdef inline bint _dfa_match(
-    const uint8_t* blob,
-    Py_ssize_t blob_len,
-    const uint8_t* sdata,
-    uint32_t slen,
-) except -1 nogil:
-    if blob_len < 4:
-        with gil:
-            raise ValueError("vector_rlike: malformed DFA blob (too short)")
-    cdef uint8_t version = blob[0]
-    cdef uint8_t flags = blob[1]
-    cdef uint16_t num_states = (<uint16_t>blob[2]) | ((<uint16_t>blob[3]) << 8)
-    if version != 1:
-        with gil:
-            raise ValueError("vector_rlike: unsupported DFA blob version")
-    cdef bint has_begin = (flags & 0x01) != 0
-    cdef bint has_end = (flags & 0x02) != 0
-    cdef Py_ssize_t accept_bitmap_len = (num_states + 7) // 8
-    cdef Py_ssize_t expected_len = 4 + accept_bitmap_len + (<Py_ssize_t>num_states) * 256 * 2
-    if blob_len != expected_len:
-        with gil:
-            raise ValueError("vector_rlike: malformed DFA blob (length mismatch)")
-
-    cdef const uint8_t* accept_bitmap = blob + 4
-    cdef const uint16_t* table = <const uint16_t*>(blob + 4 + accept_bitmap_len)
-    cdef int state = 0
-    cdef uint32_t i
-    cdef uint16_t next_state
-
-    if not has_end and ((accept_bitmap[0] >> 0) & 1):
-        return True
-
-    for i in range(slen):
-        next_state = table[(<Py_ssize_t>state) * 256 + sdata[i]]
-        if next_state == 0xFFFF:
-            # Anchored-start (has_begin): a genuine dead end, no recovery.
-            # Unanchored-start: the NFA's self-loop "search anywhere" state is
-            # always active, so a real dead transition should not occur here —
-            # treat it the same (no match) rather than guess at recovery.
-            return False
-        state = <int>next_state
-        if not has_end and ((accept_bitmap[state >> 3] >> (state & 7)) & 1):
-            return True
-
-    if has_end:
-        return ((accept_bitmap[state >> 3] >> (state & 7)) & 1) != 0
-    return False
+# parser only ever runs at plan time (vector_dfa_compile.pyx). The blob is walked
+# by the shared C++ walk (draken/ops/kernels/dfa_walk.h), the same one draken_rlike
+# uses. A non-literal or uncompilable pattern is refused with NotSupportedError
+# before a predicate ever reaches this function.
 
 
 cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
@@ -89,6 +50,9 @@ cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
     cdef DrakenStringSlot* pslot = &parena.slots[psel[0]]
     cdef const uint8_t* pat_ptr = str_data(pslot, parena.arena)
     cdef Py_ssize_t pat_len = <Py_ssize_t>str_length(pslot)
+    cdef DfaProgram prog
+    if not dfa_decode(pat_ptr, <size_t>pat_len, &prog):
+        raise ValueError("vector_rlike: malformed compiled DFA blob")
 
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
@@ -137,7 +101,7 @@ cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
             slot = &arena.slots[sel[i]]
             slen = str_length(slot)
             sdata = str_data(slot, arena.arena)
-            if _dfa_match(pat_ptr, pat_len, sdata, slen):
+            if dfa_match(&prog, sdata, slen):
                 dst[i >> 3] &= ~(1 << (i & 7))
     else:
         for i in range(n):
@@ -146,7 +110,7 @@ cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
             slot = &arena.slots[sel[i]]
             slen = str_length(slot)
             sdata = str_data(slot, arena.arena)
-            if _dfa_match(pat_ptr, pat_len, sdata, slen):
+            if dfa_match(&prog, sdata, slen):
                 dst[i >> 3] |= (1 << (i & 7))
 
     return from_decoded(<void*>dst, out_null, <size_t>n)

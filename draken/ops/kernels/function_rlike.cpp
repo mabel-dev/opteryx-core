@@ -36,17 +36,6 @@ inline bool rk_row_valid(const DrakenVector* v, uint32_t row) {
     return v->validity == nullptr || ((v->validity[row >> 3] >> (row & 7)) & 1u);
 }
 
-// Walk the compiled DFA blob over one subject string. Blob format is defined
-// by vector_dfa_compile.pyx's compile_rlike_dfa docstring:
-//   u8 version(=1), u8 flags(bit0=anchored_start, bit1=anchored_end),
-//   u16 num_states, accept_bitmap, then num_states*256 u16 transitions.
-// Returns 1/0 for match/no-match, or -1 for a malformed blob — the blob is
-// entirely plan-time-compiler-produced, so -1 means a compiler/kernel format
-// drift, not bad user input; the caller fails loud rather than guessing.
-inline int rk_dfa_match(const uint8_t* blob, size_t blob_len, const uint8_t* sdata, uint32_t slen) {
-    return draken_dfa::match(blob, blob_len, sdata, slen);  // shared walk (dfa_walk.h)
-}
-
 }  // namespace
 
 extern "C" {
@@ -98,15 +87,19 @@ VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t narg
     const uint8_t* blob = reinterpret_cast<const uint8_t*>(str_data(pslot, psa->arena));
     const size_t blob_len = str_length(pslot);
 
+    // The blob is plan-time-produced (blob format in dfa_walk.h); decode it ONCE —
+    // a failure means compiler/kernel format drift, not bad user input, so fail
+    // loud rather than guess — then walk the decoded program per value.
+    draken_dfa::DfaProgram dfa{};
+    if (!draken_dfa::decode(blob, blob_len, &dfa))
+        return draken_error_sentinel("draken_rlike: malformed compiled DFA blob");
+
     // Compressed subject: match each live value once, scatter the verdicts.
     if (draken_is_compressed(v))
         return kernel_pred_compressed_live(v, [&](uint32_t j, bool* hit) -> const char* {
             const DrakenStringSlot* vs = &vsa->slots[j];
-            const int m = rk_dfa_match(blob, blob_len,
-                                       reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena)),
-                                       str_length(vs));
-            if (m < 0) return "draken_rlike: malformed compiled DFA blob";
-            *hit = (m != 0) != negate;
+            *hit = (draken_dfa::match(&dfa, reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena)),
+                                      str_length(vs)) != 0) != negate;
             return nullptr;
         });
 
@@ -128,13 +121,7 @@ VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t narg
         const DrakenStringSlot* vs = &vsa->slots[v->selection[i]];
         const uint8_t* sdata = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
         const uint32_t slen = str_length(vs);
-        const int m = rk_dfa_match(blob, blob_len, sdata, slen);
-        if (m < 0) {
-            draken_free(out);
-            if (validity != nullptr) draken_free(validity);
-            return draken_error_sentinel("draken_rlike: malformed compiled DFA blob");
-        }
-        const bool hit = (m != 0);
+        const bool hit = draken_dfa::match(&dfa, sdata, slen) != 0;
         if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     }
 

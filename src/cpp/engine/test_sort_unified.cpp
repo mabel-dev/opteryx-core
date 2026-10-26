@@ -160,6 +160,23 @@ static CxxColumn col_dec128(const std::vector<__int128>& vals) {
     return c;
 }
 
+// DECIMAL128 with a validity bitmap (col_dec128 has none).
+static CxxColumn col_dec128_valid(const std::vector<__int128>& vals, const std::vector<bool>& valid) {
+    uint32_t n = static_cast<uint32_t>(vals.size());
+    auto* data = static_cast<__int128*>(draken_malloc(sizeof(__int128) * (n ? n : 1)));
+    for (uint32_t i = 0; i < n; ++i) data[i] = vals[i];
+    size_t vb = (static_cast<size_t>(n) + 7) / 8;
+    auto* vbits = static_cast<uint8_t*>(draken_malloc(vb ? vb : 1));
+    std::memset(vbits, 0xFF, vb ? vb : 1);
+    for (uint32_t i = 0; i < n; ++i)
+        if (!valid[i]) vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+    DrakenVector v = draken_vector_from_dense(data, n, DRAKEN_DECIMAL128, vbits);
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(vbits));
+    c.view = c.own->vec;
+    return c;
+}
+
 static MorselPtr make_morsel(std::vector<CxxColumn> cols) {
     auto m = std::make_shared<CxxMorsel>();
     for (size_t i = 0; i < cols.size(); ++i) {
@@ -381,14 +398,15 @@ static void test_string_keys() {
     CHECK(got == want, "string ordering wrong (byte-wise, shorter prefix first)");
 }
 
-// DECIMAL128 uses the __int128 lane — also not AoS-eligible.
+// DECIMAL128 uses the __int128 lane and packs as TWO AoS parts (sort_i128_parts).
 static void test_decimal128_keys() {
     __int128 big = (static_cast<__int128>(1) << 100);
     std::vector<__int128> v{big, -big, 0, big - 1, -1};
     size_t n = v.size();
     std::vector<MorselPtr> ms{make_morsel({col_dec128(v)})};
     auto keys = keys_of(ms, {{0, true, true}});
-    CHECK(!aos_keys_eligible(keys), "DECIMAL128 keys must NOT be AoS-eligible");
+    CHECK(aos_keys_eligible(keys), "DECIMAL128 keys must be AoS-eligible (two parts)");
+    CHECK(sort_part_count(keys) == 2, "one DECIMAL128 key must be two parts");
 
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
@@ -1043,6 +1061,87 @@ static void test_string_radix_matches_stable_sort() {
     std::printf("  string radix vs stable_sort: %d cases\n", cases);
 }
 
+// DECIMAL128 keys through the AoS comparator and the radix (two parts each) must land
+// on EXACTLY std::stable_sort's permutation under SortKeyCmp: values straddling the
+// 64-bit half boundary (+-2^64, 2^64-1, -1, 0) and +-2^100, heavy ties, NULLs, both
+// directions and null placements, DECIMAL128 first / last / beside a string (the
+// TPC-DS Q67 shape: string, DECIMAL128) / twice (4 parts), shuffled starts, partial
+// sorts, and a team-sized n.
+static __int128 rand_dec128(std::mt19937_64& rng) {
+    static const __int128 edges[] = {
+        0, -1, 1,
+        (static_cast<__int128>(1) << 64) - 1, static_cast<__int128>(1) << 64,
+        -(static_cast<__int128>(1) << 64), -(static_cast<__int128>(1) << 64) + 1,
+        static_cast<__int128>(1) << 100, -(static_cast<__int128>(1) << 100),
+        static_cast<__int128>(INT64_MAX), static_cast<__int128>(INT64_MIN)};
+    switch (rng() % 4) {
+        case 0: return edges[rng() % (sizeof(edges) / sizeof(edges[0]))];
+        case 1: return static_cast<__int128>(static_cast<int64_t>(rng() % 9) - 4);   // ties
+        case 2: return (static_cast<__int128>(static_cast<int64_t>(rng())) << 64) | rng();  // full width
+        default: return static_cast<__int128>(static_cast<int64_t>(rng()));
+    }
+}
+
+static void test_decimal128_radix_matches_stable_sort() {
+    std::mt19937_64 rng(4242);
+    int cases = 0;
+    // layout: d | d,i | i,d | s,d | d,s | d,d | s,d,i
+    for (size_t n : {size_t(SORT_RADIX_MIN), size_t(70001), size_t(400000)}) {
+        for (int layout = 0; layout < 7; ++layout) {
+            static const char* shapes[] = {"d", "di", "id", "sd", "ds", "dd", "sdi"};
+            const std::string shape = shapes[layout];
+            for (int trial = 0; trial < 2; ++trial) {
+                std::vector<CxxColumn> cols;
+                std::vector<SortKeySpec> spec;
+                for (size_t k = 0; k < shape.size(); ++k) {
+                    std::vector<bool> valid(n, true);
+                    for (size_t i = 0; i < n; ++i) valid[i] = rng() % 9 != 0;
+                    if (shape[k] == 'd') {
+                        std::vector<__int128> v(n);
+                        for (size_t i = 0; i < n; ++i) v[i] = rand_dec128(rng);
+                        cols.push_back(col_dec128_valid(v, valid));
+                    } else if (shape[k] == 's') {
+                        std::vector<std::string> v(n);
+                        for (size_t i = 0; i < n; ++i) v[i] = rand_str(rng, static_cast<int>(rng() % 5));
+                        cols.push_back(col_str(v, valid));
+                    } else {
+                        std::vector<int64_t> v(n);
+                        for (size_t i = 0; i < n; ++i) v[i] = static_cast<int64_t>(rng() % 7) - 3;
+                        cols.push_back(col_i64(v, valid));
+                    }
+                    spec.push_back({k, (k + trial) % 2 == 0, (trial + k / 2) % 2 == 0});
+                }
+                std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+                auto keys = keys_of(ms, spec);
+                CHECK(radix_keys_eligible(keys), "DECIMAL128 radix route not taken");
+                CHECK(keys_have_string(keys) || aos_keys_eligible(keys), "DECIMAL128 AoS route not taken");
+                for (int order = 0; order < 2; ++order) {
+                    std::vector<uint32_t> start(n);
+                    std::iota(start.begin(), start.end(), 0u);
+                    if (order == 1) std::shuffle(start.begin(), start.end(), rng);
+                    std::vector<uint32_t> ref = start;
+                    std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+                    std::vector<uint32_t> via = start;
+                    sort_perm(keys, via, SIZE_MAX, 8u);
+                    CHECK(via == ref, "DECIMAL128 sort_perm != std::stable_sort");
+                    // Partial sort (AoS comparator when the limit earns the key build):
+                    // the first `take` rows must be the stable order's, up to ties at
+                    // the cut — compare by key, not by row id.
+                    const size_t take = std::min<size_t>(SORT_AOS_TOPN_MIN, n / 2);
+                    std::vector<uint32_t> part = start;
+                    sort_perm(keys, part, take, 8u);
+                    const SortKeyCmp kc{keys};
+                    for (size_t i = 0; i < take; ++i)
+                        CHECK(!kc(part[i], ref[i]) && !kc(ref[i], part[i]),
+                              "DECIMAL128 partial sort prefix differs by key");
+                    cases += 2;
+                }
+            }
+        }
+    }
+    std::printf("  DECIMAL128 radix/AoS vs stable_sort: %d cases\n", cases);
+}
+
 // Deep MSD chains: a 100-byte shared prefix (13 levels before anything differs),
 // random tails, exact duplicates and NULLs, ASC and DESC, serial and team-sized runs.
 static void test_string_radix_deep_prefix() {
@@ -1098,6 +1197,7 @@ int main() {
     test_parallel_gather_matches_serial();
     test_string_radix_matches_stable_sort();
     test_string_radix_deep_prefix();
+    test_decimal128_radix_matches_stable_sort();
     std::printf("test_sort_unified: all %d checks passed\n", g_checks);
     return 0;
 }

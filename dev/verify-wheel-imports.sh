@@ -63,26 +63,8 @@ assert f["http2"], ("the wheel libcurl has no HTTP/2", f)'
 from rugo import parquet
 import draken'
     ;;
-  skene)
-    PKG="skene"
-    # The libskene wheel bundles draken; skene_native crosses into
-    # draken.morsels.morsel at import (cxx_to_morsel capsule import), so a
-    # bare import already exercises the boundary. The round-trip below gates
-    # the actual artifact end to end: a wheel that imports but cannot
-    # serialize/deserialize a morsel must not ship.
-    DEEP_IMPORT='import skene
-import draken
-from draken.draken_native import DrakenType
-from draken.interop.vector_sequence import vector_from_sequence
-from draken.morsels.morsel import Morsel
-m = Morsel.from_vectors(["a"], [vector_from_sequence([1, 2, None], DrakenType.INT64)])
-buf = skene.write_morsel(m, read_acceleration=True, codec="zstd", zstd_level=1)
-r = skene.read_morsel(buf, 0)
-r.materialize()
-assert r.column("a").to_pylist() == [1, 2, None], "skene wheel round-trip failed"'
-    ;;
   *)
-    echo "ERROR: unknown mode '${MODE}' (expected 'opteryx', 'rugo' or 'skene')" >&2
+    echo "ERROR: unknown mode '${MODE}' (expected 'opteryx' or 'rugo')" >&2
     exit 1
     ;;
 esac

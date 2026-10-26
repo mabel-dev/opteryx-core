@@ -1127,8 +1127,8 @@ extensions = [
             # elsewhere: skene's reader is stateless pure functions over a
             # caller-supplied buffer — no static registry, no cross-TU singleton —
             # so a second compiled copy cannot produce the kernel_registry-style
-            # split-state hazard. skene_native (the libskene wheel's extension)
-            # keeps its own copy; neither extension links the other.
+            # split-state hazard. skene_native keeps its own copy; neither
+            # extension links the other.
             "skene/src/checksum.cpp",
             "skene/src/probe.cpp",
             "skene/src/reader.cpp",

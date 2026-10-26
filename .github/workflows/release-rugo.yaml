@@ -11,9 +11,9 @@ name: Release rugo to PyPI
 #   Python  : 3.11, 3.12, 3.13, 3.14 (GIL)
 #   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
 #
-# `all-*` is the one tag that fires all three pipelines (opteryx_core, rugo,
-# libskene) from a single release decision — see release.yaml. It does NOT make
-# the three releases one release: each pipeline still runs its own floor, builds
+# `all-*` is the one tag that fires both pipelines (opteryx_core, rugo) from a
+# single release decision — see release.yaml. It does NOT make the two
+# releases one release: each pipeline still runs its own floor, builds
 # its own wheels and publishes independently, so one can go red or fail to
 # publish while the others ship. Each component's version still comes from its
 # own `__version__.py`, never from the tag.

@@ -1602,10 +1602,10 @@ VecResult draken_like_adaptive(void* ctx, const DrakenVector* const* args, uint3
     const uint32_t avg = sample > 0u ? static_cast<uint32_t>(total / sample) : 0u;
     const bool use_dfa = (blob_len > 0u) && (avg < c->threshold);
 
-    // The LIKE-DFA blob is plan-time-produced; validate its format ONCE (a -1
-    // here means compiler/kernel drift), then trust it in the hot loop.
-    if (use_dfa &&
-        draken_dfa::match(blob, blob_len, reinterpret_cast<const uint8_t*>(""), 0) < 0) {
+    // The LIKE-DFA blob is plan-time-produced; decode it ONCE (a failure here
+    // means compiler/kernel drift), then walk the decoded program in the hot loop.
+    draken_dfa::DfaProgram dfa{};
+    if (use_dfa && !draken_dfa::decode(blob, blob_len, &dfa)) {
         draken_free(out); if (validity) draken_free(validity);
         return draken_error_sentinel("draken_like_adaptive: malformed LIKE-DFA blob");
     }
@@ -1616,7 +1616,7 @@ VecResult draken_like_adaptive(void* ctx, const DrakenVector* const* args, uint3
     auto matches = [&](const DrakenStringSlot* vs) -> bool {
         const uint8_t* sd = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
         const uint32_t sl = str_length(vs);
-        return use_dfa ? (draken_dfa::match(blob, blob_len, sd, sl) != 0)
+        return use_dfa ? (draken_dfa::match(&dfa, sd, sl) != 0)
                        : fk_like_match(sd, sl, pdat, plen, ci);
     };
 

@@ -16,7 +16,7 @@ IMPORTANT: this module must stay import-safe. No subprocess calls, no file
 generation, no ``setup()`` — only pure definitions driven by env/platform.
 The side-effectful, opteryx-only pieces (libcurl resolution, consolidated
 nanobind module generation, onnxruntime) live in the root ``setup.py``.
-``write_draken_abi_modules`` is *defined* here so all three wheels stamp
+``write_draken_abi_modules`` is *defined* here so both wheels stamp
 identically, but it writes nothing until a ``setup.py`` calls it.
 """
 
@@ -1124,7 +1124,7 @@ def skene_extensions():
 # ---------------------------------------------------------------------------
 # draken ABI stamp
 #
-# opteryx_core, rugo and libskene are three distributions that each bundle the
+# opteryx_core and rugo are two distributions that each bundle the
 # SAME `draken/` package, to the SAME site-packages path. pip cannot see that:
 # whichever installs LAST silently overwrites the others' copy. When the winner
 # comes from a different tree state, the consumer's extensions are left bound to
@@ -1147,7 +1147,7 @@ def skene_extensions():
 # It deliberately answers the WEAKER question "were these built from the same
 # ABI surface?" rather than "are these two technically compatible?". A
 # comment-only edit to a header changes the stamp. That bias is the point: the
-# three wheels are ruled to release in lockstep from one tree state, so
+# two wheels are ruled to release in lockstep from one tree state, so
 # "different tree state" and "must not be mixed" are the same statement here.
 # Over-sensitivity costs a rebuild; under-sensitivity costs a production outage.
 # ---------------------------------------------------------------------------
@@ -1223,8 +1223,8 @@ _CONSUMER_ABI_MODULE = '''\
 #
 # Written by build_common.write_draken_abi_modules() on every build. Holds the
 # draken ABI stamp `@@PKG@@` was compiled against, and the check that refuses to
-# run against a different one. All three distributions that bundle draken
-# (opteryx_core, rugo, libskene) get this same module from one template, so the
+# run against a different one. Both distributions that bundle draken
+# (opteryx_core, rugo) get this same module from one template, so the
 # check cannot drift between them.
 #
 # There is deliberately NO environment variable to skip this check: a draken
@@ -1258,7 +1258,7 @@ def check_draken_abi() -> None:
             f"({REQUIRED_DRAKEN_ABI_STAMP}).\\n"
             f"  installed draken: {location}\\n"
             "An unstamped draken predates this check, which means it comes from an "
-            "older release of opteryx_core, rugo or libskene that overwrote this "
+            "older release of opteryx_core or rugo that overwrote this "
             "one. Reinstall all the draken-bundling distributions you use from the "
             "same release."
         )
@@ -1272,7 +1272,7 @@ def check_draken_abi() -> None:
             f"  `@@PKG@@` was built against draken ABI  {REQUIRED_DRAKEN_ABI_STAMP}\\n"
             f"  the installed draken carries      ABI  {DRAKEN_ABI_STAMP}\\n"
             f"  installed draken: {location}\\n"
-            "opteryx_core, rugo and libskene each bundle their own copy of "
+            "opteryx_core and rugo each bundle their own copy of "
             "`draken` at this same path, so whichever was installed LAST wins — "
             "and the winner here is not the one `@@PKG@@` was compiled against. "
             "Continuing would fail on an undefined draken_* symbol, or crash "

@@ -8,14 +8,13 @@ on:
       # this ran on every `release: published`, so a `rugo-` GitHub Release fired
       # it too; tag-prefix triggers make the two release decisions independent.
       - 'opteryx-*'   # release opteryx_core to PyPI
-      - 'all-*'       # release opteryx_core + rugo + libskene together
+      - 'all-*'       # release opteryx_core + rugo together
       - 'ci-*'        # CI / dry-run builds
 
 jobs:
-  # ── Release floor: the absolute minimum operational proof. rugo and skene
-  # have had this since their pipelines were written (release-rugo.yaml /
-  # release-skene.yaml `floor`); opteryx_core — the component that bundles both
-  # — had no test gate at all: it went straight from a tag to building and
+  # ── Release floor: the absolute minimum operational proof. rugo has had this
+  # since its pipeline was written (release-rugo.yaml `floor`); opteryx_core —
+  # the component that bundles rugo and skene — had no test gate at all: it went straight from a tag to building and
   # publishing wheels, with only the post-build import check standing between a
   # broken tree and PyPI.
   #
@@ -280,8 +279,8 @@ jobs:
           # ── aarch64: NATIVE ARM runner, no QEMU. `docker/setup-qemu-action`
           # would let ubuntu-latest build these, but emulating a manylinux
           # Rust + C++ + LTO build costs hours and risks the job time limit.
-          # release-rugo.yaml and release-skene.yaml already build aarch64 on
-          # ubuntu-24.04-arm natively; this matches them.
+          # release-rugo.yaml already builds aarch64 on ubuntu-24.04-arm
+          # natively; this matches it.
           #
           # Motivation: without these, `pip install opteryx-core` on any Linux
           # ARM host (AWS Graviton, Ampere) falls through to the sdist and

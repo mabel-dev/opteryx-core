@@ -2,7 +2,7 @@
 The draken ABI stamp: every package that bundles draken must agree with the
 draken it is sitting next to.
 
-opteryx_core, rugo and libskene are three distributions that install the SAME
+opteryx_core and rugo are two distributions that install the SAME
 `draken/` package to the SAME path, so whichever pip installs LAST wins. The
 stamp (build_common.write_draken_abi_modules) gives draken an identity so that
 overlay fails loudly at import instead of as an undefined `draken_*` symbol on

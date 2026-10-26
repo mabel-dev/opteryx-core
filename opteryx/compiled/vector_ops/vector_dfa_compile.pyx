@@ -39,15 +39,10 @@ Scope, deliberate and precedented (matches `vector_dfa_extract.pyx`'s own
   - Bounded repeat `{n,m}` is unrolled; construction aborts (returns None)
     past a fixed size cap, same as the overall DFA state-count cap below.
 
-Blob format (little-endian, all multi-byte fields):
-    u8  version (=1)
-    u8  flags (bit0 = anchored_start: no implicit "search anywhere" self-loop
-               on the start state; bit1 = anchored_end: only check the
-               accept flag after the LAST input byte, not after every byte)
-    u16 num_states
-    accept_bitmap: ceil(num_states / 8) bytes, bit i set => state i accepts
-    transition table: num_states * 256 * u16 (next-state index)
-Start state is always state 0.
+Blob format: version 3, defined (and walked) by draken/ops/kernels/dfa_walk.h —
+a required-literal prefilter, per-state acceleration entries, an accept bitmap
+and a num_states * 256 u16 transition table whose high bits flag early-accept
+and accelerated targets. Start state is always state 0.
 """
 
 from libc.stdint cimport uint8_t, uint16_t
@@ -422,13 +417,57 @@ cdef object _epsilon_closure(list nfa_states, frozenset seed):
     return frozenset(closure)
 
 
+cdef object _required_literal(Regexp* re):
+    """The longest ASCII literal every match of `re` must contain as contiguous
+    bytes, or None. Conservative: only structures that FORCE their literal are
+    followed (a concat's literal runs, a capture, a `+` or `{n,}` with n >= 1);
+    alternation, `*` and `?` contribute nothing."""
+    cdef int i
+    cdef int n
+    cdef Regexp* child
+    if re == NULL:
+        return None
+    op = re.op()
+    if op == kRegexpLiteral or op == kRegexpLiteralString:
+        return _rlike_ascii_literal_bytes(re)
+    if op == kRegexpCapture or op == kRegexpPlus:
+        return _required_literal(re.sub()[0]) if re.nsub() == 1 else None
+    if op == kRegexpRepeat:
+        return _required_literal(re.sub()[0]) if re.nsub() == 1 and re.min() >= 1 else None
+    if op != kRegexpConcat:
+        return None
+    best = None
+    run = b""
+    n = re.nsub()
+    for i in range(n):
+        child = re.sub()[i]
+        lit = _rlike_ascii_literal_bytes(child) if child != NULL else None
+        if lit is not None:
+            run += lit
+            continue
+        if best is None or len(run) > len(best):
+            best = run
+        run = b""
+        inner = _required_literal(child)
+        if inner is not None and len(inner) > len(best):
+            best = inner
+    if best is None or len(run) > len(best):
+        best = run
+    return best if best else None
+
+
 cdef object _subset_and_serialize(object nb, object start, object accepts,
-                                  bint has_begin, bint has_end):
+                                  bint has_begin, bint has_end, object required_lit):
     """Add the unanchored-search self-loop (unless has_begin), determinise via
-    subset construction, and serialize to the byte-DFA blob (version 1 format —
-    see module docstring). Returns bytes, or None past DFA_STATE_CAP. Shared by
+    subset construction, and serialize to the byte-DFA blob (version 3 format —
+    see dfa_walk.h). Returns bytes, or None past DFA_STATE_CAP. Shared by
     compile_rlike_dfa (regex source) and compile_like_dfa (glob source); the
-    executor (draken_rlike / vector_rlike._dfa_match) walks either blob."""
+    executor (draken_dfa::match) walks either blob.
+
+    `required_lit` is a literal every match contains. It becomes the blob's
+    prefilter only when the start state is not anchored (dead on fewer than half
+    the bytes) and the literal is at least 2 bytes; an anchored pattern already
+    rejects on its first byte, so a prefilter scan would only add work."""
     # Unanchored search: rather than patching the DFA after the fact (which only
     # handles a failed match at the very first byte), add the "search anywhere"
     # behaviour to the NFA itself, before subset construction. A fresh state with
@@ -479,28 +518,66 @@ cdef object _subset_and_serialize(object nb, object start, object accepts,
 
     num_states = len(dfa_order)
 
-    # --- serialize ---
+    # --- acceleration: a state that maps itself to itself on every byte except
+    # at most 3 "escape" bytes lets the walk jump to the next escape instead of
+    # stepping byte by byte (0 escapes = it loops on everything: jump to end).
+    accel = []
+    for i in range(num_states):
+        row = dfa_trans[i]
+        escapes = [b for b in range(256) if row[b] != i]
+        accel.append(escapes if len(escapes) <= 3 else None)
+
+    # --- prefilter: only when the start state is not anchored (see docstring).
+    # An anchored start state is dead on most bytes; a search-shaped one (an
+    # unanchored regex, a LIKE glob opening with `%`) is dead on none.
+    start_dead = sum(1 for b in range(256) if dfa_trans[0][b] is None)
+    lit = b""
+    if required_lit is not None and len(required_lit) >= 2 and start_dead < 128:
+        lit = bytes(required_lit[:255])
+
+    # --- serialize (version 3, layout in dfa_walk.h) ---
     flags = 0
     if has_begin:
         flags |= 0x01
     if has_end:
         flags |= 0x02
+    if accel[0] is not None:
+        flags |= 0x04
 
     accept_bitmap = bytearray((num_states + 7) // 8)
     for i in range(num_states):
         if dfa_accept[i]:
             accept_bitmap[i >> 3] |= (1 << (i & 7))
+    if len(accept_bitmap) & 1:
+        accept_bitmap.append(0)
 
     out = bytearray()
-    out.append(1)
+    out.append(3)
     out.append(flags)
     out += num_states.to_bytes(2, "little")
+    out.append(len(lit))
+    out.append(0)
+    out += lit
+    if len(out) & 1:
+        out.append(0)
+    for i in range(num_states):
+        escapes = accel[i] if accel[i] is not None else []
+        entry = [len(escapes)] + escapes + [0] * (3 - len(escapes))
+        out += bytes(entry)
     out += bytes(accept_bitmap)
     for i in range(num_states):
         row = dfa_trans[i]
         for b in range(256):
             target = row[b]
-            out += (0xFFFF if target is None else target).to_bytes(2, "little")
+            if target is None:
+                entry = 0xFFFF
+            else:
+                entry = target
+                if dfa_accept[target] and not has_end:
+                    entry |= 0x8000
+                if accel[target] is not None:
+                    entry |= 0x4000
+            out += entry.to_bytes(2, "little")
 
     return bytes(out)
 
@@ -544,8 +621,10 @@ cpdef object compile_like_dfa(bytes pattern):
         s = nb.new_state()
         frag = (s, {s})
     start, accepts = frag
+    # Required literal: the longest run of literal bytes between wildcards.
+    required = max(pattern.replace(b"_", b"%").split(b"%"), key=len)
     # LIKE is a full match: anchored at both start and end.
-    return _subset_and_serialize(nb, start, accepts, True, True)
+    return _subset_and_serialize(nb, start, accepts, True, True, required)
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +850,8 @@ cpdef object compile_rlike_dfa(bytes pattern):
         except _TooComplex:
             return None
 
-        return _subset_and_serialize(nb, start, accepts, has_begin, has_end)
+        return _subset_and_serialize(nb, start, accepts, has_begin, has_end,
+                                     _required_literal(simplified))
     finally:
         if simplified != NULL:
             simplified.Decref()

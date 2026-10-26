@@ -14,7 +14,6 @@ These are wired into the commit and release process. You do not normally run the
 | `generate_reference.py` | pre-commit hook, `make reference` | Regenerates the `reference/` catalogs. The output is committed; edit the generator, never the output |
 | `build-wheels.sh`, `build-wheels-macos.sh` | release workflow | Builds the `opteryx_core` wheel |
 | `build-rugo-wheels.sh`, `build-rugo-wheels-macos.sh` | `release-rugo` workflow | Builds the standalone `rugo` wheel |
-| `build-skene-wheels.sh`, `build-skene-wheels-macos.sh` | `release-skene` workflow | Builds the standalone `libskene` wheel |
 | `verify-wheel-imports.sh` | release workflows | Checks a built wheel imports cleanly |
 | `check_undefined_symbols.py` | `Makefile` | Pre-wheel-build check that the compiled extensions have no undefined symbols |
 

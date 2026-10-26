@@ -88,22 +88,19 @@ Naming:
   - Prefix native files with `_` to avoid symbol/name clashes
 
 **Repository Structure:**
-Single repo, **three wheels from one tree**, no monorepo split:
+Single repo, **two wheels from one tree**, no monorepo split:
 - `opteryx_core` — the full SQL engine (primary distribution). Bundles draken + rugo + skene intrinsically.
 - `rugo` — a standalone, **PyArrow/NumPy-free file-engine wheel** (Parquet/CSV/JSONL read+write) that bundles draken, for users who want the file engine without the SQL engine. Published separately on PyPI.
-- `libskene` (imports as `skene`) — a standalone wheel for the `.skene` columnar file format (reader, writer, specification) that bundles draken. Published separately on PyPI. `rugo` and `skene` are parallel: neither depends on the other, and neither wheel carries the other.
 
-`draken` is **not** separately published — it ships *inside* all three wheels. The shared build machinery and the **single-source** draken/rugo/skene extension definitions live in `build_common.py`, imported by `setup.py`, `rugo/setup.py` and `skene/setup.py`, so the wheels cannot drift. `opteryx` never depends on the published `rugo` or `libskene` wheels — both are intrinsic to opteryx; the standalone wheels are separate packagings of the same sources. `rugo/` and `skene/` source is opteryx-free.
+`draken` and `skene` are **not** separately published — they ship *inside* the wheels (`skene` only inside `opteryx_core`). The shared build machinery and the **single-source** draken/rugo/skene extension definitions live in `build_common.py`, imported by `setup.py` and `rugo/setup.py`, so the wheels cannot drift. `opteryx` never depends on the published `rugo` wheel — it is intrinsic to opteryx; the standalone wheel is a separate packaging of the same sources. `rugo/` and `skene/` source is opteryx-free.
 
 ```
 opteryx-core/
-├── draken/               # Columnar vector library (0 external deps); ships in all three wheels
+├── draken/               # Columnar vector library (0 external deps); ships in both wheels
 ├── rugo/                 # Parquet/CSV/JSONL file engine (also published standalone; depends on draken)
 │   ├── setup.py          #   → standalone `rugo` wheel (draken + rugo only, no Rust)
 │   └── pyproject.toml
-├── skene/                # `.skene` columnar file format (also published standalone as `libskene`; depends on draken)
-│   ├── setup.py          #   → standalone `libskene` wheel (draken + skene only, no Rust)
-│   └── pyproject.toml
+├── skene/                # `.skene` columnar file format (ships inside `opteryx_core` only; depends on draken)
 ├── opteryx/              # SQL query engine (depends on draken, rugo, skene). Flat layout.
 ├── src/                  # Opteryx compute extension sources (Rust + C++)
 ├── third_party/          # Vendored dependencies
@@ -111,7 +108,7 @@ opteryx-core/
 ├── reference/            # Generated catalogs (see above)
 ├── tests/
 ├── docs/
-├── build_common.py       # Shared build machinery + single-source draken/rugo/skene ext defs (all three wheels)
+├── build_common.py       # Shared build machinery + single-source draken/rugo/skene ext defs (both wheels)
 ├── setup.py              # opteryx_core wheel (Cython + setuptools-rust)
 └── pyproject.toml        # opteryx_core distribution metadata
 ```
@@ -121,7 +118,6 @@ opteryx-core/
 - Wheels — in CI manylinux containers, never run locally:
   - `opteryx_core`: `python setup.py bdist_wheel`
   - `rugo`: `python rugo/setup.py bdist_wheel` (runs from the repo root; it neutralises the root `pyproject.toml` so opteryx_core's metadata can't hijack it, and isolates its own build dir so opteryx `.so` aren't swept in — root `setup.py`/`pyproject.toml` stay untouched).
-  - `libskene`: `python skene/setup.py bdist_wheel` (same re-rooting and isolation as rugo; the `opteryx_core` wheel is unaffected).
 - `pip install -e .` and `pip install .` are forbidden for local dev. End users get pre-built wheels from PyPI.
 
 ---

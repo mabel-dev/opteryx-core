@@ -25,8 +25,10 @@
 // them, the keys are packed ROW-CONTIGUOUS (RowKeyN) and compared with a per-part
 // short-circuit (AoSKeyCmpN) — measured 1.03-1.36x over the per-column SortKeyCmp,
 // because a tie on part k finds part k+1 in the same cache line instead of in a
-// separate array. Everything else (string keys, DECIMAL128, 5+ columns) uses
-// SortKeyCmp, which is the same ordering by a slower route — never a different answer.
+// separate array. A DECIMAL128 key packs as two such parts (sort_i128_parts), so the
+// limit counts PARTS. Everything else (string keys outside the radix, UUID, more than
+// SORT_AOS_MAX_PARTS parts) uses SortKeyCmp, which is the same ordering by a slower
+// route — never a different answer.
 //
 // Ordering contract:
 //   - Null placement is PER KEY and independent of direction (SortKeySpec::nulls_first).
@@ -431,15 +433,45 @@ struct AoSKeyCmpN {
     }
 };
 
-// The AoS key packs one uint64 per column, so it can only represent columns whose
-// normalized key IS one uint64: no strings (pointer+length), no DECIMAL128 (128
-// bits). Those, and anything wider than SORT_AOS_MAX_PARTS, take SortKeyCmp.
-inline bool aos_keys_eligible(const std::vector<SortKeyColumn>& keys) {
-    if (keys.empty() || keys.size() > SORT_AOS_MAX_PARTS) return false;
+// A DECIMAL128 key packs as TWO uint64 parts — high half then low half of its
+// sign-flipped value — so the AoS/radix paths count PARTS, not key columns: part p
+// of a RowKeyN is not keys[p] once a DECIMAL128 precedes it. Both halves carry the
+// key's validity bit and NULL placement, which reproduces SortKeyCmp's null arm (one
+// NULL decides on the high half; both NULL tie on both halves). UUID rides the same
+// __int128 lane but stays on SortKeyCmp: only DECIMAL128 was taken onto this path.
+inline bool sort_key_two_parts(const SortKeyColumn& c) { return c.is_i128 && !c.is_uuid; }
+
+inline size_t sort_part_count(const std::vector<SortKeyColumn>& keys) {
+    size_t parts = 0;
+    for (const SortKeyColumn& c : keys) parts += sort_key_two_parts(c) ? 2u : 1u;
+    return parts;
+}
+
+inline bool keys_have_two_part(const std::vector<SortKeyColumn>& keys) {
     for (const SortKeyColumn& c : keys) {
-        if (c.is_str || c.is_i128) return false;
+        if (sort_key_two_parts(c)) return true;
     }
-    return true;
+    return false;
+}
+
+// Order-preserving halves of a signed int128: flip the sign bit, then high/low.
+// Unsigned (hi, lo) lexicographic order == signed int128 order.
+inline void sort_i128_parts(__int128 v, uint64_t& hi, uint64_t& lo) {
+    const unsigned __int128 u =
+        static_cast<unsigned __int128>(v) ^ (static_cast<unsigned __int128>(1) << 127);
+    hi = static_cast<uint64_t>(u >> 64);
+    lo = static_cast<uint64_t>(u);
+}
+
+// The AoS key packs uint64 parts, so it can only represent columns whose normalized
+// key IS uint64 parts: no strings (pointer+length), no UUID. DECIMAL128 takes two
+// parts. Those, and anything wider than SORT_AOS_MAX_PARTS parts, take SortKeyCmp.
+inline bool aos_keys_eligible(const std::vector<SortKeyColumn>& keys) {
+    if (keys.empty()) return false;
+    for (const SortKeyColumn& c : keys) {
+        if (c.is_str || c.is_uuid) return false;
+    }
+    return sort_part_count(keys) <= SORT_AOS_MAX_PARTS;
 }
 
 // ---- string keys in the radix: an order-preserving 8-byte prefix + tie fix-up -----
@@ -467,13 +499,14 @@ inline uint64_t string_prefix_key(const uint8_t* p, uint32_t len) {
     return k;
 }
 
-// The radix accepts strings (as prefix parts); DECIMAL128 and 5+ columns still not.
+// The radix accepts strings (as prefix parts) and DECIMAL128 (two parts); UUID and
+// more than SORT_AOS_MAX_PARTS parts still not.
 inline bool radix_keys_eligible(const std::vector<SortKeyColumn>& keys) {
-    if (keys.empty() || keys.size() > SORT_AOS_MAX_PARTS) return false;
+    if (keys.empty()) return false;
     for (const SortKeyColumn& c : keys) {
-        if (c.is_i128) return false;
+        if (c.is_uuid) return false;
     }
-    return true;
+    return sort_part_count(keys) <= SORT_AOS_MAX_PARTS;
 }
 
 inline bool keys_have_string(const std::vector<SortKeyColumn>& keys) {
@@ -529,27 +562,45 @@ inline void build_aos_keys(const std::vector<SortKeyColumn>& keys, size_t n,
     }
 }
 
-// build_aos_keys for the string radix arm ONLY (sort_perm's DRAKEN_SORT_STR_ARM): a
+// build_aos_keys for the arms whose parts are not one-uint64-per-column: the string
+// radix arm (sort_perm's DRAKEN_SORT_STR_ARM) and any key list with a DECIMAL128. A
 // string part is its prefix key (string_prefix_key — compared by the radix, never by
-// AoSKeyCmpN), a NULL's is 0 like c.num's. Kept apart from build_aos_keys so the
-// numeric build carries no per-row string test: folding them measured the 100M-row
-// int ORDER BY 6.6% slower end to end.
+// AoSKeyCmpN), a NULL's is 0 like c.num's; a DECIMAL128 fills two parts
+// (sort_i128_parts), both carrying its validity bit and NULL placement. Kept apart
+// from build_aos_keys so the numeric build carries no per-row string test: folding
+// them measured the 100M-row int ORDER BY 6.6% slower end to end. NPARTS is the PART
+// count (sort_part_count), not keys.size().
 template <int NPARTS>
-inline void build_aos_keys_with_strings(const std::vector<SortKeyColumn>& keys, size_t n,
-                                        std::vector<RowKeyN<NPARTS>>& rows_out,
-                                        std::vector<uint8_t>& masks_out,
-                                        std::array<bool, NPARTS>& nulls_first_out) {
+inline void build_aos_keys_by_column(const std::vector<SortKeyColumn>& keys, size_t n,
+                                     std::vector<RowKeyN<NPARTS>>& rows_out,
+                                     std::vector<uint8_t>& masks_out,
+                                     std::array<bool, NPARTS>& nulls_first_out) {
     rows_out.resize(n);
     masks_out.resize(n);
-    for (int k = 0; k < NPARTS; ++k) nulls_first_out[k] = keys[k].nulls_first;
     for (size_t i = 0; i < n; ++i) masks_out[i] = 0;
-    for (int k = 0; k < NPARTS; ++k) {   // column at a time: the string test is per column
-        const SortKeyColumn& c = keys[k];
-        const uint8_t bit = static_cast<uint8_t>(1u << k);
+    int k = 0;   // next part
+    for (const SortKeyColumn& c : keys) {   // column at a time: the type test is per column
         const bool asc = c.asc;
         RowKeyN<NPARTS>* rows = rows_out.data();
         uint8_t* masks = masks_out.data();
         const uint8_t* valid = c.valid.data();
+        if (sort_key_two_parts(c)) {
+            nulls_first_out[k] = c.nulls_first;
+            nulls_first_out[k + 1] = c.nulls_first;
+            const uint8_t bits = static_cast<uint8_t>(3u << k);
+            const __int128* num128 = c.num128.data();
+            for (size_t i = 0; i < n; ++i) {
+                uint64_t hi, lo;
+                sort_i128_parts(num128[i], hi, lo);
+                rows[i].parts[k] = asc ? hi : ~hi;
+                rows[i].parts[k + 1] = asc ? lo : ~lo;
+                if (valid[i]) masks[i] |= bits;
+            }
+            k += 2;
+            continue;
+        }
+        nulls_first_out[k] = c.nulls_first;
+        const uint8_t bit = static_cast<uint8_t>(1u << k);
         if (c.is_str) {
             const uint8_t* const* sp = c.sptr.data();
             const uint32_t* sl = c.slen.data();
@@ -565,6 +616,7 @@ inline void build_aos_keys_with_strings(const std::vector<SortKeyColumn>& keys, 
                 if (valid[i]) masks[i] |= bit;
             }
         }
+        k += 1;
     }
 }
 
@@ -1141,10 +1193,13 @@ struct RadixFixup {
     const RowKeyN<NPARTS>* rows;
     const uint8_t* masks;
     const std::vector<SortKeyColumn>* keys;
+    // key_of[p]: the key column part p belongs to. NOT the identity once a DECIMAL128
+    // (two parts) precedes it. A string is always exactly one part.
+    std::array<int, NPARTS> key_of;
 
     int first_string_from(int k0) const {
         for (int k = k0; k < NPARTS; ++k)
-            if ((*keys)[k].is_str) return k;
+            if ((*keys)[key_of[k]].is_str) return k;
         return -1;
     }
     bool same(uint32_t a, uint32_t b, int k0, int s) const {
@@ -1171,7 +1226,7 @@ struct RadixFixup {
     // (one value); 2 = yes, lengths differ. A NULL column s is one value.
     int ends_within(const uint32_t* p, size_t i, size_t j, int s, uint64_t cover) const {
         if (!((masks[p[i]] >> s) & 1u)) return 1;
-        const SortKeyColumn& c = (*keys)[s];
+        const SortKeyColumn& c = (*keys)[key_of[s]];
         const uint32_t l0 = c.slen[p[i]];
         bool same_len = true;
         for (size_t q = i; q < j; ++q) {
@@ -1182,7 +1237,7 @@ struct RadixFixup {
         return same_len ? 1 : 2;
     }
     uint64_t level_key(uint32_t r, int s, uint32_t depth) const {
-        const SortKeyColumn& c = (*keys)[s];
+        const SortKeyColumn& c = (*keys)[key_of[s]];
         const uint64_t off = static_cast<uint64_t>(depth) * SORT_STRING_PREFIX_BYTES;
         const uint32_t len = c.slen[r];
         const uint64_t k = len > off ? string_prefix_key(c.sptr[r] + off, static_cast<uint32_t>(len - off)) : 0;
@@ -1205,7 +1260,7 @@ struct RadixFixup {
             sort_team_run(nt, [&](unsigned m) {
                 const size_t lo = t.i + len * m / nt, hi = t.i + len * (m + 1) / nt;
                 part[m] = ends_within(p, lo, hi, t.s, cover);
-                first_len[m] = (*keys)[t.s].slen[p[lo]];
+                first_len[m] = (*keys)[key_of[t.s]].slen[p[lo]];
             });
             ends = 1;
             for (unsigned m = 0; m < nt; ++m) {
@@ -1276,7 +1331,17 @@ inline void radix_fixup_ties(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
                              std::vector<uint32_t>& perm, unsigned nthreads) {
     const size_t n = perm.size();
     if (n < 2) return;
-    const RadixFixup<NPARTS> fx{rows, masks, &keys};
+    std::array<int, NPARTS> key_of{};
+    {
+        int k = 0;
+        for (size_t c = 0; c < keys.size(); ++c) {
+            const int width = sort_key_two_parts(keys[c]) ? 2 : 1;
+            for (int h = 0; h < width; ++h) key_of[k + h] = static_cast<int>(c);
+            k += width;
+        }
+        if (k != NPARTS) std::abort();   // NPARTS must be sort_part_count(keys)
+    }
+    const RadixFixup<NPARTS> fx{rows, masks, &keys, key_of};
     uint32_t* p = perm.data();
     // Level 0: the top-level runs (parts 0..first string part), found by the team —
     // a read-only pass over perm with random reads of the keys; serial, it measured
@@ -1439,7 +1504,7 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
         // the radix (over prefix parts) + tie fix-up is the fallback.
         const SortKeyCmp exact{keys};
         const uint32_t threshold = sort_vergesort_radix_threshold(sort_team_width(n, nthreads));
-        switch (keys.size()) {
+        switch (sort_part_count(keys)) {
 #define DRAKEN_SORT_STR_ARM(NP)                                                  \
             case NP: {                                                           \
                 /* The prefix keys are built INSIDE the fallback: the census and */\
@@ -1452,7 +1517,7 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
                                    std::vector<RowKeyN<NP>> rows;                \
                                    std::vector<uint8_t> masks;                   \
                                    std::array<bool, NP> nf{};                    \
-                                   build_aos_keys_with_strings<NP>(*keys_p, n,   \
+                                   build_aos_keys_by_column<NP>(*keys_p, n,      \
                                        rows, masks, nf);                         \
                                    const RowKeyN<NP>* rows_p = rows.data();      \
                                    const uint8_t* masks_p = masks.data();        \
@@ -1472,13 +1537,17 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
         }
     }
     if (aos_keys_eligible(keys) && aos_build_worth_it(n, take_first)) {
-        switch (keys.size()) {
+        const bool by_column = keys_have_two_part(keys);
+        switch (sort_part_count(keys)) {
 #define DRAKEN_SORT_AOS_ARM(NP)                                                  \
             case NP: {                                                           \
                 std::vector<RowKeyN<NP>> rows;                                   \
                 std::vector<uint8_t> masks;                                      \
                 std::array<bool, NP> nf{};                                       \
-                build_aos_keys<NP>(keys, n, rows, masks, nf);                    \
+                if (by_column)                                                   \
+                    build_aos_keys_by_column<NP>(keys, n, rows, masks, nf);      \
+                else                                                             \
+                    build_aos_keys<NP>(keys, n, rows, masks, nf);                \
                 /* Raw pointers, captured BY VALUE below: a [&] capture of the */ \
                 /* vectors lets their addresses escape, and the uint8_t mask    */ \
                 /* stores in the inlined key build may then alias them — the    */ \
