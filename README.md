@@ -183,6 +183,16 @@ Opteryx Core is best thought of as an embedded analytical engine rather than a f
 
 ## Contributing
 
+## Third-party benchmark material
+
+The Apache-2.0 licence covers Opteryx-Core's own code. It does not cover the
+benchmark queries, data and results derived from ClickBench (CC BY-NC-SA 4.0),
+TPC-H, the Join Order Benchmark and the H2O db-benchmark (MPL-2.0), which keep
+the terms of their upstream sources. TPC-H results here are derived from TPC-H,
+are not audited, and are not comparable to published TPC-H results. See
+[THIRD_PARTY_BENCHMARKS.md](THIRD_PARTY_BENCHMARKS.md) for attributions, licences
+and changes made.
+
 If you use Opteryx-Core yourself, we want to hear from you.
 
 - Use it on your own datasets
