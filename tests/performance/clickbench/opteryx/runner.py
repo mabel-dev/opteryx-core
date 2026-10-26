@@ -28,6 +28,10 @@ class Dataset(enum.Enum):
     # this name only locates the directory: the queries read it through
     # READ_AVRO (see `relation_sql`).
     FULL_SPLIT_AVRO = "scratch.hits_avro"
+    # FULL_SPLIT_RUGO_262K converted to 1M-row ORC shards written by pyarrow.orc
+    # (dev/clickbench/parquet_to_orc.py). Read through READ_ORC, as Avro is through
+    # READ_AVRO (see `relation_sql`).
+    FULL_SPLIT_ORC = "scratch.hits_orc"
     # Remote Iceberg tables on AIStor (tests/performance/_common.py). Canon split is
     # the same files as FULL_SPLIT; canon single is upstream's hits.parquet. The rugo
     # split is FULL_SPLIT rewritten file by file (hits_N kept), 64k-row row groups in
@@ -74,6 +78,7 @@ VARIANT_DATASETS = {
     "skene": Dataset.FULL_SPLIT_SKENE,
     "json": Dataset.FULL_SPLIT_JSON,
     "avro": Dataset.FULL_SPLIT_AVRO,
+    "orc": Dataset.FULL_SPLIT_ORC,
     "aistor-canon-split": Dataset.AISTOR_CANON_SPLIT,
     "aistor-canon-single": Dataset.AISTOR_CANON_SINGLE,
     "aistor-rugo-split": Dataset.AISTOR_RUGO_SPLIT,
@@ -110,10 +115,12 @@ def resolve_dataset_path(dataset: Dataset) -> str:
     return path
 
 def relation_sql(dataset: Dataset, dataset_path: str) -> str:
-    """What `{DATASET}` becomes in a statement: the relation name, or for Avro -
-    readable only through READ_AVRO - a READ_AVRO over the directory's files."""
+    """What `{DATASET}` becomes in a statement: the relation name, or for Avro and ORC -
+    readable here only through READ_AVRO / READ_ORC - a read over the directory's files."""
     if dataset == Dataset.FULL_SPLIT_AVRO:
         return f"READ_AVRO('{dataset_path}/*.avro')"
+    if dataset == Dataset.FULL_SPLIT_ORC:
+        return f"READ_ORC('{dataset_path}/*.orc')"
     return dataset.value
 
 
@@ -137,6 +144,7 @@ OWN_BASELINES = {
 # DuckDB on local parquet - that ratio measured the network, not the engine.
 SAME_FILES_BASELINES = {
     "avro": ("ClickHouse", "../clickhouse/results.local.avro.json"),
+    "orc": ("ClickHouse", "../clickhouse/results.local.orc.json"),
     "aistor-canon-split-10": ("DuckDB", "../duckdb/results.aistor.hits_canon_split_10.json"),
     "aistor-rugo-split-10": ("DuckDB", "../duckdb/results.aistor.hits_rugo_typed_split_10.json"),
 }
@@ -323,6 +331,7 @@ if __name__ == "__main__":  # pragma: no cover
         "(scratch/hits_single); `skene` runs against the skene mirror; "
         "`json` runs against upstream's hits.json.gz split into zstd shards (scratch/hits_json); "
         "`avro` runs READ_AVRO over the rugo split converted to deflate Avro shards (scratch/hits_avro); "
+        "`orc` runs READ_ORC over the rugo split converted to zstd ORC shards written by pyarrow (scratch/hits_orc); "
         "`aistor-*` against the remote Iceberg tables on AIStor "
         "(default: the rugo 262k-row-group split, scratch/hits_rugo_262k)",
     )

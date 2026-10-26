@@ -1004,6 +1004,27 @@ clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split convert
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (avro) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant avro
 
+clickbench-orc: ## Run ClickBench through READ_ORC over the rugo split converted to 1M-row zstd ORC shards by pyarrow.orc (converts scratch/hits_rugo_262k to scratch/hits_orc on first run)
+	@# ORC is reachable here only through READ_ORC (it is not a stored-dataset format
+	@# for the benchmark), so the runner's `orc` variant rewrites each query's relation
+	@# to READ_ORC('scratch/hits_orc/*.orc'). The files are written by pyarrow.orc - the
+	@# Apache ORC C++ library, an independent writer, so this reads what a Hive / Spark
+	@# pipeline's ORC looks like, not our own idea of it. pyarrow is a dev tool here
+	@# (dev/clickbench/parquet_to_orc.py); the engine imports none of it. Its ratio
+	@# column is ClickHouse local reading the SAME ORC files (`make
+	@# clickbench-clickhouse-orc`, clickhouse/results.local.orc.json, best try); no
+	@# ratio column until that has been run - never the parquet baseline.
+	@#
+	@# Gated on a stamp naming the codec and converter version, not on the directory:
+	@# the converter writes <dir>.partial and renames it only when every source row
+	@# is accounted for, and a mirror written another way (another codec, stripe or
+	@# shard size) must not satisfy the gate. Changing any of those in
+	@# dev/clickbench/parquet_to_orc.py means bumping the stamp.
+	@test -f scratch/hits_orc.zstd-pyarrow-v1 || { rm -rf scratch/hits_orc scratch/hits_orc.partial && $(PYTHON) dev/clickbench/parquet_to_orc.py scratch/hits_rugo_262k scratch/hits_orc zstd && touch scratch/hits_orc.zstd-pyarrow-v1; }
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (orc) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant orc
+
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile
@@ -1044,6 +1065,11 @@ clickbench-clickhouse-avro: ## ClickHouse local over the clickbench-avro shards,
 	@test -f scratch/hits_avro.deflate-rugo-v1 || { echo "scratch/hits_avro is not built - run make clickbench-avro first" >&2; exit 1; }
 	@test -x $(CLICKHOUSE) || { echo "no clickhouse binary at $(CLICKHOUSE) (set CLICKHOUSE=...)" >&2; exit 1; }
 	@$(PYTHON) tests/performance/clickbench/clickhouse/runner.py --binary $(CLICKHOUSE) --avro-dir scratch/hits_avro
+
+clickbench-clickhouse-orc: ## ClickHouse local over the clickbench-orc shards, 1 try per query (writes clickhouse/results.local.orc.json; needs a clickhouse binary at CLICKHOUSE and scratch/hits_orc built by make clickbench-orc)
+	@test -f scratch/hits_orc.zstd-pyarrow-v1 || { echo "scratch/hits_orc is not built - run make clickbench-orc first" >&2; exit 1; }
+	@test -x $(CLICKHOUSE) || { echo "no clickhouse binary at $(CLICKHOUSE) (set CLICKHOUSE=...)" >&2; exit 1; }
+	@$(PYTHON) tests/performance/clickbench/clickhouse/runner.py --binary $(CLICKHOUSE) --orc-dir scratch/hits_orc
 
 clickbench-odata: ## ClickBench against opteryx.app as OData reads of benchmarks.clickbench.q_00..q_42 (writes odata/results.local.json; CLIENT_ID/CLIENT_SECRET from env or the gitignored .env)
 	@test -f .env || { echo "no .env - set CLIENT_ID/CLIENT_SECRET in .env (gitignored) or call the runner directly with them in the environment" >&2; exit 1; }

@@ -1,10 +1,13 @@
 """
-ClickHouse Local ClickBench Benchmark over the Avro shards
-===========================================================
+ClickHouse Local ClickBench Benchmark over the Avro or ORC shards
+==================================================================
 Runs the ClickBench query suite with `clickhouse local` reading the Avro shards
 `make clickbench-avro` converts (scratch/hits_avro, dev/clickbench/parquet_to_avro.py)
 through its `file(..., 'Avro')` table function - the second engine comparison for
-`make clickbench-avro`, beside DuckDB's avro extension.
+`make clickbench-avro`, beside DuckDB's avro extension. With `--orc-dir` it reads the ORC
+shards `make clickbench-orc` converts (scratch/hits_orc, dev/clickbench/parquet_to_orc.py)
+through `file(..., 'ORC')` and writes clickhouse/results.local.orc.json - the ratio column of
+`make clickbench-orc`.
 
 The queries are the DuckDB runner's (tests/performance/clickbench/duckdb/runner.py),
 which are written in ClickHouse's style; STRLEN becomes ClickHouse's `length`. The
@@ -14,11 +17,11 @@ stay as ClickHouse String, which is bytes.
 Each query runs in its own `clickhouse local` process; the time is ClickHouse's own
 `--time` figure for the query (process start and the view are not counted).
 
-Output: clickhouse/results.local.avro.json (DuckDB runner's result format).
+Output: clickhouse/results.local.avro.json, or results.local.orc.json (DuckDB runner's result format).
 
 Usage:
     python tests/performance/clickbench/clickhouse/runner.py --binary scratch/clickhouse/clickhouse \\
-        [--avro-dir scratch/hits_avro] [--tries 1]
+        [--avro-dir scratch/hits_avro | --orc-dir scratch/hits_orc] [--tries 1]
 """
 
 import argparse
@@ -38,28 +41,33 @@ QUERIES = [q.replace("STRLEN(", "length(") for q in DUCKDB_QUERIES]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ClickHouse local ClickBench over Avro")
+    parser = argparse.ArgumentParser(description="ClickHouse local ClickBench over Avro or ORC")
     parser.add_argument("--binary", required=True, help="Path to the clickhouse binary")
-    parser.add_argument("--avro-dir", default="scratch/hits_avro")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--avro-dir", default=None)
+    group.add_argument("--orc-dir", default=None)
     parser.add_argument("--tries", type=int, default=1)
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
-    avro_dir = os.path.realpath(args.avro_dir)
-    files = [f for f in os.listdir(avro_dir) if f.startswith("hits_") and f.endswith(".avro")]
+    if args.orc_dir:
+        label, extension, data_dir = "ORC", "orc", os.path.realpath(args.orc_dir)
+    else:
+        label, extension, data_dir = "Avro", "avro", os.path.realpath(args.avro_dir or "scratch/hits_avro")
+    files = [f for f in os.listdir(data_dir) if f.startswith("hits_") and f.endswith("." + extension)]
     if not files:
-        sys.exit(f"ERROR: No hits_*.avro files found in {avro_dir}")
-    data_size = sum(os.path.getsize(os.path.join(avro_dir, f)) for f in files)
+        sys.exit(f"ERROR: No hits_*.{extension} files found in {data_dir}")
+    data_size = sum(os.path.getsize(os.path.join(data_dir, f)) for f in files)
     version = subprocess.run([args.binary, "local", "--version"], capture_output=True, text=True, check=True).stdout.strip()
-    output_path = args.output or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.local.avro.json")
+    output_path = args.output or os.path.join(os.path.dirname(os.path.abspath(__file__)), f"results.local.{extension}.json")
     view = (
         "CREATE VIEW hits AS SELECT * REPLACE (toDate(EventDate) AS EventDate) "
-        f"FROM file('{avro_dir}/hits_*.avro', 'Avro');"
+        f"FROM file('{data_dir}/hits_*.{extension}', '{label}');"
     )
 
-    print("ClickHouse ClickBench — local benchmark (Avro)")
+    print(f"ClickHouse ClickBench — local benchmark ({label})")
     print(f"  ClickHouse     : {version}")
-    print(f"  Avro dir       : {avro_dir}  ({len(files)} files, {data_size / 1e9:.1f} GB)")
+    print(f"  {label} dir".ljust(17) + f": {data_dir}  ({len(files)} files, {data_size / 1e9:.1f} GB)")
     print(f"  Tries per query: {args.tries}")
     print(f"  Output         : {output_path}\n")
 
@@ -83,7 +91,7 @@ def main():
         results.append(times)
 
     payload = {
-        "system": "ClickHouse local (Avro, file())",
+        "system": f"ClickHouse local ({label}, file())",
         "date": datetime.date.today().isoformat(),
         "machine": f"{socket.gethostname()} ({platform.processor() or platform.machine()})",
         "version": version,
