@@ -21,7 +21,7 @@
 //      compress()-based key path sort -2.5 above 1.0).
 //   5. Both vergesort outcomes: already-sorted input (prepass hit) and shuffled input
 //      (prepass declines, stage-2 sort runs) give the same answer.
-//   6. Strings, DECIMAL128, and 5+ key columns route through SortKeyCmp correctly.
+//   6. Strings, DECIMAL128, and keys wider than SORT_AOS_MAX_PARTS route correctly.
 //   7. take_first (TopN/partial_sort) agrees with the full sort's prefix.
 
 #include <algorithm>
@@ -488,22 +488,24 @@ static void test_null_placement_explicit() {
     CHECK(sort_via_generic(keys, n, SIZE_MAX) == want, "generic disagrees with explicit-nulls reference");
 }
 
-// 5+ key columns exceed SORT_AOS_MAX_PARTS and must fall back, still correctly.
-static void test_five_columns_fall_back() {
+// More key columns than SORT_AOS_MAX_PARTS must fall back, still correctly.
+static void test_too_many_parts_fall_back() {
     const size_t n = 800;
+    constexpr int ncol = static_cast<int>(SORT_AOS_MAX_PARTS) + 1;
     std::mt19937_64 rng(3);
     std::uniform_int_distribution<int64_t> d(0, 3);
     std::vector<CxxColumn> cols;
     std::vector<SortKeySpec> spec;
-    std::vector<std::vector<int64_t>> vals(5, std::vector<int64_t>(n));
-    for (int k = 0; k < 5; ++k) {
+    std::vector<std::vector<int64_t>> vals(ncol, std::vector<int64_t>(n));
+    for (int k = 0; k < ncol; ++k) {
         for (size_t i = 0; i < n; ++i) vals[k][i] = d(rng);
         cols.push_back(col_i64(vals[k], std::vector<bool>(n, true)));
         spec.push_back({static_cast<size_t>(k), true, true});
     }
     std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
     auto keys = keys_of(ms, spec);
-    CHECK(!aos_keys_eligible(keys), "5 columns must exceed SORT_AOS_MAX_PARTS");
+    CHECK(!aos_keys_eligible(keys), "SORT_AOS_MAX_PARTS + 1 columns must not be AoS-eligible");
+    CHECK(!radix_keys_eligible(keys), "SORT_AOS_MAX_PARTS + 1 columns must not be radix-eligible");
 
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
@@ -511,11 +513,11 @@ static void test_five_columns_fall_back() {
     for (size_t i = 0; i + 1 < n; ++i) {
         uint32_t x = perm[i], y = perm[i + 1];
         bool ok = false;
-        for (int k = 0; k < 5; ++k) {
+        for (int k = 0; k < ncol; ++k) {
             if (vals[k][x] != vals[k][y]) { ok = vals[k][x] < vals[k][y]; break; }
-            if (k == 4) ok = true;   // fully equal
+            if (k == ncol - 1) ok = true;   // fully equal
         }
-        CHECK(ok, "5-column lexicographic order wrong");
+        CHECK(ok, "wide lexicographic order wrong");
     }
 }
 
@@ -1142,6 +1144,68 @@ static void test_decimal128_radix_matches_stable_sort() {
     std::printf("  DECIMAL128 radix/AoS vs stable_sort: %d cases\n", cases);
 }
 
+// Keys of 5..SORT_AOS_MAX_PARTS parts through the AoS comparator and the radix must
+// land on EXACTLY std::stable_sort's permutation under SortKeyCmp: the TPC-DS q47 /
+// q57 shapes (strings then ints), all-int and all-string 8-part keys, DECIMAL128
+// pairs reaching 8 parts, NULLs, mixed directions and null placements, shuffled
+// starts, partial sorts, and a team-sized n.
+static void test_wide_keys_match_stable_sort() {
+    std::mt19937_64 rng(5150);
+    int cases = 0;
+    static const char* shapes[] = {"iiiii", "sssii", "sssiii", "iiiiiiii", "ssssssss",
+                                   "dsiiii", "ddii", "dddd", "sdsdi"};
+    for (size_t n : {size_t(SORT_RADIX_MIN), size_t(70001), size_t(300000)}) {
+        for (const char* shape_c : shapes) {
+            const std::string shape = shape_c;
+            std::vector<CxxColumn> cols;
+            std::vector<SortKeySpec> spec;
+            for (size_t k = 0; k < shape.size(); ++k) {
+                std::vector<bool> valid(n, true);
+                for (size_t i = 0; i < n; ++i) valid[i] = rng() % 11 != 0;
+                if (shape[k] == 'd') {
+                    std::vector<__int128> v(n);
+                    for (size_t i = 0; i < n; ++i) v[i] = rand_dec128(rng);
+                    cols.push_back(col_dec128_valid(v, valid));
+                } else if (shape[k] == 's') {
+                    std::vector<std::string> v(n);
+                    for (size_t i = 0; i < n; ++i) v[i] = rand_str(rng, static_cast<int>(rng() % 5));
+                    cols.push_back(col_str(v, valid));
+                } else {
+                    std::vector<int64_t> v(n);
+                    for (size_t i = 0; i < n; ++i) v[i] = static_cast<int64_t>(rng() % 5) - 2;
+                    cols.push_back(col_i64(v, valid));
+                }
+                spec.push_back({k, (k + n) % 3 != 0, (k / 2) % 2 == 0});
+            }
+            std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+            auto keys = keys_of(ms, spec);
+            const size_t parts = sort_part_count(keys);
+            CHECK(parts > 4 && parts <= SORT_AOS_MAX_PARTS, "wide-key shape has the wrong part count");
+            CHECK(radix_keys_eligible(keys), "wide-key radix route not taken");
+            CHECK(keys_have_string(keys) || aos_keys_eligible(keys), "wide-key AoS route not taken");
+            for (int order = 0; order < 2; ++order) {
+                std::vector<uint32_t> start(n);
+                std::iota(start.begin(), start.end(), 0u);
+                if (order == 1) std::shuffle(start.begin(), start.end(), rng);
+                std::vector<uint32_t> ref = start;
+                std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+                std::vector<uint32_t> via = start;
+                sort_perm(keys, via, SIZE_MAX, 8u);
+                CHECK(via == ref, "wide-key sort_perm != std::stable_sort");
+                const size_t take = std::min<size_t>(SORT_AOS_TOPN_MIN, n / 2);
+                std::vector<uint32_t> part = start;
+                sort_perm(keys, part, take, 8u);
+                const SortKeyCmp kc{keys};
+                for (size_t i = 0; i < take; ++i)
+                    CHECK(!kc(part[i], ref[i]) && !kc(ref[i], part[i]),
+                          "wide-key partial sort prefix differs by key");
+                cases += 2;
+            }
+        }
+    }
+    std::printf("  wide keys (5..%zu parts) vs stable_sort: %d cases\n", SORT_AOS_MAX_PARTS, cases);
+}
+
 // Deep MSD chains: a 100-byte shared prefix (13 levels before anything differs),
 // random tails, exact duplicates and NULLs, ASC and DESC, serial and team-sized runs.
 static void test_string_radix_deep_prefix() {
@@ -1184,7 +1248,7 @@ int main() {
     test_vergesort_hit_and_miss_agree();
     test_string_keys();
     test_decimal128_keys();
-    test_five_columns_fall_back();
+    test_too_many_parts_fall_back();
     test_take_first_prefix();
     test_sort_morsels_across_morsels();
     test_aos_gate_does_not_change_the_answer();
@@ -1198,6 +1262,7 @@ int main() {
     test_string_radix_matches_stable_sort();
     test_string_radix_deep_prefix();
     test_decimal128_radix_matches_stable_sort();
+    test_wide_keys_match_stable_sort();
     std::printf("test_sort_unified: all %d checks passed\n", g_checks);
     return 0;
 }

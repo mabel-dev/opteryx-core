@@ -63,6 +63,17 @@ maps to:
     consume_to_end()
     return_capture()
 
+Semantics follow RE2 (Perl leftmost-first), which is what REGEXP_REPLACE means:
+
+- an optional literal is greedy — tried consumed first, and on a later failure
+  the match resumes with it skipped (the optionals are the only choice points);
+- consume_to_end is `.*` / `.+` over "any character": `.*` may consume nothing,
+  and `.` without (?s) must not cross a newline. It is only ever the last step.
+
+Patterns outside this — another class repeated (`[0-9]*`), a lazy optional,
+`.*` before a later step, a newline-sensitive or lazy tail with no `$` — are
+not compiled, so REGEXP_REPLACE refuses them instead of answering wrongly.
+
 Program blobs are expected to be optimizer-produced constant literals.
 Malformed or unsupported blobs raise ValueError.
 
@@ -72,7 +83,7 @@ This file is designed to be included from `vector_ops.pyx`.
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport free, malloc, getenv
-from libc.string cimport memcmp, memcpy, memset
+from libc.string cimport memchr, memcmp, memcpy, memset
 
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.object cimport PyObject
@@ -216,6 +227,8 @@ cdef extern from "ops/vec_result.h":
         DrakenType        type
         uint8_t           flags
         uint8_t           validity_embedded
+        uint8_t*          arena
+        uint8_t           arena_lender
 
 cdef extern from "ops/kernels/error_handling.h" nogil:
     VecResult draken_error_sentinel(const char* error_message)
@@ -224,6 +237,19 @@ cdef extern from "ops/kernels/result_helpers.h" nogil:
     VecResult vecresult_from_string_buffers(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType type)
+    uint8_t* vecresult_string_block_alloc(
+        uint32_t length, size_t arena_len, int want_validity,
+        DrakenStringSlot** out_slots, uint8_t** out_arena, uint8_t** out_validity)
+    VecResult vecresult_from_string_block(
+        uint8_t* block, uint32_t length, size_t arena_len, int has_validity, DrakenType type)
+
+cdef extern from "ops/kernels/result_helpers.h" nogil:
+    void kernel_borrow_input_arena(VecResult& r, const DrakenVector* v, uint8_t arg)
+    uint32_t kernel_lender_offset(const DrakenVector* v, const uint8_t* p)
+
+cdef extern from "_dfa_extract_shape.h" nogil:
+    int dfa_x_live_mask(const DrakenVector* v, uint8_t** mask)
+    int dfa_x_preserve_shape(VecResult* r, const DrakenVector* v)
 
 
 cdef enum DfaOpType:
@@ -234,11 +260,21 @@ cdef enum DfaOpType:
     DFA_OP_RETURN_CAPTURE = 5
 
 
+# Program blob version. 2 added the DFA_OP_CONSUME_TO_END flags byte.
+cdef int DFA_PROGRAM_VERSION = 2
+
+# DFA_OP_CONSUME_TO_END flags (the op's one payload byte).
+cdef enum DfaRestFlags:
+    DFA_REST_EMPTY_OK = 1      # `.*` — may consume nothing (`.+` may not)
+    DFA_REST_NO_NEWLINE = 2    # `.` without (?s) — the rest must hold no '\n'
+
+
 cdef struct DfaOp:
     int op_type
     const char* literal
     Py_ssize_t literal_len
     char target_char
+    uint8_t rest_flags
     # For literals <= 8 bytes: the literal packed into a uint64 (native-endian,
     # zero-padded) plus a byte mask, so the hot loop compares with a single
     # register op instead of an out-of-line memcmp call. packed/mask are only
@@ -257,6 +293,10 @@ cdef struct DfaProgramBuilder:
     const char* literals[8]
     Py_ssize_t literal_lens[8]
     char target_chars[8]
+    uint8_t rest_flags[8]
+    # Compile-time only (never encoded): the consume_to_end came from a lazy
+    # `.*?` / `.+?`, which differs from the greedy form when there is no `$`.
+    bint rest_lazy[8]
     char literal_storage[8][64]
     int op_count
 
@@ -300,7 +340,7 @@ cdef inline bint _decode_procedure(
         return False
 
     version = _read_u8(&p)
-    if version != 1:
+    if version != DFA_PROGRAM_VERSION:
         return False
 
     op_count = _read_u8(&p)
@@ -316,6 +356,7 @@ cdef inline bint _decode_procedure(
         proc.ops[i].literal = NULL
         proc.ops[i].literal_len = 0
         proc.ops[i].target_char = <char>0
+        proc.ops[i].rest_flags = 0
         proc.ops[i].packed = 0
         proc.ops[i].mask = 0
 
@@ -344,7 +385,14 @@ cdef inline bint _decode_procedure(
                 return False
             proc.ops[i].target_char = <char>_read_u8(&p)
 
-        elif op_type == DFA_OP_CONSUME_TO_END or op_type == DFA_OP_RETURN_CAPTURE:
+        elif op_type == DFA_OP_CONSUME_TO_END:
+            if p >= end:
+                return False
+            proc.ops[i].rest_flags = _read_u8(&p)
+            if (proc.ops[i].rest_flags & ~(DFA_REST_EMPTY_OK | DFA_REST_NO_NEWLINE)) != 0:
+                return False
+
+        elif op_type == DFA_OP_RETURN_CAPTURE:
             pass
 
         else:
@@ -378,6 +426,8 @@ cdef inline void _builder_reset(DfaProgramBuilder* builder) noexcept:
         builder.literals[i] = NULL
         builder.literal_lens[i] = 0
         builder.target_chars[i] = <char>0
+        builder.rest_flags[i] = 0
+        builder.rest_lazy[i] = False
 
 
 cdef inline bint _builder_append_literal(
@@ -427,6 +477,18 @@ cdef inline bint _builder_append_simple(
     builder.literal_lens[builder.op_count] = 0
     builder.target_chars[builder.op_count] = <char>0
     builder.op_count += 1
+    return True
+
+
+cdef inline bint _builder_append_rest(
+    DfaProgramBuilder* builder,
+    uint8_t rest_flags,
+    bint rest_lazy,
+) noexcept:
+    if not _builder_append_simple(builder, DFA_OP_CONSUME_TO_END):
+        return False
+    builder.rest_flags[builder.op_count - 1] = rest_flags
+    builder.rest_lazy[builder.op_count - 1] = rest_lazy
     return True
 
 
@@ -484,8 +546,65 @@ cdef inline bint _extract_ascii_literal(
 cdef inline bint _is_optional_literal(Regexp* re) noexcept:
     if re == NULL:
         return False
-    if re.op() == kRegexpQuest and re.nsub() == 1:
+    # A lazy `??` prefers SKIPPING the literal; the executor only knows the greedy
+    # order (consume first), so a lazy optional is refused, not run greedily.
+    if re.op() == kRegexpQuest and re.nsub() == 1 and (re.parse_flags() & NonGreedy) == 0:
         return _is_ascii_literal_regexp(re.sub()[0])
+    return False
+
+
+cdef inline bint _is_consume_rest(Regexp* re, uint8_t* rest_flags, bint* rest_lazy) noexcept:
+    """`.*` / `.+` — a repeat of "any character", the only thing consume_to_end
+    implements. Qualifying repeats: AnyChar / AnyByte, the full rune range, or `.`
+    without (?s), which is [^\\n] and sets DFA_REST_NO_NEWLINE. Any other class
+    (`[0-9]*`) is refused — consuming the rest would accept bytes it rejects."""
+    cdef Regexp* sub
+    cdef CharClass* char_class
+    cdef RuneRange* it
+    cdef RuneRange* end
+    cdef int range_count = 0
+    cdef int first_lo = -1
+    cdef int first_hi = -1
+    cdef int second_lo = -1
+    cdef int second_hi = -1
+
+    if re == NULL or re.nsub() != 1:
+        return False
+    if re.op() != kRegexpStar and re.op() != kRegexpPlus:
+        return False
+    sub = re.sub()[0]
+    if sub == NULL:
+        return False
+
+    rest_flags[0] = DFA_REST_EMPTY_OK if re.op() == kRegexpStar else 0
+    rest_lazy[0] = (re.parse_flags() & NonGreedy) != 0
+
+    if sub.op() == kRegexpAnyChar or sub.op() == kRegexpAnyByte:
+        return True
+    if sub.op() != kRegexpCharClass:
+        return False
+    char_class = sub.cc()
+    if char_class == NULL:
+        return False
+
+    it = char_class.begin()
+    end = char_class.end()
+    while it != end:
+        if range_count == 0:
+            first_lo = it.lo
+            first_hi = it.hi
+        elif range_count == 1:
+            second_lo = it.lo
+            second_hi = it.hi
+        range_count += 1
+        it += 1
+
+    if range_count == 1 and first_lo == 0 and first_hi == 1114111:
+        return True
+    if (range_count == 2 and first_lo == 0 and first_hi == 9
+            and second_lo == 11 and second_hi == 1114111):
+        rest_flags[0] |= DFA_REST_NO_NEWLINE
+        return True
     return False
 
 
@@ -514,7 +633,8 @@ cdef inline bint _is_capture_until_char(Regexp* re, char* target_char) noexcept:
     elif inner.op() == kRegexpRepeat and inner.nsub() == 1 and inner.min() == 1 and inner.max() == -1:
         repeated = inner.sub()[0]
     else:
-        repeated = inner
+        # A bare [^X] is ONE character, not "everything up to X".
+        return False
 
     if repeated == NULL or repeated.op() != kRegexpCharClass:
         return False
@@ -565,6 +685,8 @@ cdef inline bint _lower_regexp_to_builder(
     cdef Py_ssize_t literal_len = 0
     cdef char target_char = <char>0
     cdef char literal_buf[64]
+    cdef uint8_t rest_flags = 0
+    cdef bint rest_lazy = False
 
     if re == NULL:
         return False
@@ -612,16 +734,10 @@ cdef inline bint _lower_regexp_to_builder(
                 ):
                     return False
                 continue
-            if child.nsub() == 1 and child.sub()[0] != NULL:
-                if child.op() == kRegexpStar or child.op() == kRegexpPlus:
-                    if (
-                        child.sub()[0].op() == kRegexpAnyChar
-                        or child.sub()[0].op() == kRegexpAnyByte
-                        or child.sub()[0].op() == kRegexpCharClass
-                    ):
-                        if not _builder_append_simple(builder, DFA_OP_CONSUME_TO_END):
-                            return False
-                        continue
+            if _is_consume_rest(child, &rest_flags, &rest_lazy):
+                if not _builder_append_rest(builder, rest_flags, rest_lazy):
+                    return False
+                continue
             return False
         return True
 
@@ -650,14 +766,8 @@ cdef inline bint _lower_regexp_to_builder(
             target_char,
         )
 
-    if re.nsub() == 1 and re.sub()[0] != NULL:
-        if re.op() == kRegexpStar or re.op() == kRegexpPlus:
-            if (
-                re.sub()[0].op() == kRegexpAnyChar
-                or re.sub()[0].op() == kRegexpAnyByte
-                or re.sub()[0].op() == kRegexpCharClass
-            ):
-                return _builder_append_simple(builder, DFA_OP_CONSUME_TO_END)
+    if _is_consume_rest(re, &rest_flags, &rest_lazy):
+        return _builder_append_rest(builder, rest_flags, rest_lazy)
 
     return False
 
@@ -675,13 +785,13 @@ cdef inline bytes _encode_builder_program(DfaProgramBuilder* builder):
         total_len += 1
         if builder.op_types[i] == DFA_OP_CONSUME_LITERAL or builder.op_types[i] == DFA_OP_CONSUME_OPTIONAL_LITERAL:
             total_len += 4 + builder.literal_lens[i]
-        elif builder.op_types[i] == DFA_OP_CAPTURE_UNTIL_CHAR:
+        elif builder.op_types[i] == DFA_OP_CAPTURE_UNTIL_CHAR or builder.op_types[i] == DFA_OP_CONSUME_TO_END:
             total_len += 1
 
     program = bytes(total_len)
     out_ptr = <char*>program
 
-    _write_u8(&out_ptr, 1)
+    _write_u8(&out_ptr, <uint8_t>DFA_PROGRAM_VERSION)
     _write_u8(&out_ptr, <uint8_t>builder.op_count)
 
     for i in range(builder.op_count):
@@ -692,6 +802,8 @@ cdef inline bytes _encode_builder_program(DfaProgramBuilder* builder):
             out_ptr += builder.literal_lens[i]
         elif builder.op_types[i] == DFA_OP_CAPTURE_UNTIL_CHAR:
             _write_u8(&out_ptr, <uint8_t>builder.target_chars[i])
+        elif builder.op_types[i] == DFA_OP_CONSUME_TO_END:
+            _write_u8(&out_ptr, builder.rest_flags[i])
 
     return program
 
@@ -764,6 +876,22 @@ cpdef object compile_dfa_program(bytes pattern, bytes replacement):
         if last_op_type != DFA_OP_CONSUME_TO_END and not has_end_anchor:
             return None
 
+        # consume_to_end takes everything left, so a step after it could only ever
+        # fail — `^M.*r([^y]+)y$` needs backtracking INTO the `.*`. Last step only.
+        for op_idx in range(builder.op_count - 1):
+            if builder.op_types[op_idx] == DFA_OP_CONSUME_TO_END:
+                return None
+
+        # With no `$` the match may stop short of the end, and REGEXP_REPLACE then
+        # keeps the unmatched tail: `.` stops at a newline, a lazy tail matches as
+        # little as it can. The executor returns the capture alone, so only a greedy
+        # tail that crosses newlines may go unanchored.
+        if last_op_type == DFA_OP_CONSUME_TO_END and not has_end_anchor:
+            if builder.rest_lazy[builder.op_count - 1]:
+                return None
+            if builder.rest_flags[builder.op_count - 1] & DFA_REST_NO_NEWLINE:
+                return None
+
         # Every CAPTURE_UNTIL_CHAR(X) must be immediately followed by a
         # CONSUME_LITERAL whose first byte is X. Without this, a regex like
         # ^M([^s]+).*$ would compile (no 's' required by the pattern) but the
@@ -835,79 +963,104 @@ cdef inline bint _execute_procedure(
     const char** out_ptr,
     Py_ssize_t* out_len,
 ) noexcept nogil:
+    """Run the procedure over one value, in RE2's (Perl leftmost-first) order.
+
+    Optional literals are the only choice points — a literal, a [^X]+ capture
+    and the trailing consume_to_end each have one way to match — so the search
+    is: take an optional when it matches and remember where it was taken; on a
+    later failure, resume after that optional with it skipped. At most one
+    resume point per op, so the stack is the op limit (8)."""
     cdef const char* p = src
     cdef const char* end = src + src_len
     cdef const char* capture_ptr = NULL
     cdef Py_ssize_t capture_len = 0
-    cdef int i
+    cdef int i = 0
     cdef int char_pos
     cdef DfaOp* op
     cdef Py_ssize_t remaining
     cdef uint64_t loaded
+    cdef bint ok
+    cdef bint took
+    cdef int resume_op[8]
+    cdef const char* resume_p[8]
+    cdef int resume_count = 0
 
     out_ptr[0] = NULL
     out_len[0] = 0
 
-    for i in range(proc.op_count):
+    while i < proc.op_count:
         op = &proc.ops[i]
+        ok = True
 
         if op.op_type == DFA_OP_CONSUME_LITERAL:
             remaining = <Py_ssize_t>(end - p)
             if remaining < op.literal_len:
-                return False
-            if op.literal_len <= 8 and remaining >= 8:
+                ok = False
+            elif op.literal_len <= 8 and remaining >= 8:
                 # Fast path: one unaligned 8-byte load + masked register compare.
                 # Safe only when >= 8 bytes remain (tight arenas have no slack);
                 # the rare <8-byte tail falls through to memcmp below.
                 memcpy(&loaded, p, 8)
-                if (loaded & op.mask) != op.packed:
-                    return False
-            elif memcmp(p, op.literal, <size_t>op.literal_len) != 0:
-                return False
-            p += op.literal_len
+                ok = (loaded & op.mask) == op.packed
+            else:
+                ok = memcmp(p, op.literal, <size_t>op.literal_len) == 0
+            if ok:
+                p += op.literal_len
 
         elif op.op_type == DFA_OP_CONSUME_OPTIONAL_LITERAL:
             remaining = <Py_ssize_t>(end - p)
             if remaining < op.literal_len:
-                pass
+                took = False
             elif op.literal_len <= 8 and remaining >= 8:
                 memcpy(&loaded, p, 8)
-                if (loaded & op.mask) == op.packed:
-                    p += op.literal_len
-            elif memcmp(p, op.literal, <size_t>op.literal_len) == 0:
+                took = (loaded & op.mask) == op.packed
+            else:
+                took = memcmp(p, op.literal, <size_t>op.literal_len) == 0
+            if took:
+                resume_op[resume_count] = i + 1
+                resume_p[resume_count] = p
+                resume_count += 1
                 p += op.literal_len
 
         elif op.op_type == DFA_OP_CAPTURE_UNTIL_CHAR:
             remaining = <Py_ssize_t>(end - p)
-            if remaining <= 0:
-                return False
             # dfa_find_char returns the first match index in [0, remaining), or
             # -1. char_pos <= 0 covers both "not found" and "empty capture";
-            # char_pos > 0 guarantees p < p+char_pos < end, so no further bounds
-            # check is needed.
-            char_pos = dfa_find_char(p, <size_t>remaining, op.target_char)
+            # char_pos > 0 guarantees p < p+char_pos < end.
+            char_pos = dfa_find_char(p, <size_t>remaining, op.target_char) if remaining > 0 else -1
             if char_pos <= 0:
-                return False
-            capture_ptr = p
-            capture_len = <Py_ssize_t>char_pos
-            p = p + char_pos
+                ok = False
+            else:
+                capture_ptr = p
+                capture_len = <Py_ssize_t>char_pos
+                p = p + char_pos
 
         elif op.op_type == DFA_OP_CONSUME_TO_END:
-            if p >= end:
-                return False
-            p = end
+            if p == end:
+                ok = (op.rest_flags & DFA_REST_EMPTY_OK) != 0
+            elif (op.rest_flags & DFA_REST_NO_NEWLINE) and memchr(p, 10, <size_t>(end - p)) != NULL:
+                ok = False
+            else:
+                p = end
 
         elif op.op_type == DFA_OP_RETURN_CAPTURE:
-            if capture_ptr == NULL:
-                return False
-            if p != end:
-                return False
-            out_ptr[0] = capture_ptr
-            out_len[0] = capture_len
-            return True
+            if capture_ptr != NULL and p == end:
+                out_ptr[0] = capture_ptr
+                out_len[0] = capture_len
+                return True
+            ok = False
 
         else:
             return False
+
+        if ok:
+            i += 1
+        elif resume_count == 0:
+            return False
+        else:
+            resume_count -= 1
+            i = resume_op[resume_count]
+            p = resume_p[resume_count]
 
     return False
 
@@ -1049,16 +1202,79 @@ cdef object _vector_dfa_extract_compressed(
 # ---------------------------------------------------------------------------
 # c-native BC_FUNCTION kernel — draken__dfa_extract(strings, compiled_program)
 # ---------------------------------------------------------------------------
+
+# One output slot. Every output is a byte range of its input value — a capture, or
+# the whole value when nothing matched — so a LONG output (> 12 bytes) can only come
+# from a long input, whose bytes live in the input's arena: its slot points there
+# (kernel_borrow_input_arena), and no output byte is copied.
+cdef inline void _dfa_x_slot(
+    DrakenStringSlot* out, const DrakenVector* v, const DrakenStringSlot* src,
+    bint matched, const char* cap_ptr, Py_ssize_t cap_len,
+) noexcept nogil:
+    if not matched:
+        memcpy(out, src, sizeof(DrakenStringSlot))     # the value itself, offset and all
+    elif cap_len > STR_INLINE_MAX:
+        draken_build_string_slot(out, <const uint8_t*>cap_ptr, <uint32_t>cap_len,
+                                 kernel_lender_offset(v, <const uint8_t*>cap_ptr))
+    else:
+        draken_build_string_slot(out, <const uint8_t*>cap_ptr, <uint32_t>cap_len, 0)
+
+
+# Compressed (dict/constant) input: the procedure is a pure function of the value
+# bytes, so it runs once per live PHYSICAL value (kernel_live_slots) instead of
+# once per logical row, and the result keeps the input's encoding
+# (kernel_preserve_shape), so the GROUP BY key downstream stays compressed.
+cdef VecResult _dfa_extract_kernel_compressed(
+    const DrakenVector* v, DfaProcedure* proc,
+) noexcept nogil:
+    cdef const DrakenStringArena* src_arena = <const DrakenStringArena*>v.data
+    cdef uint32_t k = v.data_length
+    cdef uint8_t* live = NULL
+    if not dfa_x_live_mask(v, &live):
+        return draken_error_sentinel("draken__dfa_extract: allocation failed")
+
+    cdef DrakenStringSlot* out_slots = NULL
+    cdef uint8_t* out_unused_arena = NULL
+    cdef uint8_t* out_unused_validity = NULL
+    cdef uint8_t* block = vecresult_string_block_alloc(
+        k, 0, 0, &out_slots, &out_unused_arena, &out_unused_validity)
+    if block == NULL:
+        draken_free(live)
+        return draken_error_sentinel("draken__dfa_extract: output allocation failed")
+
+    cdef uint32_t j
+    cdef const DrakenStringSlot* slot
+    cdef const char* out_ptr = NULL
+    cdef Py_ssize_t out_len = 0
+    cdef bint matched
+    # Dead slots (no valid row reads them) are never selected: null them, skip the work.
+    for j in range(k):
+        if live != NULL and not live[j]:
+            str_init_null(&out_slots[j])
+            continue
+        slot = &src_arena.slots[j]
+        matched = _execute_procedure(<const char*>str_data(slot, src_arena.arena),
+                                     <Py_ssize_t>str_length(slot), proc, &out_ptr, &out_len)
+        _dfa_x_slot(&out_slots[j], v, slot, matched, out_ptr, out_len)
+    draken_free(live)
+
+    cdef VecResult r = vecresult_from_string_block(block, k, 0, 0, DRAKEN_VARCHAR)
+    kernel_borrow_input_arena(r, v, 0)
+    if not dfa_x_preserve_shape(&r, v):
+        draken_free(block)
+        return draken_error_sentinel("draken__dfa_extract: allocation failed")
+    return r
+
 # The generic NT_FUNCTION lowering (compiled_expression.pyx) resolves
 # "draken_" + func_val.lower() for ANY function name with no special-casing
 # needed; for _DFA_EXTRACT that's "draken__dfa_extract" (double underscore).
 # Both call arguments are pushed as usual — args[1] is the optimizer's
 # compiled-program VARBINARY CONSTANT literal (same shape every row), decoded
 # ONCE per kernel call (not per row) via the nogil _decode_procedure above.
-# Uses the uniform data[selection[i]] read (buffers.h contract) for BOTH
-# operands, so it's correct for any shape (dense/dict/constant) of the string
-# input — no shape-specific dispatch (the existing dict "compressed" fast path
-# above stays Python/GIL-only; this kernel does not call it).
+# A compressed string input (draken_is_compressed — dict or constant) runs once
+# per physical value in _dfa_extract_kernel_compressed above (compression-aware
+# kernels directive, 2026-10-18); every other shape takes the uniform
+# data[selection[i]] row loop below. Both give the same value per row.
 cdef VecResult _dfa_extract_kernel(
     void* ctx, const DrakenVector* const* args, uint32_t nargs,
 ) noexcept nogil:
@@ -1078,6 +1294,9 @@ cdef VecResult _dfa_extract_kernel(
     if not _decode_procedure(program_ptr, program_len, &proc):
         return draken_error_sentinel("draken__dfa_extract: compiled program blob is invalid")
 
+    if draken_is_compressed(v):
+        return _dfa_extract_kernel_compressed(v, &proc)
+
     cdef const DrakenStringArena* src_arena = <const DrakenStringArena*>v.data
     cdef const uint32_t* sel = v.selection
     cdef const uint8_t* nulls = v.validity
@@ -1086,104 +1305,40 @@ cdef VecResult _dfa_extract_kernel(
     cdef Py_ssize_t i
     cdef const char* out_ptr = NULL
     cdef Py_ssize_t out_len = 0
-    cdef Py_ssize_t total_bytes = 0
-    cdef Py_ssize_t row_len = 0
-    cdef const char* row_ptr = NULL
-    cdef Py_ssize_t null_bytes = 0
     cdef const DrakenStringSlot* slot
-    cdef const uint8_t* sdata
-    cdef uint32_t slen
-
-    cdef size_t cache_n = <size_t>(n if n > 0 else 1)
-    cdef const char** cap_ptrs = <const char**>malloc(cache_n * sizeof(const char*))
-    cdef int32_t* cap_lens = <int32_t*>malloc(cache_n * sizeof(int32_t))
-    if cap_ptrs == NULL or cap_lens == NULL:
-        free(cap_ptrs)
-        free(cap_lens)
-        return draken_error_sentinel("draken__dfa_extract: cache allocation failed")
-
-    for i in range(n):
-        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
-            cap_ptrs[i] = NULL
-            cap_lens[i] = 0
-            continue
-
-        slot = &src_arena.slots[sel[i]]
-        slen = str_length(slot)
-        sdata = str_data(slot, src_arena.arena)
-        row_ptr = <const char*>sdata
-        row_len = <Py_ssize_t>slen
-
-        if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
-            cap_ptrs[i] = out_ptr
-            cap_lens[i] = <int32_t>out_len
-            if out_len > STR_INLINE_MAX:
-                total_bytes += out_len
-        else:
-            cap_ptrs[i] = row_ptr
-            cap_lens[i] = <int32_t>(-row_len - 1)
-            if row_len > STR_INLINE_MAX:
-                total_bytes += row_len
+    cdef bint matched
 
     cdef size_t slots_sz = <size_t>n * sizeof(DrakenStringSlot) if n > 0 else sizeof(DrakenStringSlot)
-    cdef size_t arena_sz = <size_t>total_bytes if total_bytes > 0 else 1
     cdef DrakenStringSlot* out_slots = <DrakenStringSlot*>draken_malloc(slots_sz)
-    cdef uint8_t* out_arena = <uint8_t*>draken_malloc(arena_sz)
-    cdef uint8_t* out_null = NULL
-
-    if out_slots == NULL or out_arena == NULL:
-        free(cap_ptrs)
-        free(cap_lens)
-        draken_free(out_slots)
-        draken_free(out_arena)
+    if out_slots == NULL:
         return draken_error_sentinel("draken__dfa_extract: output allocation failed")
 
+    # Word-padded: vecresult_from_string_buffers copies the padded bitmap width.
+    cdef size_t null_bytes = 0
+    cdef uint8_t* out_null = NULL
     if nulls != NULL:
-        null_bytes = (n + 7) >> 3
-        out_null = <uint8_t*>draken_malloc(<size_t>null_bytes if null_bytes > 0 else 1)
+        null_bytes = ((<size_t>n + 7) >> 3)
+        out_null = <uint8_t*>draken_malloc(((null_bytes + 7) & ~(<size_t>7)) if null_bytes > 0 else 8)
         if out_null == NULL:
-            free(cap_ptrs)
-            free(cap_lens)
             draken_free(out_slots)
-            draken_free(out_arena)
             return draken_error_sentinel("draken__dfa_extract: validity allocation failed")
-        memcpy(out_null, nulls, <size_t>null_bytes)
-
-    cdef const char* cached_ptr
-    cdef int32_t cached_len
-    cdef uint32_t copy_len
-    cdef size_t arena_used = 0
-    cdef const DrakenStringSlot* psrc
+        memset(out_null, 0, ((null_bytes + 7) & ~(<size_t>7)) if null_bytes > 0 else 8)
+        memcpy(out_null, nulls, null_bytes)
 
     for i in range(n):
-        cached_ptr = cap_ptrs[i]
-        cached_len = cap_lens[i]
         if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
             memset(&out_slots[i], 0, sizeof(DrakenStringSlot))
             continue
-        if cached_len >= 0:
-            copy_len = <uint32_t>cached_len
-            if copy_len > <uint32_t>STR_INLINE_MAX:
-                memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
-                draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
-                arena_used += <size_t>copy_len
-            else:
-                draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, 0)
-        else:
-            psrc = &src_arena.slots[sel[i]]
-            if str_is_inline(psrc):
-                str_clone_with_offset(&out_slots[i], psrc, 0)
-            else:
-                copy_len = <uint32_t>(-cached_len - 1)
-                memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
-                str_clone_with_offset(&out_slots[i], psrc, <uint32_t>arena_used)
-                arena_used += <size_t>copy_len
+        slot = &src_arena.slots[sel[i]]
+        matched = _execute_procedure(<const char*>str_data(slot, src_arena.arena),
+                                     <Py_ssize_t>str_length(slot), &proc, &out_ptr, &out_len)
+        _dfa_x_slot(&out_slots[i], v, slot, matched, out_ptr, out_len)
 
-    free(cap_ptrs)
-    free(cap_lens)
-
-    return vecresult_from_string_buffers(
-        out_slots, out_arena, arena_used, out_null, <uint32_t>n, DRAKEN_VARCHAR)
+    cdef VecResult r = vecresult_from_string_buffers(
+        out_slots, NULL, 0, out_null, <uint32_t>n, DRAKEN_VARCHAR)
+    if r.data != NULL:
+        kernel_borrow_input_arena(r, v, 0)
+    return r
 
 
 # Register with the C-ABI kernel registry at import time (this module is

@@ -57,6 +57,14 @@ CxxMorsel* cxx_mask_with_consts_c(const CxxMorsel* m, const DrakenVector* mask,
 // ownership before a morsel crosses into a nogil engine Source).
 CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m);
 
+// Every column whose string arena is BORROWED (VectorOwner::arena_source — its own,
+// or that of the column a lazily filtered view borrows its data from) rebuilt
+// with an arena of its own holding only the bytes it references; every other
+// column shared, not copied. For writers that emit a string arena verbatim (the
+// spill path — docs/STRING_ARENA_BORROW_DESIGN.md §6). nullptr on allocation
+// failure.
+CxxMorsel* cxx_morsel_own_arenas_c(const CxxMorsel* m);
+
 // Select/reorder columns by identity name (opaque bytes as ptr+len arrays).
 CxxMorsel* cxx_select_c(const CxxMorsel* m, const char** name_ptrs,
                         const uint32_t* name_lens, uint32_t n);

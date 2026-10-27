@@ -89,6 +89,16 @@ struct VectorOwner {
     // NOT a second ownership path for the same bytes — data_buf and data_source are
     // mutually exclusive. Setting both would double-free.
     std::shared_ptr<VectorOwner> data_source;
+    // arena_source — non-null ONLY when this vector's slots (and validity/codes)
+    // are owned HERE but its long-form ARENA bytes are BORROWED from another
+    // VectorOwner: a string kernel result whose slots point into its input's arena
+    // (VecResult::arena_lender, docs/STRING_ARENA_BORROW_DESIGN.md). This reference
+    // is what keeps those bytes alive. Always the ROOT keeper (arena_keeper below),
+    // so borrowers never chain.
+    //
+    // Mutually exclusive with arena_buf (the arena is owned here) and with
+    // data_source (which already borrows the arena along with the data).
+    std::shared_ptr<VectorOwner> arena_source;
 
     VectorOwner(DrakenVector v,
                 OwnedBuffer<void>    d,
@@ -106,6 +116,16 @@ struct VectorOwner {
     ~VectorOwner()                             = default;
 };
 
+// The owner that keeps `o`'s string arena bytes alive: the one a borrower's
+// arena_source must point at. A borrowing owner's keeper is its arena_source; a
+// data-borrowing owner's is its data_source's keeper (data_source never chains,
+// but the column it borrows from may itself borrow an arena); otherwise `o`.
+static inline std::shared_ptr<VectorOwner> arena_keeper(const std::shared_ptr<VectorOwner>& o) {
+    if (o->arena_source) return o->arena_source;
+    if (o->data_source) return arena_keeper(o->data_source);
+    return o;
+}
+
 // In-memory footprint (bytes) of a VectorOwner's payload, INCLUDING (for
 // DRAKEN_ARRAY) the owned child subtree -- unlike draken_vector_nbytes alone,
 // which only ever sees the bare DrakenVector and so cannot reach child_owner
@@ -116,7 +136,13 @@ struct VectorOwner {
 static inline size_t draken_vector_owner_nbytes(const VectorOwner* owner) noexcept {
     size_t total = 0u;
     while (owner != nullptr) {
-        if (owner->data_source) {
+        if (owner->arena_source) {
+            // BORROWED arena (see arena_source): the slots, validity and codes are
+            // owned here, the arena bytes are counted by their owner.
+            total += draken_vector_nbytes(&owner->vec);
+            const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(owner->vec.data);
+            if (sa != nullptr) total -= sa->arena_used;
+        } else if (owner->data_source) {
             // BORROWED payload (see data_source): the data/arena bytes belong to
             // another owner and are counted THERE. Counting them here too would
             // multiply one shared block by the number of morsels sharing it — for a

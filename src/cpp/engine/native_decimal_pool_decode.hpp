@@ -29,10 +29,9 @@
 //
 // Scale handling: NOT read from this buffer — int64-backed DECIMAL's wire
 // format (ipc_serialize.hpp's serialize_int64) carries no precision/scale
-// descriptor (unlike TAG_INT128's DECIMAL128 payload). Matching every other
-// piece of this engine's decimal support (native_decimal.hpp), scale is
-// plan-time-known and baked into the DecimalExpr tree by the caller — never
-// re-derived here.
+// descriptor (unlike TAG_INT128's DECIMAL128 payload). Scale is plan-time-known
+// and attached by the caller (native_parquet_scan_source.hpp's WP-11 logical_type
+// attach) — never re-derived here.
 
 #include <cstdint>
 #include <cstring>

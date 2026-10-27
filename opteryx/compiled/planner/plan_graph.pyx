@@ -43,6 +43,7 @@ from opteryx.exceptions import InvalidInternalStateError
 cdef extern from "planner/_plan_graph.hpp":
     cdef int32_t kNoStepKind "opteryx::planner::kNoStepKind"
     cdef int32_t kStepKindSlots "opteryx::planner::kStepKindSlots"
+    enum: kStepKindMaskWords "opteryx::planner::kStepKindMaskWords"
 
     cdef enum CEdgeRole "opteryx::planner::EdgeRole":
         EDGE_NONE "opteryx::planner::EDGE_NONE"
@@ -92,6 +93,11 @@ class EdgeRole(Enum):
 
     LEFT = 1
     RIGHT = 2
+
+
+# Step kinds the native graph has slots for: every LogicalPlanStepType value must be
+# below this (checked where the enum is defined).
+STEP_KIND_SLOTS = kStepKindSlots
 
 
 cdef object _LEFT = EdgeRole.LEFT
@@ -325,20 +331,23 @@ cdef class PlanGraph:
     def steps_of(self, kinds) -> list:
         """`(id, step)` for each step whose kind is one of `kinds` (a tuple of
         LogicalPlanStepType), in insertion order."""
-        cdef uint64_t wanted = 0
+        cdef uint64_t wanted[kStepKindMaskWords]
         cdef uint32_t present = 0
         cdef int32_t code
         cdef size_t i
         cdef size_t n = self._graph.size()
+        for i in range(kStepKindMaskWords):
+            wanted[i] = 0
         for kind in kinds:
             code = self._kind_code(kind)
-            wanted |= (<uint64_t>1) << code
-            present += self._graph.kind_count(code)
+            present += self._graph.kind_count(code)  # range-checks the code
+            wanted[code >> 6] |= (<uint64_t>1) << (code & 63)
         out = []
         if present == 0:
             return out
         for i in range(n):
-            if (wanted >> self._graph.kind_at(i)) & 1:
+            code = self._graph.kind_at(i)
+            if (wanted[code >> 6] >> (code & 63)) & 1:
                 out.append((self._graph.node_at(i).id, <object>self._graph.step_at(i)))
         return out
 

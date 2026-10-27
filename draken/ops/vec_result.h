@@ -111,4 +111,16 @@ struct VecResult {
     // unlike `validity` (see validity_embedded) — a non-null value here is
     // always an allocation of its own.
     uint8_t*          arena            = nullptr;
+    // A string result whose long-form slots point into an INPUT's byte arena
+    // instead of an arena of its own (docs/STRING_ARENA_BORROW_DESIGN.md, Stage 2):
+    // the index into the kernel's args[] of the lender, or 0xFF for none. When set,
+    // the result's DrakenStringArena::arena IS args[arena_lender]'s arena pointer
+    // (arena_used / arena_cap copied from it), `arena` above is nullptr, and every
+    // long slot's offset is an offset into the lender's bytes. The result does NOT
+    // keep the lender alive: a consumer that can (the expression VM, which holds
+    // its operands for the whole span) may keep it as is; every other consumer
+    // makes it self-contained first — vecresult_to_owner does
+    // (kernel_string_compact_arena). 0xFF, the default, is every existing
+    // producer, so they all stay correct untouched.
+    uint8_t           arena_lender     = 0xFFu;
 };

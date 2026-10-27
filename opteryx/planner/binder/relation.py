@@ -80,7 +80,7 @@ def visit_clone_relation(self, node: PlanStep, context: BindingContext) -> Tuple
     """
     Bind CREATE TABLE <target> CLONE <upstream>.
 
-    Four gates, in this order (FORKS_DESIGN.md S4.1, plus the metastore gate):
+    Four gates (FORKS_DESIGN.md S4.1, plus the metastore gate):
 
     * CREATE on the target - the same tier as any other CREATE TABLE, and first,
       so a caller who may not write the target learns that rather than being
@@ -100,9 +100,11 @@ def visit_clone_relation(self, node: PlanStep, context: BindingContext) -> Tuple
     is for its owner to turn the guard off deliberately.
 
     The fourth gate is not about permission at all: the upstream must be held
-    in an Opteryx metastore, because a fork borrows its manifest. It is checked
-    after the permission gates so that a caller who may not read the upstream
-    learns that, rather than the shape of a workspace they have no grant on.
+    in an Opteryx metastore, because a fork borrows its manifest - and so must
+    the target, because only that metastore can create a fork. Both are checked
+    after the permission gates and before egress, so that a caller who may not
+    read the upstream learns that, rather than the shape of a workspace they
+    have no grant on.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -145,6 +147,17 @@ def visit_clone_relation(self, node: PlanStep, context: BindingContext) -> Tuple
             "cannot be cloned - **CLONE** borrows the upstream's own manifest, which only "
             "an Opteryx-backed relation has. Copy it with **CREATE TABLE** ... "
             "**AS SELECT** instead."
+        )
+
+    # The TARGET too: the fork is created by the native metastore, which writes
+    # its manifest and registers it on the upstream, so a target held anywhere
+    # else has no clone operation to call.
+    if not node.connector.supports_forking(node.relation_name):
+        raise UnsupportedSyntaxError(
+            f"{md_code(node.relation_name)} is not held in an Opteryx metastore, so a "
+            "fork cannot be created there - **CLONE** makes a dataset that borrows its "
+            "upstream's manifest, which only an Opteryx-backed relation can do. Copy it "
+            "with **CREATE TABLE** ... **AS SELECT** instead."
         )
 
     refusals = node.connector.egress_verdict(node.relation_name, [node.source_relation])
@@ -206,6 +219,15 @@ def visit_clone_collection(self, node: PlanStep, context: BindingContext) -> Tup
             "an Opteryx-backed relation has."
         )
 
+    # And the target collection, as for a single relation: every fork lands
+    # there, and only the native metastore can create one.
+    if not node.connector.supports_forking(node.collection_name):
+        raise UnsupportedSyntaxError(
+            f"{md_code(node.collection_name)} is not held in an Opteryx metastore, so forks "
+            "cannot be created there - **CLONE** makes datasets that borrow their "
+            "upstream's manifests, which only an Opteryx-backed collection can hold."
+        )
+
     refusals = node.connector.egress_verdict(node.collection_name, [node.source_collection])
     if refusals:
         raise EgressRestrictedError(refusals[0].message)
@@ -228,10 +250,13 @@ def visit_resync_relation(self, node: PlanStep, context: BindingContext) -> Tupl
 
     Whether the dataset is a fork at all, and whether FORCE was needed, are
     settled at execution: both are facts about two datasets' current snapshots.
+    Whether it COULD be one is settled here - see the metastore gate below.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.exceptions import md_code
     from opteryx.managers.permissions import can_perform_action
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
@@ -243,6 +268,18 @@ def visit_resync_relation(self, node: PlanStep, context: BindingContext) -> Tupl
     if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
         raise PermissionError(
             f"User does not have permission to alter {node.relation_name}"
+        )
+
+    # ONLY AN OPTERYX-BACKED RELATION CAN BE A FORK. CLONE refuses any other
+    # source (visit_clone_relation), so a relation held anywhere else was never
+    # made by one - and its connector has no fork operations to call. Checked
+    # after the permission gate, as CLONE's is, so a caller who may not alter
+    # the relation learns that rather than where it is held.
+    if not node.connector.supports_forking(node.relation_name):
+        raise UnsupportedSyntaxError(
+            f"{md_code(node.relation_name)} is not held in an Opteryx metastore, so it "
+            "cannot be a fork - **RESYNC** acts on a dataset made by **CREATE TABLE** ... "
+            "**CLONE**, which only an Opteryx-backed relation can be."
         )
 
     node.columns = []
@@ -263,6 +300,8 @@ def visit_detach_relation(self, node: PlanStep, context: BindingContext) -> Tupl
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.exceptions import md_code
     from opteryx.managers.permissions import can_perform_action
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
@@ -274,6 +313,14 @@ def visit_detach_relation(self, node: PlanStep, context: BindingContext) -> Tupl
     if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
         raise PermissionError(
             f"User does not have permission to alter {node.relation_name}"
+        )
+
+    # The same metastore gate as RESYNC's, for the same reason.
+    if not node.connector.supports_forking(node.relation_name):
+        raise UnsupportedSyntaxError(
+            f"{md_code(node.relation_name)} is not held in an Opteryx metastore, so it "
+            "cannot be a fork - **DETACH** acts on a dataset made by **CREATE TABLE** ... "
+            "**CLONE**, which only an Opteryx-backed relation can be."
         )
 
     node.columns = []

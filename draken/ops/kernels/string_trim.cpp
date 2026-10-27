@@ -57,8 +57,9 @@
 // the trimmed range is a pure function of a physical value's bytes, so it is
 // computed ONCE per data_length PHYSICAL unique value, then kernel_preserve_shape
 // carries the input's selection + per-logical-row validity onto the result. Dense
-// stays dense, constant stays constant, dict stays dict. Trim shortens lengths per
-// value, so the arena is sized over the K outputs (two-pass, like draken_substring).
+// stays dense, constant stays constant, dict stays dict. A long trimmed value is a
+// byte range of a long input value, so its slot points into the INPUT's arena
+// (kernel_borrow_input_arena, like draken_substring) — no bytes are copied.
 
 #include <cstdint>
 #include <cstring>
@@ -193,46 +194,31 @@ VecResult trim_kernel(const DrakenVector* v, bool trim_left, bool trim_right,
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
     const uint32_t k = v->data_length;   // physical unique count
 
-    // Pass 1: total long-form bytes over the K physical trimmed outputs.
-    size_t arena_len = 0;
-    for (uint32_t j = 0; j < k; ++j) {
-        const DrakenStringSlot* slot = &sa->slots[j];
-        uint32_t off, len;
-        trim_range(str_data(slot, sa->arena), str_length(slot),
-                   trim_left, trim_right, m, &off, &len);
-        if (len > STR_INLINE_MAX) arena_len += len;
-    }
-
     // K-slot physical block, NO embedded validity (per-logical-row nulls come from
-    // kernel_preserve_shape).
+    // kernel_preserve_shape) and no arena of its own.
     DrakenStringSlot* slots;
-    uint8_t* arena;
+    uint8_t* arena_unused;
     uint8_t* validity_unused;
-    uint8_t* block = vecresult_string_block_alloc(k, arena_len, /*want_validity=*/0,
-                                                  &slots, &arena, &validity_unused);
+    uint8_t* block = vecresult_string_block_alloc(k, 0, /*want_validity=*/0,
+                                                  &slots, &arena_unused, &validity_unused);
     if (block == nullptr) return draken_error_sentinel_fmt("%s: allocation failed", who);
 
-    size_t arena_pos = 0;
     for (uint32_t j = 0; j < k; ++j) {
         const DrakenStringSlot* slot = &sa->slots[j];
         const uint8_t* src = str_data(slot, sa->arena);
         uint32_t off, len;
         trim_range(src, str_length(slot), trim_left, trim_right, m, &off, &len);
         const uint8_t* sub = src + off;
-        if (len <= STR_INLINE_MAX) {
+        if (len <= STR_INLINE_MAX)
             str_init_inline(&slots[j], sub, len);
-        } else {
-            uint8_t* dst = arena + arena_pos;
-            std::memcpy(dst, sub, len);
-            str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(arena_pos));
-            arena_pos += len;
-        }
+        else
+            str_init_extern(&slots[j], sub, len, kernel_lender_offset(v, sub));
     }
 
     // Carry the input's shape onto the dense K-block (see draken_substring for the
     // identity-replacement and bad_alloc-containment rationale).
-    VecResult r = vecresult_from_string_block(block, k, arena_len, /*has_validity=*/0, v->type);
+    VecResult r = vecresult_from_string_block(block, k, 0, /*has_validity=*/0, v->type);
+    kernel_borrow_input_arena(r, v, 0);
     try {
         kernel_preserve_shape(r, v);
     } catch (const std::exception&) {

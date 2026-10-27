@@ -219,3 +219,28 @@ extern "C" VecResult vecresult_from_string_buffers(
     r.arena             = darena;
     return r;
 }
+
+extern "C" uint8_t* draken_string_compact_arena(DrakenStringArena* sa, int* ok) {
+    *ok = 1;
+    size_t total = 0u;
+    for (size_t j = 0; j < sa->length; ++j)
+        if (!str_is_inline(&sa->slots[j])) total += str_length(&sa->slots[j]);
+    uint8_t* arena = nullptr;
+    if (total > 0u) {
+        arena = static_cast<uint8_t*>(draken_malloc(total));
+        if (arena == nullptr) { *ok = 0; return nullptr; }
+        size_t pos = 0u;
+        for (size_t j = 0; j < sa->length; ++j) {
+            DrakenStringSlot* s = &sa->slots[j];
+            if (str_is_inline(s)) continue;
+            const uint32_t len = str_length(s);
+            std::memcpy(arena + pos, str_data(s, sa->arena), len);
+            s->ext.arena_offset = static_cast<uint32_t>(pos);
+            pos += len;
+        }
+    }
+    sa->arena      = arena;
+    sa->arena_used = total;
+    sa->arena_cap  = total;
+    return arena;
+}

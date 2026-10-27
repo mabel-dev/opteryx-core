@@ -474,13 +474,6 @@ struct NativeScanColumnBuilder {
     // PyObject. morsel_take_direct/morsel_take_string transfer ownership out of
     // the MorselRef (nulling its slots so ~MorselRef won't double-free); the
     // OwnedBuffers below take that same ownership over to the VectorOwner.
-    //
-    // NOTE for DK_DECIMAL128: `out.own->logical_type` is deliberately left
-    // nullptr — this narrow pipeline's own DecimalExpr evaluator (native_decimal.hpp)
-    // takes each column's scale from the plan-time-known expression tree, never
-    // from `VectorOwner.logical_type`, so it doesn't need it. A decimal CxxColumn
-    // built here must not be handed to any OTHER consumer that expects a valid
-    // logical_type descriptor (draken's own `require_decimal_descriptor` contract).
     bool build_column(rugo::MorselRef& result, size_t i, CxxColumn& out, ErrCtx& err) {
         int dk = result.columns[i].direct_kind;
         // Diagnostic (scan_tel): the shape the ENGINE receives, recorded before any

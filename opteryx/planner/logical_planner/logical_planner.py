@@ -47,6 +47,7 @@ from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
+from opteryx.compiled.planner.plan_graph import STEP_KIND_SLOTS
 from opteryx.compiled.planner.plan_graph import PlanGraph
 from opteryx.types import logical_type as _plt
 from opteryx.types.logical_type import ColumnType, LogicalCategory
@@ -226,6 +227,16 @@ class LogicalPlanStepType(int, Enum):
     DetachRelation = auto()  # ALTER TABLE <fork> DETACH
     VectorIndexDdl = auto()  # CREATE / ALTER / DROP INDEX ... (vector index)
     DropSecret = auto()  # DROP SECRET [IF EXISTS] <name> IN <workspace>
+
+
+# The native plan graph counts steps per kind in a fixed number of slots
+# (kStepKindSlots, src/cpp/planner/_plan_graph.hpp); a kind past them could never be
+# put into a plan, so the enum outgrowing them is refused here, at load.
+if max(LogicalPlanStepType) >= STEP_KIND_SLOTS:
+    raise InvalidInternalStateError(
+        f"LogicalPlanStepType has a kind ({max(LogicalPlanStepType).name} = {max(LogicalPlanStepType).value}) "
+        f"outside the plan graph's {STEP_KIND_SLOTS} kind slots; raise kStepKindSlots in _plan_graph.hpp."
+    )
 
 
 class LogicalPlan(PlanGraph):

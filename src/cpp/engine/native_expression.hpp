@@ -60,6 +60,13 @@ typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
 // reject the result — a caller that drops it leaks silently, with no test to catch
 // it.
 //
+// `out_arena_col` (int*, may be NULL) comes back -1, or the index in `m` of the
+// column whose byte arena the string result BORROWS (VecResult::arena_lender —
+// docs/STRING_ARENA_BORROW_DESIGN.md). The caller must then keep that column's
+// arena alive for the result's lifetime: VectorOwner::arena_source =
+// arena_keeper(column owner). A caller that passes NULL never gets a borrowed
+// result (the span copies instead).
+//
 // `out_child` (VecResult**) is set to NULL, or to an OWNED VecResult* for an
 // ARRAY result's element vector — non-null only when out_vec->type ==
 // DRAKEN_ARRAY (see evaluation.pyx's _dv_eval_span_cxx). The span-side kernel
@@ -69,7 +76,7 @@ typedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
                           uint8_t** out_validity, void** out_sel,
-                          uint8_t** out_arena, int* err_op,
+                          uint8_t** out_arena, int* out_arena_col, int* err_op,
                           const char** err_msg, VecResult** out_child);
 
 // One plan-resolved expression program. `instrs` is BORROWED — the NativePlan
@@ -221,13 +228,14 @@ struct ExprMultiProjectOperator : Operator {
             uint8_t* validity = nullptr;
             void* sel = nullptr;
             uint8_t* arena = nullptr;
+            int arena_col = -1;
             int err_op = 0;
             const char* kernel_msg = nullptr;
             VecResult* child = nullptr;
             int rc = fn(progs[k].instrs, progs[k].count, m.get(),
                         progs[k].col_idx.data(), progs[k].lit_dv.data(),
-                        &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
-                        &child);
+                        &v, &data, &validity, &sel, &arena, &arena_col, &err_op,
+                        &kernel_msg, &child);
             if (rc == 98) {
                 err.code = 1;
                 err.msg = "ExprMultiProjectOperator: expression result is not a "
@@ -256,6 +264,19 @@ struct ExprMultiProjectOperator : Operator {
             if (child != nullptr) {
                 nc.own->child_owner.reset(draken_vecresult_child_owner_new_c(*child));
                 delete child;
+            }
+            // A result whose arena is borrowed from column `arena_col` (see
+            // ExprEvalFn's out_arena_col): that column's arena keeper now keeps the
+            // bytes alive for as long as this column lives.
+            if (arena_col >= 0) {
+                const auto& lender = m->columns[static_cast<size_t>(arena_col)].own;
+                if (!lender) {
+                    err.code = 1;
+                    err.msg = "ExprMultiProjectOperator: a borrowed string arena's lender "
+                              "column has no owner to keep it alive";
+                    return OpResult::NEED_INPUT;
+                }
+                nc.own->arena_source = arena_keeper(lender);
             }
             nc.own->logical_type = out_logicals[k];
             nc.view = nc.own->vec;

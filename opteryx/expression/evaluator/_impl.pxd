@@ -41,6 +41,8 @@ cdef extern from "ops/vec_result.h":
         uint8_t           data_error  # 1 = the message is user-facing data-error
                                       # text (see ops/vec_result.h); the spans turn
                                       # that into rc 96 instead of rc 4.
+        uint8_t           arena_lender  # args[] index whose arena a string result
+                                        # borrows, 0xFF = none (ops/vec_result.h)
 
 # GIL: resolve LOAD_COL identity → column index in the CxxMorsel and LOAD_LIT_CONST
 # → DV*. Stable for a fixed pipeline schema → resolve once, reuse. 0 ok, -1 column
@@ -88,7 +90,7 @@ cdef int _dv_eval_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                            int* col_idx, DrakenVector** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
-                           uint8_t** out_arena,
+                           uint8_t** out_arena, int* out_arena_col,
                            int* err_op, const char** err_msg,
                            bint preserve_shape,
                            VecResult** out_child) noexcept nogil

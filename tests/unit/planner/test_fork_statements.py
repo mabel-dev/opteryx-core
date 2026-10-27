@@ -92,6 +92,14 @@ def test_a_plain_create_table_is_untouched():
     assert node.node_type == LogicalPlanStepType.CreateRelation
 
 
+def test_a_collection_clone_plans_to_a_clone_collection_node_naming_both_ends():
+    node = _node("CREATE COLLECTION benchmarks.tpch_sf1 CLONE samples.tpch_sf1")
+
+    assert node.node_type == LogicalPlanStepType.CloneCollection
+    assert node.collection_name == "benchmarks.tpch_sf1"
+    assert node.source_collection == "samples.tpch_sf1"
+
+
 # --------------------------------------------------------------------------
 # 2. ALTER TABLE ... RESYNC | DETACH
 # --------------------------------------------------------------------------

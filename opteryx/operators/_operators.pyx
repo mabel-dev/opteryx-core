@@ -112,7 +112,7 @@ ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                            int* col_idx, void** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
-                           uint8_t** out_arena,
+                           uint8_t** out_arena, int* out_arena_col,
                            int* err_op, const char** err_msg,
                            VecResult** out_child) noexcept nogil
 
@@ -819,71 +819,6 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               cppvector[int] lt_precision, cppvector[int] lt_scale,
                               cppvector[int] lt_dimension)
         void run(int dop, void* pool, ErrCtx& err)
-
-# ---- Genuinely native (zero-Python) UNGROUPED aggregate: NativeParquetScanSource ->
-# [NumericFilterOperator] -> NativeAggregateSink. See native_aggregate.hpp for the
-# scope boundary — SUM/COUNT/AVG only, fixed-width numeric only, NOT DECIMAL.
-cdef extern from "engine/native_aggregate.hpp" namespace "opteryx::engine" nogil:
-    cdef enum class ExprKind "opteryx::engine::ExprKind":
-        Column "opteryx::engine::ExprKind::Column"
-        Literal "opteryx::engine::ExprKind::Literal"
-        Add "opteryx::engine::ExprKind::Add"
-        Sub "opteryx::engine::ExprKind::Sub"
-        Mul "opteryx::engine::ExprKind::Mul"
-        Div "opteryx::engine::ExprKind::Div"
-    cdef cppclass NativeExpr:
-        ExprKind kind
-        size_t col_idx
-        double literal
-        shared_ptr[NativeExpr] left
-        shared_ptr[NativeExpr] right
-
-        @staticmethod
-        shared_ptr[NativeExpr] make_column(size_t idx)
-        @staticmethod
-        shared_ptr[NativeExpr] make_literal(double v)
-        @staticmethod
-        shared_ptr[NativeExpr] make_binary(ExprKind k, shared_ptr[NativeExpr] l,
-                                           shared_ptr[NativeExpr] r)
-
-    cdef enum class AggFunc "opteryx::engine::AggFunc":
-        Sum "opteryx::engine::AggFunc::Sum"
-        Count "opteryx::engine::AggFunc::Count"
-        Avg "opteryx::engine::AggFunc::Avg"
-    cdef struct AggregateSpec:
-        AggFunc func
-        bint is_decimal
-        shared_ptr[NativeExpr] expr
-        shared_ptr[DecimalExpr] decimal_expr
-
-cdef extern from "engine/native_decimal.hpp" namespace "opteryx::engine" nogil:
-    cdef enum class DecimalExprKind "opteryx::engine::DecimalExprKind":
-        Column "opteryx::engine::DecimalExprKind::Column"
-        Literal "opteryx::engine::DecimalExprKind::Literal"
-        Add "opteryx::engine::DecimalExprKind::Add"
-        Sub "opteryx::engine::DecimalExprKind::Sub"
-        Mul "opteryx::engine::DecimalExprKind::Mul"
-        Case "opteryx::engine::DecimalExprKind::Case"
-    cdef cppclass DecimalExpr:
-        DecimalExprKind kind
-        size_t col_idx
-        uint8_t scale
-        shared_ptr[DecimalExpr] left
-        shared_ptr[DecimalExpr] right
-        size_t cond_col_idx
-        string cond_prefix
-
-        @staticmethod
-        shared_ptr[DecimalExpr] make_column(size_t idx, uint8_t sc)
-        @staticmethod
-        shared_ptr[DecimalExpr] make_literal(int64_t unscaled, uint8_t sc)
-        @staticmethod
-        shared_ptr[DecimalExpr] make_binary(DecimalExprKind k, shared_ptr[DecimalExpr] l,
-                                            shared_ptr[DecimalExpr] r)
-        @staticmethod
-        shared_ptr[DecimalExpr] make_case(size_t cond_idx, string prefix,
-                                          shared_ptr[DecimalExpr] then_expr,
-                                          shared_ptr[DecimalExpr] else_expr)
 
 
 # -----------------------------------------------------------------------------
@@ -1845,7 +1780,7 @@ cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
                           uint8_t** out_validity, void** out_sel,
-                          uint8_t** out_arena,
+                          uint8_t** out_arena, int* out_arena_col,
                           int* err_op, const char** err_msg,
                           VecResult** out_child) noexcept nogil:
     """Native entry (matches ExprEvalFn) for ExprProjectOperator — the pure-nogil
@@ -1856,7 +1791,7 @@ cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
     (NULL otherwise); the C++ caller adopts it into VectorOwner::arena_buf."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, out_arena,
+                             out_validity, out_sel, out_arena, out_arena_col,
                              err_op, err_msg, False, out_child)
 
 
@@ -1864,7 +1799,7 @@ cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
                                    int* col_idx, void** lit_dv,
                                    DrakenVector* out_vec, void** out_data,
                                    uint8_t** out_validity, void** out_sel,
-                                   uint8_t** out_arena,
+                                   uint8_t** out_arena, int* out_arena_col,
                                    int* err_op, const char** err_msg,
                                    VecResult** out_child) noexcept nogil:
     """Shape-PRESERVING ExprEvalFn twin of _expr_eval_tramp — keeps a compressed
@@ -1878,7 +1813,7 @@ cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
     twin: a compressed string key still has an arena behind its K physical slots."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, out_arena,
+                             out_validity, out_sel, out_arena, out_arena_col,
                              err_op, err_msg, True, out_child)
 
 

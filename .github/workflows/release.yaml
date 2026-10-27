@@ -163,6 +163,8 @@ jobs:
             name: make st — skene native suite + Python bindings
           - target: slt
             name: make slt — sqllogictest suite (incl. catalog-backed writes)
+          - target: ft
+            name: make ft — fork statement execution (CLONE/RESYNC/DETACH)
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7

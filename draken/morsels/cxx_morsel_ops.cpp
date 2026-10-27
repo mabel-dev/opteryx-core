@@ -30,6 +30,7 @@
 #include "core/string_slot.h"
 #include "core/vector_alloc.h"
 #include "core/vector_owner_ops.h"
+#include "ops/kernels/result_helpers.h"   // draken_string_compact_arena
 #include "core/validity_word.h"
 #include "logical_type.h"
 #include "morsels/cxx_morsel_c.h"
@@ -208,6 +209,17 @@ VectorOwner vecresult_to_owner(VecResult r) {
     OwnedBuffer<uint8_t> arena_buf(r.arena);
     VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf),
                       std::move(arena_buf));
+    // A result that BORROWS its input's arena (VecResult::arena_lender) cannot keep
+    // that input alive from here — nothing here knows its owner — so it becomes
+    // self-contained: its referenced bytes are copied into an arena of its own.
+    // The expression VM, which can keep the lender alive, never routes a borrowing
+    // result through this function.
+    if (r.arena_lender != 0xFFu) {
+        int ok = 1;
+        uint8_t* own = draken_string_compact_arena(static_cast<DrakenStringArena*>(owner.vec.data), &ok);
+        if (!ok) throw std::bad_alloc();
+        owner.arena_buf.reset(own);
+    }
 
     // Phase 9c: attach the timestamp unit descriptor when the kernel set one.
     // DrakenVector/VecResult carry no LogicalType; it lives on the VectorOwner.
@@ -1264,6 +1276,56 @@ extern "C" CxxMorsel* cxx_mask_with_consts_c(
 }
 extern "C" CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m) {
     return new CxxMorsel(cxx_morsel_materialize_native(*m));
+}
+
+// A borrowed-arena string column rebuilt with an arena of its own: its K physical
+// slots copied, only the bytes they reference copied after them (in slot order),
+// the shape carried (kernel_preserve_shape). Throws std::bad_alloc.
+static CxxColumn compact_borrowed_arena(const CxxColumn& c) {
+    const DrakenVector& v = c.view;
+    const auto* sa = static_cast<const DrakenStringArena*>(v.data);
+    const uint32_t k = v.data_length;
+    size_t total = 0u;
+    for (uint32_t j = 0; j < k; ++j)
+        if (!str_is_inline(&sa->slots[j])) total += str_length(&sa->slots[j]);
+    DrakenStringSlot* slots;
+    uint8_t* arena;
+    uint8_t* unused;
+    uint8_t* block = vecresult_string_block_alloc(k, total, 0, &slots, &arena, &unused);
+    if (block == nullptr) throw std::bad_alloc();
+    size_t pos = 0u;
+    for (uint32_t j = 0; j < k; ++j) {
+        slots[j] = sa->slots[j];
+        if (str_is_inline(&slots[j])) continue;
+        const uint32_t len = str_length(&slots[j]);
+        std::memcpy(arena + pos, str_data(&sa->slots[j], sa->arena), len);
+        slots[j].ext.arena_offset = static_cast<uint32_t>(pos);
+        pos += len;
+    }
+    VecResult r = vecresult_from_string_block(block, k, total, 0, v.type);
+    try {
+        kernel_preserve_shape(r, &v);
+    } catch (...) {
+        draken_free(block);
+        throw;
+    }
+    auto own = std::make_shared<VectorOwner>(vecresult_to_owner(r));
+    own->logical_type = c.own->logical_type;
+    return CxxColumn{own->vec, own};
+}
+
+extern "C" CxxMorsel* cxx_morsel_own_arenas_c(const CxxMorsel* m) {
+    try {
+        std::unique_ptr<CxxMorsel> out(new CxxMorsel());
+        cxx_morsel_shallow_into(*out, *m);
+        for (CxxColumn& col : out->columns)
+            if (col.own && (col.own->arena_source
+                            || (col.own->data_source && col.own->data_source->arena_source)))
+                col = compact_borrowed_arena(col);
+        return out.release();
+    } catch (...) {
+        return nullptr;
+    }
 }
 // S-B.2: select/reorder columns by identity name (bytes → ptr+len arrays, since
 // identity names are opaque bytes). Pure container op (shares owners, no copy).

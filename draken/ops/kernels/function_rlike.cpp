@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "core/buffers.h"
 #include "core/string_slot.h"
@@ -27,8 +28,8 @@
 #include "ops/kernels/result_helpers.h"
 #include "ops/kernels/kernel_context.h"  // binary_op_ctx
 #include "ops/kernels/error_handling.h"
-#include "ops/kernels/dfa_walk.h"        // draken_dfa::match — shared byte-DFA walk
-#include "ops/kernels/compressed_helpers.h"   // kernel_pred_compressed_live
+#include "ops/kernels/dfa_walk.h"        // draken_dfa::match_all — shared byte-DFA walk
+#include "ops/kernels/compressed_helpers.h"   // kernel_pred_compressed, kernel_live_slots
 
 namespace {
 
@@ -94,14 +95,28 @@ VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t narg
     if (!draken_dfa::decode(blob, blob_len, &dfa))
         return draken_error_sentinel("draken_rlike: malformed compiled DFA blob");
 
-    // Compressed subject: match each live value once, scatter the verdicts.
-    if (draken_is_compressed(v))
-        return kernel_pred_compressed_live(v, [&](uint32_t j, bool* hit) -> const char* {
-            const DrakenStringSlot* vs = &vsa->slots[j];
-            *hit = (draken_dfa::match(&dfa, reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena)),
-                                      str_length(vs)) != 0) != negate;
-            return nullptr;
-        });
+    // Compressed subject: match each live value once (one batch walk over the
+    // live slots — match_all may interleave them), scatter the verdicts.
+    if (draken_is_compressed(v)) {
+        try {
+            const uint32_t k = v->data_length;
+            std::vector<uint8_t> live;
+            const uint8_t* lv = kernel_live_slots(v, live);
+            std::vector<uint8_t> hit(k > 0u ? k : 1u, 0);
+            draken_dfa::match_all(&dfa, k,
+                [&](uint32_t j, const uint8_t** s, uint32_t* len) -> bool {
+                    if (lv != nullptr && !lv[j]) return false;
+                    const DrakenStringSlot* vs = &vsa->slots[j];
+                    *s = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
+                    *len = str_length(vs);
+                    return true;
+                },
+                [&](uint32_t j, int m) { hit[j] = static_cast<uint8_t>(m); });
+            return kernel_pred_compressed(v, [&](uint32_t j) -> bool { return (hit[j] != 0) != negate; });
+        } catch (...) {
+            return draken_error_sentinel("allocation failed");
+        }
+    }
 
     auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
@@ -113,17 +128,20 @@ VecResult draken_rlike(void* ctx, const DrakenVector* const* args, uint32_t narg
         std::memset(validity, 0xFF, nb_alloc);
     }
 
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!rk_row_valid(v, i)) {
-            validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
-            continue;
-        }
-        const DrakenStringSlot* vs = &vsa->slots[v->selection[i]];
-        const uint8_t* sdata = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
-        const uint32_t slen = str_length(vs);
-        const bool hit = draken_dfa::match(&dfa, sdata, slen) != 0;
-        if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-    }
+    draken_dfa::match_all(&dfa, n,
+        [&](uint32_t i, const uint8_t** s, uint32_t* len) -> bool {
+            if (!rk_row_valid(v, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                return false;
+            }
+            const DrakenStringSlot* vs = &vsa->slots[v->selection[i]];
+            *s = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
+            *len = str_length(vs);
+            return true;
+        },
+        [&](uint32_t i, int m) {
+            if ((m != 0) != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        });
 
     VecResult r{};
     r.data = out;

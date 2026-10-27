@@ -57,7 +57,11 @@ struct DfaProgram {
     uint16_t num_states;
     bool has_end;
     bool start_accel;
+    bool interleave;          // match_all walks rows through match_rows<kLanes>
 };
+
+// Lanes for match_rows. Measured on ARM (M-series, 2026-10-26): 8 beats 4/6/12/16.
+constexpr uint32_t kLanes = 8;
 
 // Parse the blob once. Returns 1 on success, 0 if malformed (compiler/kernel
 // format drift — the blob is entirely plan-time-produced, so callers fail loud).
@@ -89,6 +93,13 @@ inline int decode(const uint8_t* blob, size_t blob_len, DfaProgram* p) {
     p->num_states = num_states;
     p->has_end = (flags & 0x02) != 0;
     p->start_accel = (flags & 0x04) != 0;
+    // Interleave only programs that walk most of every row byte by byte: an
+    // accelerated state hands its bytes to find_escape, and an anchored start
+    // dies within a few bytes — both break the lockstep so often that the
+    // per-row walk is faster (measured: 1.1-2.0x slower interleaved).
+    bool any_accel = false;
+    for (uint32_t k = 0; k < num_states; ++k) any_accel |= p->accel[static_cast<size_t>(k) << 2] != 0;
+    p->interleave = (flags & 0x01) == 0 && !any_accel;
     return 1;
 }
 
@@ -131,35 +142,144 @@ inline const uint8_t* find_escape(const uint8_t* s, const uint8_t* end,
     return nullptr;
 }
 
-// Walk a decoded program over one subject. Returns 1/0 for match/no-match.
-inline int match(const DfaProgram* p, const uint8_t* s, uint32_t slen) {
+// Row prologue: the start-state accept, the required-literal prefilter and the
+// start-state skip. Returns the verdict (0/1) when one is already known, else -1
+// with *cp = where the walk resumes (always < end, in state 0).
+inline int begin(const DfaProgram* p, const uint8_t* s, const uint8_t* end, const uint8_t** cp) {
     if (!p->has_end && accepts(p, 0)) return 1;
-    const uint8_t* const end = s + slen;
+    const uint32_t slen = static_cast<uint32_t>(end - s);
     if (p->lit_len != 0 &&
         (p->lit_len > slen ||
          draken_like_prog::search_literal(s, end - p->lit_len + 1, p->lit, p->lit_len) == nullptr))
         return 0;
-
-    const uint16_t* const table = p->table;
-    uint32_t state = 0;
     const uint8_t* c = s;
     if (p->start_accel) {
         c = find_escape(c, end, p->accel + 1, p->accel[0]);
         if (c == nullptr) c = end;
     }
+    if (c == end) return (p->has_end && accepts(p, 0)) ? 1 : 0;
+    *cp = c;
+    return -1;
+}
+
+// Resolve a special transition (>= kSpecial) taken at c. Returns the verdict
+// (0/1), or -1 with *state set and *cp advanced to the next escape byte (or end).
+inline int special(const DfaProgram* p, uint32_t nx, const uint8_t** cp, const uint8_t* end,
+                   uint32_t* state) {
+    if (nx == kDead) return 0;
+    if (nx & kAccept) return 1;
+    *state = nx & kStateMask;
+    // Accelerated: every non-escape byte maps this state to itself.
+    const uint8_t* a = p->accel + (static_cast<size_t>(*state) << 2);
+    const uint8_t* c = find_escape(*cp, end, a + 1, a[0]);
+    *cp = (c == nullptr) ? end : c;
+    return -1;
+}
+
+// Walk [c, end) from `state` to a verdict.
+inline int walk(const DfaProgram* p, const uint8_t* c, const uint8_t* end, uint32_t state) {
+    const uint16_t* const table = p->table;
     while (c < end) {
         const uint32_t nx = table[(state << 8) + *c++];
         if (nx < kSpecial) { state = nx; continue; }
-        if (nx == kDead) return 0;
-        if (nx & kAccept) return 1;
-        state = nx & kStateMask;
-        // Accelerated: every non-escape byte maps this state to itself.
-        const uint8_t* a = p->accel + (static_cast<size_t>(state) << 2);
-        c = find_escape(c, end, a + 1, a[0]);
-        if (c == nullptr) break;
+        const int v = special(p, nx, &c, end, &state);
+        if (v >= 0) return v;
     }
-    if (p->has_end) return accepts(p, state) ? 1 : 0;
-    return 0;
+    return (p->has_end && accepts(p, state)) ? 1 : 0;
+}
+
+// Walk a decoded program over one subject. Returns 1/0 for match/no-match.
+inline int match(const DfaProgram* p, const uint8_t* s, uint32_t slen) {
+    const uint8_t* const end = s + slen;
+    const uint8_t* c = nullptr;
+    const int v = begin(p, s, end, &c);
+    return v >= 0 ? v : walk(p, c, end, 0);
+}
+
+// Batch walk: rows [0, n) through L interleaved lanes. One row's walk is a serial
+// load -> index -> load chain (~4-5 cycles/byte); L independent rows step in
+// lockstep so their chains overlap. Each lockstep run lasts the shortest live
+// lane's remaining bytes, so the inner loop has no per-byte end test, and it
+// breaks on the first special transition in any lane (one OR + one test per
+// step: every special entry has bit 14 or 15 set). Finished lanes refill from
+// the next row; when rows run out the live lanes finish with walk().
+//   row(i, &s, &len) -> false to skip row i (e.g. NULL);  emit(i, verdict 0/1).
+// Verdicts are emitted out of row order. Same verdict as match() per row.
+template <uint32_t L, class Row, class Emit>
+inline void match_rows(const DfaProgram* p, uint32_t n, Row&& row, Emit&& emit) {
+    const uint16_t* const table = p->table;
+    const uint8_t* c[L];
+    const uint8_t* e[L];
+    uint32_t st[L];
+    uint32_t rid[L];
+    uint32_t next = 0;
+    // Load the next row that needs a walk into lane k; false when rows run out.
+    auto admit = [&](uint32_t k) -> bool {
+        while (next < n) {
+            const uint32_t i = next++;
+            const uint8_t* s;
+            uint32_t len;
+            if (!row(i, &s, &len)) continue;
+            const uint8_t* cc = nullptr;
+            const int v = begin(p, s, s + len, &cc);
+            if (v >= 0) { emit(i, v); continue; }
+            c[k] = cc; e[k] = s + len; st[k] = 0; rid[k] = i;
+            return true;
+        }
+        return false;
+    };
+    uint32_t live = 0;
+    while (live < L && admit(live)) ++live;
+    bool drained = live < L;
+    while (!drained) {
+        size_t m = static_cast<size_t>(e[0] - c[0]);
+        for (uint32_t k = 1; k < L; ++k) {
+            const size_t r = static_cast<size_t>(e[k] - c[k]);
+            m = r < m ? r : m;
+        }
+        // Lockstep run on register copies (no address escapes the block).
+        {
+            const uint8_t* cc[L];
+            uint32_t ss[L];
+            for (uint32_t k = 0; k < L; ++k) { cc[k] = c[k]; ss[k] = st[k]; }
+            uint32_t any;
+            do {
+                any = 0;
+                for (uint32_t k = 0; k < L; ++k) {
+                    const uint32_t nx = table[(ss[k] << 8) + *cc[k]++];
+                    ss[k] = nx;
+                    any |= nx;
+                }
+            } while (--m != 0 && (any & 0xC000u) == 0);
+            for (uint32_t k = 0; k < L; ++k) { c[k] = cc[k]; st[k] = ss[k]; }
+        }
+        for (uint32_t k = 0; k < L; ++k) {
+            int v = -1;
+            if (st[k] >= kSpecial) v = special(p, st[k], &c[k], e[k], &st[k]);
+            if (v < 0 && c[k] == e[k]) v = (p->has_end && accepts(p, st[k])) ? 1 : 0;
+            if (v < 0) continue;
+            emit(rid[k], v);
+            if (!admit(k)) { e[k] = nullptr; drained = true; }
+        }
+    }
+    for (uint32_t k = 0; k < live; ++k)
+        if (e[k] != nullptr) emit(rid[k], walk(p, c[k], e[k], st[k]));
+}
+
+// Every row through the walk the program suits: match_rows<kLanes> when
+// p->interleave, else one row at a time. Same row/emit contract as match_rows.
+template <class Row, class Emit>
+inline void match_all(const DfaProgram* p, uint32_t n, Row&& row, Emit&& emit) {
+    if (p->interleave) {
+        match_rows<kLanes>(p, n, row, emit);
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint8_t* s;
+        uint32_t len;
+        if (!row(i, &s, &len)) continue;
+        emit(i, match(p, s, len));
+    }
 }
 
 // One-shot decode + match. Returns 1/0, or -1 for a malformed blob.

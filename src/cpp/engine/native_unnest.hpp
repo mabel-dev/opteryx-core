@@ -186,7 +186,7 @@ struct UnnestOperator : Operator {
         VecResult* child = nullptr;
         int rc = filter_fn(filter_prog.instrs, filter_prog.count, &child_morsel,
                            filter_prog.col_idx.data(), filter_prog.lit_dv.data(),
-                           &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                           &v, &data, &validity, &sel, &arena, nullptr, &err_op, &kernel_msg,
                            &child);
         if (rc != 0) {
             set_span_error(err, "UnnestOperator: pushed predicate evaluation failed",

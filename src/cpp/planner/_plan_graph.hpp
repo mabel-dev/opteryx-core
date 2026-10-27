@@ -35,7 +35,11 @@
 namespace opteryx { namespace planner {
 
 constexpr int32_t kNoStepKind = -1;
-constexpr int32_t kStepKindSlots = 64;  // LogicalPlanStepType values are below this
+// LogicalPlanStepType values are below this; logical_planner.py refuses to load an
+// enum that outgrows it, and steps_of's kind mask is sized from it.
+constexpr int32_t kStepKindSlots = 128;
+constexpr int32_t kStepKindMaskWords = 2;  // steps_of's kind mask: one bit per slot
+static_assert(kStepKindSlots == 64 * kStepKindMaskWords, "the kind mask must cover every kind slot");
 
 class PlanGraph : public PlanTopology {
 public:

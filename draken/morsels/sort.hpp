@@ -383,10 +383,13 @@ struct SortKeyCmp {
 
 // ---- AoS (row-contiguous) key layout — the fast comparator ------------------------
 
-// Widest ORDER BY worth specializing. Surveyed across ClickBench/TPC-H/H2O/JOB the
-// widest real clause is 4 columns (TPC-H q02/q16); 80% are single-column. Beyond
-// this, SortKeyCmp handles it — same order, one indirection more per compare.
-inline constexpr size_t SORT_AOS_MAX_PARTS = 4;
+// Widest key (in PARTS) worth specializing. ClickBench/TPC-H/H2O/JOB top out at 4
+// columns (TPC-H q02/q16) and 80% are single-column, but TPC-DS window/rollup sorts
+// carry 5-6 (q47: 6, q57: 5) and took SortKeyCmp at 4. 8 is the hard ceiling: the
+// per-row validity mask is one uint8_t, one bit per part. Beyond it, SortKeyCmp
+// handles it — same order, one indirection more per compare.
+inline constexpr size_t SORT_AOS_MAX_PARTS = 8;
+static_assert(SORT_AOS_MAX_PARTS <= 8, "the per-row validity mask is a uint8_t: one bit per part");
 
 // Validity lives in a SEPARATE compact side array, NOT in RowKeyN. A leading
 // uint8_t next to uint64_t parts[] pads the struct up to the next 8-byte multiple
@@ -402,6 +405,10 @@ static_assert(sizeof(RowKeyN<1>) == 8,  "RowKeyN<1> must be unpadded");
 static_assert(sizeof(RowKeyN<2>) == 16, "RowKeyN<2> must be unpadded");
 static_assert(sizeof(RowKeyN<3>) == 24, "RowKeyN<3> must be unpadded");
 static_assert(sizeof(RowKeyN<4>) == 32, "RowKeyN<4> must be unpadded");
+static_assert(sizeof(RowKeyN<5>) == 40, "RowKeyN<5> must be unpadded");
+static_assert(sizeof(RowKeyN<6>) == 48, "RowKeyN<6> must be unpadded");
+static_assert(sizeof(RowKeyN<7>) == 56, "RowKeyN<7> must be unpadded");
+static_assert(sizeof(RowKeyN<8>) == 64, "RowKeyN<8> must be unpadded");
 
 // Mirrors SortKeyCmp's null semantics exactly: both NULL -> next part; one NULL ->
 // a precedes b iff a is the NULL and that part's NULLs go first. Direction never
@@ -1532,6 +1539,10 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
             DRAKEN_SORT_STR_ARM(2)
             DRAKEN_SORT_STR_ARM(3)
             DRAKEN_SORT_STR_ARM(4)
+            DRAKEN_SORT_STR_ARM(5)
+            DRAKEN_SORT_STR_ARM(6)
+            DRAKEN_SORT_STR_ARM(7)
+            DRAKEN_SORT_STR_ARM(8)
 #undef DRAKEN_SORT_STR_ARM
             default: break;   // unreachable — radix_keys_eligible bounds the size
         }
@@ -1573,6 +1584,10 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
             DRAKEN_SORT_AOS_ARM(2)
             DRAKEN_SORT_AOS_ARM(3)
             DRAKEN_SORT_AOS_ARM(4)
+            DRAKEN_SORT_AOS_ARM(5)
+            DRAKEN_SORT_AOS_ARM(6)
+            DRAKEN_SORT_AOS_ARM(7)
+            DRAKEN_SORT_AOS_ARM(8)
 #undef DRAKEN_SORT_AOS_ARM
             default: break;   // unreachable — aos_keys_eligible bounds the size
         }

@@ -18,7 +18,7 @@ holding the relation, that an undeclared answer is an error rather than a
 guess, and that the sibling catalog declares what this depends on.
 """
 
-import importlib.util
+import importlib
 import os
 import sys
 
@@ -110,12 +110,16 @@ def test_a_connector_with_no_metastore_answers_no():
 
 
 def _sibling_catalog_module(module_name: str):
-    """A module from the sibling ../opteryx-catalog checkout, by path.
+    """A module of `opteryx_catalog` from the sibling ../opteryx-catalog checkout.
 
-    Loaded rather than imported for the reason `test_egress_protection`'s
-    equivalent gives: whatever `opteryx_catalog` is installed may be a stale
-    wheel, and what matters is the catalog this engine will ship beside
-    (release order is catalog, then core).
+    What matters is the catalog this engine will ship beside (release order is
+    catalog, then core), not whatever wheel may be installed. It is imported
+    under its REAL name, with the checkout first on the path, and its origin is
+    then verified: the catalog imports itself by absolute name in places, so
+    loading it under any other name splices in whichever `opteryx_catalog` the
+    path offers - an installed wheel's modules beside the checkout's, or nothing.
+    An `opteryx_catalog` already imported from elsewhere is a failure, not a
+    fallback.
     """
     repo = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
@@ -126,15 +130,15 @@ def _sibling_catalog_module(module_name: str):
             f"sibling opteryx-catalog checkout not found at {repo}; this test reads the "
             "catalog source, not an installed wheel"
         )
-    spec = importlib.util.spec_from_file_location(
-        "_sibling_opteryx_catalog",
-        os.path.join(package_dir, "__init__.py"),
-        submodule_search_locations=[package_dir],
-    )
-    package = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = package
-    spec.loader.exec_module(package)
-    return importlib.import_module(f"{spec.name}.{module_name}")
+    if repo not in sys.path:
+        sys.path.insert(1, repo)
+    package = importlib.import_module("opteryx_catalog")
+    if not os.path.abspath(package.__file__).startswith(package_dir + os.sep):
+        raise AssertionError(
+            f"opteryx_catalog was already imported from {package.__file__}, not the sibling "
+            f"checkout at {package_dir}; run this module in its own pytest invocation"
+        )
+    return importlib.import_module(f"opteryx_catalog.{module_name}")
 
 
 def test_the_sibling_catalog_declares_forking_only_for_the_native_store():

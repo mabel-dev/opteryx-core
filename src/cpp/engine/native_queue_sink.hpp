@@ -1,6 +1,6 @@
 #pragma once
-// src/cpp/engine/native_queue_sink.hpp — the engine's terminal sink, plus the two
-// numeric-read helpers the ungrouped aggregate shares with it.
+// src/cpp/engine/native_queue_sink.hpp — the engine's terminal sink, plus the
+// vec_row_is_valid helper (used by native_unnest.hpp).
 //
 // QueueSink writes straight into the REAL production MorselQueue — the output edge
 // opteryx's cursor drains. Every plan's LAST pipeline ends here (an invariant
@@ -10,9 +10,10 @@
 // could drive real scan morsels through a filter into the real queue. That proof has
 // long since been superseded by the actual engine; its demo scaffolding (VecSource,
 // DemoStats, run_filter_to_queue) and NumericFilterOperator — whose only wiring,
-// Engine::add_filter, was itself dead — have been removed. What survived is the one
-// piece that was never scaffolding (QueueSink) and the two vector-read helpers
-// native_aggregate.hpp genuinely uses.
+// Engine::add_filter, was itself dead — have been removed, as has the ungrouped
+// NativeAggregateSink (native_aggregate.hpp / native_decimal.hpp), which nothing
+// constructed. What survived is the one piece that was never scaffolding (QueueSink)
+// and vec_row_is_valid.
 
 #include <atomic>
 #include <cstdint>
@@ -22,28 +23,6 @@
 #include "morsel_queue.hpp"  // the REAL production output queue (src/cpp/morsel_queue.hpp)
 
 namespace opteryx::engine {
-
-// Read one row of a fixed-width numeric vector as a double, via the uniform
-// data[selection[i]] access (buffers.h). Returns 0.0 for a type it does not handle —
-// callers gate on their own supported-type check first.
-//
-// DRAKEN_DECIMAL is int64-backed (precision <= 18) and read bit-identically to
-// DRAKEN_INT64 — i.e. the RAW unscaled value. Any caller comparing that against a
-// literal must rescale the literal into the same unscaled-integer domain first; this
-// function never rescales anything itself.
-inline double vec_read_as_double(const DrakenVector& v, uint32_t logical_row) {
-    uint32_t phys = v.selection[logical_row];
-    switch (v.type) {
-        case DRAKEN_INT8:    return static_cast<double>(static_cast<const int8_t*>(v.data)[phys]);
-        case DRAKEN_INT16:   return static_cast<double>(static_cast<const int16_t*>(v.data)[phys]);
-        case DRAKEN_INT32:   return static_cast<double>(static_cast<const int32_t*>(v.data)[phys]);
-        case DRAKEN_INT64:   return static_cast<double>(static_cast<const int64_t*>(v.data)[phys]);
-        case DRAKEN_FLOAT32: return static_cast<double>(static_cast<const float*>(v.data)[phys]);
-        case DRAKEN_FLOAT64: return static_cast<double>(static_cast<const double*>(v.data)[phys]);
-        case DRAKEN_DECIMAL: return static_cast<double>(static_cast<const int64_t*>(v.data)[phys]);
-        default:             return 0.0;
-    }
-}
 
 inline bool vec_row_is_valid(const DrakenVector& v, uint32_t logical_row) {
     if (v.validity == nullptr) return true;  // NULL bitmap absent => all valid

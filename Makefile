@@ -67,7 +67,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test pipeline-latch-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q ft rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test pipeline-latch-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -218,6 +218,7 @@ q:
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
 	@$(PYTEST) tests/integration/test_row_identity_native_scan_local.py -q
 	@$(PYTEST) tests/storage/test_mabel_connector.py -q
+	@$(PYTEST) tests/unit/planner/test_plan_graph_step_kinds.py tests/unit/planner/test_fork_statements.py -q
 	@$(MAKE) --no-print-directory chunk-cache-test
 	@$(MAKE) --no-print-directory simd-find-test
 	@$(MAKE) --no-print-directory float-text-test
@@ -226,6 +227,10 @@ q:
 	@$(MAKE) --no-print-directory packed-codes-test
 	@$(MAKE) --no-print-directory carchar-set-test
 	@$(MAKE) --no-print-directory pipeline-latch-test
+
+ft: ## Run the fork statement execution tests (CLONE/RESYNC/DETACH) — release floor, not make q
+	$(call print_blue,"Running fork statement execution tests...")
+	@$(PYTEST) tests/storage/test_clone_execution.py tests/storage/test_fork_maintenance_execution.py -q
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)

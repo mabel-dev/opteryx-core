@@ -2114,7 +2114,7 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
         VecResult* child = nullptr;
         int rc = residual_fn(residual.instrs, residual.count, pairs.get(),
                              residual.col_idx.data(), residual.lit_dv.data(),
-                             &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                             &v, &data, &validity, &sel, &arena, nullptr, &err_op, &kernel_msg,
                              &child);
         if (rc != 0) {
             set_span_error(err, "SemiAntiProbe: correlated residual evaluation failed",
@@ -2817,7 +2817,7 @@ struct Join2MarkSink : Sink {
         VecResult* child = nullptr;
         int rc = residual_fn(residual.instrs, residual.count, pairs.get(),
                              residual.col_idx.data(), residual.lit_dv.data(),
-                             &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                             &v, &data, &validity, &sel, &arena, nullptr, &err_op, &kernel_msg,
                              &child);
         if (rc != 0) {
             set_span_error(err, "Join2MarkSink: correlated residual evaluation failed",

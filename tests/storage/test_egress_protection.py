@@ -11,7 +11,7 @@ half: turning relation names into workspaces, asking only when a boundary is
 actually crossed, and failing closed rather than open when it cannot ask.
 """
 
-import importlib.util
+import importlib
 import os
 
 import pytest
@@ -213,15 +213,20 @@ def test_the_fake_has_the_real_types_surface():
 
 
 def _sibling_catalog_refusal_type():
-    """`EgressRefusal` from the sibling ../opteryx-catalog checkout, by path.
+    """`EgressRefusal` from the sibling ../opteryx-catalog checkout.
 
-    Loaded under its own module name rather than imported, because whatever
-    `opteryx_catalog` is already in sys.modules may be a stale site-packages
-    wheel - and this test exists to compare against the type the engine will
-    actually ship beside, which is the sibling repo (release order is catalog,
-    then core). Importing by name would compare the fake against last month's
-    wording and report drift that is not there, or miss drift that is.
+    This test exists to compare against the type the engine will actually ship
+    beside, which is the sibling repo (release order is catalog, then core) - a
+    stale site-packages wheel would compare the fake against last month's
+    wording and report drift that is not there, or miss drift that is. So it is
+    imported under its REAL name, with the checkout first on the path, and its
+    origin is then verified: the catalog imports itself by absolute name in
+    places, so loading it under any other name splices in whichever
+    `opteryx_catalog` the path offers. An `opteryx_catalog` already imported
+    from elsewhere is a failure, not a fallback.
     """
+    import sys
+
     repo = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
     )
@@ -231,17 +236,15 @@ def _sibling_catalog_refusal_type():
             f"sibling opteryx-catalog checkout not found at {repo}; this test compares "
             "against the catalog source, not an installed wheel"
         )
-    spec = importlib.util.spec_from_file_location(
-        "_sibling_opteryx_catalog",
-        os.path.join(package_dir, "__init__.py"),
-        submodule_search_locations=[package_dir],
-    )
-    package = importlib.util.module_from_spec(spec)
-    import sys
-
-    sys.modules[spec.name] = package
-    spec.loader.exec_module(package)
-    return importlib.import_module(f"{spec.name}.opteryx_catalog").EgressRefusal
+    if repo not in sys.path:
+        sys.path.insert(1, repo)
+    package = importlib.import_module("opteryx_catalog")
+    if not os.path.abspath(package.__file__).startswith(package_dir + os.sep):
+        raise AssertionError(
+            f"opteryx_catalog was already imported from {package.__file__}, not the sibling "
+            f"checkout at {package_dir}; run this module in its own pytest invocation"
+        )
+    return importlib.import_module("opteryx_catalog.opteryx_catalog").EgressRefusal
 
 
 def test_the_refusal_is_the_engines_own_type(connector):

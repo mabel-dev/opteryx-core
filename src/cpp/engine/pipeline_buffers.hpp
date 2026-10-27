@@ -55,6 +55,9 @@
 #include "skene/reader.h"
 #include "skene/writer.h"
 
+extern "C" CxxMorsel* cxx_morsel_own_arenas_c(const CxxMorsel* m);   // draken_native
+extern "C" void cxx_morsel_delete(CxxMorsel* m);
+
 namespace opteryx::engine {
 
 // Engine-owned spill environment: one per Engine, shared by every buffer.
@@ -370,7 +373,12 @@ struct MorselBuffer {
             // engine names cannot fail the write. Views and owners are shared,
             // not copied.
             CxxMorsel renamed;
-            renamed.columns = m->columns;
+            // A column whose string arena is borrowed (VectorOwner::arena_source)
+            // gets an arena of its own first: the skene writer emits a string
+            // arena verbatim, and a borrowed one is the LENDER's whole arena.
+            MorselPtr own_arenas(cxx_morsel_own_arenas_c(m.get()), cxx_morsel_delete);
+            if (!own_arenas) { msg = "spill: allocation failed compacting a borrowed string arena"; return false; }
+            renamed.columns = own_arenas->columns;
             renamed.zero_col_rows = m->zero_col_rows;
             renamed.state = m->state;
             renamed.names.reserve(m->columns.size());

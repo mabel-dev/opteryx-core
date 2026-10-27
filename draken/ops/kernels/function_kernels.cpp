@@ -2199,48 +2199,34 @@ VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t 
     // function of a physical value's bytes plus the bind-time start/count, so it is
     // computed ONCE per data_length physical value, then kernel_preserve_shape
     // carries the input's selection + per-logical-row validity onto the result.
-    // Substring changes lengths per value, so the arena is sized over the K outputs.
-
-    // Pass 1: total long-form bytes over the K physical substring outputs.
-    size_t arena_len = 0;
-    for (uint32_t j = 0; j < k; ++j) {
-        const DrakenStringSlot* slot = &sa->slots[j];
-        uint32_t off, len;
-        fk_substr_range(str_data(slot, sa->arena), str_length(slot), is_utf8,
-                        start0, has_count, c->count, &off, &len);
-        if (len > STR_INLINE_MAX) arena_len += len;
-    }
+    // A long substring is a byte range of a long input value, so its slot points
+    // into the INPUT's arena (kernel_borrow_input_arena) — no bytes are copied.
 
     // K-slot physical block, NO embedded validity (per-logical-row nulls come from
-    // kernel_preserve_shape).
+    // kernel_preserve_shape) and no arena of its own.
     DrakenStringSlot* slots;
-    uint8_t* arena;
+    uint8_t* arena_unused;
     uint8_t* validity_unused;
-    uint8_t* block = vecresult_string_block_alloc(k, arena_len, /*want_validity=*/0,
-                                                  &slots, &arena, &validity_unused);
+    uint8_t* block = vecresult_string_block_alloc(k, 0, /*want_validity=*/0,
+                                                  &slots, &arena_unused, &validity_unused);
     if (block == nullptr) return draken_error_sentinel("draken_substring: allocation failed");
 
-    size_t arena_pos = 0;
     for (uint32_t j = 0; j < k; ++j) {
         const DrakenStringSlot* slot = &sa->slots[j];
         const uint8_t* src = str_data(slot, sa->arena);
         uint32_t off, len;
         fk_substr_range(src, str_length(slot), is_utf8, start0, has_count, c->count, &off, &len);
         const uint8_t* sub = src + off;
-        if (len <= STR_INLINE_MAX) {
+        if (len <= STR_INLINE_MAX)
             str_init_inline(&slots[j], sub, len);
-        } else {
-            uint8_t* dst = arena + arena_pos;
-            std::memcpy(dst, sub, len);
-            str_init_extern(&slots[j], dst, len,
-                            static_cast<uint32_t>(arena_pos));
-            arena_pos += len;
-        }
+        else
+            str_init_extern(&slots[j], sub, len, kernel_lender_offset(v, sub));
     }
 
     // Carry the input's shape onto the dense K-block (see ascii_case_transform for
     // the identity-replacement and bad_alloc-containment rationale).
-    VecResult r = vecresult_from_string_block(block, k, arena_len, /*has_validity=*/0, v->type);
+    VecResult r = vecresult_from_string_block(block, k, 0, /*has_validity=*/0, v->type);
+    kernel_borrow_input_arena(r, v, 0);
     try {
         kernel_preserve_shape(r, v);
     } catch (const std::exception&) {
@@ -2332,47 +2318,35 @@ VecResult fk_substring_dynamic_impl(FkSubstrDynMode mode, const DrakenVector* co
     const uint32_t n = sv->length;
 
     try {
-        std::vector<uint8_t> row_valid(n);
-        std::vector<uint32_t> row_off(n), row_len(n);
-        size_t arena_cap = 0;
-        for (uint32_t i = 0; i < n; ++i) {
-            uint32_t off = 0, len = 0;
-            const bool valid = fk_substr_dyn_row(sv, a1, a2, mode, is_utf8, i, &off, &len);
-            row_valid[i] = valid ? 1 : 0;
-            row_off[i] = off;
-            row_len[i] = len;
-            if (valid && len > STR_INLINE_MAX) arena_cap += len;
-        }
-
+        // A long substring is a byte range of a long input value: its slot points
+        // into the INPUT's arena (kernel_borrow_input_arena) — no bytes are copied.
         DrakenStringSlot* slots;
-        uint8_t* arena;
+        uint8_t* arena_unused;
         uint8_t* validity;
-        uint8_t* block = vecresult_string_block_alloc(n, arena_cap, /*want_validity=*/1,
-                                                       &slots, &arena, &validity);
+        uint8_t* block = vecresult_string_block_alloc(n, 0, /*want_validity=*/1,
+                                                       &slots, &arena_unused, &validity);
         if (block == nullptr)
             return draken_error_sentinel("draken_substring_dynamic: allocation failed");
 
         const auto* sa = static_cast<const DrakenStringArena*>(sv->data);
         std::memset(validity, 0, (static_cast<size_t>(n) + 7) / 8);
-        size_t arena_pos = 0;
         for (uint32_t i = 0; i < n; ++i) {
-            if (!row_valid[i]) { str_init_null(&slots[i]); continue; }
-            validity[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
-            const uint32_t phys = sv->selection[i];
-            const DrakenStringSlot* src_slot = &sa->slots[phys];
-            const uint8_t* src = str_data(src_slot, sa->arena) + row_off[i];
-            const uint32_t len = row_len[i];
-            if (len <= STR_INLINE_MAX) {
-                str_init_inline(&slots[i], src, len);
-            } else {
-                uint8_t* dst = arena + arena_pos;
-                std::memcpy(dst, src, len);
-                str_init_extern(&slots[i], dst, len,
-                                static_cast<uint32_t>(arena_pos));
-                arena_pos += len;
+            uint32_t off = 0, len = 0;
+            if (!fk_substr_dyn_row(sv, a1, a2, mode, is_utf8, i, &off, &len)) {
+                str_init_null(&slots[i]);
+                continue;
             }
+            validity[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+            const DrakenStringSlot* src_slot = &sa->slots[sv->selection[i]];
+            const uint8_t* src = str_data(src_slot, sa->arena) + off;
+            if (len <= STR_INLINE_MAX)
+                str_init_inline(&slots[i], src, len);
+            else
+                str_init_extern(&slots[i], src, len, kernel_lender_offset(sv, src));
         }
-        return vecresult_from_string_block(block, n, arena_cap, /*has_validity=*/1, sv->type);
+        VecResult r = vecresult_from_string_block(block, n, 0, /*has_validity=*/1, sv->type);
+        kernel_borrow_input_arena(r, sv, 0);
+        return r;
     } catch (const std::exception& e) {
         return draken_error_sentinel(e.what());
     } catch (...) {

@@ -68,6 +68,10 @@ class BaseConnector:
         source that cannot honestly support a fork is refused rather than
         producing one resting on files nothing has promised to keep.
 
+        RESYNC and DETACH ask it of the FORK: a fork is made and maintained by
+        the native metastore, so a relation held anywhere else cannot be one,
+        and its connector has nothing to resync or detach.
+
         Answered PER RELATION rather than as a class attribute because one
         connector serves many workspaces and they need not share a metastore -
         OpteryxConnector fronts the native catalog for one workspace and an

@@ -1,0 +1,65 @@
+# REGEXP_REPLACE(s, pattern, '\1') runs on the native extractor (_DFA_EXTRACT,
+# vector_dfa_extract.pyx) (2026-10-27). Each case answered differently from RE2
+# before; the expected values are RE2's, which is what REGEXP_REPLACE means.
+
+# A trailing `.*` may match nothing: 'http://yandex.ru/' is a match. An optional
+# literal backs off when the rest fails: 'http://www./a' captures 'www.'.
+query TT
+SELECT s, REGEXP_REPLACE(s, '^https?://(?:www\.)?([^/]+)/.*$', '\1') FROM (VALUES ('http://yandex.ru/'), ('http://yandex.ru/x'), ('http://www./a'), ('https://www.a.ru/x'), ('ftp://a.ru/')) AS t(s) ORDER BY s
+----
+ftp://a.ru/ ftp://a.ru/
+http://www./a www.
+http://yandex.ru/ yandex.ru
+http://yandex.ru/x yandex.ru
+https://www.a.ru/x a.ru
+
+query T
+SELECT REGEXP_REPLACE(name, '^Ma([^s]+)s.*$', '\1') FROM $planets WHERE name = 'Mars'
+----
+r
+
+# `.+` still needs at least one character
+query T
+SELECT REGEXP_REPLACE(name, '^Ma([^s]+)s.+$', '\1') FROM $planets WHERE name = 'Mars'
+----
+Mars
+
+# `.` does not cross a newline unless (?s) is set
+query I
+SELECT REGEXP_REPLACE(s, '^Ma([^s]+)s.*$', '\1') = s FROM (SELECT CONCAT(name, CHR(10), 'x') AS s FROM $planets WHERE name = 'Mars') AS t
+----
+1
+
+query T
+SELECT REGEXP_REPLACE(s, '(?s)^Ma([^s]+)s.*$', '\1') FROM (SELECT CONCAT(name, CHR(10), 'x') AS s FROM $planets WHERE name = 'Mars') AS t
+----
+r
+
+query T
+SELECT REGEXP_REPLACE(name, '(?s)^M([^r]+)r.*', '\1') FROM $planets WHERE name = 'Mercury'
+----
+e
+
+# Shapes the extractor cannot run exactly are refused, never approximated.
+# A repeated class other than "any character" is not "consume the rest"
+query error NotSupportedError
+SELECT REGEXP_REPLACE(name, '^M([^r]+)r[0-9]*$', '\1') FROM $planets
+
+# `.*` before a later step would need backtracking into it
+query error NotSupportedError
+SELECT REGEXP_REPLACE(name, '^M.*r([^y]+)y$', '\1') FROM $planets
+
+# a lazy optional prefers skipping
+query error NotSupportedError
+SELECT REGEXP_REPLACE(name, '^(?:M)??([^r]+)r.*$', '\1') FROM $planets
+
+# with no `$`, a lazy tail or a newline-stopping `.` leaves an unmatched tail
+query error NotSupportedError
+SELECT REGEXP_REPLACE(name, '^M([^r]+)r.*?', '\1') FROM $planets
+
+query error NotSupportedError
+SELECT REGEXP_REPLACE(name, '^M([^r]+)r.*', '\1') FROM $planets
+
+# a bare [^c] is one character, not "up to c"
+query error NotSupportedError
+SELECT REGEXP_REPLACE(name, '^M([^c])c.*$', '\1') FROM $planets

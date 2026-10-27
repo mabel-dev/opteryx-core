@@ -81,6 +81,16 @@ VecResult vecresult_from_string_block(
     int         has_validity,
     DrakenType  type);
 
+// Make a string block's arena its OWN: copy the bytes its long slots reference
+// into a fresh draken_malloc'd arena (just those bytes, in slot order), rebase
+// every long slot onto it, and point sa->arena / arena_used / arena_cap at it.
+// For a block whose arena is borrowed (VecResult::arena_lender, VectorOwner::
+// arena_source) and must stand alone — vecresult_to_owner, the Python bridge,
+// spill. Returns the new arena (the caller owns it; nullptr when no slot is long,
+// in which case sa->arena is set to nullptr too). *ok = 0 on allocation failure,
+// with the block untouched.
+uint8_t* draken_string_compact_arena(DrakenStringArena* sa, int* ok);
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -233,5 +243,28 @@ static inline void kernel_preserve_shape(VecResult& r, const DrakenVector* in) {
         r.selection      = codes;                              // dict: copy owned codes
         r.owns_selection = true;
     }
+}
+
+// Point a string result at its input's byte arena instead of an arena of its own
+// (VecResult::arena_lender, docs/STRING_ARENA_BORROW_DESIGN.md Stage 2). The
+// result's long slots must already carry offsets into `in`'s arena — a long output
+// is a byte range of a long input value — and the result must own no arena
+// (`r.arena` nullptr). `arg` is `in`'s index in the kernel's args[]. An input with
+// no arena has no long values, so its outputs are all inline: nothing to borrow.
+static inline void kernel_borrow_input_arena(VecResult& r, const DrakenVector* in, uint8_t arg) {
+    const auto* lender = static_cast<const DrakenStringArena*>(in->data);
+    if (lender->arena == nullptr) return;
+    auto* sa = static_cast<DrakenStringArena*>(r.data);
+    sa->arena      = lender->arena;
+    sa->arena_used = lender->arena_used;
+    sa->arena_cap  = lender->arena_cap;
+    r.arena        = nullptr;
+    r.arena_lender = arg;
+}
+
+// Offset of a long output's bytes within its lender's arena (see
+// kernel_borrow_input_arena): `p` points inside `lender`'s arena.
+static inline uint32_t kernel_lender_offset(const DrakenVector* in, const uint8_t* p) {
+    return static_cast<uint32_t>(p - static_cast<const DrakenStringArena*>(in->data)->arena);
 }
 #endif
