@@ -2666,12 +2666,28 @@ struct UngroupedAggSink : Sink {
                 // union of the partitioned sets).
                 std::array<UCDPartition, kGBParts>& DP = l.dparts[s];
                 std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
-                std::vector<uint64_t> vh;
-                if (!compute_row_hashes(in, vcol, vh, err)) return SinkResult::CONTINUE;
-                for (uint32_t i = 0; i < v.length; ++i) {
-                    if (!sort_row_valid(v, i)) continue;
-                    DP[gb_part(vh[i])].insert(vh[i]);
+                ShapedKeyHash skh;
+                if (!compute_row_hashes_shaped(in, vcol, skh, err)) return SinkResult::CONTINUE;
+                if (skh.compressed()) {
+                    // draken hashed each distinct value once: mark the hashes some
+                    // VALID row references, then dedup once per marked hash, not
+                    // once per row.
+                    std::vector<uint8_t> ref(skh.data_length, 0);
+                    for (uint32_t i = 0; i < v.length; ++i) {
+                        if (sort_row_valid(v, i)) ref[skh.codes[i]] = 1;
+                    }
+                    for (uint32_t j = 0; j < skh.data_length; ++j) {
+                        if (ref[j] == 0) continue;
+                        DP[gb_part(skh.hashes[j])].insert(skh.hashes[j]);
+                    }
+                } else {
+                    for (uint32_t i = 0; i < v.length; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        const uint64_t h = skh.hashes[skh.codes[i]];
+                        DP[gb_part(h)].insert(h);
+                    }
                 }
+                cxx_morsel_delete(skh.owner);
             } else if (l.meta[s].is_string) {
                 bool want_max = specs[s].fn == AggFn::Max;
                 if (draken_is_compressed(&v)) {

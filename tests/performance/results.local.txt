@@ -1,6 +1,6 @@
-make clickbench-rugo            4010ms (26-OCT) [0.38x] [0.9.175 @ 4137ms last clickbench]
+make clickbench-rugo            3972ms (27-OCT) [0.39x] [0.9.175 @ 4137ms last clickbench]
 make clickbench-skene           5644ms (25-OCT) [0.53x]
-make clickbench-canon           5485ms (25-OCT) [0.51x] [0.9.175 @ 5485ms last clickbench]
+make clickbench-canon           5446ms (27-OCT) [0.51x] [0.9.175 @ 5485ms last clickbench]
 make clickbench-canon-single    5863ms (25-OCT) [0.55x]
 make clickbench-rugo-extended   7755ms (25-OCT) [0.43x]
 make clickbench-json          427180ms (12-OCT) [3-runs only]
