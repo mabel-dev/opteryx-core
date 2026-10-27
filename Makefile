@@ -235,6 +235,35 @@ ft: ## Run the fork statement execution tests (CLONE/RESYNC/DETACH) — release 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
 
+ORC_RLE_BENCH_ARGS ?= 7 128
+ORC_RLE_TEST_FLAGS ?= -O2
+
+ORC_FIXED_ARGS ?=
+ifeq ($(shell uname),Darwin)
+  ORC_FIXED_LINK_FLAGS := -dynamiclib -undefined dynamic_lookup
+else
+  ORC_FIXED_LINK_FLAGS := -shared
+endif
+
+.PHONY: bench-orc-fixed bench-orc-rle orc-rle-test orc-test
+bench-orc-fixed: ## Benchmark native ORC fixed-width stripe decoding (ORC_FIXED_ARGS="--rounds ... --iterations ...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -O3 -std=c++20 -Wall -Wextra -fPIC $(ORC_FIXED_LINK_FLAGS) -I$(CURDIR)/rugo/src -I$(CURDIR)/draken -I$(CURDIR)/third_party/cyan4973 $(CURDIR)/dev/bench_orc_fixed.cpp -o /tmp/opteryx-tests/bench_orc_fixed.so
+	@TZ=UTC $(PYTHON) dev/bench_orc_fixed.py /tmp/opteryx-tests/bench_orc_fixed.so $(ORC_FIXED_ARGS)
+
+bench-orc-rle: ## Benchmark native ORC RLEv2 decoding (ORC_RLE_BENCH_ARGS="rounds iterations")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -O3 -std=c++20 -Wall -Wextra -I$(CURDIR) $(CURDIR)/dev/bench_orc_intrle.cpp -o /tmp/opteryx-tests/bench_orc_intrle
+	@/tmp/opteryx-tests/bench_orc_intrle $(ORC_RLE_BENCH_ARGS)
+
+orc-rle-test: ## Build and run the native ORC RLEv2 correctness tests
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 $(ORC_RLE_TEST_FLAGS) -Wall -Wextra -I$(CURDIR) $(CURDIR)/tests/rugo/orc_rlev2_test.cpp -o /tmp/opteryx-tests/orc_rlev2_test
+	@/tmp/opteryx-tests/orc_rlev2_test
+
+orc-test: ## Run ORC reader and native scan tests
+	@$(PYTEST) tests/rugo/test_orc*.py tests/unit/connectors/test_orc_folder_dataset.py tests/unit/connectors/test_read_orc.py -q
+
 rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — gates the rugo wheel
 	$(call print_blue,"Running rugo release floor: parquet oracle conformance...")
 	@$(PYTEST) tests/rugo/test_oracle_conformance.py -q

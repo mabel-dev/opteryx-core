@@ -162,6 +162,117 @@ def test_integer_extremes_and_signs():
     assert _read(_write(table, compression="snappy"))["x"] == values * 50
 
 
+@pytest.mark.parametrize("version", ["0.11", "0.12"])
+@pytest.mark.parametrize("null_layout", ["all-valid", "alternating", "boundaries", "all-null"])
+def test_fixed_width_values_and_reader_widening(version, null_layout):
+    n = 1545
+    boundaries = {0, 7, 8, 9, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, n - 1}
+
+    def present(i):
+        if null_layout == "all-valid":
+            return True
+        if null_layout == "all-null":
+            return False
+        if null_layout == "alternating":
+            return i % 2 == 0
+        return i not in boundaries and not (250 <= i < 390 or 1000 <= i < 1035)
+
+    def masked(values):
+        return [v if present(i) else None for i, v in enumerate(values)]
+
+    # Long repeats and literals cross byte-RLE and integer-RLE run limits.
+    byte_pattern = [-128] * 130 + [127, -128, -1, 0, 1, 126] * 23 + [127] * 129
+    byte_values = [byte_pattern[i % len(byte_pattern)] for i in range(n)]
+    short_values = [[-32768, 32767, -1, 0, 1, 12345][i % 6] for i in range(n)]
+    int_values = [[-(2**31), 2**31 - 1, -1, 0, 1, 123456789][i % 6] for i in range(n)]
+    long_values = [[-(2**63), 2**63 - 1, -(2**31), 2**31, -1, 0, 1][i % 7] for i in range(n)]
+    dates = [datetime.date(1970, 1, 1) + datetime.timedelta(days=i % 2001 - 1000) for i in range(n)]
+    fractions = [0, 1, 999, 1000, 123456, 999999]
+    times = [
+        datetime.datetime(1969, 12, 31, 23, 59, 58) if i % 7 == 0 else
+        datetime.datetime(2014, 12, 31, 23, 59, 58) + datetime.timedelta(
+            seconds=i % 5, microseconds=fractions[i % len(fractions)]
+        )
+        for i in range(n)
+    ]
+    floats = [[0.1, -0.1, 0.0, -1234.5, 2**24, 1 / 8][i % 6] for i in range(n)]
+    doubles = [[0.1, -0.1, 0.0, -1234.5, 2**53, 1 / 8][i % 6] for i in range(n)]
+
+    specs = [
+        ("byte8", pa.int8(), DrakenType.INT8, byte_values),
+        ("byte16", pa.int8(), DrakenType.INT16, byte_values),
+        ("byte32", pa.int8(), DrakenType.INT32, byte_values),
+        ("byte64", pa.int8(), DrakenType.INT64, byte_values),
+        ("short16", pa.int16(), DrakenType.INT16, short_values),
+        ("short32", pa.int16(), DrakenType.INT32, short_values),
+        ("short64", pa.int16(), DrakenType.INT64, short_values),
+        ("int32", pa.int32(), DrakenType.INT32, int_values),
+        ("int64", pa.int32(), DrakenType.INT64, int_values),
+        ("long64", pa.int64(), DrakenType.INT64, long_values),
+        ("date", pa.date32(), DrakenType.DATE32, dates),
+        ("float32", pa.float32(), DrakenType.FLOAT32, floats),
+        ("float64", pa.float32(), DrakenType.FLOAT64, floats),
+        ("double", pa.float64(), DrakenType.FLOAT64, doubles),
+        ("timestamp", pa.timestamp("us"), DrakenType.TIMESTAMP64, times),
+        ("instant", pa.timestamp("us", tz="UTC"), DrakenType.TIMESTAMP64, times),
+    ]
+    table = pa.table({name: pa.array(masked(values), arrow_type) for name, arrow_type, _, values in specs})
+    expected = table.to_pydict()
+    reader = [(name, None, dtype.value, 0, 0, True) for name, _, dtype, _ in specs]
+    data = _write(table, file_version=version, compression="uncompressed", stripe_size=1024 * 1024)
+
+    got = {name: [] for name, _, _, _ in specs}
+    for morsel in orc.read_orc(data, reader=reader):
+        for name, _, dtype, _ in specs:
+            vector = morsel.column(name.encode())
+            assert vector.type == dtype, name
+            got[name].extend(vector.to_pylist())
+    for name in got:
+        if name in ("timestamp", "instant"):
+            assert _naive(got[name]) == _naive(expected[name]), name
+        else:
+            assert got[name] == expected[name], name
+
+
+@pytest.mark.parametrize("version", ["0.11", "0.12"])
+def test_timestamp_nanoseconds_are_truncated_to_microseconds(version):
+    nanos = [0, 1, 999, 1000, 123456789, 999999999, None]
+    epoch_ns = 1483228800 * 10**9
+    values = [None if ns is None else epoch_ns + ns for ns in nanos] * 30
+    table = pa.table({
+        "timestamp": pa.array(values, pa.timestamp("ns")),
+        "instant": pa.array(values, pa.timestamp("ns", tz="UTC")),
+    })
+    expected = [
+        None if ns is None else datetime.datetime(2017, 1, 1) + datetime.timedelta(microseconds=ns // 1000)
+        for ns in nanos
+    ] * 30
+    got = _read(_write(table, file_version=version))
+    assert _naive(got["timestamp"]) == expected
+    assert _naive(got["instant"]) == expected
+
+
+@pytest.mark.parametrize("n", [1, 7, 8, 9, 63, 64, 65, 127, 128, 129, 511, 512, 513])
+def test_fixed_width_partial_bitmap_and_run_lengths(n):
+    keep = [i != 0 and i != n - 1 and i % 3 != 0 for i in range(n)]
+    table = pa.table({
+        "byte": pa.array([(-128 if i % 2 else 127) if keep[i] else None for i in range(n)], pa.int8()),
+        "integer": pa.array([i - 256 if keep[i] else None for i in range(n)], pa.int64()),
+        "date": pa.array([
+            datetime.date(1970, 1, 1) + datetime.timedelta(days=i - 256) if keep[i] else None
+            for i in range(n)
+        ], pa.date32()),
+        "timestamp": pa.array([
+            datetime.datetime(2015, 1, 1) + datetime.timedelta(microseconds=i * 1234) if keep[i] else None
+            for i in range(n)
+        ], pa.timestamp("us")),
+    })
+    got = _read(_write(table))
+    expected = table.to_pydict()
+    assert _naive(got.pop("timestamp")) == expected.pop("timestamp")
+    assert got == expected
+
+
 def test_an_empty_file():
     table = pa.table({"x": pa.array([], pa.int64()), "s": pa.array([], pa.string())})
     data = _write(table)

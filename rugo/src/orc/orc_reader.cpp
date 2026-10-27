@@ -6,6 +6,7 @@
 #include <memory>
 #include <new>
 #include <stdexcept>
+#include <type_traits>
 
 #include "base64/_base64.h"        // mabel bintob64 (exported by draken_native)
 #include "core/alloc.h"
@@ -383,6 +384,73 @@ struct Presence {
     uint8_t* validity = nullptr;  // draken_malloc'd; null when there are no nulls
 };
 
+template <typename T>
+void read_ints_into(IntRle& reader, T* out, size_t count, const uint8_t* flags) {
+    if (flags == nullptr) {
+        if constexpr (std::is_same_v<T, int64_t>) {
+            reader.read(out, count);
+        } else {
+            reader.read_runs(count, [&](const int64_t* values, size_t n) {
+                for (size_t i = 0; i < n; ++i) out[i] = static_cast<T>(values[i]);
+                out += n;
+            });
+        }
+    } else {
+        size_t row = 0;
+        reader.read_runs(count, [&](const int64_t* values, size_t n) {
+            for (size_t i = 0; i < n; ++i) {
+                while (!flags[row]) ++row;
+                out[row++] = static_cast<T>(values[i]);
+            }
+        });
+    }
+}
+
+template <typename T>
+void read_bytes_into(ByteRle& reader, T* out, size_t count, const uint8_t* validity) {
+    if constexpr (std::is_same_v<T, int8_t>) {
+        if (validity == nullptr) {
+            reader.read(reinterpret_cast<uint8_t*>(out), count);
+            return;
+        }
+    }
+    uint8_t values[512];
+    size_t row = 0;
+    size_t bitmap_byte = 0;
+    unsigned bits = 0;
+    while (count != 0) {
+        const size_t n = std::min(count, sizeof(values));
+        reader.read(values, n);
+        if (validity == nullptr) {
+            for (size_t i = 0; i < n; ++i) out[row++] = static_cast<int8_t>(values[i]);
+        } else {
+            for (size_t i = 0; i < n; ++i) {
+                while (bits == 0) bits = validity[bitmap_byte++];
+                const size_t at = (bitmap_byte - 1) * 8 + static_cast<unsigned>(__builtin_ctz(bits));
+                out[at] = static_cast<int8_t>(values[i]);
+                bits &= bits - 1;
+            }
+        }
+        count -= n;
+    }
+}
+
+int64_t timestamp_micros(int64_t seconds, int64_t nanos, const std::string& where) {
+    const uint64_t raw = static_cast<uint64_t>(nanos);
+    uint64_t value = raw >> 3;
+    const unsigned zeros = static_cast<unsigned>(raw & 7);
+    if (zeros != 0) {
+        uint64_t scale = 1;
+        for (unsigned z = 0; z <= zeros; ++z) scale *= 10;
+        value *= scale;
+    }
+    if (value > 999999999) fail(where + "a timestamp's nanoseconds are out of range");
+    int64_t epoch = seconds + kOrcEpochOffset;
+    // Seconds are truncated toward zero; match the Java reader's pre-1970 adjustment.
+    if (epoch < 0 && value > 999999) epoch -= 1;
+    return epoch * 1000000 + static_cast<int64_t>(value / 1000);
+}
+
 uint8_t* alloc_bytes(size_t n) {
     auto* p = static_cast<uint8_t*>(draken_malloc(n ? n : 1));
     if (p == nullptr) throw std::bad_alloc();
@@ -680,29 +748,15 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
     out.precision = rc.precision;
     out.scale = rc.scale;
 
-    // Fixed-width output: place the `nn` decoded values at the valid rows, zero elsewhere.
+    // Nullable output retains zeroes at null rows. All-valid output is entirely overwritten.
     auto fixed_out = [&](size_t width) {
         draken::AppendBuffer<uint8_t> buf;
-        buf.resize_fill(static_cast<size_t>(rows) * width, 0);
+        const size_t bytes = static_cast<size_t>(rows) * width;
+        if (all_valid) buf.resize_uninit(bytes);
+        else buf.resize_fill(bytes, 0);
         return buf;
     };
-    auto place_ints = [&](const std::vector<int64_t>& vals, DrakenType dest) {
-        const size_t w = width_of(dest);
-        draken::AppendBuffer<uint8_t> buf = fixed_out(w);
-        uint8_t* d = buf.data();
-        size_t k = 0;
-        for (uint32_t r = 0; r < rows; ++r) {
-            if (!all_valid && !pres.flags[r]) continue;
-            const int64_t v = vals[k++];
-            switch (w) {
-                case 1: reinterpret_cast<int8_t*>(d)[r] = static_cast<int8_t>(v); break;
-                case 2: reinterpret_cast<int16_t*>(d)[r] = static_cast<int16_t>(v); break;
-                case 4: reinterpret_cast<int32_t*>(d)[r] = static_cast<int32_t>(v); break;
-                default: reinterpret_cast<int64_t*>(d)[r] = v;
-            }
-        }
-        out.data = buf.release();
-    };
+    const uint8_t* flags = all_valid ? nullptr : pres.flags.data();
 
     switch (fc.kind) {
         case Kind::Boolean: {
@@ -721,20 +775,31 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
         }
         case Kind::Byte: {
             const Bytes b = need(StreamKind::Data, "DATA");
-            std::vector<uint8_t> raw(nn);
-            ByteRle(b.p, b.n).read(raw.data(), nn);
-            std::vector<int64_t> vals(nn);
-            for (size_t i = 0; i < nn; ++i) vals[i] = static_cast<int8_t>(raw[i]);
+            const size_t width = width_of(rc.type);
+            draken::AppendBuffer<uint8_t> buf = fixed_out(width);
+            ByteRle reader(b.p, b.n);
+            switch (width) {
+                case 1: read_bytes_into(reader, reinterpret_cast<int8_t*>(buf.data()), nn, pres.validity); break;
+                case 2: read_bytes_into(reader, reinterpret_cast<int16_t*>(buf.data()), nn, pres.validity); break;
+                case 4: read_bytes_into(reader, reinterpret_cast<int32_t*>(buf.data()), nn, pres.validity); break;
+                default: read_bytes_into(reader, reinterpret_cast<int64_t*>(buf.data()), nn, pres.validity); break;
+            }
             out.kind = OutKind::Raw;
-            place_ints(vals, rc.type);
+            out.data = buf.release();
             break;
         }
         case Kind::Short: case Kind::Int: case Kind::Long: case Kind::Date: {
             const Bytes b = need(StreamKind::Data, "DATA");
-            std::vector<int64_t> vals(nn);
-            IntRle(b.p, b.n, v2, true).read(vals.data(), nn);
+            const size_t width = width_of(rc.type);
+            draken::AppendBuffer<uint8_t> buf = fixed_out(width);
+            IntRle reader(b.p, b.n, v2, true);
+            switch (width) {
+                case 2: read_ints_into(reader, reinterpret_cast<int16_t*>(buf.data()), nn, flags); break;
+                case 4: read_ints_into(reader, reinterpret_cast<int32_t*>(buf.data()), nn, flags); break;
+                default: read_ints_into(reader, reinterpret_cast<int64_t*>(buf.data()), nn, flags); break;
+            }
             out.kind = fc.type == DRAKEN_TIME64 ? OutKind::Time64 : OutKind::Raw;
-            place_ints(vals, rc.type);
+            out.data = buf.release();
             break;
         }
         case Kind::Float: case Kind::Double: {
@@ -743,19 +808,23 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             if (b.n < nn * w) fail(where + "its DATA stream is shorter than its values");
             draken::AppendBuffer<uint8_t> buf = fixed_out(width_of(rc.type));
             uint8_t* d = buf.data();
-            size_t k = 0;
-            for (uint32_t r = 0; r < rows; ++r) {
-                if (!all_valid && !pres.flags[r]) continue;
-                const uint8_t* src = b.p + (k++) * w;
-                if (fc.kind == Kind::Float) {
-                    float f;
-                    std::memcpy(&f, src, 4);
-                    if (rc.type == DRAKEN_FLOAT32) reinterpret_cast<float*>(d)[r] = f;
-                    else reinterpret_cast<double*>(d)[r] = static_cast<double>(f);
-                } else {
-                    double f;
-                    std::memcpy(&f, src, 8);
-                    reinterpret_cast<double*>(d)[r] = f;
+            if (all_valid && w == width_of(rc.type)) {
+                if (rows != 0) std::memcpy(d, b.p, static_cast<size_t>(rows) * w);
+            } else {
+                size_t k = 0;
+                for (uint32_t r = 0; r < rows; ++r) {
+                    if (!all_valid && !pres.flags[r]) continue;
+                    const uint8_t* src = b.p + (k++) * w;
+                    if (fc.kind == Kind::Float) {
+                        float f;
+                        std::memcpy(&f, src, 4);
+                        if (rc.type == DRAKEN_FLOAT32) reinterpret_cast<float*>(d)[r] = f;
+                        else reinterpret_cast<double*>(d)[r] = static_cast<double>(f);
+                    } else {
+                        double f;
+                        std::memcpy(&f, src, 8);
+                        reinterpret_cast<double*>(d)[r] = f;
+                    }
                 }
             }
             out.kind = OutKind::Raw;
@@ -880,29 +949,27 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
                      "'; only UTC writers are supported (a TIMESTAMP is wall-clock time in its writer's zone)");
             const Bytes data_b = need(StreamKind::Data, "DATA");
             const Bytes nano_b = need(StreamKind::Secondary, "SECONDARY");
-            std::vector<int64_t> secs(nn), nanos(nn);
-            IntRle(data_b.p, data_b.n, v2, true).read(secs.data(), nn);
-            IntRle(nano_b.p, nano_b.n, v2, false).read(nanos.data(), nn);
-            std::vector<int64_t> micros(nn);
-            for (size_t i = 0; i < nn; ++i) {
-                uint64_t raw = static_cast<uint64_t>(nanos[i]);
-                uint64_t value = raw >> 3;
-                const unsigned zeros = static_cast<unsigned>(raw & 7);
-                if (zeros != 0) {
-                    uint64_t scale = 1;
-                    for (unsigned z = 0; z <= zeros; ++z) scale *= 10;   // the field holds zeros - 1
-                    value *= scale;
-                }
-                if (value > 999999999) fail(where + "a timestamp's nanoseconds are out of range");
-                int64_t epoch = secs[i] + kOrcEpochOffset;
-                // Seconds are written truncated toward zero: before 1970 a non-zero
-                // fraction above a millisecond belongs to the previous second (the
-                // Java reader's adjustment, which the C++ writer matches).
-                if (epoch < 0 && value > 999999) epoch -= 1;
-                micros[i] = epoch * 1000000 + static_cast<int64_t>(value / 1000);
-            }
+            draken::AppendBuffer<uint8_t> buf = fixed_out(sizeof(int64_t));
+            auto* values = reinterpret_cast<int64_t*>(buf.data());
+            IntRle seconds(data_b.p, data_b.n, v2, true);
+            IntRle nanos(nano_b.p, nano_b.n, v2, false);
+            size_t row = 0;
+            seconds.read_runs(nn, [&](const int64_t* secs, size_t n) {
+                nanos.read_runs(n, [&](const int64_t* fractions, size_t count) {
+                    if (all_valid) {
+                        for (size_t i = 0; i < count; ++i, ++row)
+                            values[row] = timestamp_micros(secs[i], fractions[i], where);
+                    } else {
+                        for (size_t i = 0; i < count; ++i) {
+                            while (!flags[row]) ++row;
+                            values[row++] = timestamp_micros(secs[i], fractions[i], where);
+                        }
+                    }
+                    secs += count;
+                });
+            });
             out.kind = OutKind::Timestamp;
-            place_ints(micros, DRAKEN_TIMESTAMP64);
+            out.data = buf.release();
             break;
         }
         case Kind::Decimal: {

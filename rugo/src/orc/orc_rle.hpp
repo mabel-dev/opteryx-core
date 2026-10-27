@@ -115,6 +115,62 @@ inline unsigned closest_fixed_bits(unsigned n) {
 
 inline int64_t unzigzag(uint64_t v) { return static_cast<int64_t>(v >> 1) ^ -static_cast<int64_t>(v & 1); }
 
+// Read exactly N bytes, even at the end of a packed run. The shifts make this
+// independent of host byte order and permit unaligned inputs.
+template <unsigned N>
+inline uint64_t load_be(const uint8_t* p) {
+    static_assert(N >= 1 && N <= 8, "packed values must fit in a 64-bit load");
+    uint64_t v = 0;
+    for (unsigned i = 0; i < N; ++i) v = (v << 8) | p[i];
+    return v;
+}
+
+template <unsigned Width, unsigned I>
+inline void unpack_one(const uint8_t* src, uint64_t* out) {
+    constexpr unsigned bit = I * Width;
+    constexpr unsigned offset = bit % 8;
+    constexpr unsigned bytes = (offset + Width + 7) / 8;
+    constexpr unsigned shift = bytes * 8 - offset - Width;
+    constexpr uint64_t mask = ~uint64_t{0} >> (64 - Width);
+    out[I] = (load_be<bytes>(src + bit / 8) >> shift) & mask;
+}
+
+template <unsigned Width>
+inline void unpack_width(const uint8_t* src, size_t count, uint64_t* out) {
+    while (count >= 8) {
+        unpack_one<Width, 0>(src, out);
+        unpack_one<Width, 1>(src, out);
+        unpack_one<Width, 2>(src, out);
+        unpack_one<Width, 3>(src, out);
+        unpack_one<Width, 4>(src, out);
+        unpack_one<Width, 5>(src, out);
+        unpack_one<Width, 6>(src, out);
+        unpack_one<Width, 7>(src, out);
+        src += Width;
+        out += 8;
+        count -= 8;
+    }
+    // The final group can contain fewer than eight values and must not read
+    // beyond its byte-aligned payload.
+    uint64_t acc = 0;
+    unsigned have = 0;
+    for (size_t i = 0; i < count; ++i) {
+        uint64_t v = 0;
+        unsigned need = Width;
+        while (need > 0) {
+            if (have == 0) {
+                acc = *src++;
+                have = 8;
+            }
+            const unsigned take = need < have ? need : have;
+            v = (v << take) | ((acc >> (have - take)) & ((uint64_t{1} << take) - 1));
+            have -= take;
+            need -= take;
+        }
+        out[i] = v;
+    }
+}
+
 }  // namespace detail
 
 class IntRle {
@@ -123,12 +179,21 @@ public:
         : p_(p), end_(p + n), v2_(v2), signed_(is_signed) {}
 
     void read(int64_t* out, size_t count) {
+        read_runs(count, [&](const int64_t* values, size_t n) {
+            std::memcpy(out, values, n * sizeof(int64_t));
+            out += n;
+        });
+    }
+
+    // Values remain valid only for the duration of the callback; a later run
+    // reuses the decoder's bounded scratch buffer.
+    template <typename Consumer>
+    void read_runs(size_t count, Consumer&& consume) {
         while (count > 0) {
             if (pos_ == len_) refill();
             const size_t take = (len_ - pos_) < count ? (len_ - pos_) : count;
-            std::memcpy(out, buf_ + pos_, take * sizeof(int64_t));
+            consume(buf_ + pos_, take);
             pos_ += take;
-            out += take;
             count -= take;
         }
     }
@@ -185,24 +250,18 @@ private:
         const size_t total_bits = count * width;
         const size_t bytes = (total_bits + 7) / 8;
         if (bytes > static_cast<size_t>(end_ - p_)) fail("an integer run-length run extends past its stream");
-        const uint8_t* src = p_;
-        uint64_t acc = 0;
-        unsigned have = 0;
-        size_t at = 0;
-        for (size_t i = 0; i < count; ++i) {
-            uint64_t v = 0;
-            unsigned need = width;
-            while (need > 0) {
-                if (have == 0) {
-                    acc = src[at++];
-                    have = 8;
-                }
-                const unsigned take = need < have ? need : have;
-                v = (take == 64 ? 0 : (v << take)) | ((acc >> (have - take)) & ((take == 64) ? ~uint64_t{0} : ((uint64_t{1} << take) - 1)));
-                have -= take;
-                need -= take;
-            }
-            out[i] = v;
+        switch (width) {
+#define ORC_UNPACK_WIDTH(w) case w: detail::unpack_width<w>(p_, count, out); break
+            ORC_UNPACK_WIDTH(1);  ORC_UNPACK_WIDTH(2);  ORC_UNPACK_WIDTH(3);  ORC_UNPACK_WIDTH(4);
+            ORC_UNPACK_WIDTH(5);  ORC_UNPACK_WIDTH(6);  ORC_UNPACK_WIDTH(7);  ORC_UNPACK_WIDTH(8);
+            ORC_UNPACK_WIDTH(9);  ORC_UNPACK_WIDTH(10); ORC_UNPACK_WIDTH(11); ORC_UNPACK_WIDTH(12);
+            ORC_UNPACK_WIDTH(13); ORC_UNPACK_WIDTH(14); ORC_UNPACK_WIDTH(15); ORC_UNPACK_WIDTH(16);
+            ORC_UNPACK_WIDTH(17); ORC_UNPACK_WIDTH(18); ORC_UNPACK_WIDTH(19); ORC_UNPACK_WIDTH(20);
+            ORC_UNPACK_WIDTH(21); ORC_UNPACK_WIDTH(22); ORC_UNPACK_WIDTH(23); ORC_UNPACK_WIDTH(24);
+            ORC_UNPACK_WIDTH(26); ORC_UNPACK_WIDTH(28); ORC_UNPACK_WIDTH(30); ORC_UNPACK_WIDTH(32);
+            ORC_UNPACK_WIDTH(40); ORC_UNPACK_WIDTH(48); ORC_UNPACK_WIDTH(56); ORC_UNPACK_WIDTH(64);
+#undef ORC_UNPACK_WIDTH
+            default: fail("an integer run-length run has an invalid bit width");
         }
         p_ += bytes;
     }

@@ -837,12 +837,12 @@ def main():
         col_count = 0
         for pf in parquet_files:
             pth = os.path.join(table_path, pf)
-            info = duckdb.sql("SELECT COUNT(*) AS n FROM read_parquet(?)", params=[pth]).fetchone()
+            info = duckdb.sql("SELECT COUNT(*) AS n FROM read_parquet(?)", params=[pth]).fetchall()[0]
             total_rows += info[0]
             if col_count == 0:
                 cols = duckdb.sql(
                     "SELECT COUNT(*) AS n FROM parquet_schema(?)", params=[pth]
-                ).fetchone()
+                ).fetchall()[0]
                 col_count = cols[0]
         tables[table_dir] = {"rows": total_rows, "columns": col_count}
 

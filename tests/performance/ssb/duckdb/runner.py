@@ -71,8 +71,8 @@ def main() -> int:
         pattern = os.path.join(scale_path, table, "*.parquet")
         if not glob.glob(pattern):
             continue
-        rows = duckdb.sql(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchone()[0]
-        cols = duckdb.sql(f"SELECT COUNT(*) FROM parquet_schema('{glob.glob(pattern)[0]}')").fetchone()[0] - 1
+        rows = duckdb.sql(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchall()[0][0]
+        cols = duckdb.sql(f"SELECT COUNT(*) FROM parquet_schema('{glob.glob(pattern)[0]}')").fetchall()[0][0] - 1
         tables[table] = {"rows": rows, "columns": cols}
 
     queries = load_queries(scale_path)

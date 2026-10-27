@@ -1292,6 +1292,7 @@ extensions = [
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
             "rugo/src/compression/stream_decompress.hpp",
+            "rugo/src/orc/orc_rle.hpp",
         ],
     ),
     Extension(

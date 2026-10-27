@@ -113,6 +113,8 @@ def main() -> int:
 
     # Register every table as a view that reads from the Parquet files
     con = duckdb.connect()
+    # The shared query text uses Opteryx's FLOAT64; DuckDB 2.0 has no such type name.
+    con.execute("CREATE TYPE FLOAT64 AS DOUBLE")
     for table in TABLES:
         table_path = DATA_DIR / table
         glob_path = str(table_path / "*.parquet").replace("'", "''")
