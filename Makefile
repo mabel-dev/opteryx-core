@@ -237,6 +237,8 @@ bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode
 
 ORC_RLE_BENCH_ARGS ?= 7 128
 ORC_RLE_TEST_FLAGS ?= -O2
+# Override for sanitizers, e.g. -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer.
+ORC_PRESENT_TEST_FLAGS ?= -O2
 
 ORC_FIXED_ARGS ?=
 ifeq ($(shell uname),Darwin)
@@ -245,7 +247,7 @@ else
   ORC_FIXED_LINK_FLAGS := -shared
 endif
 
-.PHONY: bench-orc-fixed bench-orc-present bench-orc-rle orc-rle-test orc-timestamp-test orc-test
+.PHONY: bench-orc-fixed bench-orc-present bench-orc-rle orc-rle-test orc-present-test orc-timestamp-test orc-test
 bench-orc-fixed: ## Benchmark native ORC fixed-width stripe decoding (ORC_FIXED_ARGS="--rounds ... --iterations ...")
 	@mkdir -p /tmp/opteryx-tests
 	@clang++ -O3 -std=c++20 -Wall -Wextra -fPIC $(ORC_FIXED_LINK_FLAGS) -I$(CURDIR)/rugo/src -I$(CURDIR)/draken -I$(CURDIR)/third_party/cyan4973 $(CURDIR)/dev/bench_orc_fixed.cpp -o /tmp/opteryx-tests/bench_orc_fixed.so
@@ -266,6 +268,11 @@ orc-rle-test: ## Build and run the native ORC RLEv2 correctness tests
 	@mkdir -p /tmp/opteryx-tests
 	@clang++ -std=c++20 $(ORC_RLE_TEST_FLAGS) -Wall -Wextra -I$(CURDIR) $(CURDIR)/tests/rugo/orc_rlev2_test.cpp -o /tmp/opteryx-tests/orc_rlev2_test
 	@/tmp/opteryx-tests/orc_rlev2_test
+
+orc-present-test: ## Build and run the native ORC PRESENT bitmap correctness tests
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 $(ORC_PRESENT_TEST_FLAGS) -Wall -Wextra -I$(CURDIR) $(CURDIR)/tests/rugo/orc_present_test.cpp -o /tmp/opteryx-tests/orc_present_test
+	@/tmp/opteryx-tests/orc_present_test
 
 orc-timestamp-test: ## Build and run the native ORC timestamp conversion tests
 	@mkdir -p /tmp/opteryx-tests
