@@ -1,6 +1,6 @@
 """Measure the existing native ORC reader on deterministic PRESENT layouts.
 
-Run through make bench-orc-present; see dev/bench_orc_present_baseline_20261027.md.
+Run through make bench-orc-present; see dev/bench_orc_present_baseline_20261028.md.
 Fixtures and the original native binaries are archived once; subsequent runs use
 those exact ORC bytes and verify every decoded validity bit and valid value.
 """

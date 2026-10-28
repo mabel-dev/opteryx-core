@@ -286,7 +286,7 @@ leftovers (full-range lane emit, double-converting selection) would be gone.
 and the projection then *computes* `ClientIP - n` for every group. Pruning first would
 evaluate that arithmetic on fewer rows and could hide an error the unfused plan
 raises. The fix belongs to the optimizer: move a projection of functionally
-dependent keys above the HeapSort. That's a separate ruling, worth about 4% on Q36.
+dependent keys above the HeapSort. That's a separate ruling, worth about 4% on Q36. *(Done 2026-10-28 for projections that provably cannot raise: see `docs/GROUPBY_TOPK_THROUGH_PROJECTION_DESIGN.md`; Q35 in today's numbering, measured -8.2%.)*
 
 ### v1 A/B (ABBA, one fresh process per arm, 3 runs each, min of 6; DOP 16; same binary with arming disabled in-process for arm A)
 

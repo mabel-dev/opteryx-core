@@ -3401,6 +3401,43 @@ class _Compiler:
         "Stddev", "StddevSamp", "VarPop", "VarSamp", "Corr",
     })
 
+    # Integer widths whose +/- an integer literal below 2**31 binds INT64 and so cannot
+    # overflow (|operand| < 2**32, |literal| < 2**31, exact result < 2**33).
+    _TOPK_NARROW_INT_TYPES = frozenset({
+        DrakenType.INT8, DrakenType.INT16, DrakenType.INT32,
+        DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32,
+    })
+
+    def _projection_cannot_raise(self, col, gb_outputs):
+        """True when the projection column ``col`` is provably unable to raise, from
+        plan-time types alone (docs/GROUPBY_TOPK_THROUGH_PROJECTION_DESIGN.md §4).
+
+        The one accepted shape: ``<GROUP BY output of an integer type of at most 32
+        bits> +/- <integer literal below 2**31 in magnitude>`` (either order) whose
+        resolved type is INT64. The exact result stays below 2**33, so it cannot
+        overflow INT64; there is no division, cast or function call. Anything else
+        (INT64 operands, ``*``, ``/``, CAST, any function, nesting, a non-key column)
+        returns False and leaves the top-k fusion unarmed, because evaluating it on
+        fewer rows could stop raising an error the unfused plan raises."""
+        if col.node_type != NodeType.BINARY_OPERATOR or col.value not in ("Plus", "Minus"):
+            return False
+        if _physical_type(col.schema_column) != DrakenType.INT64:
+            return False
+        operand, literal = col.left, col.right
+        if operand is None or literal is None:
+            return False
+        if operand.node_type == NodeType.LITERAL:
+            operand, literal = literal, operand
+        if operand.node_type != NodeType.IDENTIFIER or literal.node_type != NodeType.LITERAL:
+            return False
+        if operand.schema_column is None or operand.schema_column.identity not in gb_outputs:
+            return False
+        if _physical_type(operand.schema_column) not in self._TOPK_NARROW_INT_TYPES:
+            return False
+        if literal.value is None or _physical_type(literal.schema_column) != DrakenType.INT64:
+            return False
+        return -(1 << 31) < literal.value < (1 << 31)
+
     def _arm_groupby_topk(self, child_nid, order_by, limit):
         """GROUP BY -> ORDER BY <aggregate> LIMIT k fusion
         (docs/GROUPBY_TOPK_FUSION_DESIGN.md).
@@ -3415,11 +3452,13 @@ class _Compiler:
         A plan-SHAPE decision, made once here. Every condition is about correctness:
         * rows-preserving GROUP BY (no HAVING, no ROLLUP) — cutting groups before a
           HAVING could keep ones it removes and drop ones it keeps;
-        * nothing in between EVALUATES anything per row: every projection column
-          is either a GROUP BY output already in the stream (the binder resolves a
+        * nothing in between EVALUATES anything that can raise: every projection
+          column is a GROUP BY output already in the stream (the binder resolves a
           repeated expression — `COUNT(*)`, a computed key — to that column, and
-          `_add_computed` skips it) or a literal. A real computation evaluated on
-          fewer rows could stop raising an error the unfused plan raises;
+          `_add_computed` skips it), a literal, or a computation provably unable to
+          raise (`_projection_cannot_raise`: narrow-integer key +/- a small integer
+          literal, which binds INT64). Any other computation evaluated on fewer rows
+          could stop raising an error the unfused plan raises;
         * the ORDER BY's LEADING keys are rankable aggregates of that GROUP BY
           (matched by identity — `ORDER BY COUNT(*)` binds to the aggregate's own
           output); if it continues past them (onto a group key or an expression),
@@ -3454,8 +3493,11 @@ class _Compiler:
             for col in projected:
                 if col.node_type == NodeType.LITERAL:
                     continue
-                if col.schema_column is None or col.schema_column.identity not in gb_outputs:
-                    return
+                if col.schema_column is not None and col.schema_column.identity in gb_outputs:
+                    continue
+                if self._projection_cannot_raise(col, gb_outputs):
+                    continue
+                return
         keys = []
         for col, ascending, nulls_first in order_by:
             if col.schema_column is None:

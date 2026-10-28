@@ -252,6 +252,20 @@ def test_timestamp_nanoseconds_are_truncated_to_microseconds(version):
     assert _naive(got["instant"]) == expected
 
 
+@pytest.mark.parametrize("version", ["0.11", "0.12"])
+@pytest.mark.parametrize("tz", [None, "UTC"])
+def test_timestamps_at_the_int64_microsecond_extremes(version, tz):
+    # Seconds beyond the reader's fast window (Unix years ~-292,000..+265,000) take the exact
+    # checked path for their whole run; in-window values and a null share that run.
+    # Python datetime cannot hold these years, so compare raw microseconds.
+    values = [0, 2**63 - 1, -9223372036854 * 10**6, 1577836800123456, None, 8370000000000 * 10**6]
+    table = pa.table({"t": pa.array(values, pa.int64()).cast(pa.timestamp("us", tz=tz))})
+    got = []
+    for morsel in orc.read_orc(_write(table, file_version=version)):
+        got.extend(morsel.column(morsel.column_names[0]).to_arrow().cast(pa.int64()).to_pylist())
+    assert got == values
+
+
 @pytest.mark.parametrize("n", [1, 7, 8, 9, 63, 64, 65, 127, 128, 129, 511, 512, 513])
 def test_fixed_width_partial_bitmap_and_run_lengths(n):
     keep = [i != 0 and i != n - 1 and i % 3 != 0 for i in range(n)]

@@ -31,29 +31,32 @@ inline uint64_t timestamp_nanos(int64_t nanos, const std::string& where) {
     return value;
 }
 
-// DATA seconds for which the plain conversion (offset, pre-1970 borrow, * 1e6 + fraction)
-// cannot leave int64.
+// DATA seconds in [kWindowSecondsLo, kWindowSecondsLo + 2^44): a power-of-two window inside the
+// range where the plain conversion (offset, pre-1970 borrow, * 1e6 + fraction) cannot leave
+// int64 — Unix years about -292,000 to +265,000. Seconds outside it, valid or not, take the
+// exact checked path.
 constexpr int64_t kWindowSecondsLo = INT64_MIN / 1000000 + 1 - kOrcEpochOffset;
-constexpr int64_t kWindowSecondsHi = INT64_MAX / 1000000 - 1 - kOrcEpochOffset;
+constexpr unsigned kWindowBits = 44;
+static_assert(kWindowSecondsLo + (int64_t{1} << kWindowBits) - 1 <= INT64_MAX / 1000000 - 1 - kOrcEpochOffset,
+              "the timestamp window must sit inside the range the plain conversion handles");
 
-// One branch-free pass per run: per-row range checks cost 17-44% of timestamp decode, this
-// check is hoisted out of the row loop instead.
-inline bool timestamp_seconds_in_window(const int64_t* seconds, size_t n) {
-    constexpr uint64_t span = static_cast<uint64_t>(kWindowSecondsHi - kWindowSecondsLo);
-    uint64_t outside = 0;
-    for (size_t i = 0; i < n; ++i)
-        outside |= static_cast<uint64_t>(static_cast<uint64_t>(seconds[i]) -
-                                         static_cast<uint64_t>(kWindowSecondsLo) > span);
-    return outside == 0;
+// Offset of seconds from the window floor. The row loop ORs these over a run (two ALU ops per
+// row, no branch); timestamp_offsets_in_window then tests the run once. A separate pass over
+// the run or a per-row range branch costs 10-44% of timestamp decode (~1.4 ns/row).
+inline uint64_t timestamp_seconds_offset(int64_t seconds) {
+    return static_cast<uint64_t>(seconds) - static_cast<uint64_t>(kWindowSecondsLo);
 }
 
-// Seconds are truncated toward zero; match the Java reader's pre-1970 adjustment.
-// Only for seconds inside the window (timestamp_seconds_in_window).
+inline bool timestamp_offsets_in_window(uint64_t offsets) { return (offsets >> kWindowBits) == 0; }
+
+// Seconds are truncated toward zero; match the Java reader's pre-1970 adjustment. Exact for
+// seconds inside the window; outside it the result wraps (unsigned, defined) and the caller
+// redoes the run with timestamp_micros_run_checked.
 inline int64_t timestamp_micros_in_window(int64_t seconds, int64_t nanos, const std::string& where) {
     const uint64_t value = timestamp_nanos(nanos, where);
-    int64_t epoch = seconds + kOrcEpochOffset;
-    if (epoch < 0 && value > 999999) epoch -= 1;
-    return epoch * 1000000 + static_cast<int64_t>(value / 1000);
+    uint64_t epoch = static_cast<uint64_t>(seconds) + static_cast<uint64_t>(kOrcEpochOffset);
+    if (static_cast<int64_t>(epoch) < 0 && value > 999999) epoch -= 1;
+    return static_cast<int64_t>(epoch * 1000000 + value / 1000);
 }
 
 // Any seconds: sub-microsecond digits are truncated; a result outside int64 microseconds fails.
@@ -73,19 +76,19 @@ inline int64_t timestamp_micros(int64_t seconds, int64_t nanos, const std::strin
     return micros;
 }
 
-inline int64_t timestamp_micros_old(int64_t seconds, int64_t nanos, const std::string& where) {
-    const uint64_t raw = static_cast<uint64_t>(nanos);
-    uint64_t value = raw >> 3;
-    const unsigned zeros = static_cast<unsigned>(raw & 7);
-    if (zeros != 0) {
-        uint64_t scale = 1;
-        for (unsigned z = 0; z <= zeros; ++z) scale *= 10;
-        value *= scale;
+// A run whose seconds leave the window: checked conversion into present rows,
+// overwriting what timestamp_micros_in_window wrote. A null bitmap means all valid.
+// Out of line and cold so its code stays out of the hot loop.
+[[gnu::noinline, gnu::cold]] inline void timestamp_micros_run_checked(int64_t* values, size_t row,
+                                                                        const uint8_t* validity,
+                                                                        const int64_t* seconds,
+                                                                        const int64_t* nanos, size_t count,
+                                                                        const std::string& where) {
+    for (size_t i = 0; i < count; ++i) {
+        if (validity != nullptr)
+            while ((validity[row >> 3] & (1u << (row & 7))) == 0) ++row;
+        values[row++] = timestamp_micros(seconds[i], nanos[i], where);
     }
-    if (value > 999999999) fail(where + "a timestamp's nanoseconds are out of range");
-    int64_t epoch = seconds + kOrcEpochOffset;
-    if (epoch < 0 && value > 999999) epoch -= 1;
-    return epoch * 1000000 + static_cast<int64_t>(value / 1000);
 }
 
 }  // namespace rugo::orc

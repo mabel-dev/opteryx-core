@@ -154,9 +154,9 @@ int main() {
     {
         const int64_t secs[] = {orc_seconds(0), orc_seconds(kMax / 1000000), orc_seconds(-1)};
         const int64_t fracs[] = {nanos(1000), nanos(775807000), nanos(5, 7)};
-        const uint8_t flags[] = {0, 1, 0, 1, 1, 0};
+        const uint8_t validity[] = {0x1a}; // rows 1, 3 and 4
         int64_t values[6] = {-7, -7, -7, -7, -7, -7};
-        timestamp_micros_run_checked(values, 0, flags, secs, fracs, 3, "");
+        timestamp_micros_run_checked(values, 0, validity, secs, fracs, 3, "");
         const int64_t expected[6] = {-7, 1, -7, kMax, -1500000, -7};
         for (int i = 0; i < 6; ++i)
             if (values[i] != expected[i]) {
@@ -166,7 +166,7 @@ int main() {
         int64_t dense[3] = {};
         timestamp_micros_run_checked(dense, 0, nullptr, secs, fracs, 3, "");
         if (dense[0] != 1 || dense[1] != kMax || dense[2] != -1500000) {
-            std::cerr << "checked rerun without flags is wrong\n";
+            std::cerr << "checked rerun without validity bitmap is wrong\n";
             ++failures;
         }
         const int64_t bad_secs[] = {orc_seconds(0), kMax};

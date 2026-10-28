@@ -80,6 +80,35 @@ inline void read_bools(const uint8_t* p, size_t n, size_t count, uint8_t* out) {
     }
 }
 
+// Decode ORC's MSB-first PRESENT bits into an LSB-first validity bitmap.
+// The unused high bits of the final byte are cleared and excluded from the count.
+inline size_t read_present(const uint8_t* p, size_t n, size_t count, uint8_t* out) {
+    const size_t full = count / 8;
+    const unsigned tail = static_cast<unsigned>(count % 8);
+    ByteRle(p, n).read(out, full + (tail != 0));
+    size_t nonnull = 0;
+    size_t at = 0;
+    for (; full - at >= sizeof(uint64_t); at += sizeof(uint64_t)) {
+        uint64_t bits;
+        std::memcpy(&bits, out + at, sizeof(bits));
+        nonnull += static_cast<size_t>(__builtin_popcountll(bits));
+        bits = ((bits & 0x5555555555555555ULL) << 1) | ((bits >> 1) & 0x5555555555555555ULL);
+        bits = ((bits & 0x3333333333333333ULL) << 2) | ((bits >> 2) & 0x3333333333333333ULL);
+        bits = ((bits & 0x0f0f0f0f0f0f0f0fULL) << 4) | ((bits >> 4) & 0x0f0f0f0f0f0f0f0fULL);
+        std::memcpy(out + at, &bits, sizeof(bits));
+    }
+    for (; at < full + (tail != 0); ++at) {
+        unsigned bits = out[at];
+        bits = ((bits & 0x55) << 1) | ((bits >> 1) & 0x55);
+        bits = ((bits & 0x33) << 2) | ((bits >> 2) & 0x33);
+        bits = ((bits & 0x0f) << 4) | ((bits >> 4) & 0x0f);
+        if (at == full && tail != 0) bits &= (1u << tail) - 1;
+        out[at] = static_cast<uint8_t>(bits);
+        nonnull += static_cast<size_t>(__builtin_popcount(bits));
+    }
+    return nonnull;
+}
+
 // ── integer RLE ─────────────────────────────────────────────────────────────
 
 namespace detail {

@@ -207,3 +207,129 @@ def test_armed_null_placement_by_value(order, nulls_in_answer, nulls_lead):
     non_null = [v for v in values if v is not None]
     descending = order.startswith("DESC")
     assert non_null == sorted(non_null, reverse=descending), (order, values)
+
+
+# ---------------------------------------------------------------------------------
+# Top-k through a projection that provably cannot raise
+# (docs/GROUPBY_TOPK_THROUGH_PROJECTION_DESIGN.md). A narrow-integer GROUP BY output
+# +/- an integer literal below 2**31 binds INT64 and cannot overflow, so a projection
+# of it no longer blocks the fusion. Everything else a projection can compute still does.
+# ---------------------------------------------------------------------------------
+
+
+def _keyed(cast_type, modulus):
+    """A subquery giving a GROUP BY key of a narrow integer type."""
+    return f"(SELECT CAST(g % {modulus} AS {cast_type}) AS k, g FROM {SERIES}) AS t"
+
+
+# fmt:off
+THROUGH_PROJECTION_ARMED = [
+    # (sql, ordering-value column position, total order?)
+    (f"SELECT k, k + 1 AS k1, COUNT(*) AS c FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY c DESC LIMIT 10", 2, False),
+    (f"SELECT k, 5 - k AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10", 2, True),
+    (f"SELECT k, k - 7 AS k1, SUM(g) AS s FROM {_keyed('INT16', 30011)} GROUP BY k ORDER BY s ASC LIMIT 10", 2, True),
+    (f"SELECT k, k + 1 AS k1, SUM(g) AS s FROM {_keyed('UINT16', 60001)} GROUP BY k ORDER BY s DESC LIMIT 10", 2, True),
+    (f"SELECT k, k + 1 AS k1, SUM(g) AS s FROM {_keyed('UINT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10", 2, True),
+    (f"SELECT k, k + 1 AS k1, SUM(g) AS s FROM {_keyed('INT8', 127)} GROUP BY k ORDER BY s DESC LIMIT 1", 2, True),
+    # Several derived columns, and the largest literal the class admits.
+    (f"SELECT k, k + 1 AS a, k - 2 AS b, k + 2147483647 AS c2, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10", 4, True),
+    # OFFSET (k = limit + offset) and ORDER BY continuing onto a key.
+    (f"SELECT k, k + 1 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 5 OFFSET 3", 2, True),
+    (f"SELECT k, k + 1 AS k1, COUNT(*) AS c FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY c DESC, k ASC LIMIT 10", 2, True),
+]
+
+THROUGH_PROJECTION_NOT_ARMED = [
+    # INT64 key: +/- a literal CAN overflow, so it stays unarmed.
+    f"SELECT g % 100003 AS k, g % 100003 + 1 AS k1, SUM(g) AS s FROM {SERIES} GROUP BY g % 100003 ORDER BY s DESC LIMIT 10",
+    # Anything but +/- with a small integer literal on a narrow key.
+    f"SELECT k, k * 2 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, k / 2 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, k % 7 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, CAST(k AS INT64) AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, ABS(k) AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, k + k AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, k + 1 + 2 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    f"SELECT k, k + 1.5 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    # A literal at or beyond 2**31 is outside the class.
+    f"SELECT k, k + 3000000000 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY s DESC LIMIT 10",
+    # ORDER BY the derived column: no leading aggregate to rank.
+    f"SELECT k, k + 1 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k ORDER BY k1 DESC LIMIT 10",
+    # HAVING still blocks it.
+    f"SELECT k, k + 1 AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k HAVING SUM(g) > 5 ORDER BY s DESC LIMIT 10",
+    # Known v1 limitation: projections stacked through subqueries carry their columns in
+    # NESTED wrappers, which the matcher does not look through (it never did, for pass-
+    # through columns either). Correct answer, just not fused.
+    f"SELECT a, b, s FROM (SELECT k, k + 1 AS a, k - 1 AS b, s FROM (SELECT k, SUM(g) AS s FROM {_keyed('INT32', 100003)} GROUP BY k) AS x) AS y ORDER BY s DESC LIMIT 10",
+]
+# fmt:on
+
+
+@pytest.mark.parametrize("sql, value_col, total_order", THROUGH_PROJECTION_ARMED)
+def test_through_projection_armed_matches_unarmed(sql, value_col, total_order):
+    armed_rows, pruned = _run(sql, armed=True)
+    plain_rows, plain_pruned = _run(sql, armed=False)
+    assert pruned > 0, f"expected the top-k fusion to arm through the projection:\n{sql}"
+    assert plain_pruned == 0
+    assert len(armed_rows) == len(plain_rows)
+    assert [r[value_col] for r in armed_rows] == [r[value_col] for r in plain_rows], sql
+    if total_order:
+        assert armed_rows == plain_rows, sql
+
+
+@pytest.mark.parametrize("sql", THROUGH_PROJECTION_NOT_ARMED)
+def test_through_projection_not_armed(sql):
+    armed_rows, pruned = _run(sql, armed=True)
+    plain_rows, _ = _run(sql, armed=False)
+    assert pruned == 0, f"the top-k fusion must not arm through this projection:\n{sql}"
+    assert sorted(armed_rows, key=repr) == sorted(plain_rows, key=repr)
+
+
+@pytest.mark.parametrize(
+    "cast_type, low, high",
+    [
+        ("INT8", -128, 127), ("INT16", -32768, 32767), ("INT32", -2147483648, 2147483647),
+        ("UINT8", 0, 255), ("UINT16", 0, 65535), ("UINT32", 0, 4294967295),
+    ],
+)
+def test_narrow_integer_plus_minus_literal_binds_int64(cast_type, low, high):
+    """The class's safety argument, checked per width: +/- a literal of magnitude
+    2**31 - 1 on a column at either end of its range binds INT64 and is exact."""
+    literal = 2147483647
+    sql = (
+        f"SELECT CAST(g * 0 + {high} AS {cast_type}) + {literal} AS hi, "
+        f"CAST(g * 0 + {low} AS {cast_type}) - {literal} AS lo "
+        f"FROM generate_series(1, 3) AS g"
+    )
+    session = opteryx.session()
+    try:
+        morsels = list(session.execute_to_morsels(sql))
+    finally:
+        session.close()
+    types = [str(t) for t in morsels[0].column_types]
+    assert all("INT64" in t for t in types), (cast_type, types)
+    assert morsels[0].column("hi").to_pylist() == [high + literal] * 3
+    assert morsels[0].column("lo").to_pylist() == [low - literal] * 3
+
+
+def test_int64_overflow_still_raises_with_a_limit():
+    """The reason INT64 operands stay outside the class: a group NOT in the top k
+    whose derived column overflows must still raise, as it does without the fusion."""
+    sql = (
+        "SELECT k, k + 1 AS k1, COUNT(*) AS c FROM "
+        f"(SELECT CASE WHEN g = 1 THEN 9223372036854775807 ELSE g % 100003 END AS k FROM {SERIES}) AS t "
+        "GROUP BY k ORDER BY c DESC LIMIT 5"
+    )
+    for armed in (True, False):
+        with pytest.raises(Exception, match="overflow"):
+            _run(sql, armed=armed)
+
+
+def test_narrowing_cast_still_raises_with_a_limit():
+    """A CAST can raise, so it is outside the class: most groups' keys do not fit INT8,
+    and the error the unfused plan raises must survive the LIMIT."""
+    sql = (
+        f"SELECT k, CAST(k AS INT8) AS k1, SUM(g) AS s FROM {_keyed('INT32', 100003)} "
+        "GROUP BY k ORDER BY s DESC LIMIT 10"
+    )
+    with pytest.raises(Exception, match="out of range"):
+        _run(sql, armed=True)

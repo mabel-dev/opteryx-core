@@ -376,16 +376,32 @@ struct ColPlan {
 
 // ── decoding helpers ────────────────────────────────────────────────────────
 
-// Validity bitmap (LSB first, bit set = valid) and the flags it came from.
+// Validity bitmap (LSB first, bit set = valid); null means every row is present.
 struct Presence {
-    std::vector<uint8_t> flags;   // one byte per row; empty when every row is present
     size_t nonnull = 0;
-    uint8_t* validity = nullptr;  // draken_malloc'd; null when there are no nulls
+    uint8_t* validity = nullptr;  // draken_malloc'd
+};
+
+inline bool present_at(const uint8_t* validity, size_t row) {
+    return validity == nullptr || (validity[row >> 3] & (1u << (row & 7))) != 0;
+}
+
+struct PresentCursor {
+    const uint8_t* validity;
+    size_t byte = 0;
+    unsigned bits = 0;
+
+    size_t next() {
+        while (bits == 0) bits = validity[byte++];
+        const size_t row = (byte - 1) * 8 + static_cast<unsigned>(__builtin_ctz(bits));
+        bits &= bits - 1;
+        return row;
+    }
 };
 
 template <typename T>
-void read_ints_into(IntRle& reader, T* out, size_t count, const uint8_t* flags) {
-    if (flags == nullptr) {
+void read_ints_into(IntRle& reader, T* out, size_t count, const uint8_t* validity) {
+    if (validity == nullptr) {
         if constexpr (std::is_same_v<T, int64_t>) {
             reader.read(out, count);
         } else {
@@ -395,12 +411,9 @@ void read_ints_into(IntRle& reader, T* out, size_t count, const uint8_t* flags) 
             });
         }
     } else {
-        size_t row = 0;
+        PresentCursor cursor{validity};
         reader.read_runs(count, [&](const int64_t* values, size_t n) {
-            for (size_t i = 0; i < n; ++i) {
-                while (!flags[row]) ++row;
-                out[row++] = static_cast<T>(values[i]);
-            }
+            for (size_t i = 0; i < n; ++i) out[cursor.next()] = static_cast<T>(values[i]);
         });
     }
 }
@@ -415,20 +428,14 @@ void read_bytes_into(ByteRle& reader, T* out, size_t count, const uint8_t* valid
     }
     uint8_t values[512];
     size_t row = 0;
-    size_t bitmap_byte = 0;
-    unsigned bits = 0;
+    PresentCursor cursor{validity};
     while (count != 0) {
         const size_t n = std::min(count, sizeof(values));
         reader.read(values, n);
         if (validity == nullptr) {
             for (size_t i = 0; i < n; ++i) out[row++] = static_cast<int8_t>(values[i]);
         } else {
-            for (size_t i = 0; i < n; ++i) {
-                while (bits == 0) bits = validity[bitmap_byte++];
-                const size_t at = (bitmap_byte - 1) * 8 + static_cast<unsigned>(__builtin_ctz(bits));
-                out[at] = static_cast<int8_t>(values[i]);
-                bits &= bits - 1;
-            }
+            for (size_t i = 0; i < n; ++i) out[cursor.next()] = static_cast<int8_t>(values[i]);
         }
         count -= n;
     }
@@ -703,15 +710,10 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
     pres.nonnull = rows;
     if (const auto* s = find(StreamKind::Present)) {
         const Bytes pb = stream(s->first, s->second);
-        pres.flags.resize(rows);
-        read_bools(pb.p, pb.n, rows, pres.flags.data());
-        pres.nonnull = 0;
-        for (uint8_t f : pres.flags) pres.nonnull += f;
-        if (pres.nonnull != rows) {
-            pres.validity = alloc_zero(pad8((static_cast<size_t>(rows) + 7) / 8));
-            for (uint32_t r = 0; r < rows; ++r)
-                if (pres.flags[r]) pres.validity[r >> 3] |= static_cast<uint8_t>(1u << (r & 7));
-        }
+        draken::AppendBuffer<uint8_t> bitmap;
+        bitmap.resize_fill(pad8((static_cast<size_t>(rows) + 7) / 8), 0);
+        pres.nonnull = read_present(pb.p, pb.n, rows, bitmap.data());
+        if (pres.nonnull != rows) pres.validity = bitmap.release();
     }
     struct Guard {
         uint8_t* p;
@@ -739,7 +741,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
         else buf.resize_fill(bytes, 0);
         return buf;
     };
-    const uint8_t* flags = all_valid ? nullptr : pres.flags.data();
+    const uint8_t* validity = pres.validity;
 
     switch (fc.kind) {
         case Kind::Boolean: {
@@ -749,7 +751,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             auto* bits = alloc_zero(pad8((static_cast<size_t>(rows) + 7) / 8));
             size_t k = 0;
             for (uint32_t r = 0; r < rows; ++r) {
-                if (!all_valid && !pres.flags[r]) continue;
+                if (!present_at(validity, r)) continue;
                 if (vals[k++]) bits[r >> 3] |= static_cast<uint8_t>(1u << (r & 7));
             }
             out.kind = OutKind::Raw;
@@ -777,9 +779,9 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             draken::AppendBuffer<uint8_t> buf = fixed_out(width);
             IntRle reader(b.p, b.n, v2, true);
             switch (width) {
-                case 2: read_ints_into(reader, reinterpret_cast<int16_t*>(buf.data()), nn, flags); break;
-                case 4: read_ints_into(reader, reinterpret_cast<int32_t*>(buf.data()), nn, flags); break;
-                default: read_ints_into(reader, reinterpret_cast<int64_t*>(buf.data()), nn, flags); break;
+                case 2: read_ints_into(reader, reinterpret_cast<int16_t*>(buf.data()), nn, validity); break;
+                case 4: read_ints_into(reader, reinterpret_cast<int32_t*>(buf.data()), nn, validity); break;
+                default: read_ints_into(reader, reinterpret_cast<int64_t*>(buf.data()), nn, validity); break;
             }
             out.kind = fc.type == DRAKEN_TIME64 ? OutKind::Time64 : OutKind::Raw;
             out.data = buf.release();
@@ -796,7 +798,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             } else {
                 size_t k = 0;
                 for (uint32_t r = 0; r < rows; ++r) {
-                    if (!all_valid && !pres.flags[r]) continue;
+                    if (!present_at(validity, r)) continue;
                     const uint8_t* src = b.p + (k++) * w;
                     if (fc.kind == Kind::Float) {
                         float f;
@@ -829,7 +831,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
                 draken::AppendBuffer<uint8_t> buf = fixed_out(16);
                 const uint8_t* src = data_b.p;
                 for (uint32_t r = 0; r < rows; ++r) {
-                    if (!all_valid && !pres.flags[r]) continue;
+                    if (!present_at(validity, r)) continue;
                     std::memcpy(buf.data() + static_cast<size_t>(r) * 16, src, 16);
                     src += 16;
                 }
@@ -859,7 +861,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
                 const uint8_t* src = data_b.p;
                 size_t k = 0;
                 for (uint32_t r = 0; r < rows; ++r) {
-                    if (!all_valid && !pres.flags[r]) {
+                    if (!present_at(validity, r)) {
                         str_init_null(&slots[r]);
                         continue;
                     }
@@ -912,7 +914,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
                 codes.resize_fill(rows, 0);
                 size_t k = 0;
                 for (uint32_t r = 0; r < rows; ++r) {
-                    if (!all_valid && !pres.flags[r]) continue;
+                    if (!present_at(validity, r)) continue;
                     const int64_t c = idx[k++];
                     if (c < 0 || static_cast<uint64_t>(c) >= dsize) fail(where + "a dictionary index is out of range");
                     codes[r] = static_cast<uint32_t>(c);
@@ -937,21 +939,25 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             IntRle seconds(data_b.p, data_b.n, v2, true);
             IntRle nanos(nano_b.p, nano_b.n, v2, false);
             size_t row = 0;
+            PresentCursor cursor{validity};
             seconds.read_runs(nn, [&](const int64_t* secs, size_t n) {
-                const bool in_window = timestamp_seconds_in_window(secs, n);
                 nanos.read_runs(n, [&](const int64_t* fractions, size_t count) {
-                    auto convert = [&](auto micros) {
-                        if (all_valid) {
-                            for (size_t i = 0; i < count; ++i, ++row)
-                                values[row] = micros(secs[i], fractions[i], where);
-                        } else {
-                            for (size_t i = 0; i < count; ++i) {
-                                while (!flags[row]) ++row;
-                                values[row++] = micros(secs[i], fractions[i], where);
-                            }
+                    const size_t first = row;
+                    uint64_t offsets = 0;
+                    if (all_valid) {
+                        for (size_t i = 0; i < count; ++i, ++row) {
+                            offsets |= timestamp_seconds_offset(secs[i]);
+                            values[row] = timestamp_micros_in_window(secs[i], fractions[i], where);
                         }
-                    };
-                    convert([](int64_t s, int64_t f, const std::string& w) { return timestamp_micros_old(s, f, w); });
+                    } else {
+                        for (size_t i = 0; i < count; ++i) {
+                            row = cursor.next();
+                            offsets |= timestamp_seconds_offset(secs[i]);
+                            values[row++] = timestamp_micros_in_window(secs[i], fractions[i], where);
+                        }
+                    }
+                    if (!timestamp_offsets_in_window(offsets)) [[unlikely]]
+                        timestamp_micros_run_checked(values, first, validity, secs, fractions, count, where);
                     secs += count;
                 });
             });
@@ -971,7 +977,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             const uint8_t* end = data_b.p + data_b.n;
             size_t k = 0;
             for (uint32_t r = 0; r < rows; ++r) {
-                if (!all_valid && !pres.flags[r]) continue;
+                if (!present_at(validity, r)) continue;
                 __int128 v = read_varint128(p, end);
                 const int64_t s = scales[k++];
                 if (s < 0 || s > 38) fail(where + "a decimal value has scale " + std::to_string(s));
@@ -1011,7 +1017,7 @@ struct NestedNode {
     Kind kind = Kind::Long;
     std::string key;               // the member name in the parent struct
     size_t n = 0;                  // entries at this level
-    std::vector<uint8_t> flags;    // one per entry; empty = every entry is present
+    std::vector<uint8_t> validity; // LSB-first bitmap; empty = every entry is present
     std::vector<int64_t> lens;     // LIST / MAP: one length per present entry
     std::vector<NestedNode> kids;
     FileColumn fc;                 // a primitive: how it decoded
@@ -1047,7 +1053,7 @@ bool entry_present(const NestedNode& nd, size_t e) {
         const uint8_t* v = nd.leaf.validity;
         return v == nullptr || ((v[e >> 3] >> (e & 7)) & 1) != 0;
     }
-    return nd.flags.empty() || nd.flags[e] != 0;
+    return present_at(nd.validity.empty() ? nullptr : nd.validity.data(), e);
 }
 
 void render_string_bytes(std::string& o, const NestedNode& nd, size_t e) {
@@ -1189,10 +1195,9 @@ void densify_strings(Column& c) {
 
 // The validity bitmap of a node's entries (null when every entry is present).
 uint8_t* validity_of(const NestedNode& nd) {
-    if (nd.flags.empty()) return nullptr;
-    uint8_t* v = alloc_zero(pad8((nd.n + 7) / 8));
-    for (size_t r = 0; r < nd.n; ++r)
-        if (nd.flags[r]) v[r >> 3] |= static_cast<uint8_t>(1u << (r & 7));
+    if (nd.validity.empty()) return nullptr;
+    uint8_t* v = alloc_zero(pad8(nd.validity.size()));
+    std::memcpy(v, nd.validity.data(), nd.validity.size());
     return v;
 }
 
@@ -1208,7 +1213,7 @@ void fill_array(NestedNode& list, Column& out, uint8_t* validity) {
     int64_t at = 0;
     for (size_t r = 0; r < list.n; ++r) {
         offsets[r] = static_cast<int32_t>(at);
-        if (list.flags.empty() || list.flags[r]) at += list.lens[k++];
+        if (present_at(list.validity.empty() ? nullptr : list.validity.data(), r)) at += list.lens[k++];
     }
     if (at > INT32_MAX) fail("a column has more than 2 billion list elements in a stripe");
     offsets[list.n] = static_cast<int32_t>(at);
@@ -1290,16 +1295,14 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
         return nd;
     }
 
-    // PRESENT: one flag per entry; absent when every entry is present.
+    // PRESENT: one bit per entry; absent when every entry is present.
     size_t present = n;
     auto it = streams.find({id, static_cast<uint32_t>(StreamKind::Present)});
     if (it != streams.end()) {
         const Bytes pb = stream(it->second.first, it->second.second);
-        nd.flags.resize(n);
-        read_bools(pb.p, pb.n, n, nd.flags.data());
-        present = 0;
-        for (uint8_t f : nd.flags) present += f;
-        if (present == n) nd.flags.clear();
+        nd.validity.resize((n + 7) / 8);
+        present = read_present(pb.p, pb.n, n, nd.validity.data());
+        if (present == n) nd.validity.clear();
     }
 
     if (t.kind == Kind::Struct) {
@@ -1370,16 +1373,11 @@ void OrcFile::Impl::decode_nested(const StripeFooter& sf, const StreamMap& strea
     out.length = rows;
 
     // The column's own nulls.
-    uint8_t* validity = nullptr;
+    uint8_t* validity = validity_of(top);
     struct Guard {
         uint8_t*& p;
         ~Guard() { draken_free(p); }
     } validity_guard{validity};
-    if (!top.flags.empty()) {
-        validity = alloc_zero(pad8((static_cast<size_t>(rows) + 7) / 8));
-        for (uint32_t r = 0; r < rows; ++r)
-            if (top.flags[r]) validity[r >> 3] |= static_cast<uint8_t>(1u << (r & 7));
-    }
 
     if (fc.type == DRAKEN_ARRAY) {
         // A LIST of a plain scalar, or of lists of one: the offsets, and the element column as decoded.
@@ -1394,7 +1392,7 @@ void OrcFile::Impl::decode_nested(const StripeFooter& sf, const StreamMap& strea
     std::string all;
     std::vector<uint64_t> ends(rows);
     for (uint32_t r = 0; r < rows; ++r) {
-        if (top.flags.empty() || top.flags[r]) render_value(all, top, r);
+        if (present_at(validity, r)) render_value(all, top, r);
         ends[r] = all.size();
     }
     draken::AppendBuffer<DrakenStringSlot> slots;
@@ -1402,7 +1400,7 @@ void OrcFile::Impl::decode_nested(const StripeFooter& sf, const StreamMap& strea
     slots.resize_uninit(rows);
     uint64_t from = 0;
     for (uint32_t r = 0; r < rows; ++r) {
-        if (!top.flags.empty() && !top.flags[r]) {
+        if (!present_at(validity, r)) {
             str_init_null(&slots[r]);
         } else {
             build_slot(slots, arena, r, reinterpret_cast<const uint8_t*>(all.data()) + from, ends[r] - from);
