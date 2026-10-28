@@ -484,8 +484,11 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                                 "row_groups_pruned_runtime"
                             ]
                         # READ_AVRO prefilter: batches decoded two-pass / single-pass
-                        # (native_avro_scan_source.hpp). Present only when one was armed.
-                        for key in ("avro_two_pass_batches", "avro_single_pass_batches", "orc_pass2_rows"):
+                        # (native_avro_scan_source.hpp); ORC prefilter: rows its second
+                        # pass decoded, stripes / row groups its statistics skipped
+                        # (native_orc_scan_source.hpp). Present only when armed.
+                        for key in ("avro_two_pass_batches", "avro_single_pass_batches", "orc_pass2_rows",
+                                    "orc_stripes_pruned", "orc_row_groups_pruned", "orc_topn_kept_rows"):
                             if key in facts:
                                 node_stat[key] = facts[key]
                         # TOP-N RUNTIME BOUNDARY: same contract — present only when

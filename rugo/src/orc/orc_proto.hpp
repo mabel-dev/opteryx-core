@@ -199,12 +199,60 @@ struct StripeFooter {
     std::string writer_timezone;
 };
 
+// Protobuf sint and ORC signed run-length values are zigzag encoded.
+inline int64_t unzigzag(uint64_t v) { return static_cast<int64_t>(v >> 1) ^ -static_cast<int64_t>(v & 1); }
+
+// What a ColumnStatistics says about an integer or date column (docs/ORC_READER_DESIGN.md §6.7):
+// how many non-null values, and their range from intStatistics or dateStatistics. Nothing else
+// is read.
+struct ColumnStats {
+    bool has_count = false;
+    uint64_t count = 0;
+    bool has_range = false;
+    int64_t min = 0;
+    int64_t max = 0;
+};
+
+inline ColumnStats parse_column_stats(Slice s) {
+    ColumnStats cs;
+    ProtoReader r(s);
+    uint32_t field, wire;
+    while (r.next(field, wire)) {
+        if (field == 1 && wire == 0) {
+            cs.has_count = true;
+            cs.count = r.varint();
+        } else if ((field == 2 || field == 7) && wire == 2) {
+            // IntegerStatistics {sint64 minimum = 1; sint64 maximum = 2}; DateStatistics {sint32 ...}.
+            ProtoReader ir(r.bytes());
+            bool has_min = false, has_max = false;
+            uint32_t f, w;
+            while (ir.next(f, w)) {
+                if (f == 1 && w == 0) {
+                    cs.min = unzigzag(ir.varint());
+                    has_min = true;
+                } else if (f == 2 && w == 0) {
+                    cs.max = unzigzag(ir.varint());
+                    has_max = true;
+                } else {
+                    ir.skip(w);
+                }
+            }
+            cs.has_range = has_min && has_max;
+        } else {
+            r.skip(wire);
+        }
+    }
+    return cs;
+}
+
 // One row group of a column's ROW_INDEX stream: where each of the column's streams stands at
 // the group's first row (docs/ORC_READER_DESIGN.md §6.5). Per stream, in the column's stream
 // order: the compressed chunk's offset in the stream and the offset in its decompressed bytes
-// (one byte offset when the file is uncompressed), then the run-length decoder's position.
+// (one byte offset when the file is uncompressed), then the run-length decoder's position. And
+// the group's statistics (§6.7).
 struct RowIndexEntry {
     std::vector<uint64_t> positions;
+    ColumnStats stats;
 };
 
 inline std::vector<RowIndexEntry> parse_row_index(Slice s) {
@@ -221,11 +269,34 @@ inline std::vector<RowIndexEntry> parse_row_index(Slice s) {
         uint32_t f, w;
         while (er.next(f, w)) {
             if (f == 1) er.repeated_varint64(w, e.positions);
+            else if (f == 2 && w == 2) e.stats = parse_column_stats(er.bytes());
             else er.skip(w);
         }
         entries.push_back(std::move(e));
     }
     return entries;
+}
+
+// The file's Metadata section: per stripe, per type id, the stripe's column statistics (§6.7).
+inline std::vector<std::vector<ColumnStats>> parse_metadata(Slice s) {
+    std::vector<std::vector<ColumnStats>> stripes;
+    ProtoReader r(s);
+    uint32_t field, wire;
+    while (r.next(field, wire)) {
+        if (field != 1 || wire != 2) {
+            r.skip(wire);
+            continue;
+        }
+        std::vector<ColumnStats> columns;
+        ProtoReader sr(r.bytes());
+        uint32_t f, w;
+        while (sr.next(f, w)) {
+            if (f == 1 && w == 2) columns.push_back(parse_column_stats(sr.bytes()));
+            else sr.skip(w);
+        }
+        stripes.push_back(std::move(columns));
+    }
+    return stripes;
 }
 
 inline PostScript parse_postscript(Slice s) {

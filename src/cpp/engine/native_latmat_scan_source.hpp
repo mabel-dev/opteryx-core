@@ -29,7 +29,8 @@
 //   * row gather ............................... draken gather_rows
 //
 // ── The one genuinely new piece: the boundary reduction ───────────────────────────
-// `reduce_to_topn` below. It does NOT reimplement an ordering. It builds draken's own
+// `reduce_to_topn` below, whose cut is the shared topn_keep_mask (topn_keep.hpp,
+// also used by the skene and ORC scans). It does NOT reimplement an ordering. It builds draken's own
 // normalized sort keys (`build_sort_keys`) over the pass-1 survivors and uses draken's
 // own comparator (`SortKeyCmp`) — the SAME definition the downstream TopNSink sorts
 // with — then keeps every row that is not strictly worse than the n-th best:
@@ -77,6 +78,7 @@
 
 #include "native_parquet_scan_source.hpp"   // NativeScanColumnBuilder, LC_* packing
 #include "native_sort.hpp"                  // build_sort_keys / SortKeyCmp / gather_rows
+#include "topn_keep.hpp"                    // topn_keep_mask — the shared top-n cut
 #include "operator.hpp"
 #include "trace.hpp"                        // TC_IO_WAIT
 
@@ -469,29 +471,12 @@ struct LatmatScanSource : Source {
         }
         if (total == 0) return;
 
-        // `keep[g]` over the CONCATENATED survivor row space (row-group order), which
-        // is exactly the order build_sort_keys walks `ms` in.
-        std::vector<uint8_t> keep(total, 1u);
-        const size_t n = static_cast<size_t>(topn_limit);
-        if (n < total) {
-            std::vector<SortKeySpec> spec{
-                SortKeySpec{static_cast<size_t>(sort_p1_index), sort_ascending,
-                            sort_nulls_first}};
-            std::vector<SortKeyColumn> keys;
-            if (!build_sort_keys(ms, spec, keys, err)) return;
-            SortKeyCmp cmp{keys};
-            std::vector<uint32_t> idx(total);
-            std::iota(idx.begin(), idx.end(), 0u);
-            std::nth_element(idx.begin(), idx.begin() + static_cast<ptrdiff_t>(n - 1),
-                             idx.end(), cmp);
-            const uint32_t boundary = idx[n - 1];
-            // Keep every row the boundary row does NOT strictly precede: the n best
-            // plus every row tied with the n-th. Dropping only strictly-worse rows is
-            // what makes the downstream TopNSink's answer identical to the un-pushed
-            // plan's.
-            for (size_t g = 0; g < total; ++g)
-                keep[g] = cmp(boundary, static_cast<uint32_t>(g)) ? 0u : 1u;
-        }
+        // `keep[g]` over the CONCATENATED survivor row space (row-group order): the
+        // shared top-n cut (topn_keep.hpp).
+        std::vector<uint8_t> keep;
+        const std::vector<SortKeySpec> spec{
+            SortKeySpec{static_cast<size_t>(sort_p1_index), sort_ascending, sort_nulls_first}};
+        if (!topn_keep_mask(ms, spec, static_cast<size_t>(topn_limit), keep, err)) return;
 
         size_t base = 0;
         for (LatmatRowGroup& rg : rgs) {

@@ -313,15 +313,22 @@ uint8_t* draken_cc_fill_alloc(int64_t bytes) {
 
 void draken_cc_fill_discard(uint8_t* buffer) { std::free(buffer); }
 
-int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
-                     uint8_t* buffer, int64_t buffer_bytes,
-                     const int64_t* page_index, int32_t npages, int64_t cost_ns) {
-    const int64_t budget = draken_mem_cache_budget();
-    if (budget <= 0 || buffer_bytes <= 0 || buffer_bytes > budget) {
-        std::free(buffer);
+}  // extern "C"
+
+namespace {
+
+// draken_cc_insert / draken_cc_insert_pinned. `pinned`: an admitted entry comes back pinned,
+// and a refused buffer stays the caller's (not freed).
+DrakenChunkEntry* insert_entry(const char* path, size_t path_len, int64_t chunk_offset,
+                               uint8_t* buffer, int64_t buffer_bytes,
+                               const int64_t* page_index, int32_t npages, int64_t cost_ns, bool pinned) {
+    auto refuse = [&]() -> DrakenChunkEntry* {
+        if (!pinned) std::free(buffer);
         g_refused.fetch_add(1, std::memory_order_relaxed);
-        return 0;
-    }
+        return nullptr;
+    };
+    const int64_t budget = draken_mem_cache_budget();
+    if (budget <= 0 || buffer_bytes <= 0 || buffer_bytes > budget) return refuse();
     const int64_t limit = draken_mem_cache_limit();
     // Under query-memory pressure (the limit is below the budget) an insert may
     // only use free room: evicting residents to admit would refill the cache the
@@ -329,11 +336,8 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
     const bool pressure = limit < budget;
     const bool fits_free = draken_mem_cache_bytes() + buffer_bytes <= limit;
     if (buffer_bytes > limit || (pressure && !fits_free) ||
-        (!fits_free && !make_room(limit - buffer_bytes, Why::kAdmit))) {
-        std::free(buffer);
-        g_refused.fetch_add(1, std::memory_order_relaxed);
-        return 0;
-    }
+        (!fits_free && !make_room(limit - buffer_bytes, Why::kAdmit)))
+        return refuse();
 
     auto* e = new DrakenChunkEntry();
     e->path.assign(path, path_len);
@@ -351,15 +355,17 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
         e->index.push_back(page_index[3 * i + 1]);
         e->index.push_back(page_index[3 * i + 2]);
     }
+    if (pinned) e->state.store(1, std::memory_order_relaxed);   // the caller's pin, before anyone can see it
 
     Key k{e->path, chunk_offset};
     Shard& sh = shard_for(k);
     {
         std::lock_guard<std::mutex> lk(sh.mu);
         if (sh.map.find(k) != sh.map.end()) {   // another reader filled it first
+            if (pinned) e->buffer = nullptr;    // the buffer stays the caller's
             destroy(e);
             g_refused.fetch_add(1, std::memory_order_relaxed);
-            return 0;
+            return nullptr;
         }
         if (sh.remembered_set.erase(k) != 0) {
             // Evicted from probation recently and wanted again: straight to MAIN.
@@ -377,7 +383,24 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
     }
     g_entries.fetch_add(1, std::memory_order_relaxed);
     g_inserts.fetch_add(1, std::memory_order_relaxed);
-    return 1;
+    return e;
+}
+
+}  // namespace
+
+extern "C" {
+
+int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
+                     uint8_t* buffer, int64_t buffer_bytes,
+                     const int64_t* page_index, int32_t npages, int64_t cost_ns) {
+    return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, page_index, npages, cost_ns,
+                        false) != nullptr ? 1 : 0;
+}
+
+const DrakenChunkEntry* draken_cc_insert_pinned(const char* path, size_t path_len, int64_t chunk_offset,
+                                                uint8_t* buffer, int64_t buffer_bytes,
+                                                const int64_t* page_index, int32_t npages, int64_t cost_ns) {
+    return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, page_index, npages, cost_ns, true);
 }
 
 void draken_cc_flush(void) {

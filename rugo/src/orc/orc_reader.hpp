@@ -66,6 +66,17 @@ struct FileColumn {
     uint8_t     array_depth = 0;             // ARRAY: levels of list nesting (a list of lists of a scalar is 2)
 };
 
+// One conjunct of a WHERE the reader can test against an integer or date column's statistics
+// (docs/ORC_READER_DESIGN.md §6.7): `column` is a bound column (an index into bind()'s `decode`),
+// the values are the column's stored integers (a date is days since 1970-01-01).
+enum class PruneOp : uint8_t { Eq = 0, NotEq = 1, Gt = 2, GtEq = 3, Lt = 4, LtEq = 5, InList = 6 };
+
+struct PruneTerm {
+    uint32_t column = 0;
+    PruneOp op = PruneOp::Eq;
+    std::vector<int64_t> values;   // one; InList: every listed value
+};
+
 class OrcFile {
 public:
     // Parses the file tail. Throws on a file that is not ORC, is corrupt, is encrypted,
@@ -97,6 +108,17 @@ public:
     // Decode one stripe's bound columns (none bound = a batch of only the row count).
     Batch decode_stripe(size_t stripe) const;
 
+    // Read compressed streams through the process's chunk cache (draken core/chunk_cache.h;
+    // docs/ORC_CHUNK_CACHE_DESIGN.md), keyed by `path` — files are immutable for the process's
+    // life. Whole streams are looked up and, with `admit`, filled on a miss; a part of a stream
+    // (a row-index seek) is read from a cached whole one and never fills.
+    void use_chunk_cache(const std::string& path, bool admit);
+
+    // Read the file's stripe statistics (the Metadata section), once, before stripe_may_match.
+    void load_stripe_statistics();
+    // False only when the stripe's statistics prove no row of it passes every term (§6.7).
+    bool stripe_may_match(size_t stripe, const std::vector<PruneTerm>& terms) const;
+
 private:
     friend class StripeCursor;
     struct Impl;
@@ -122,6 +144,10 @@ public:
     uint32_t stride() const;
     // Whether every primitive column of the cursor has the stripe's row index (read on first ask).
     bool indexed();
+
+    // Per row group (indexed() must be true): false only when its statistics prove no row of it
+    // passes every term (§6.7). Every term's column must be one of the cursor's.
+    std::vector<uint8_t> groups_may_match(const std::vector<PruneTerm>& terms);
 
     // The next `n` rows (none bound = a batch of only the row count).
     Batch next(uint32_t n);

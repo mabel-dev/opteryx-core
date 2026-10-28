@@ -81,6 +81,15 @@ int      draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offse
                           uint8_t* buffer, int64_t buffer_bytes,
                           const int64_t* page_index, int32_t npages, int64_t cost_ns);
 
+// As draken_cc_insert, for a filler that goes on reading the bytes (the ORC reader,
+// docs/ORC_CHUNK_CACHE_DESIGN.md): admitted, returns the new entry PINNED (release with
+// draken_cc_unpin; the bytes are the entry's now); refused — including when another reader
+// filled the same key first — returns NULL and the buffer stays the caller's (free it with
+// draken_cc_fill_discard).
+const DrakenChunkEntry* draken_cc_insert_pinned(const char* path, size_t path_len, int64_t chunk_offset,
+                                                uint8_t* buffer, int64_t buffer_bytes,
+                                                const int64_t* page_index, int32_t npages, int64_t cost_ns);
+
 // Drop every unpinned entry (pinned ones go as soon as their readers finish).
 void draken_cc_flush(void);
 

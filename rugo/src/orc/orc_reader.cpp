@@ -1,6 +1,8 @@
 #include "orc_reader.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -11,6 +13,7 @@
 
 #include "base64/_base64.h"        // mabel bintob64 (exported by draken_native)
 #include "core/alloc.h"
+#include "core/chunk_cache.h"     // C7: whole streams cached across queries (draken_native)
 #include "core/append_buffer.h"
 #include "core/string_slot.h"
 #include "interop/value_format.hpp"  // the shared JSON value rendering (parquet, avro, orc)
@@ -41,19 +44,44 @@ bool is_utc_name(const std::string& zone) {
     return false;
 }
 
-// A stream's decompressed bytes: a view into the file when uncompressed, else owned.
+struct FreeBytes {
+    void operator()(uint8_t* p) const { std::free(p); }
+};
+
+// A pin on a chunk-cache entry (docs/ORC_CHUNK_CACHE_DESIGN.md), released with the bytes
+// that view it.
+struct CachePin {
+    const DrakenChunkEntry* entry = nullptr;
+    CachePin() = default;
+    CachePin(CachePin&& o) noexcept : entry(o.entry) { o.entry = nullptr; }
+    CachePin& operator=(CachePin&& o) noexcept {
+        if (this != &o) {
+            if (entry != nullptr) draken_cc_unpin(entry);
+            entry = o.entry;
+            o.entry = nullptr;
+        }
+        return *this;
+    }
+    CachePin(const CachePin&) = delete;
+    CachePin& operator=(const CachePin&) = delete;
+    ~CachePin() {
+        if (entry != nullptr) draken_cc_unpin(entry);
+    }
+};
+
+// A stream's decompressed bytes: a view into the file when uncompressed, a view into a
+// pinned chunk-cache entry, or owned (malloc'd and uninitialised on allocation: every byte
+// up to `n` is written by the decompressor).
 struct Bytes {
     const uint8_t* p = nullptr;
     size_t n = 0;
-    std::vector<uint8_t> owned;
+    std::unique_ptr<uint8_t, FreeBytes> owned;
+    CachePin pin;
 };
 
-// One decompressed chunk appended to `out` (at most `limit` bytes).
-void inflate_chunk(Compression c, const uint8_t* src, size_t n, size_t limit, std::vector<uint8_t>& out,
-                   libdeflate_decompressor*& deflater) {
-    const size_t base = out.size();
-    out.resize(base + limit);
-    uint8_t* dst = out.data() + base;
+// One compressed chunk decompressed to `dst` (room for `limit` bytes); the bytes produced.
+size_t inflate_chunk(Compression c, const uint8_t* src, size_t n, size_t limit, uint8_t* dst,
+                     libdeflate_decompressor*& deflater) {
     size_t produced = 0;
     switch (c) {
         case Compression::Zlib: {
@@ -91,12 +119,19 @@ void inflate_chunk(Compression c, const uint8_t* src, size_t n, size_t limit, st
         default:
             fail(std::string("compression ") + compression_name(c) + " is not supported");
     }
-    out.resize(base + produced);
+    return produced;
 }
 
 // A decompressed stream (design doc §3.2): `n` bytes at `p` are a sequence of chunks,
-// each led by a 3-byte little-endian header `length * 2 + isOriginal`.
-Bytes decompress(Compression c, size_t block_size, const uint8_t* p, size_t n) {
+// each led by a 3-byte little-endian header `length * 2 + isOriginal`. The chunk headers
+// are walked first to size the output once (an original chunk is its length, a
+// compressed one at most the block size), so the output is neither zero-filled nor
+// regrown.
+//
+// `index`, when given, receives the chunk index a chunk-cache entry carries: per chunk, its
+// header's offset in the stream, its start in the output and its decompressed length.
+Bytes decompress(Compression c, size_t block_size, const uint8_t* p, size_t n,
+                 std::vector<int64_t>* index = nullptr) {
     Bytes out;
     if (c == Compression::None) {
         out.p = p;
@@ -105,20 +140,38 @@ Bytes decompress(Compression c, size_t block_size, const uint8_t* p, size_t n) {
     }
     if (c == Compression::Lzo) fail("compression lzo is not supported");
     const size_t limit = block_size != 0 ? block_size : kDefaultBlock;
+    size_t bound = 0;
+    for (size_t at = 0; at < n;) {
+        if (n - at < 3) fail("a compression chunk header runs past its stream");
+        const uint32_t header = p[at] | (static_cast<uint32_t>(p[at + 1]) << 8) | (static_cast<uint32_t>(p[at + 2]) << 16);
+        at += 3;
+        const size_t len = header >> 1;
+        if (len > n - at) fail("a compression chunk extends past its stream");
+        if ((header & 1) && len > limit) fail("an uncompressed chunk is larger than the compression block size");
+        bound += (header & 1) ? len : limit;
+        at += len;
+    }
+    out.owned.reset(static_cast<uint8_t*>(std::malloc(bound ? bound : 1)));
+    if (out.owned == nullptr) throw std::bad_alloc();
+    uint8_t* dst = out.owned.get();
+    size_t used = 0;
     libdeflate_decompressor* deflater = nullptr;
     try {
-        size_t at = 0;
-        while (at < n) {
-            if (n - at < 3) fail("a compression chunk header runs past its stream");
+        for (size_t at = 0; at < n;) {
             const uint32_t header = p[at] | (static_cast<uint32_t>(p[at + 1]) << 8) | (static_cast<uint32_t>(p[at + 2]) << 16);
             at += 3;
             const size_t len = header >> 1;
-            if (len > n - at) fail("a compression chunk extends past its stream");
+            const size_t from = used;
             if (header & 1) {
-                if (len > limit) fail("an uncompressed chunk is larger than the compression block size");
-                out.owned.insert(out.owned.end(), p + at, p + at + len);
+                std::memcpy(dst + used, p + at, len);
+                used += len;
             } else {
-                inflate_chunk(c, p + at, len, limit, out.owned, deflater);
+                used += inflate_chunk(c, p + at, len, limit, dst + used, deflater);
+            }
+            if (index != nullptr) {
+                index->push_back(static_cast<int64_t>(at - 3));
+                index->push_back(static_cast<int64_t>(from));
+                index->push_back(static_cast<int64_t>(used - from));
             }
             at += len;
         }
@@ -127,21 +180,85 @@ Bytes decompress(Compression c, size_t block_size, const uint8_t* p, size_t n) {
         throw;
     }
     if (deflater != nullptr) libdeflate_free_decompressor(deflater);
-    out.p = out.owned.data();
-    out.n = out.owned.size();
+    out.p = dst;
+    out.n = used;
     return out;
 }
 
 // Where a file's streams come from: the file's bytes and how its streams are compressed.
+// With `cache_path` set (OrcFile::use_chunk_cache) a compressed file's WHOLE streams are
+// looked up in, and filled into, the chunk cache, keyed by the path and the stream's
+// offset in the file; a part of a stream is read from a cached whole one when there is
+// one, and never fills (docs/ORC_CHUNK_CACHE_DESIGN.md).
 struct StreamSource {
     const uint8_t* data = nullptr;
     size_t size = 0;
     Compression compression = Compression::None;
     size_t block_size = 0;
+    std::string cache_path;    // empty = no chunk cache
+    bool cache_admit = true;   // fill on a miss (SET chunk_cache_admit)
+
+    void check(uint64_t offset, uint64_t length) const {
+        if (offset > size || length > size - offset) fail("a stream extends past the end of the file");
+    }
 
     Bytes get(uint64_t offset, uint64_t length) const {
-        if (offset > size || length > size - offset) fail("a stream extends past the end of the file");
+        check(offset, length);
         return decompress(compression, block_size, data + offset, static_cast<size_t>(length));
+    }
+
+    bool cached() const {
+        return !cache_path.empty() && compression != Compression::None && draken_cc_enabled() != 0;
+    }
+
+    // A whole stream: from the cache, or decompressed and offered to it.
+    Bytes stream(uint64_t offset, uint64_t length) const {
+        if (!cached()) return get(offset, length);
+        check(offset, length);
+        int fill_ok = 0;
+        Bytes out;
+        out.pin.entry = draken_cc_lookup(cache_path.data(), cache_path.size(), static_cast<int64_t>(offset), 0, &fill_ok);
+        if (out.pin.entry != nullptr) {
+            const uint8_t* p = nullptr;
+            int64_t n = 0;
+            draken_cc_entry_bytes(out.pin.entry, &p, &n);
+            out.p = p;
+            out.n = static_cast<size_t>(n);
+            return out;
+        }
+        std::vector<int64_t> index;
+        const auto began = std::chrono::steady_clock::now();
+        out = decompress(compression, block_size, data + offset, static_cast<size_t>(length), &index);
+        const int64_t cost_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - began).count();
+        if (!cache_admit || fill_ok == 0 || out.n == 0) return out;
+        out.pin.entry = draken_cc_insert_pinned(cache_path.data(), cache_path.size(), static_cast<int64_t>(offset),
+                                                out.owned.get(), static_cast<int64_t>(out.n), index.data(),
+                                                static_cast<int32_t>(index.size() / 3), cost_ns);
+        if (out.pin.entry != nullptr) out.owned.release();   // the bytes are the entry's now
+        return out;
+    }
+
+    // Part of a stream from the compression chunk at `chunk` (its offset in the stream) on,
+    // read from the cached whole stream: true and `out` set on a hit.
+    bool cached_part(uint64_t offset, uint64_t chunk, Bytes& out) const {
+        if (!cached()) return false;
+        int fill_ok = 0;
+        CachePin pin;
+        pin.entry = draken_cc_lookup(cache_path.data(), cache_path.size(), static_cast<int64_t>(offset), 1, &fill_ok);
+        if (pin.entry == nullptr) return false;
+        const uint8_t* base = nullptr;
+        int64_t total = 0;
+        draken_cc_entry_bytes(pin.entry, &base, &total);
+        const uint8_t* at = nullptr;
+        int64_t len = 0;
+        if (!draken_cc_page(pin.entry, static_cast<int64_t>(chunk), &at, &len))
+            fail("a row index position is not the start of a compression chunk of its stream (the file is corrupt)");
+        out = Bytes();
+        out.p = at;
+        out.n = static_cast<size_t>(base + total - at);
+        out.pin = std::move(pin);
+        return true;
     }
 };
 
@@ -544,8 +661,11 @@ struct OrcFile::Impl {
     std::vector<FileColumn> columns;
     std::vector<ColPlan> plan;
     std::vector<std::string> out_names;
+    std::vector<std::vector<ColumnStats>> stripe_stats;   // load_stripe_statistics(); per stripe, per type id
+    bool stripe_stats_loaded = false;
+    uint64_t metadata_at = 0;                              // where the Metadata section starts
 
-    Bytes stream(uint64_t offset, uint64_t length) const { return src.get(offset, length); }
+    Bytes stream(uint64_t offset, uint64_t length) const { return src.stream(offset, length); }
 
     // A STRUCT / LIST / MAP column's subtree, `n` entries of node `id`, decoded whole for the stripe.
     NestedNode build_node(const StripeFooter& sf, const StreamMap& streams, uint32_t id, const std::string& name,
@@ -572,6 +692,7 @@ OrcFile::OrcFile(const uint8_t* data, size_t size) : impl_(new Impl) {
     if (m.footer.types.empty() || m.footer.types[0].kind != Kind::Struct)
         fail("the file's root type is not a struct (the file is corrupt)");
     const uint64_t content_end = size - tail - m.ps.metadata_length;
+    m.metadata_at = content_end;
     uint64_t total_rows = 0;
     for (const StripeInfo& s : m.footer.stripes) {
         const uint64_t end = s.offset + s.index_length + s.data_length + s.footer_length;
@@ -779,7 +900,7 @@ LeafCursor::LeafCursor(const StreamSource& s, const StripeFooter& sf, const Stre
             dsize = enc.dictionary_size;
             if (dsize == 0) break;
             const Range lens_r = need(StreamKind::Length, "LENGTH");
-            const Bytes lens_b = src.get(lens_r.offset, lens_r.length);
+            const Bytes lens_b = src.stream(lens_r.offset, lens_r.length);
             std::vector<int64_t> lens(dsize);
             IntRle(lens_b.p, lens_b.n, v2, false).read(lens.data(), dsize);
             if (fc.fixed_length != 0)
@@ -787,7 +908,7 @@ LeafCursor::LeafCursor(const StreamSource& s, const StripeFooter& sf, const Stre
                     if (l != static_cast<int64_t>(fc.fixed_length))
                         fail(where + "a fixed(" + std::to_string(fc.fixed_length) + ") value is " + std::to_string(l) + " bytes");
             const Range dict_r = need(StreamKind::DictionaryData, "DICTIONARY_DATA");
-            const Bytes dict_b = src.get(dict_r.offset, dict_r.length);
+            const Bytes dict_b = src.stream(dict_r.offset, dict_r.length);
             uint64_t total = 0;
             for (int64_t l : lens) {
                 if (l < 0) fail(where + "a dictionary entry has a negative length");
@@ -844,19 +965,28 @@ Bytes LeafCursor::open(const Range& r, Positions& at, Positions& until, size_t& 
         if (start > r.length) fail(where + "a row index position is past its stream (the file is corrupt)");
         return src.get(r.offset, r.length);
     }
+    if (at.e == nullptr && until.e == nullptr) {   // the whole stream: cached
+        start = 0;
+        return src.stream(r.offset, r.length);
+    }
     const uint64_t chunk = at.take(where);
     start = static_cast<size_t>(at.take(where));
     uint64_t end = r.length;
     if (until.e != nullptr) {
-        // The next group's values begin in its chunk; a run that starts there may run on into the
-        // next ones, so the window takes three chunks from it.
+        // The last values before the next group's place are in the run that starts there, in
+        // its chunk, and that run may spill into the following chunk: the window takes both.
         const uint64_t next = until.take(where);
         until.take(where);
         if (next < chunk || next > r.length) fail(where + "a row index position is past its stream (the file is corrupt)");
-        end = chunks_end(src, r.offset, r.length, next, 3);
+        end = chunks_end(src, r.offset, r.length, next, 2);
     }
     if (chunk > r.length) fail(where + "a row index position is past its stream (the file is corrupt)");
-    Bytes b = src.get(r.offset + chunk, end - chunk);
+    Bytes b;
+    if (src.cached_part(r.offset, chunk, b)) {
+        if (start > b.n) fail(where + "a row index position is past its chunk (the file is corrupt)");
+        return b;
+    }
+    b = src.get(r.offset + chunk, end - chunk);
     if (start > b.n) fail(where + "a row index position is past its chunk (the file is corrupt)");
     return b;
 }
@@ -1552,6 +1682,38 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
     return nd;
 }
 
+namespace {
+
+// Whether a column whose statistics are `cs` may hold a value passing `t` (§6.7). A column with
+// no non-null value passes no comparison; one without a range may pass anything.
+bool range_may_match(const ColumnStats& cs, const PruneTerm& t) {
+    if (cs.has_count && cs.count == 0) return false;
+    if (!cs.has_range) return true;
+    const int64_t v = t.values.empty() ? 0 : t.values[0];
+    switch (t.op) {
+        case PruneOp::Eq: return v >= cs.min && v <= cs.max;
+        case PruneOp::NotEq: return !(cs.min == cs.max && cs.min == v);
+        case PruneOp::Gt: return cs.max > v;
+        case PruneOp::GtEq: return cs.max >= v;
+        case PruneOp::Lt: return cs.min < v;
+        case PruneOp::LtEq: return cs.min <= v;
+        case PruneOp::InList:
+            for (const int64_t x : t.values)
+                if (x >= cs.min && x <= cs.max) return true;
+            return false;
+    }
+    return true;
+}
+
+// Whether the statistics of a bound column can be tested at all: an integer or date column the
+// file has. Anything else is never pruned by.
+bool prunable(const FileColumn& fc) {
+    return !fc.nested && (fc.kind == Kind::Byte || fc.kind == Kind::Short || fc.kind == Kind::Int ||
+                          fc.kind == Kind::Date || (fc.kind == Kind::Long && fc.type == DRAKEN_INT64));
+}
+
+}  // namespace
+
 // ── stripe cursor ───────────────────────────────────────────────────────────
 
 namespace {
@@ -1662,6 +1824,8 @@ void render_json(NestedNode& top, size_t from, uint32_t rows, DrakenType type, C
 // One bound column of the stripe: a primitive's cursor, a nested column decoded whole (rendered
 // or sliced a range at a time), or none (a NULL constant).
 struct StripeCursor::Col {
+    uint32_t bound = 0;                   // its index among the file's bound columns
+    const FileColumn* fc = nullptr;       // the file's column; null when the file lacks it
     const ReaderColumn* rc = nullptr;
     uint32_t type_id = 0;                 // a primitive: its type id (the column of its ROW_INDEX)
     std::unique_ptr<LeafCursor> leaf;
@@ -1696,7 +1860,7 @@ StripeCursor::StripeCursor(const OrcFile& file, size_t stripe, const std::vector
     // The stripe footer names every stream; offsets are the running sum of their lengths,
     // index streams first, so a column that is not asked for is never touched.
     const uint64_t footer_at = si.offset + si.index_length + si.data_length;
-    const Bytes footer_bytes = m.stream(footer_at, si.footer_length);
+    const Bytes footer_bytes = m.src.get(footer_at, si.footer_length);
     const StripeFooter sf = parse_stripe_footer({footer_bytes.p, footer_bytes.n});
     StreamMap& streams = stripe_->streams;
     uint64_t at = si.offset;
@@ -1711,9 +1875,11 @@ StripeCursor::StripeCursor(const OrcFile& file, size_t stripe, const std::vector
         if (i >= m.plan.size()) fail("a stripe cursor was asked for a column that is not bound");
         const ColPlan& cp = m.plan[i];
         auto c = std::make_unique<Col>();
+        c->bound = i;
         c->rc = &cp.rc;
         if (cp.file_col >= 0) {
             const FileColumn& fc = m.columns[static_cast<size_t>(cp.file_col)];
+            c->fc = &fc;
             if (!fc.nested) {
                 c->type_id = fc.type_id;
                 c->leaf = std::make_unique<LeafCursor>(m.src, sf, streams, fc, cp.rc.type, cp.rc.precision, cp.rc.scale);
@@ -1758,6 +1924,22 @@ bool StripeCursor::indexed() {
     }
     st.indexed = 1;
     return true;
+}
+
+std::vector<uint8_t> StripeCursor::groups_may_match(const std::vector<PruneTerm>& terms) {
+    if (!indexed()) fail("row groups were tested without a row index");
+    const size_t groups = (static_cast<size_t>(rows_) + stripe_->stride - 1) / stripe_->stride;
+    std::vector<uint8_t> keep(groups, 1);
+    for (const PruneTerm& t : terms) {
+        const Col* col = nullptr;
+        for (const auto& c : cols_)
+            if (c->bound == t.column) col = c.get();
+        if (col == nullptr) fail("a prune term names a column the stripe cursor does not read");
+        if (!col->leaf || col->fc == nullptr || !prunable(*col->fc)) continue;
+        for (size_t g = 0; g < groups; ++g)
+            if (keep[g] && !range_may_match(col->index[g].stats, t)) keep[g] = 0;
+    }
+    return keep;
 }
 
 Batch StripeCursor::next(uint32_t n) { return read(at_, n, rows_); }
@@ -1827,6 +2009,40 @@ Batch StripeCursor::read(uint32_t first, uint32_t n, uint32_t run_end) {
     }
     at_ = first + n;
     return batch;
+}
+
+
+void OrcFile::use_chunk_cache(const std::string& path, bool admit) {
+    impl_->src.cache_path = path;
+    impl_->src.cache_admit = admit;
+}
+
+void OrcFile::load_stripe_statistics() {
+    Impl& m = *impl_;
+    if (m.stripe_stats_loaded) return;
+    m.stripe_stats_loaded = true;
+    if (m.ps.metadata_length == 0) return;   // a file without stripe statistics prunes nothing
+    const Bytes b = m.src.get(m.metadata_at, m.ps.metadata_length);
+    m.stripe_stats = parse_metadata({b.p, b.n});
+    if (m.stripe_stats.size() != m.footer.stripes.size())
+        fail("the file's stripe statistics cover " + std::to_string(m.stripe_stats.size()) + " stripes, not " +
+             std::to_string(m.footer.stripes.size()) + " (the file is corrupt)");
+}
+
+bool OrcFile::stripe_may_match(size_t stripe, const std::vector<PruneTerm>& terms) const {
+    const Impl& m = *impl_;
+    if (!m.stripe_stats_loaded) fail("stripe statistics were tested before they were loaded");
+    if (m.stripe_stats.empty()) return true;
+    const std::vector<ColumnStats>& cols = m.stripe_stats.at(stripe);
+    for (const PruneTerm& t : terms) {
+        if (t.column >= m.plan.size()) fail("a prune term names a column that is not bound");
+        const ColPlan& cp = m.plan[t.column];
+        if (cp.file_col < 0) continue;
+        const FileColumn& fc = m.columns[static_cast<size_t>(cp.file_col)];
+        if (!prunable(fc) || fc.type_id >= cols.size()) continue;
+        if (!range_may_match(cols[fc.type_id], t)) return false;
+    }
+    return true;
 }
 
 Batch OrcFile::decode_stripe(size_t stripe) const {

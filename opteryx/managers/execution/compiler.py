@@ -271,8 +271,17 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
     # prefilter was armed or the scan never ran.
     for plan in nplan.orc_scan_plans:
         entry = facts.get(plan.scan_identity)
-        if entry is not None and plan.pass2_rows >= 0:
+        if entry is None:
+            continue
+        if plan.pass2_rows >= 0:
             entry["orc_pass2_rows"] = plan.pass2_rows
+        # Stripes and row groups the WHERE's statistics tests skipped (§6.7); absent unarmed.
+        if plan.stripes_pruned >= 0:
+            entry["orc_stripes_pruned"] = plan.stripes_pruned
+            entry["orc_row_groups_pruned"] = plan.row_groups_pruned
+        # Top-N mode: rows the cut kept for pass 2 (docs/ORC_TOPN_LATE_MATERIALISATION_DESIGN.md).
+        if plan.topn_kept_rows >= 0:
+            entry["orc_topn_kept_rows"] = plan.topn_kept_rows
 
     # The parquet twin. Separate loop, not a shared one: the two plan types
     # report DIFFERENT things at compile time. A skene scan's `row_groups_pruned`
@@ -1102,6 +1111,8 @@ class _Compiler:
         # Avro and ORC scan pipelines: p -> (emitted identities, their decoded column
         # names, the scan's row-number column), for _arm_two_pass_prefilter.
         self._two_pass_scan_columns: dict = {}
+        # ORC scan pipelines: p -> (OrcScanPlan, scan), for _arm_orc_prune_terms.
+        self._orc_scan_plans: dict = {}
         # WP-02: per-native-scan relocated residual filter, keyed by scan node
         # identity. When a pushed predicate is lowered to a c-native span and its
         # scan admitted natively, this carries the wiring from _native_scan_plan to
@@ -2550,9 +2561,11 @@ class _Compiler:
             # hoists above added as well as the ones the child produced.
             predicate = self._bind_precomputed_subexpressions(condition, hoisted_layout)
             bc = self._lower_expression(predicate, "a filter predicate")
+            topn = (self._orc_topn_spec(p, in_edges[0][1])
+                    if child is not None and child.kind == "OrcReadNode" else None)
             if (child is not None and child.kind in ("AvroReadNode", "OrcReadNode")
                     and hoisted_layout == layout
-                    and self._arm_two_pass_prefilter(p, predicate, bc)):
+                    and self._arm_two_pass_prefilter(p, predicate, bc, topn)):
                 return p, layout
             const_col_idx, const_scalar_vecs = self._resolve_const_replacements(condition, hoisted_layout)
             self.nplan.add_expr_filter(p, bc, hoisted_layout, const_col_idx, const_scalar_vecs)
@@ -6895,7 +6908,50 @@ class _Compiler:
         self._remember_types(scan.columns)
         return p, identities
 
-    def _arm_two_pass_prefilter(self, p, predicate, bc) -> bool:
+    def _orc_topn_spec(self, p, filter_nid):
+        """The top-N an ORC scan's prefilter can take on (docs/ORC_TOPN_LATE_MATERIALISATION_DESIGN.md),
+        or None: the Filter at `filter_nid`, directly over the scan in pipeline `p`, has ONE
+        consumer, a HeapSort (an ORDER BY fused with a positive LIMIT and no OFFSET; through at
+        most a Projection that only selects columns) whose every
+        key is a plain column the scan emits. Returns (limit, [(emit index, ascending,
+        nulls_first)], key identities). The HeapSort stays in the plan and makes the final
+        cut; the scan only drops rows strictly worse than its n-th best."""
+        out_edges = list(self.plan.outgoing_edges(filter_nid))
+        if len(out_edges) != 1:
+            return None
+        consumer = self.plan[out_edges[0][1]]
+        # A Projection that only selects columns (an explicit SELECT list) keeps rows one
+        # for one and computes nothing that could fail on a row the cut drops: it may sit
+        # between the Filter and the HeapSort. Anything it computes declines.
+        if consumer is not None and consumer.kind == "ProjectionNode":
+            step = consumer.step
+            selected = (list(step.hoisted_columns or []) + list(step.columns or [])
+                        + list(step.passthrough_columns or []))
+            if any(col.node_type != NodeType.IDENTIFIER for col in selected):
+                return None
+            out_edges = list(self.plan.outgoing_edges(out_edges[0][1]))
+            if len(out_edges) != 1:
+                return None
+            consumer = self.plan[out_edges[0][1]]
+        if consumer is None or consumer.kind != "HeapSortNode":
+            return None
+        limit = consumer.step.limit
+        order_by = consumer.step.order_by or []
+        if limit is None or int(limit) <= 0 or not order_by:
+            return None
+        identities = self._two_pass_scan_columns[p][0]
+        keys, key_identities = [], []
+        for expression, ascending, nulls_first in order_by:
+            if expression.node_type != NodeType.IDENTIFIER or expression.schema_column is None:
+                return None
+            identity = expression.schema_column.identity
+            if identity not in identities:
+                return None
+            keys.append((identities.index(identity), bool(ascending), bool(nulls_first)))
+            key_identities.append(identity)
+        return int(limit), keys, key_identities
+
+    def _arm_two_pass_prefilter(self, p, predicate, bc, topn=None) -> bool:
         """Avro / ORC scan prefilter (docs/AVRO_READER_DESIGN.md §26,
         docs/ORC_READER_DESIGN.md §6.6): the WHERE directly over the scan in pipeline `p`
         runs inside the scan, which decodes the predicate's columns for every row and
@@ -6912,6 +6968,9 @@ class _Compiler:
         }
         if not read or not read <= set(identities):
             return False
+        # Top-N: its ORDER BY keys are decoded in pass 1 too, for the cut.
+        if topn is not None:
+            read = read | set(topn[2])
         pass1_names = {physical[k] for k, identity in enumerate(identities) if identity in read}
         decode_names = list(dict.fromkeys(physical))
         # The pass-1 morsel the scan builds: every emitted pass-1 column, emit order,
@@ -6923,7 +6982,70 @@ class _Compiler:
             p, bc, pass1_layout, list(identities) + [row_column],
             [name in pass1_names for name in decode_names],
         )
+        if p in self._orc_scan_plans:
+            self._arm_orc_prune_terms(p, predicate, decode_names)
+            if topn is not None:
+                self._orc_scan_plans[p][0].set_topn(topn[0], topn[1])
         return True
+
+    def _arm_orc_prune_terms(self, p, predicate, decode_names) -> None:
+        """The WHERE's conjuncts an ORC scan can test against its stripe and row group
+        statistics (docs/ORC_READER_DESIGN.md §6.7): `column op literal`, BETWEEN and IN over
+        an integer or DATE column, found by the parquet pruning's own extractor. Anything
+        else is not pruned by; the prefilter still runs the whole predicate, so a term only
+        ever skips rows the predicate would have dropped."""
+        import datetime
+
+        from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+
+        plan, scan = self._orc_scan_plans[p]
+        physical = list(scan.orc_physical_columns)
+        by_name: dict = {}
+        for k, col in enumerate(scan.columns or []):
+            by_name.setdefault(col.schema_column.name, set()).add(physical[k])
+        dtypes = {reader[0]: reader[2] for reader in scan.orc_reader_columns}
+        ints = {DrakenType.INT8.value, DrakenType.INT16.value, DrakenType.INT32.value, DrakenType.INT64.value}
+        date = DrakenType.DATE32.value
+        epoch = datetime.date(1970, 1, 1)
+        ops = {"Eq": 0, "NotEq": 1, "Gt": 2, "GtEq": 3, "Lt": 4, "LtEq": 5, "InList": 6}
+
+        def stored(value, dtype):
+            # The column's stored integer for a literal, or None when it has none.
+            if dtype in ints:
+                if type(value) is int and -(2**63) <= value < 2**63:
+                    return value
+                return None
+            if dtype == date:
+                if type(value) is datetime.datetime and value.tzinfo is None and value.time() == datetime.time.min:
+                    return (value.date() - epoch).days
+                if type(value) is datetime.date:
+                    return (value - epoch).days
+            return None
+
+        conjuncts, stack = [], [predicate]
+        while stack:
+            node = stack.pop()
+            if node.node_type == NodeType.AND:
+                stack.extend((node.left, node.right))
+            elif node.node_type == NodeType.DNF:   # despite the name, the engine's n-ary AND
+                stack.extend(node.parameters)
+            elif node.node_type in (NodeType.COMPARISON_OPERATOR, NodeType.BETWEEN):
+                # The extractor reads these; any other conjunct is simply not pruned by.
+                conjuncts.append(node)
+        terms = []
+        for name, op, value in extract_predicate_stats(conjuncts):
+            targets = by_name.get(name, set())
+            if len(targets) != 1 or op not in ops:
+                continue
+            target = next(iter(targets))
+            dtype = dtypes.get(target)
+            values = list(value) if op == "InList" else [value]
+            converted = [stored(v, dtype) for v in values]
+            if not converted or any(v is None for v in converted):
+                continue
+            terms.append((decode_names.index(target), ops[op], converted))
+        if terms:
+            plan.set_prune_terms(terms)
 
     def _compile_avro_scan(self, scan):
         """READ_AVRO: an AvroScanPlan and a NativeAvroScanSource.
@@ -7020,6 +7142,7 @@ class _Compiler:
         p = self.nplan.new_pipeline()
         self.nplan.set_native_orc_scan_source(p, plan)
         self._two_pass_scan_columns[p] = (identities, physical, b"$orc_row")
+        self._orc_scan_plans[p] = (plan, scan)
         self._remember_types(scan.columns)
         return p, identities
 
@@ -7748,6 +7871,12 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                 _cc_scans_declined += 1
                 _cc_declined_bytes += _sp.cache_fill_bytes
             _sp.set_chunk_cache_admit(_admit)
+        # ORC scans cache whole decompressed streams (docs/ORC_CHUNK_CACHE_DESIGN.md). Their
+        # fill size is not known at plan time (it needs every file's stripe footers), so the
+        # scan-resistant headroom check above does not apply to them: they admit unless
+        # `chunk_cache_admit` is off.
+        for _op in nplan.orc_scan_plans:
+            _op.set_chunk_cache_admit(_chunk_cache_admit)
         # Process memory account: the peak is per query from here.
         reset_process_memory_peak()
         _t0 = _t.perf_counter_ns()

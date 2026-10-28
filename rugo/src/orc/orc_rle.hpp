@@ -208,8 +208,6 @@ inline unsigned closest_fixed_bits(unsigned n) {
     return 64;
 }
 
-inline int64_t unzigzag(uint64_t v) { return static_cast<int64_t>(v >> 1) ^ -static_cast<int64_t>(v & 1); }
-
 // Read exactly N bytes, even at the end of a packed run. The shifts make this
 // independent of host byte order and permit unaligned inputs.
 template <unsigned N>
@@ -320,7 +318,7 @@ private:
 
     int64_t read_value() {
         const uint64_t v = varint();
-        return signed_ ? detail::unzigzag(v) : static_cast<int64_t>(v);
+        return signed_ ? unzigzag(v) : static_cast<int64_t>(v);
     }
 
     // ── v1 ──
@@ -388,7 +386,7 @@ private:
         if (width > static_cast<size_t>(end_ - p_)) fail("a short-repeat run extends past its stream");
         uint64_t v = 0;
         for (unsigned i = 0; i < width; ++i) v = (v << 8) | *p_++;
-        const int64_t value = signed_ ? detail::unzigzag(v) : static_cast<int64_t>(v);
+        const int64_t value = signed_ ? unzigzag(v) : static_cast<int64_t>(v);
         for (size_t i = 0; i < count; ++i) buf_[i] = value;
         len_ = count;
     }
@@ -399,7 +397,7 @@ private:
         uint64_t tmp[kMaxRun];
         unpack(count, width, tmp);
         for (size_t i = 0; i < count; ++i)
-            buf_[i] = signed_ ? detail::unzigzag(tmp[i]) : static_cast<int64_t>(tmp[i]);
+            buf_[i] = signed_ ? unzigzag(tmp[i]) : static_cast<int64_t>(tmp[i]);
         len_ = count;
     }
 
@@ -466,8 +464,8 @@ private:
         const unsigned width = width_code == 0 ? 0 : detail::decode_width(width_code);
         const size_t count = ((static_cast<size_t>(b0 & 1) << 8) | byte()) + 1;
         const uint64_t base_raw = varint();
-        const int64_t base = signed_ ? detail::unzigzag(base_raw) : static_cast<int64_t>(base_raw);
-        const int64_t delta_base = detail::unzigzag(varint());
+        const int64_t base = signed_ ? unzigzag(base_raw) : static_cast<int64_t>(base_raw);
+        const int64_t delta_base = unzigzag(varint());
         buf_[0] = base;
         if (count == 1) {
             len_ = 1;

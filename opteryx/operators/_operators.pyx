@@ -379,6 +379,17 @@ cdef extern from "engine/native_orc_scan_source.hpp" namespace "opteryx::engine"
         int64_t files_read
         int64_t stripes_read
         int64_t pass2_rows
+        int64_t stripes_pruned
+        int64_t row_groups_pruned
+        cppvector[uint32_t] prune_columns
+        cppvector[uint8_t] prune_ops
+        cppvector[cppvector[int64_t]] prune_values
+        int64_t topn_limit
+        cppvector[uint32_t] topn_key_emit
+        cppvector[uint8_t] topn_ascending
+        cppvector[uint8_t] topn_nulls_first
+        int64_t topn_kept_rows
+        bint chunk_cache_admit
 
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
@@ -2684,12 +2695,85 @@ cdef class OrcScanPlan:
         self.spec.files_read = -1
         self.spec.stripes_read = -1
         self.spec.pass2_rows = -1
+        self.spec.stripes_pruned = -1
+        self.spec.row_groups_pruned = -1
+        self.spec.topn_limit = 0
+        self.spec.topn_kept_rows = -1
+        self.spec.chunk_cache_admit = True
         self.scan_identity = None
+
+    def set_chunk_cache_admit(self, bint admit):
+        """Whether this scan fills the chunk cache on a miss (docs/ORC_CHUNK_CACHE_DESIGN.md);
+        hits are used either way. Set before the run."""
+        self.spec.chunk_cache_admit = admit
+
+    def set_topn(self, int64_t limit, list keys):
+        """Top-N mode (docs/ORC_TOPN_LATE_MATERIALISATION_DESIGN.md): the HeapSort above
+        keeps `limit` rows ordered by `keys`, each (emitted column index, ascending,
+        nulls_first) of a column decoded in pass 1. Only with the prefilter, before the run."""
+        if limit <= 0 or not keys:
+            raise ValueError("OrcScanPlan: a top-N needs a positive limit and a key")
+        self.spec.topn_key_emit.clear()
+        self.spec.topn_ascending.clear()
+        self.spec.topn_nulls_first.clear()
+        # Typed locals, not inline expressions: push_back takes a const reference, and
+        # Cython binds `push_back(1 if x else 0)` to a temporary that is gone before the
+        # vector reads it (the values arrived as garbage).
+        cdef uint32_t emit_at
+        cdef uint8_t ascending_flag
+        cdef uint8_t nulls_first_flag
+        for emit_obj, ascending, nulls_first in keys:
+            emit_at = emit_obj
+            if emit_at >= self.spec.out_identities.size():
+                raise ValueError("OrcScanPlan: a top-N key is not an emitted column")
+            ascending_flag = 1 if ascending else 0
+            nulls_first_flag = 1 if nulls_first else 0
+            self.spec.topn_key_emit.push_back(emit_at)
+            self.spec.topn_ascending.push_back(ascending_flag)
+            self.spec.topn_nulls_first.push_back(nulls_first_flag)
+        self.spec.topn_limit = limit
+
+    @property
+    def topn_kept_rows(self):
+        """Top-N: rows the cut kept for pass 2; -1 unarmed or until the scan has run."""
+        return self.spec.topn_kept_rows
+
+    def set_prune_terms(self, list terms):
+        """The WHERE's conjuncts the scan tests against stripe and row group statistics
+        (docs/ORC_READER_DESIGN.md §6.7): (decoded column index, op code, [int64 values]),
+        the op code a rugo::orc::PruneOp. Only with the prefilter, before the run."""
+        cdef uint32_t column
+        cdef uint8_t op
+        cdef cppvector[int64_t] values
+        self.spec.prune_columns.clear()
+        self.spec.prune_ops.clear()
+        self.spec.prune_values.clear()
+        for column_obj, op_obj, values_obj in terms:
+            column = column_obj
+            op = op_obj
+            if column >= self.spec.decode_names.size() or op > 6 or not values_obj:
+                raise ValueError("OrcScanPlan: a malformed prune term")
+            values.clear()
+            for value in values_obj:
+                values.push_back(<int64_t>value)
+            self.spec.prune_columns.push_back(column)
+            self.spec.prune_ops.push_back(op)
+            self.spec.prune_values.push_back(values)
 
     @property
     def pass2_rows(self):
         """Prefilter: rows its second pass decoded; -1 unarmed or until the scan has run."""
         return self.spec.pass2_rows
+
+    @property
+    def stripes_pruned(self):
+        """Prune terms: stripes their statistics skipped; -1 unarmed or until the scan has run."""
+        return self.spec.stripes_pruned
+
+    @property
+    def row_groups_pruned(self):
+        """Prune terms: row groups skipped in the stripes read; -1 unarmed or until run."""
+        return self.spec.row_groups_pruned
 
 
 cdef class AvroScanPlan:

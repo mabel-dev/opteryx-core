@@ -84,7 +84,8 @@
 //     so parallelism has to be here or nowhere.
 //
 // ── The reduction ─────────────────────────────────────────────────────────────────
-// `reduce_to_topn` does NOT reimplement an ordering. It builds draken's own
+// `reduce_to_topn`'s cut is the shared topn_keep_mask (topn_keep.hpp), which
+// does NOT reimplement an ordering. It builds draken's own
 // normalized sort keys (`build_sort_keys`) over the pass-1 survivors and uses
 // draken's own comparator (`SortKeyCmp`) — the SAME definition the downstream
 // TopNSink sorts with — then keeps every row that is not strictly worse than the
@@ -122,6 +123,7 @@
 
 #include "native_skene_scan_source.hpp"  // SkeneClaimSet, skene_map_decoded_columns
 #include "native_sort.hpp"               // build_sort_keys / SortKeyCmp / gather_rows
+#include "topn_keep.hpp"                 // topn_keep_mask — the shared top-n cut
 #include "operator.hpp"
 
 #include "morsels/cxx_morsel.h"
@@ -509,41 +511,21 @@ class NativeSkeneLatmatScanSource : public Source {
         }
         if (total == 0) return;
 
-        // `keep[i]` over the CONCATENATED survivor row space (candidate order), which
-        // is exactly the order build_sort_keys walks `ms` in.
-        std::vector<uint8_t> keep(total, 1u);
+        // `keep[i]` over the CONCATENATED survivor row space (candidate order): the
+        // shared top-n cut (topn_keep.hpp). A zero LIMIT cannot reach here (the
+        // plan-time gate requires a positive one); the cut refuses one rather than keep
+        // everything.
+        std::vector<uint8_t> keep;
         const size_t n = topn_limit_ > 0 ? static_cast<size_t>(topn_limit_) : 0;
-        if (n == 0) {
-            // A zero LIMIT cannot reach here (the plan-time gate requires a positive
-            // one), but a silent "keep everything" would be a wrong answer's shape,
-            // so say so instead.
-            record_error(g, 1, "NativeSkeneLatmatScanSource: non-positive top-n limit");
+        const std::vector<SortKeySpec> spec{SortKeySpec{0, sort_ascending_, sort_nulls_first_}};
+        ErrCtx kerr;
+        if (!topn_keep_mask(ms, spec, n, keep, kerr)) {
+            record_error(g, kerr.code != 0 ? kerr.code : 1,
+                         kerr.msg != nullptr
+                             ? std::string(kerr.msg)
+                             : std::string("NativeSkeneLatmatScanSource: could not "
+                                           "build the top-n sort key"));
             return;
-        }
-        if (n < total) {
-            std::vector<SortKeySpec> spec{SortKeySpec{0, sort_ascending_, sort_nulls_first_}};
-            std::vector<SortKeyColumn> keys;
-            ErrCtx kerr;
-            if (!build_sort_keys(ms, spec, keys, kerr)) {
-                record_error(g, kerr.code != 0 ? kerr.code : 1,
-                             kerr.msg != nullptr
-                                 ? std::string(kerr.msg)
-                                 : std::string("NativeSkeneLatmatScanSource: could not "
-                                               "build the top-n sort key"));
-                return;
-            }
-            SortKeyCmp cmp{keys};
-            std::vector<uint32_t> idx(total);
-            std::iota(idx.begin(), idx.end(), 0u);
-            std::nth_element(idx.begin(), idx.begin() + static_cast<ptrdiff_t>(n - 1),
-                             idx.end(), cmp);
-            const uint32_t boundary = idx[n - 1];
-            // Keep every row the boundary row does NOT strictly precede: the n best
-            // plus every row tied with the n-th. Dropping only strictly-worse rows is
-            // what makes the downstream TopNSink's answer identical to the un-pushed
-            // plan's.
-            for (size_t i = 0; i < total; ++i)
-                keep[i] = cmp(boundary, static_cast<uint32_t>(i)) ? 0u : 1u;
         }
 
         size_t base = 0;

@@ -256,12 +256,70 @@ cannot be entered mid-stream without the row index (`ROW_INDEX` streams hold the
 using it is the "row-index splitting" deferred in §1. COUNT(*) reads no stream at all — the row count
 is in the stripe information.
 
-### 6.4 Deferred: pruning
+### 6.4 Pruning
 
-Stripe statistics (the `Metadata` section) and bloom filters would let a Source skip stripes. Not
-built. The manifest-level file pruning that already works for every format is unaffected; Iceberg's
-ORC writer records column metrics in the manifest where its Avro writer records none **[verify on a
-real file]**, so file pruning should in practice work for ORC tables.
+Stripe and row group statistics prune since 2026-10-28 (§6.7). Bloom filters are not read. The
+manifest-level file pruning that already works for every format is unaffected; Iceberg's ORC writer
+records column metrics in the manifest where its Avro writer records none **[verify on a real
+file]**, so file pruning should in practice work for ORC tables.
+
+### 6.5 Row index seek (built 2026-10-28)
+
+Each primitive column of a stripe carries a `ROW_INDEX` stream: one entry per row group of
+`row_index_stride` rows (writers default 10,000), each a list of positions, per stream of the
+column in its stream order. Compressed: the chunk's offset in the stream, then the offset in its
+decompressed bytes; uncompressed: one byte offset. Then the decoder's place: a run-length stream
+adds the values to pass over in the run that starts there, a bit stream adds that and the bit in
+the next byte. Stream order: PRESENT (only when the stripe has a PRESENT stream for the column —
+writers drop its positions otherwise), then DATA, then LENGTH (a direct string) or SECONDARY
+(timestamp nanos, decimal scales). A dictionary string positions only its DATA (the codes); the
+dictionary is read whole. Verified against pyarrow (orc-cpp) on 2026-10-28.
+
+`StripeCursor::read(first, n, run_end)` seeks when a range starts a row group the open streams do
+not reach: each stream is decompressed from the group's chunk to the chunk after the one where the
+row group after `run_end` begins (the run that starts there may spill into the next chunk), so
+reading a few row groups decompresses about two chunks per stream, not the stream. A position
+list that is shorter or longer than the column's streams need fails the query. Without a row
+index (or with row groups larger than a morsel) nothing seeks: rows between ranges are decoded
+and dropped. Nested columns are decoded whole per stripe and do not seek.
+
+### 6.6 Prefilter: two-pass (built 2026-10-28)
+
+The WHERE directly above an ORC scan runs inside it, as for READ_AVRO (AVRO_READER_DESIGN §26;
+`compiler._arm_two_pass_prefilter`, `NativeOrcScanSource::set_prefilter`, helpers shared in
+`native_scan_prefilter.hpp`), and the Filter is not compiled. Per range of a stripe (whole row
+groups, at most 65,536 rows, when the row index can be used):
+1. the predicate's columns are decoded for every row of the range, and the predicate runs over
+   them plus a row number column (`$orc_row`);
+2. no survivor: the other columns are not touched for the range;
+3. otherwise the other columns are decoded for the rows from the first survivor's row group to the
+   last one's (one seek, one span; a range's survivors are not split into several reads), and the
+   survivors are taken (`cxx_take_c`).
+
+There is no single-pass choice as Avro has: pass 2 decodes no more than a single pass would, plus
+the take. A predicate failure is reported as the Filter would report it. Telemetry:
+`orc_pass2_rows`, the rows pass 2 decoded, on the scan's operation row when a prefilter is armed.
+Tests: tests/unit/connectors/test_orc_prefilter.py (a file without a row index is not covered:
+pyarrow cannot write one; row groups larger than a morsel take the same path).
+
+### 6.7 Statistics pruning (built 2026-10-28)
+
+With the prefilter armed (§6.6), the WHERE's conjuncts that are `column op literal` (`=`, `<>`,
+`<`, `<=`, `>`, `>=`), `BETWEEN`, or `IN (...)` over an INT8/16/32/64 or DATE column become prune
+terms (`compiler._arm_orc_prune_terms`, found by the parquet pruning's own extractor,
+`extract_predicate_stats`, so its declines — temporal domain mismatch, NaN — apply). A stripe whose
+statistics in the file's Metadata section rule out a term is not read at all; in a stripe that is
+read, a row group whose ROW_INDEX statistics rule one out is not decoded (the ranges of §6.6 are
+then the runs of row groups left, each read by seeking). A column with no non-null value in the
+stripe / group passes no comparison. Statistics without a range never prune. The prefilter still
+runs the whole predicate, so a term only ever skips rows the predicate would drop.
+
+Not pruned by: strings (ORC writers have ordered string statistics by UTF-16 and by bytes, and
+truncate long ones), timestamps (the statistics' millisecond / UTC fields changed across writer
+versions), decimals, floats, booleans; a short `IN` list the optimizer has rewritten; any
+conjunct under an OR. Telemetry: `orc_stripes_pruned`, `orc_row_groups_pruned` on the scan's
+operation row when terms are armed. A Metadata section that does not cover every stripe fails the
+query.
 
 ## 7. Planning wiring
 
