@@ -1,7 +1,7 @@
 # GROUP BY small-block churn (ClickBench Q32) — design note
 
 Status: RULED 2026-10-27 (§2). Built in private trees and A/B'd 2026-10-28: FAILED
-(§5), not landed.
+at the 4 GiB budget (§5) and at 8 GiB (§5.2), not landed.
 
 ## 1. Problem (measured)
 
@@ -169,6 +169,42 @@ back by give-back churn.
 Also found: x86 base Q32 on **glibc** takes 0.29 M faults per hot try, not 1.15 M;
 the 1.15 M of §1 is mimalloc's purge (the preload `make` uses). The c6a entry runs
 glibc, so §1's upper bound overstates what this lever could do on the board.
+
+### 5.1 B with an 8 GiB slab budget (x86 ClickBench, 2026-10-28)
+
+Same trees, same shape; B's arm ran with `SLAB_POOL_BUDGET_BYTES=8589934592`, base at
+the default 4 GiB. Knob proven first: B Q32 give-backs 9,300 → 3,008, Q33 4,770 → 0.
+
+| run | battery B/base | B faster rounds | Q32 | Q18 | Q33 / Q34 | > 1.02 |
+|---|---|---|---|---|---|---|
+| glibc | **0.994** | 9/9 | 1.006 (5/9) | 0.978 | 0.981 / 0.987 | Q04 1.028, Q05 1.022, Q24 1.053 (median 0.993), Q40 1.022 |
+| mimalloc | **0.983** | 9/9 | **0.903** (9/9, separated) | 0.973 | 0.983 / 0.993 | Q05 1.027 |
+
+Q32 mimalloc: minor faults 1.20 M → 0.24 M per hot try, system time 3.04 → 1.06 s.
+Guard Q09 1.003 / 1.003. Q15 1.017–1.019 and Q35 1.013–1.015 slower on both (0/9).
+Hot major faults on glibc rose 76 k → 217 k (B holds more memory on a 15 GB box;
+page-cache displacement suspected, not proven). Max peak RSS unchanged (13.4 GiB).
+
+### 5.2 §4 completed at 8 GiB (2026-10-28)
+
+| run | battery B/base | B faster rounds | Q32 | Q09 (guard) | peak RSS B/base median (max) |
+|---|---|---|---|---|---|
+| Mac ClickBench, system | **0.987** | 9/9 | 0.976 (8/9) | **1.026** (1/9) | 1.016 (1.108) |
+| Mac TPC-H SF1, system | 1.006 | 1/9 | — | 1.041 (TPC-H Q09) | **1.105** (1.188) |
+| x86 ClickBench, glibc | **0.994** | 9/9 | 1.006 (5/9) | 1.003 | 1.039 (1.218) |
+| x86 ClickBench, mimalloc | **0.983** | 9/9 | **0.903** (9/9) | 1.003 | 1.032 (1.169) |
+| x86 TPC-H SF1, glibc | 1.004 | 0/9 | — | — | **1.151** (1.334) |
+| x86 TPC-H SF1, mimalloc | 1.005 | 3/9 | — | — | **1.108** (1.203) |
+
+Mac ClickBench at 8 GiB: Q33 0.957, Q34 0.964, Q18 0.961 (all 9/9); but the short
+queries lose — Q41 1.063, Q06 1.056, Q37 1.042, Q40 1.029 (0–1/9). x86 TPC-H glibc:
+Q01 1.030, Q18 1.033, Q22 1.026 (0/9). TPC-H SF1 never reaches the budget, so its
+loss and its +10–15% peak RSS are the small classes' own cost, not the budget's.
+
+**Verdict against §4: FAIL.** Q32 is not faster on glibc; TPC-H is slower on every
+allocator; the Q09 guard is 1.026 on the Mac (bar 1.02); peak RSS is up 10–15%
+(median) on TPC-H. The ClickBench win (0.983–0.994) needs the 8 GiB budget, which
+changes a ruled value (4 GiB, 2026-10-24 sweep knee). Not landed.
 
 ## 6. Open
 
