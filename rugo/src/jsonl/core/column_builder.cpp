@@ -16,6 +16,14 @@
 #include "json_array_walker.hpp"  // per-row array element parsing (parse_array_column)
 #include "declared_parse.hpp"     // explicit_schema strict per-value parse (shared with CSV)
 
+#if defined(__riscv)
+// riscv64 + GCC: a C++ exception cannot unwind through a frame holding an RVV scalable spill (its CFA is
+// computed from the vlenb CSR, which libgcc's unwinder cannot read), so a std::invalid_argument thrown for
+// a bad declared value reaches std::terminate instead of the Python boundary. Keep this TU's own frames
+// scalar. Placed after the includes so library inline functions keep their default optimisation.
+#pragma GCC optimize("no-tree-vectorize")
+#endif
+
 // extract_column() pulls one column out as raw-byte slices (StringColumnResult);
 // parse_typed_column / parse_varchar_column fill owned ParsedColumn buffers (wrapped
 // into Draken Vectors by jsonl/_jsonl_column_wrap.cpp, the Python edge), and
