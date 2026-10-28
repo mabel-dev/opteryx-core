@@ -234,15 +234,23 @@ pieces live in core.
 Copied from `NativeAvroScanSource`, changing the unit of work. The Source owns its decode pool;
 a file is loaded once (local: memory-mapped; the file is complete in memory, so stripes are
 addressable by offset), compiled against the reader schema, and framed into **stripes**. Workers
-claim stripes; a finished stripe becomes morsels on the ready queue; bounded read-ahead
-(`decode_workers + 2` stripes claimed-but-unconsumed) bounds memory. Morsel order is not guaranteed.
+claim stripes and decode each through a `rugo::orc::StripeCursor`, a range of at most 65,536 rows at
+a time; each range is a morsel on the ready queue; bounded read-ahead (`decode_workers + 2` morsels
+decoded-but-unconsumed) bounds memory. Morsel order is not guaranteed.
 Errors go through `ErrCtx` code 3, which the engine already scrubs to a path-free user message, and
 log the detail.
 
 ### 6.3 Granularity
 
 A stripe is the unit (Java default 64 MiB, so typically tens of thousands to millions of rows). A
-stripe is decoded whole per projected column and emitted as morsels of at most 65,536 rows. A file
+stripe is decoded a range of at most 65,536 rows at a time and each range is a morsel (built
+2026-10-28; before that a stripe was decoded whole and emitted as ONE morsel, which held
+`decode_workers + 2` whole stripes in memory and failed ClickBench Q23 with `bad_alloc`). Each
+primitive column is a cursor over its decompressed streams that continues where the last range
+ended; the cursor holds the stripe's streams until the stripe is done. A dictionary-encoded string
+column decodes the stripe's dictionary once and gives each range a dictionary of only the entries
+its rows use. A nested column is decoded whole for the stripe, then rendered (JSON) or sliced
+(ARRAY) a range at a time. A file
 with one stripe therefore decodes on one thread. That is accepted for basic support: the RLE streams
 cannot be entered mid-stream without the row index (`ROW_INDEX` streams hold the positions), and
 using it is the "row-index splitting" deferred in §1. COUNT(*) reads no stream at all — the row count

@@ -41,6 +41,17 @@ public:
         }
     }
 
+    // Pass over the next `count` values.
+    void skip(size_t count) {
+        while (count > 0) {
+            if (left_ == 0) refill();
+            const size_t take = left_ < count ? left_ : count;
+            if (!repeat_) p_ += take;
+            left_ -= take;
+            count -= take;
+        }
+    }
+
 private:
     void refill() {
         if (p_ == end_) fail("a byte run-length stream ends before its values do");
@@ -65,48 +76,103 @@ private:
 
 // ── boolean RLE ─────────────────────────────────────────────────────────────
 
+// A bit-packed (MSB first) byte RLE stream, read in pieces: each read continues at the
+// bit after the last one read, so a stripe's PRESENT or BOOLEAN stream can be decoded a
+// row range at a time.
+class BitReader {
+public:
+    BitReader(const uint8_t* p, size_t n) : bytes_(p, n) {}
+
+    // The next `count` bits as an LSB-first bitmap at `out` ((count + 7) / 8 bytes are
+    // written; the unused high bits of the last are cleared). Returns the number set.
+    size_t read_bitmap(size_t count, uint8_t* out) {
+        if (left_ != 0) return read_bitmap_unaligned(count, out);
+        const size_t full = count / 8;
+        const unsigned tail = static_cast<unsigned>(count % 8);
+        bytes_.read(out, full + (tail != 0));
+        size_t nonnull = 0;
+        size_t at = 0;
+        for (; full - at >= sizeof(uint64_t); at += sizeof(uint64_t)) {
+            uint64_t bits;
+            std::memcpy(&bits, out + at, sizeof(bits));
+            nonnull += static_cast<size_t>(__builtin_popcountll(bits));
+            bits = ((bits & 0x5555555555555555ULL) << 1) | ((bits >> 1) & 0x5555555555555555ULL);
+            bits = ((bits & 0x3333333333333333ULL) << 2) | ((bits >> 2) & 0x3333333333333333ULL);
+            bits = ((bits & 0x0f0f0f0f0f0f0f0fULL) << 4) | ((bits >> 4) & 0x0f0f0f0f0f0f0f0fULL);
+            std::memcpy(out + at, &bits, sizeof(bits));
+        }
+        for (; at < full + (tail != 0); ++at) {
+            const unsigned raw = out[at];
+            unsigned bits = raw;
+            bits = ((bits & 0x55) << 1) | ((bits >> 1) & 0x55);
+            bits = ((bits & 0x33) << 2) | ((bits >> 2) & 0x33);
+            bits = ((bits & 0x0f) << 4) | ((bits >> 4) & 0x0f);
+            if (at == full && tail != 0) {
+                bits &= (1u << tail) - 1;
+                // The byte's low 8 - tail bits belong to the next read.
+                cur_ = static_cast<uint8_t>(raw << tail);
+                left_ = 8 - tail;
+            }
+            out[at] = static_cast<uint8_t>(bits);
+            nonnull += static_cast<size_t>(__builtin_popcount(bits));
+        }
+        return nonnull;
+    }
+
+    // The next `count` bits, one byte each (0/1).
+    void read_bools(size_t count, uint8_t* out) {
+        for (size_t i = 0; i < count; ++i) out[i] = next_bit();
+    }
+
+    // Position at a row index entry's place: `run_bytes` bytes into the current byte run, then
+    // `bits` bits into the next byte. Only on a fresh reader.
+    void seek(uint64_t run_bytes, uint64_t bits) {
+        if (bits > 7) fail("a row index bit offset is larger than 7 (the file is corrupt)");
+        bytes_.skip(static_cast<size_t>(run_bytes));
+        if (bits != 0) {
+            bytes_.read(&cur_, 1);
+            cur_ = static_cast<uint8_t>(cur_ << bits);
+            left_ = 8 - static_cast<unsigned>(bits);
+        }
+    }
+
+private:
+    uint8_t next_bit() {
+        if (left_ == 0) {
+            bytes_.read(&cur_, 1);
+            left_ = 8;
+        }
+        const uint8_t bit = cur_ >> 7;
+        cur_ = static_cast<uint8_t>(cur_ << 1);
+        left_ -= 1;
+        return bit;
+    }
+
+    size_t read_bitmap_unaligned(size_t count, uint8_t* out) {
+        std::memset(out, 0, (count + 7) / 8);
+        size_t nonnull = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t bit = next_bit();
+            out[i >> 3] |= static_cast<uint8_t>(bit << (i & 7));
+            nonnull += bit;
+        }
+        return nonnull;
+    }
+
+    ByteRle bytes_;
+    uint8_t cur_ = 0;      // the current byte's unread bits, at the top
+    unsigned left_ = 0;    // how many
+};
+
 // `count` booleans from a bit-packed (MSB first) byte RLE stream, one byte each (0/1).
 inline void read_bools(const uint8_t* p, size_t n, size_t count, uint8_t* out) {
-    ByteRle bytes(p, n);
-    size_t done = 0;
-    uint8_t chunk[256];
-    while (done < count) {
-        const size_t want_bits = count - done;
-        size_t want_bytes = (want_bits + 7) / 8;
-        if (want_bytes > sizeof(chunk)) want_bytes = sizeof(chunk);
-        bytes.read(chunk, want_bytes);
-        for (size_t b = 0; b < want_bytes && done < count; ++b)
-            for (int bit = 7; bit >= 0 && done < count; --bit) out[done++] = (chunk[b] >> bit) & 1;
-    }
+    BitReader(p, n).read_bools(count, out);
 }
 
 // Decode ORC's MSB-first PRESENT bits into an LSB-first validity bitmap.
 // The unused high bits of the final byte are cleared and excluded from the count.
 inline size_t read_present(const uint8_t* p, size_t n, size_t count, uint8_t* out) {
-    const size_t full = count / 8;
-    const unsigned tail = static_cast<unsigned>(count % 8);
-    ByteRle(p, n).read(out, full + (tail != 0));
-    size_t nonnull = 0;
-    size_t at = 0;
-    for (; full - at >= sizeof(uint64_t); at += sizeof(uint64_t)) {
-        uint64_t bits;
-        std::memcpy(&bits, out + at, sizeof(bits));
-        nonnull += static_cast<size_t>(__builtin_popcountll(bits));
-        bits = ((bits & 0x5555555555555555ULL) << 1) | ((bits >> 1) & 0x5555555555555555ULL);
-        bits = ((bits & 0x3333333333333333ULL) << 2) | ((bits >> 2) & 0x3333333333333333ULL);
-        bits = ((bits & 0x0f0f0f0f0f0f0f0fULL) << 4) | ((bits >> 4) & 0x0f0f0f0f0f0f0f0fULL);
-        std::memcpy(out + at, &bits, sizeof(bits));
-    }
-    for (; at < full + (tail != 0); ++at) {
-        unsigned bits = out[at];
-        bits = ((bits & 0x55) << 1) | ((bits >> 1) & 0x55);
-        bits = ((bits & 0x33) << 2) | ((bits >> 2) & 0x33);
-        bits = ((bits & 0x0f) << 4) | ((bits >> 4) & 0x0f);
-        if (at == full && tail != 0) bits &= (1u << tail) - 1;
-        out[at] = static_cast<uint8_t>(bits);
-        nonnull += static_cast<size_t>(__builtin_popcount(bits));
-    }
-    return nonnull;
+    return BitReader(p, n).read_bitmap(count, out);
 }
 
 // ── integer RLE ─────────────────────────────────────────────────────────────
@@ -212,6 +278,11 @@ public:
             std::memcpy(out, values, n * sizeof(int64_t));
             out += n;
         });
+    }
+
+    // Pass over the next `count` values.
+    void skip(size_t count) {
+        read_runs(count, [](const int64_t*, size_t) {});
     }
 
     // Values remain valid only for the duration of the callback; a later run

@@ -77,6 +77,7 @@
 #include "disk_io.h"                       // read_all_mmap / unmap_memory_c
 #include "http_client.hpp"                 // HttpClient — remote files, whole-object GET
 #include "native_expression.hpp"           // ExprProgram / ExprFilterFn — the prefilter
+#include "native_scan_prefilter.hpp"        // add_prefilter_row_column / run_prefilter / prefilter_survivors
 
 // rugo's Avro reader (rugo/src/avro) — pure C++.
 #include "avro/avro_reader.hpp"
@@ -643,50 +644,6 @@ private:
     // is not tuned between them (docs §26).
     static constexpr uint32_t kTwoPassBlockShare = 250000;   // millionths
 
-    // A morsel's columns plus the record index, as the prefilter programs read them.
-    static void add_record_index(CxxMorsel& m, uint32_t n) {
-        auto* index = static_cast<int32_t*>(draken_malloc(static_cast<size_t>(n ? n : 1) * sizeof(int32_t)));
-        if (index == nullptr) throw std::bad_alloc();
-        for (uint32_t r = 0; r < n; ++r) index[r] = static_cast<int32_t>(r);
-        CxxColumn col;
-        col.own = std::make_shared<VectorOwner>(draken_vector_from_dense(index, n, DRAKEN_INT32, nullptr),
-                                                OwnedBuffer<void>(index), OwnedBuffer<uint8_t>(nullptr));
-        col.view = col.own->vec;
-        m.columns.push_back(std::move(col));
-        m.names.push_back(kPrefilterRowColumn);
-    }
-
-    // Run `prog` over `probe`. Null when no row survives, or on failure with `error` /
-    // `code` set exactly as the Filter would have reported it (set_span_error).
-    std::unique_ptr<CxxMorsel> run_predicate(const ExprProgram& prog, CxxMorsel& probe,
-                                             std::string& error, int& code) {
-        CxxMorsel* filtered = nullptr;
-        int err_op = 0;
-        const char* kernel_msg = nullptr;
-        const int rc = prefilter_fn_(prog.instrs, prog.count, &probe, const_cast<int*>(prog.col_idx.data()),
-                                     const_cast<void**>(prog.lit_dv.data()), nullptr, nullptr, 0,
-                                     &filtered, &err_op, &kernel_msg);
-        if (rc != 0) {
-            ErrCtx span;
-            set_span_error(span, "ExprFilterOperator: predicate evaluation failed", rc, err_op, kernel_msg);
-            error = span.msg;
-            code = span.code;
-            return nullptr;
-        }
-        std::unique_ptr<CxxMorsel> kept(filtered);
-        if (kept == nullptr || kept->num_rows() == 0) return nullptr;
-        return kept;
-    }
-
-    // The surviving records' indices: the filtered morsel's last column (§11 access).
-    static std::vector<uint32_t> survivors(const CxxMorsel& kept) {
-        const DrakenVector& iv = kept.columns.back().view;
-        const auto* idata = static_cast<const int32_t*>(iv.data);
-        std::vector<uint32_t> rows(iv.length);
-        for (uint32_t i = 0; i < iv.length; ++i) rows[i] = static_cast<uint32_t>(idata[iv.selection[i]]);
-        return rows;
-    }
-
     // Decode one batch and apply the prefilter (set_prefilter), two-pass or single-pass.
     // Null when no record survives, or on a predicate failure (`error` / `code` set).
     MorselPtr decode_filtered(NativeAvroScanGlobal& g, const avro_detail::OpenFile& file,
@@ -713,13 +670,13 @@ private:
                 probe.columns.push_back(decoded1[decode_pos_[spec_->emit_index[k]]]);
                 probe.names.push_back(spec_->out_identities[k]);
             }
-            add_record_index(probe, first.rows);
-            kept = run_predicate(pass1_prog_, probe, error, code);
+            add_prefilter_row_column(probe, first.rows, kPrefilterRowColumn);
+            kept = run_prefilter(prefilter_fn_, pass1_prog_, probe, error, code);
             if (kept == nullptr) {
                 if (error.empty()) g.last_block_share.store(0, std::memory_order_relaxed);
                 return nullptr;
             }
-            const std::vector<uint32_t> rows = survivors(*kept);
+            const std::vector<uint32_t> rows = prefilter_survivors(*kept);
             if (has_pass2)
                 g.last_block_share.store(block_share(file, range, rows), std::memory_order_relaxed);
             std::vector<CxxColumn> decoded2;
@@ -746,13 +703,13 @@ private:
                 probe.columns.push_back(decoded[spec_->emit_index[k]]);
                 probe.names.push_back(spec_->out_identities[k]);
             }
-            add_record_index(probe, batch.rows);
-            kept = run_predicate(full_prog_, probe, error, code);
+            add_prefilter_row_column(probe, batch.rows, kPrefilterRowColumn);
+            kept = run_prefilter(prefilter_fn_, full_prog_, probe, error, code);
             if (kept == nullptr) {
                 if (error.empty()) g.last_block_share.store(0, std::memory_order_relaxed);
                 return nullptr;
             }
-            g.last_block_share.store(block_share(file, range, survivors(*kept)), std::memory_order_relaxed);
+            g.last_block_share.store(block_share(file, range, prefilter_survivors(*kept)), std::memory_order_relaxed);
             for (size_t k = 0; k < spec_->emit_index.size(); ++k) morsel->columns.push_back(kept->columns[k]);
         }
         morsel->names = spec_->out_identities;

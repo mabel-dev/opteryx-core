@@ -378,6 +378,7 @@ cdef extern from "engine/native_orc_scan_source.hpp" namespace "opteryx::engine"
         int64_t bytes_read
         int64_t files_read
         int64_t stripes_read
+        int64_t pass2_rows
 
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
@@ -591,10 +592,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_native_scan_prefilter(size_t p, void* instrs, int count,
                                        cppvector[int] col_idx, cppvector[void*] lit_dv,
                                        ExprFilterFn fn, cppvector[uint8_t] is_pred) except +
-        void set_native_avro_scan_prefilter(size_t p, void* instrs, int count,
-                                            cppvector[int] pass1_col_idx, cppvector[void*] pass1_lit_dv,
-                                            cppvector[int] full_col_idx, cppvector[void*] full_lit_dv,
-                                            ExprFilterFn fn, cppvector[uint8_t] pass1) except +
+        void set_native_two_pass_scan_prefilter(size_t p, void* instrs, int count,
+                                                cppvector[int] pass1_col_idx, cppvector[void*] pass1_lit_dv,
+                                                cppvector[int] full_col_idx, cppvector[void*] full_lit_dv,
+                                                ExprFilterFn fn, cppvector[uint8_t] pass1) except +
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_scan_admission(size_t p, RowAdmission* admission) except +
@@ -2682,7 +2683,13 @@ cdef class OrcScanPlan:
         self.spec.bytes_read = -1
         self.spec.files_read = -1
         self.spec.stripes_read = -1
+        self.spec.pass2_rows = -1
         self.scan_identity = None
+
+    @property
+    def pass2_rows(self):
+        """Prefilter: rows its second pass decoded; -1 unarmed or until the scan has run."""
+        return self.spec.pass2_rows
 
 
 cdef class AvroScanPlan:
@@ -3930,18 +3937,19 @@ cdef class NativePlan:
         self._e.set_native_scan_prefilter(p, <void*>bc.instrs, <int>bc.count, col_idx,
                                           lit_dv, _expr_filter_tramp, c_is_pred)
 
-    def set_native_avro_scan_prefilter(self, size_t p, CompiledBytecode bc, list pass1_layout,
-                                       list full_layout, list pass1):
-        """READ_AVRO prefilter (docs/AVRO_READER_DESIGN.md §26): pipeline `p`'s native
-        Avro scan runs the WHERE directly above it itself, per batch either two-pass
-        (the predicate's columns first, the rest for survivors) or single-pass.
+    def set_native_two_pass_scan_prefilter(self, size_t p, CompiledBytecode bc, list pass1_layout,
+                                           list full_layout, list pass1):
+        """Two-pass scan prefilter (READ_AVRO: docs/AVRO_READER_DESIGN.md §26; ORC:
+        docs/ORC_READER_DESIGN.md §6.6): pipeline `p`'s native Avro or ORC scan runs the
+        WHERE directly above it itself - the predicate's columns first, the rest for the
+        survivors (Avro may also choose single-pass per batch).
         `pass1` flags, per decoded column, the ones the predicate reads. `bc` - the
         program the ExprFilter would have run, held for the run - is resolved against
         both morsels the scan builds: `pass1_layout` (the emitted pass-1 columns in
-        emit order, then the record index) and `full_layout` (every emitted column,
-        then the record index)."""
+        emit order, then the row number) and `full_layout` (every emitted column,
+        then the row number)."""
         if not bytecode_is_c_native_predicate(bc):
-            raise ValueError("set_native_avro_scan_prefilter requires a c-native "
+            raise ValueError("set_native_two_pass_scan_prefilter requires a c-native "
                              "bool-final program — the compiler must reject earlier")
         cdef cppvector[int] pass1_col_idx
         cdef cppvector[void*] pass1_lit_dv
@@ -3954,10 +3962,10 @@ cdef class NativePlan:
         cdef Py_ssize_t k
         for k in range(len(pass1)):
             c_pass1.push_back(<uint8_t>(1 if pass1[k] else 0))
-        self._e.set_native_avro_scan_prefilter(p, <void*>bc.instrs, <int>bc.count,
-                                               pass1_col_idx, pass1_lit_dv,
-                                               full_col_idx, full_lit_dv,
-                                               _expr_filter_tramp, c_pass1)
+        self._e.set_native_two_pass_scan_prefilter(p, <void*>bc.instrs, <int>bc.count,
+                                                   pass1_col_idx, pass1_lit_dv,
+                                                   full_col_idx, full_lit_dv,
+                                                   _expr_filter_tramp, c_pass1)
 
     def add_expr_project(self, size_t p, CompiledBytecode bc, list layout, name,
                          logical=None, bint preserve_shape=False):

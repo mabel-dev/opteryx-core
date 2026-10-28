@@ -752,18 +752,19 @@ public:
         prog.lit_dv = std::move(lit_dv);
         src->set_prefilter(std::move(prog), fn, std::move(is_pred));
     }
-    // Make pipeline `p`'s native Avro scan (READ_AVRO) apply the WHERE directly above
-    // it itself (native_avro_scan_source.hpp): `pass1` flags, per decoded column, the
-    // ones the predicate reads; the program comes resolved against the pass-1 morsel
-    // and against the single-pass one. Replaces the ExprFilter for this scan.
-    void set_native_avro_scan_prefilter(size_t p, void* instrs, int count,
-                                        std::vector<int> pass1_col_idx, std::vector<void*> pass1_lit_dv,
-                                        std::vector<int> full_col_idx, std::vector<void*> full_lit_dv,
-                                        ExprFilterFn fn, std::vector<uint8_t> pass1) {
-        auto* src = dynamic_cast<NativeAvroScanSource*>(pipelines[p]->source.get());
-        if (src == nullptr)
+    // Make pipeline `p`'s native Avro or ORC scan apply the WHERE directly above it
+    // itself, two-pass (native_scan_prefilter.hpp): `pass1` flags, per decoded column,
+    // the ones the predicate reads; the program comes resolved against the pass-1 morsel
+    // and against the single-pass one (Avro only). Replaces the ExprFilter for this scan.
+    void set_native_two_pass_scan_prefilter(size_t p, void* instrs, int count,
+                                            std::vector<int> pass1_col_idx, std::vector<void*> pass1_lit_dv,
+                                            std::vector<int> full_col_idx, std::vector<void*> full_lit_dv,
+                                            ExprFilterFn fn, std::vector<uint8_t> pass1) {
+        auto* avro = dynamic_cast<NativeAvroScanSource*>(pipelines[p]->source.get());
+        auto* orc = dynamic_cast<NativeOrcScanSource*>(pipelines[p]->source.get());
+        if (avro == nullptr && orc == nullptr)
             throw std::runtime_error(
-                "set_native_avro_scan_prefilter: pipeline source is not a native Avro scan");
+                "set_native_two_pass_scan_prefilter: pipeline source is not a native Avro or ORC scan");
         ExprProgram pass1_prog;
         pass1_prog.instrs = instrs;
         pass1_prog.count = count;
@@ -774,7 +775,8 @@ public:
         full_prog.count = count;
         full_prog.col_idx = std::move(full_col_idx);
         full_prog.lit_dv = std::move(full_lit_dv);
-        src->set_prefilter(std::move(pass1_prog), std::move(full_prog), fn, std::move(pass1));
+        if (avro != nullptr) avro->set_prefilter(std::move(pass1_prog), std::move(full_prog), fn, std::move(pass1));
+        else orc->set_prefilter(std::move(pass1_prog), std::move(full_prog), fn, std::move(pass1));
     }
     // Give pipeline `p`'s native parquet scan a row admission (the vector index search,
     // vector_index_admission.hpp): which rows it may decode, decided at make_global.

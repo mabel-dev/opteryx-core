@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 
@@ -130,6 +131,19 @@ Bytes decompress(Compression c, size_t block_size, const uint8_t* p, size_t n) {
     out.n = out.owned.size();
     return out;
 }
+
+// Where a file's streams come from: the file's bytes and how its streams are compressed.
+struct StreamSource {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    Compression compression = Compression::None;
+    size_t block_size = 0;
+
+    Bytes get(uint64_t offset, uint64_t length) const {
+        if (offset > size || length > size - offset) fail("a stream extends past the end of the file");
+        return decompress(compression, block_size, data + offset, static_cast<size_t>(length));
+    }
+};
 
 size_t width_of(DrakenType t) {
     switch (t) {
@@ -525,24 +539,15 @@ struct OrcFile::Impl {
     const uint8_t* data = nullptr;
     size_t size = 0;
     PostScript ps;
+    StreamSource src;
     Footer footer;
     std::vector<FileColumn> columns;
     std::vector<ColPlan> plan;
     std::vector<std::string> out_names;
 
-    Bytes stream(uint64_t offset, uint64_t length) const {
-        if (offset > size || length > size - offset) fail("a stream extends past the end of the file");
-        return decompress(ps.compression, static_cast<size_t>(ps.block_size), data + offset, static_cast<size_t>(length));
-    }
+    Bytes stream(uint64_t offset, uint64_t length) const { return src.get(offset, length); }
 
-    void decode_column(const StripeFooter& sf, const StreamMap& streams, const ColPlan& cp, uint32_t rows,
-                       Column& out) const;
-    // One primitive column of `rows` entries, read as `rc`.
-    void decode_leaf(const StripeFooter& sf, const StreamMap& streams, const FileColumn& fc,
-                     const ReaderColumn& rc, uint32_t rows, Column& out) const;
-    // A STRUCT / LIST / MAP column: its subtree decoded, then rendered (JSON text, or an ARRAY).
-    void decode_nested(const StripeFooter& sf, const StreamMap& streams, const FileColumn& fc,
-                       const ReaderColumn& rc, uint32_t rows, Column& out) const;
+    // A STRUCT / LIST / MAP column's subtree, `n` entries of node `id`, decoded whole for the stripe.
     NestedNode build_node(const StripeFooter& sf, const StreamMap& streams, uint32_t id, const std::string& name,
                           const std::string& key, size_t n, const DeclCtx* decl = nullptr, int di = -1) const;
 };
@@ -556,6 +561,7 @@ OrcFile::OrcFile(const uint8_t* data, size_t size) : impl_(new Impl) {
     if (ps_len == 0 || ps_len + 1 > size) fail("the postscript length is out of range (the file is corrupt)");
     m.ps = parse_postscript({data + size - 1 - ps_len, ps_len});
     if (m.ps.compression == Compression::Lzo) fail("compression lzo is not supported");
+    m.src = StreamSource{data, size, m.ps.compression, static_cast<size_t>(m.ps.block_size)};
     const uint64_t tail = 1 + ps_len + m.ps.footer_length;
     if (tail > size) fail("the footer extends before the start of the file (the file is corrupt)");
     const uint8_t* footer_at = data + size - tail;
@@ -649,70 +655,283 @@ void OrcFile::bind(const std::vector<ReaderColumn>& reader, const std::vector<st
     }
 }
 
-Batch OrcFile::decode_stripe(size_t stripe) const {
-    const Impl& m = *impl_;
-    const StripeInfo& si = m.footer.stripes.at(stripe);
-    Batch batch;
-    batch.rows = static_cast<uint32_t>(si.rows);
-    if (m.plan.empty()) return batch;
+// ── column cursors ──────────────────────────────────────────────────────────
+//
+// A stripe's column is decoded a row range at a time, in order: each read() continues where the
+// last one ended, so a stripe becomes morsels of a bounded size (design doc §6.3). A cursor owns its
+// column's decompressed streams for the stripe.
 
-    // The stripe footer names every stream; offsets are the running sum of their lengths,
-    // index streams first, so a column that is not asked for is never touched.
-    const uint64_t footer_at = si.offset + si.index_length + si.data_length;
-    const Bytes footer_bytes = m.stream(footer_at, si.footer_length);
-    const StripeFooter sf = parse_stripe_footer({footer_bytes.p, footer_bytes.n});
-    StreamMap streams;
-    uint64_t at = si.offset;
-    for (const StreamInfo& s : sf.streams) {
-        streams[{s.column, s.kind}] = {at, s.length};
-        at += s.length;
+namespace {
+
+// One primitive column of a stripe, read as `type` (with `precision` / `scale`). Its streams are
+// opened by seek(): from the stripe's first row, or from a row group's first row by the column's
+// row index (design doc §6.5). A dictionary is read whole at construction.
+struct LeafCursor {
+    LeafCursor(const StreamSource& src, const StripeFooter& sf, const StreamMap& streams, const FileColumn& f,
+               DrakenType type, uint8_t precision, uint8_t scale);
+    ~LeafCursor() {
+        draken_free(dslots);
+        draken_free(darena);
     }
-    if (at > footer_at) fail("a stripe's streams extend past its data (the file is corrupt)");
+    LeafCursor(const LeafCursor&) = delete;
+    LeafCursor& operator=(const LeafCursor&) = delete;
 
-    batch.columns.resize(m.plan.size());
-    for (size_t i = 0; i < m.plan.size(); ++i) m.decode_column(sf, streams, m.plan[i], batch.rows, batch.columns[i]);
-    return batch;
-}
+    // Open every stream at `at`'s row group (null = the stripe's first row), decompressing only as
+    // far as `until`'s row group needs (null = the end of the stripe).
+    void seek(const RowIndexEntry* at, const RowIndexEntry* until);
 
-void OrcFile::Impl::decode_column(const StripeFooter& sf, const StreamMap& streams, const ColPlan& cp, uint32_t rows,
-                                  Column& out) const {
-    if (cp.file_col < 0) {
-        null_constant(cp.rc, rows, out);
-        return;
-    }
-    const FileColumn& fc = columns[static_cast<size_t>(cp.file_col)];
-    if (fc.nested) decode_nested(sf, streams, fc, cp.rc, rows, out);
-    else decode_leaf(sf, streams, fc, cp.rc, rows, out);
-}
+    // The next `rows` entries.
+    void read(uint32_t rows, Column& out);
 
-void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams, const FileColumn& fc,
-                                const ReaderColumn& rc, uint32_t rows, Column& out) const {
+    // A stream of the stripe: where it is in the file; absent when the stripe has none.
+    struct Range {
+        uint64_t offset = 0;
+        uint64_t length = 0;
+        bool exists = false;
+    };
+
+    const StreamSource& src;
+    const FileColumn& fc;
+    DrakenType type;
+    uint8_t precision;
+    uint8_t scale;
+    std::string where;
+    bool v2 = false;
+    bool dictionary = false;
+    Range present_r, data_r, length_r, secondary_r;   // length_r: a direct string's LENGTH
+
+    Bytes present_b, data_b, length_b, secondary_b;   // the open windows of the streams
+    std::optional<BitReader> present;
+    std::optional<BitReader> bools;         // BOOLEAN DATA
+    std::optional<ByteRle> bytes;           // BYTE DATA
+    std::optional<IntRle> ints;             // integer DATA; seconds; dictionary indexes
+    std::optional<IntRle> lengths;          // string LENGTH
+    std::optional<IntRle> secondary;        // timestamp nanos; decimal scales
+    const uint8_t* raw = nullptr;           // the unread rest of a raw DATA stream
+    const uint8_t* raw_end = nullptr;
+
+    // A dictionary-encoded string column: the stripe's dictionary, decoded once. Each read emits
+    // a dictionary of only the entries its rows use (remap: entry -> code in the read; kNone = unused).
+    static constexpr uint32_t kNone = UINT32_MAX;
+    uint32_t dsize = 0;
+    DrakenStringSlot* dslots = nullptr;
+    uint8_t* darena = nullptr;
+    std::vector<uint32_t> remap;
+    std::vector<uint32_t> touched;
+
+    std::vector<int64_t> scratch;
+
+private:
+    // Walks one row index entry's positions in stream order. A null entry yields zeroes.
+    struct Positions {
+        const RowIndexEntry* e;
+        size_t i = 0;
+        uint64_t take(const std::string& where) {
+            if (e == nullptr) return 0;
+            if (i >= e->positions.size()) fail(where + "its row index has fewer positions than its streams need (the file is corrupt)");
+            return e->positions[i++];
+        }
+        void finish(const std::string& where) const {
+            if (e != nullptr && i != e->positions.size())
+                fail(where + "its row index has more positions than its streams need (the file is corrupt)");
+        }
+    };
+    // Open `r` at `at`'s place: the window of decompressed bytes and where in it the place is.
+    Bytes open(const Range& r, Positions& at, Positions& until, size_t& start);
+};
+
+LeafCursor::LeafCursor(const StreamSource& s, const StripeFooter& sf, const StreamMap& streams, const FileColumn& f,
+                       DrakenType t, uint8_t p, uint8_t sc)
+    : src(s), fc(f), type(t), precision(p), scale(sc), where("column '" + f.name + "': ") {
     const uint32_t id = fc.type_id;
-    const std::string where = "column '" + fc.name + "': ";
     if (id >= sf.columns.size()) fail(where + "the stripe has no encoding for it (the file is corrupt)");
     const ColumnEncoding enc = sf.columns[id];
     if (enc.kind > 3) fail(where + "it has column encoding " + std::to_string(enc.kind) + ", which this reader does not know");
-    const bool v2 = enc.kind >= 2;
-    const bool dictionary = enc.kind == 1 || enc.kind == 3;
+    v2 = enc.kind >= 2;
+    dictionary = enc.kind == 1 || enc.kind == 3;
 
-    auto find = [&](StreamKind k) -> const std::pair<uint64_t, uint64_t>* {
+    auto find = [&](StreamKind k) -> Range {
         auto it = streams.find({id, static_cast<uint32_t>(k)});
-        return it == streams.end() ? nullptr : &it->second;
+        if (it == streams.end()) return Range{};
+        return Range{it->second.first, it->second.second, true};
     };
-    auto need = [&](StreamKind k, const char* what) -> Bytes {
-        const auto* s = find(k);
-        if (s == nullptr) fail(where + "its " + what + " stream is missing");
-        return stream(s->first, s->second);
+    auto need = [&](StreamKind k, const char* what) -> Range {
+        const Range r = find(k);
+        if (!r.exists) fail(where + "its " + what + " stream is missing");
+        return r;
     };
 
     // PRESENT: one boolean per row; absent when every row has a value.
+    present_r = find(StreamKind::Present);
+
+    switch (fc.kind) {
+        case Kind::Boolean: case Kind::Byte: case Kind::Short: case Kind::Int: case Kind::Long: case Kind::Date:
+        case Kind::Float: case Kind::Double:
+            data_r = need(StreamKind::Data, "DATA");
+            break;
+        case Kind::String: case Kind::Varchar: case Kind::Char: case Kind::Binary: {
+            if (fc.type == DRAKEN_UUID && dictionary) fail(where + "a uuid column with a dictionary encoding is not supported");
+            data_r = need(StreamKind::Data, "DATA");
+            if (!dictionary) {
+                length_r = need(StreamKind::Length, "LENGTH");
+                break;
+            }
+            dsize = enc.dictionary_size;
+            if (dsize == 0) break;
+            const Range lens_r = need(StreamKind::Length, "LENGTH");
+            const Bytes lens_b = src.get(lens_r.offset, lens_r.length);
+            std::vector<int64_t> lens(dsize);
+            IntRle(lens_b.p, lens_b.n, v2, false).read(lens.data(), dsize);
+            if (fc.fixed_length != 0)
+                for (int64_t l : lens)
+                    if (l != static_cast<int64_t>(fc.fixed_length))
+                        fail(where + "a fixed(" + std::to_string(fc.fixed_length) + ") value is " + std::to_string(l) + " bytes");
+            const Range dict_r = need(StreamKind::DictionaryData, "DICTIONARY_DATA");
+            const Bytes dict_b = src.get(dict_r.offset, dict_r.length);
+            uint64_t total = 0;
+            for (int64_t l : lens) {
+                if (l < 0) fail(where + "a dictionary entry has a negative length");
+                total += static_cast<uint64_t>(l);
+            }
+            if (total > dict_b.n) fail(where + "its DICTIONARY_DATA stream is shorter than its entry lengths");
+            draken::AppendBuffer<DrakenStringSlot> ds;
+            draken::AppendBuffer<uint8_t> da;
+            ds.resize_uninit(dsize);
+            const uint8_t* from = dict_b.p;
+            for (uint32_t e = 0; e < dsize; ++e) {
+                const uint64_t len = static_cast<uint64_t>(lens[e]);
+                build_slot(ds, da, e, from, len);
+                from += len;
+            }
+            dslots = ds.release();
+            darena = da.release();
+            remap.assign(dsize, kNone);
+            break;
+        }
+        case Kind::Timestamp: case Kind::TimestampInstant:
+            if (fc.kind == Kind::Timestamp && !is_utc_name(sf.writer_timezone))
+                fail(where + "it is a TIMESTAMP written in time zone '" + sf.writer_timezone +
+                     "'; only UTC writers are supported (a TIMESTAMP is wall-clock time in its writer's zone)");
+            data_r = need(StreamKind::Data, "DATA");
+            secondary_r = need(StreamKind::Secondary, "SECONDARY");
+            break;
+        case Kind::Decimal:
+            data_r = need(StreamKind::Data, "DATA");
+            secondary_r = need(StreamKind::Secondary, "SECONDARY");
+            break;
+        default:
+            fail(where + std::string(kind_name(fc.kind)) + " columns are not supported");
+    }
+}
+
+// The end of the compressed chunk `count` chunks on from the one at `chunk` (or the stream's end).
+uint64_t chunks_end(const StreamSource& src, uint64_t offset, uint64_t length, uint64_t chunk, unsigned count) {
+    uint64_t at = chunk;
+    for (unsigned i = 0; i < count && at < length; ++i) {
+        if (length - at < 3) fail("a compression chunk header runs past its stream");
+        const uint8_t* h = src.data + offset + at;
+        const uint64_t len = (h[0] | (static_cast<uint32_t>(h[1]) << 8) | (static_cast<uint32_t>(h[2]) << 16)) >> 1;
+        at += 3 + len;
+    }
+    return at < length ? at : length;
+}
+
+Bytes LeafCursor::open(const Range& r, Positions& at, Positions& until, size_t& start) {
+    if (r.offset > src.size || r.length > src.size - r.offset) fail("a stream extends past the end of the file");
+    if (src.compression == Compression::None) {
+        start = static_cast<size_t>(at.take(where));
+        if (until.e != nullptr) until.take(where);
+        if (start > r.length) fail(where + "a row index position is past its stream (the file is corrupt)");
+        return src.get(r.offset, r.length);
+    }
+    const uint64_t chunk = at.take(where);
+    start = static_cast<size_t>(at.take(where));
+    uint64_t end = r.length;
+    if (until.e != nullptr) {
+        // The next group's values begin in its chunk; a run that starts there may run on into the
+        // next ones, so the window takes three chunks from it.
+        const uint64_t next = until.take(where);
+        until.take(where);
+        if (next < chunk || next > r.length) fail(where + "a row index position is past its stream (the file is corrupt)");
+        end = chunks_end(src, r.offset, r.length, next, 3);
+    }
+    if (chunk > r.length) fail(where + "a row index position is past its stream (the file is corrupt)");
+    Bytes b = src.get(r.offset + chunk, end - chunk);
+    if (start > b.n) fail(where + "a row index position is past its chunk (the file is corrupt)");
+    return b;
+}
+
+void LeafCursor::seek(const RowIndexEntry* at_entry, const RowIndexEntry* until_entry) {
+    Positions at{at_entry};
+    Positions until{until_entry};
+    size_t start = 0;
+    // A run-length stream: the window, then `run` values into the run at the place.
+    auto int_rle = [&](const Range& r, Bytes& b, std::optional<IntRle>& reader, bool is_signed) {
+        b = open(r, at, until, start);
+        reader.emplace(b.p + start, b.n - start, v2, is_signed);
+        const uint64_t run = at.take(where);
+        if (until.e != nullptr) until.take(where);
+        reader->skip(static_cast<size_t>(run));
+    };
+    auto bits = [&](const Range& r, Bytes& b, std::optional<BitReader>& reader) {
+        b = open(r, at, until, start);
+        reader.emplace(b.p + start, b.n - start);
+        const uint64_t run = at.take(where);
+        const uint64_t bit = at.take(where);
+        if (until.e != nullptr) {
+            until.take(where);
+            until.take(where);
+        }
+        reader->seek(run, bit);
+    };
+    auto raw_data = [&]() {
+        data_b = open(data_r, at, until, start);
+        raw = data_b.p + start;
+        raw_end = data_b.p + data_b.n;
+    };
+
+    if (present_r.exists) bits(present_r, present_b, present);
+    switch (fc.kind) {
+        case Kind::Boolean: bits(data_r, data_b, bools); break;
+        case Kind::Byte: {
+            data_b = open(data_r, at, until, start);
+            bytes.emplace(data_b.p + start, data_b.n - start);
+            const uint64_t run = at.take(where);
+            if (until.e != nullptr) until.take(where);
+            bytes->skip(static_cast<size_t>(run));
+            break;
+        }
+        case Kind::Short: case Kind::Int: case Kind::Long: case Kind::Date: int_rle(data_r, data_b, ints, true); break;
+        case Kind::Float: case Kind::Double: raw_data(); break;
+        case Kind::String: case Kind::Varchar: case Kind::Char: case Kind::Binary:
+            if (dictionary) {
+                int_rle(data_r, data_b, ints, false);
+            } else {
+                raw_data();
+                int_rle(length_r, length_b, lengths, false);
+            }
+            break;
+        case Kind::Timestamp: case Kind::TimestampInstant:
+            int_rle(data_r, data_b, ints, true);
+            int_rle(secondary_r, secondary_b, secondary, false);
+            break;
+        case Kind::Decimal:
+            raw_data();
+            int_rle(secondary_r, secondary_b, secondary, true);
+            break;
+        default: fail(where + std::string(kind_name(fc.kind)) + " columns are not supported");
+    }
+    at.finish(where);
+}
+
+void LeafCursor::read(uint32_t rows, Column& out) {
+    // PRESENT: this range's validity; null when every row has a value.
     Presence pres;
     pres.nonnull = rows;
-    if (const auto* s = find(StreamKind::Present)) {
-        const Bytes pb = stream(s->first, s->second);
+    if (present) {
         draken::AppendBuffer<uint8_t> bitmap;
         bitmap.resize_fill(pad8((static_cast<size_t>(rows) + 7) / 8), 0);
-        pres.nonnull = read_present(pb.p, pb.n, rows, bitmap.data());
+        pres.nonnull = present->read_bitmap(rows, bitmap.data());
         if (pres.nonnull != rows) pres.validity = bitmap.release();
     }
     struct Guard {
@@ -728,26 +947,26 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
     const size_t nn = pres.nonnull;
     const bool all_valid = pres.nonnull == rows;
 
-    out.type = rc.type;
+    out.type = type;
     out.length = rows;
-    out.precision = rc.precision;
-    out.scale = rc.scale;
+    out.precision = precision;
+    out.scale = scale;
 
     // Nullable output retains zeroes at null rows. All-valid output is entirely overwritten.
     auto fixed_out = [&](size_t width) {
         draken::AppendBuffer<uint8_t> buf;
-        const size_t bytes = static_cast<size_t>(rows) * width;
-        if (all_valid) buf.resize_uninit(bytes);
-        else buf.resize_fill(bytes, 0);
+        const size_t n = static_cast<size_t>(rows) * width;
+        if (all_valid) buf.resize_uninit(n);
+        else buf.resize_fill(n, 0);
         return buf;
     };
+    auto raw_left = [&]() { return static_cast<size_t>(raw_end - raw); };
     const uint8_t* validity = pres.validity;
 
     switch (fc.kind) {
         case Kind::Boolean: {
-            const Bytes b = need(StreamKind::Data, "DATA");
             std::vector<uint8_t> vals(nn);
-            read_bools(b.p, b.n, nn, vals.data());
+            bools->read_bools(nn, vals.data());
             auto* bits = alloc_zero(pad8((static_cast<size_t>(rows) + 7) / 8));
             size_t k = 0;
             for (uint32_t r = 0; r < rows; ++r) {
@@ -759,59 +978,55 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             break;
         }
         case Kind::Byte: {
-            const Bytes b = need(StreamKind::Data, "DATA");
-            const size_t width = width_of(rc.type);
+            const size_t width = width_of(type);
             draken::AppendBuffer<uint8_t> buf = fixed_out(width);
-            ByteRle reader(b.p, b.n);
             switch (width) {
-                case 1: read_bytes_into(reader, reinterpret_cast<int8_t*>(buf.data()), nn, pres.validity); break;
-                case 2: read_bytes_into(reader, reinterpret_cast<int16_t*>(buf.data()), nn, pres.validity); break;
-                case 4: read_bytes_into(reader, reinterpret_cast<int32_t*>(buf.data()), nn, pres.validity); break;
-                default: read_bytes_into(reader, reinterpret_cast<int64_t*>(buf.data()), nn, pres.validity); break;
+                case 1: read_bytes_into(*bytes, reinterpret_cast<int8_t*>(buf.data()), nn, validity); break;
+                case 2: read_bytes_into(*bytes, reinterpret_cast<int16_t*>(buf.data()), nn, validity); break;
+                case 4: read_bytes_into(*bytes, reinterpret_cast<int32_t*>(buf.data()), nn, validity); break;
+                default: read_bytes_into(*bytes, reinterpret_cast<int64_t*>(buf.data()), nn, validity); break;
             }
             out.kind = OutKind::Raw;
             out.data = buf.release();
             break;
         }
         case Kind::Short: case Kind::Int: case Kind::Long: case Kind::Date: {
-            const Bytes b = need(StreamKind::Data, "DATA");
-            const size_t width = width_of(rc.type);
+            const size_t width = width_of(type);
             draken::AppendBuffer<uint8_t> buf = fixed_out(width);
-            IntRle reader(b.p, b.n, v2, true);
             switch (width) {
-                case 2: read_ints_into(reader, reinterpret_cast<int16_t*>(buf.data()), nn, validity); break;
-                case 4: read_ints_into(reader, reinterpret_cast<int32_t*>(buf.data()), nn, validity); break;
-                default: read_ints_into(reader, reinterpret_cast<int64_t*>(buf.data()), nn, validity); break;
+                case 2: read_ints_into(*ints, reinterpret_cast<int16_t*>(buf.data()), nn, validity); break;
+                case 4: read_ints_into(*ints, reinterpret_cast<int32_t*>(buf.data()), nn, validity); break;
+                default: read_ints_into(*ints, reinterpret_cast<int64_t*>(buf.data()), nn, validity); break;
             }
             out.kind = fc.type == DRAKEN_TIME64 ? OutKind::Time64 : OutKind::Raw;
             out.data = buf.release();
             break;
         }
         case Kind::Float: case Kind::Double: {
-            const Bytes b = need(StreamKind::Data, "DATA");
             const size_t w = fc.kind == Kind::Float ? 4 : 8;
-            if (b.n < nn * w) fail(where + "its DATA stream is shorter than its values");
-            draken::AppendBuffer<uint8_t> buf = fixed_out(width_of(rc.type));
+            if (raw_left() < nn * w) fail(where + "its DATA stream is shorter than its values");
+            draken::AppendBuffer<uint8_t> buf = fixed_out(width_of(type));
             uint8_t* d = buf.data();
-            if (all_valid && w == width_of(rc.type)) {
-                if (rows != 0) std::memcpy(d, b.p, static_cast<size_t>(rows) * w);
+            if (all_valid && w == width_of(type)) {
+                if (rows != 0) std::memcpy(d, raw, static_cast<size_t>(rows) * w);
             } else {
                 size_t k = 0;
                 for (uint32_t r = 0; r < rows; ++r) {
                     if (!present_at(validity, r)) continue;
-                    const uint8_t* src = b.p + (k++) * w;
+                    const uint8_t* from = raw + (k++) * w;
                     if (fc.kind == Kind::Float) {
                         float f;
-                        std::memcpy(&f, src, 4);
-                        if (rc.type == DRAKEN_FLOAT32) reinterpret_cast<float*>(d)[r] = f;
+                        std::memcpy(&f, from, 4);
+                        if (type == DRAKEN_FLOAT32) reinterpret_cast<float*>(d)[r] = f;
                         else reinterpret_cast<double*>(d)[r] = static_cast<double>(f);
                     } else {
                         double f;
-                        std::memcpy(&f, src, 8);
+                        std::memcpy(&f, from, 8);
                         reinterpret_cast<double*>(d)[r] = f;
                     }
                 }
             }
+            raw += nn * w;
             out.kind = OutKind::Raw;
             out.data = buf.release();
             break;
@@ -820,127 +1035,105 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             if (fc.type == DRAKEN_UUID) {
                 // A BINARY column marked iceberg.binary-type=UUID: exactly 16 bytes per value, in
                 // network order, into a 16-byte lane. Anything else is not a uuid - fail, naming it.
-                if (dictionary) fail(where + "a uuid column with a dictionary encoding is not supported");
-                const Bytes lens_b = need(StreamKind::Length, "LENGTH");
-                std::vector<int64_t> lens(nn);
-                IntRle(lens_b.p, lens_b.n, v2, false).read(lens.data(), nn);
-                for (int64_t l : lens)
-                    if (l != 16) fail(where + "a uuid value is " + std::to_string(l) + " bytes, not 16");
-                const Bytes data_b = need(StreamKind::Data, "DATA");
-                if (data_b.n < nn * 16) fail(where + "its DATA stream is shorter than its uuid values");
+                scratch.resize(nn);
+                lengths->read(scratch.data(), nn);
+                for (size_t i = 0; i < nn; ++i)
+                    if (scratch[i] != 16) fail(where + "a uuid value is " + std::to_string(scratch[i]) + " bytes, not 16");
+                if (raw_left() < nn * 16) fail(where + "its DATA stream is shorter than its uuid values");
                 draken::AppendBuffer<uint8_t> buf = fixed_out(16);
-                const uint8_t* src = data_b.p;
                 for (uint32_t r = 0; r < rows; ++r) {
                     if (!present_at(validity, r)) continue;
-                    std::memcpy(buf.data() + static_cast<size_t>(r) * 16, src, 16);
-                    src += 16;
+                    std::memcpy(buf.data() + static_cast<size_t>(r) * 16, raw, 16);
+                    raw += 16;
                 }
                 out.kind = OutKind::Raw;
                 out.data = buf.release();
                 break;
             }
             if (!dictionary) {
-                const Bytes lens_b = need(StreamKind::Length, "LENGTH");
-                std::vector<int64_t> lens(nn);
-                IntRle(lens_b.p, lens_b.n, v2, false).read(lens.data(), nn);
+                scratch.resize(nn);
+                lengths->read(scratch.data(), nn);
                 if (fc.fixed_length != 0)
-                    for (int64_t l : lens)
-                        if (l != static_cast<int64_t>(fc.fixed_length))
-                            fail(where + "a fixed(" + std::to_string(fc.fixed_length) + ") value is " + std::to_string(l) + " bytes");
-                const Bytes data_b = need(StreamKind::Data, "DATA");
+                    for (size_t i = 0; i < nn; ++i)
+                        if (scratch[i] != static_cast<int64_t>(fc.fixed_length))
+                            fail(where + "a fixed(" + std::to_string(fc.fixed_length) + ") value is " + std::to_string(scratch[i]) + " bytes");
                 uint64_t total = 0;
-                for (int64_t l : lens) {
-                    if (l < 0) fail(where + "a string has a negative length");
-                    total += static_cast<uint64_t>(l);
+                for (size_t i = 0; i < nn; ++i) {
+                    if (scratch[i] < 0) fail(where + "a string has a negative length");
+                    total += static_cast<uint64_t>(scratch[i]);
                 }
-                if (total > data_b.n) fail(where + "its DATA stream is shorter than its string lengths");
+                if (total > raw_left()) fail(where + "its DATA stream is shorter than its string lengths");
                 draken::AppendBuffer<DrakenStringSlot> slots;
                 draken::AppendBuffer<uint8_t> arena;
                 slots.resize_uninit(rows);
                 arena.reserve(static_cast<size_t>(total));
-                const uint8_t* src = data_b.p;
                 size_t k = 0;
                 for (uint32_t r = 0; r < rows; ++r) {
                     if (!present_at(validity, r)) {
                         str_init_null(&slots[r]);
                         continue;
                     }
-                    const uint64_t len = static_cast<uint64_t>(lens[k++]);
-                    build_slot(slots, arena, r, src, len);
-                    src += len;
+                    const uint64_t len = static_cast<uint64_t>(scratch[k++]);
+                    build_slot(slots, arena, r, raw, len);
+                    raw += len;
                 }
                 out.kind = OutKind::String;
                 out.arena_len = arena.size();
                 out.slots = slots.release();
                 out.arena = arena.release();
-            } else {
-                const uint32_t dsize = enc.dictionary_size;
-                const Bytes idx_b = need(StreamKind::Data, "DATA");
-                std::vector<int64_t> idx(nn);
-                IntRle(idx_b.p, idx_b.n, v2, false).read(idx.data(), nn);
-                if (dsize == 0) {
-                    if (nn != 0) fail(where + "it has values but an empty dictionary");
-                    draken::AppendBuffer<DrakenStringSlot> slots;
-                    slots.resize_uninit(rows);
-                    for (uint32_t r = 0; r < rows; ++r) str_init_null(&slots[r]);
-                    out.kind = OutKind::String;
-                    out.slots = slots.release();
-                    break;
-                }
-                const Bytes lens_b = need(StreamKind::Length, "LENGTH");
-                std::vector<int64_t> lens(dsize);
-                IntRle(lens_b.p, lens_b.n, v2, false).read(lens.data(), dsize);
-                if (fc.fixed_length != 0)
-                    for (int64_t l : lens)
-                        if (l != static_cast<int64_t>(fc.fixed_length))
-                            fail(where + "a fixed(" + std::to_string(fc.fixed_length) + ") value is " + std::to_string(l) + " bytes");
-                const Bytes dict_b = need(StreamKind::DictionaryData, "DICTIONARY_DATA");
-                uint64_t total = 0;
-                for (int64_t l : lens) {
-                    if (l < 0) fail(where + "a dictionary entry has a negative length");
-                    total += static_cast<uint64_t>(l);
-                }
-                if (total > dict_b.n) fail(where + "its DICTIONARY_DATA stream is shorter than its entry lengths");
-                draken::AppendBuffer<DrakenStringSlot> dslots;
-                draken::AppendBuffer<uint8_t> darena;
-                dslots.resize_uninit(dsize);
-                const uint8_t* src = dict_b.p;
-                for (uint32_t e = 0; e < dsize; ++e) {
-                    const uint64_t len = static_cast<uint64_t>(lens[e]);
-                    build_slot(dslots, darena, e, src, len);
-                    src += len;
-                }
-                draken::AppendBuffer<uint32_t> codes;
-                codes.resize_fill(rows, 0);
-                size_t k = 0;
-                for (uint32_t r = 0; r < rows; ++r) {
-                    if (!present_at(validity, r)) continue;
-                    const int64_t c = idx[k++];
-                    if (c < 0 || static_cast<uint64_t>(c) >= dsize) fail(where + "a dictionary index is out of range");
-                    codes[r] = static_cast<uint32_t>(c);
-                }
-                out.kind = OutKind::Dict;
-                out.dict_len = dsize;
-                out.arena_len = darena.size();
-                out.slots = dslots.release();
-                out.arena = darena.release();
-                out.codes = codes.release();
+                break;
             }
+            scratch.resize(nn);
+            ints->read(scratch.data(), nn);
+            if (dsize == 0 && nn != 0) fail(where + "it has values but an empty dictionary");
+            // The entries this range uses, in first-use order, become its dictionary.
+            draken::AppendBuffer<uint32_t> codes;
+            codes.resize_fill(rows, 0);
+            touched.clear();
+            size_t k = 0;
+            for (uint32_t r = 0; r < rows; ++r) {
+                if (!present_at(validity, r)) continue;
+                const int64_t c = scratch[k++];
+                if (c < 0 || static_cast<uint64_t>(c) >= dsize) fail(where + "a dictionary index is out of range");
+                uint32_t& code = remap[static_cast<size_t>(c)];
+                if (code == kNone) {
+                    code = static_cast<uint32_t>(touched.size());
+                    touched.push_back(static_cast<uint32_t>(c));
+                }
+                codes[r] = code;
+            }
+            if (touched.empty()) {   // every row of the range is null
+                draken::AppendBuffer<DrakenStringSlot> slots;
+                slots.resize_uninit(rows);
+                for (uint32_t r = 0; r < rows; ++r) str_init_null(&slots[r]);
+                out.kind = OutKind::String;
+                out.slots = slots.release();
+                break;
+            }
+            draken::AppendBuffer<DrakenStringSlot> cslots;
+            draken::AppendBuffer<uint8_t> carena;
+            cslots.resize_uninit(touched.size());
+            for (size_t j = 0; j < touched.size(); ++j) {
+                const uint32_t e = touched[j];
+                const DrakenStringSlot* from = &dslots[e];
+                build_slot(cslots, carena, j, str_data(from, darena), str_length(from));
+                remap[e] = kNone;
+            }
+            out.kind = OutKind::Dict;
+            out.dict_len = static_cast<uint32_t>(touched.size());
+            out.arena_len = carena.size();
+            out.slots = cslots.release();
+            out.arena = carena.release();
+            out.codes = codes.release();
             break;
         }
         case Kind::Timestamp: case Kind::TimestampInstant: {
-            if (fc.kind == Kind::Timestamp && !is_utc_name(sf.writer_timezone))
-                fail(where + "it is a TIMESTAMP written in time zone '" + sf.writer_timezone +
-                     "'; only UTC writers are supported (a TIMESTAMP is wall-clock time in its writer's zone)");
-            const Bytes data_b = need(StreamKind::Data, "DATA");
-            const Bytes nano_b = need(StreamKind::Secondary, "SECONDARY");
             draken::AppendBuffer<uint8_t> buf = fixed_out(sizeof(int64_t));
             auto* values = reinterpret_cast<int64_t*>(buf.data());
-            IntRle seconds(data_b.p, data_b.n, v2, true);
-            IntRle nanos(nano_b.p, nano_b.n, v2, false);
             size_t row = 0;
             PresentCursor cursor{validity};
-            seconds.read_runs(nn, [&](const int64_t* secs, size_t n) {
+            IntRle& nanos = *secondary;
+            ints->read_runs(nn, [&](const int64_t* secs, size_t n) {
                 nanos.read_runs(n, [&](const int64_t* fractions, size_t count) {
                     const size_t first = row;
                     uint64_t offsets = 0;
@@ -966,22 +1159,19 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             break;
         }
         case Kind::Decimal: {
-            const Bytes data_b = need(StreamKind::Data, "DATA");
-            const Bytes scale_b = need(StreamKind::Secondary, "SECONDARY");
-            std::vector<int64_t> scales(nn);
-            IntRle(scale_b.p, scale_b.n, v2, true).read(scales.data(), nn);
-            const size_t w = width_of(rc.type);
+            scratch.resize(nn);
+            secondary->read(scratch.data(), nn);
+            const size_t w = width_of(type);
             draken::AppendBuffer<uint8_t> buf = fixed_out(w);
-            const unsigned __int128 limit = pow10_128(rc.precision);
-            const uint8_t* p = data_b.p;
-            const uint8_t* end = data_b.p + data_b.n;
+            const unsigned __int128 limit = pow10_128(precision);
+            const uint8_t* p = raw;
             size_t k = 0;
             for (uint32_t r = 0; r < rows; ++r) {
                 if (!present_at(validity, r)) continue;
-                __int128 v = read_varint128(p, end);
-                const int64_t s = scales[k++];
+                __int128 v = read_varint128(p, raw_end);
+                const int64_t s = scratch[k++];
                 if (s < 0 || s > 38) fail(where + "a decimal value has scale " + std::to_string(s));
-                const int target = rc.scale;
+                const int target = scale;
                 if (s < target) {
                     v *= static_cast<__int128>(pow10_128(static_cast<unsigned>(target - s)));
                 } else if (s > target) {
@@ -990,10 +1180,11 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
                     v /= div;
                 }
                 const unsigned __int128 mag = v < 0 ? static_cast<unsigned __int128>(-v) : static_cast<unsigned __int128>(v);
-                if (mag >= limit) fail(where + "a decimal value exceeds precision " + std::to_string(rc.precision));
+                if (mag >= limit) fail(where + "a decimal value exceeds precision " + std::to_string(precision));
                 if (w == 16) std::memcpy(buf.data() + static_cast<size_t>(r) * 16, &v, 16);
                 else *reinterpret_cast<int64_t*>(buf.data() + static_cast<size_t>(r) * 8) = static_cast<int64_t>(v);
             }
+            raw = p;
             out.kind = w == 16 ? OutKind::Decimal128 : OutKind::Decimal64;
             out.data = buf.release();
             break;
@@ -1003,6 +1194,8 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
     }
     out.validity = take_validity();
 }
+
+}  // namespace
 
 // ── nested columns ──────────────────────────────────────────────────────────
 //
@@ -1286,12 +1479,9 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
     if (!is_container(t.kind)) {
         nd.fc = describe_leaf(t, name, id);
         if (!nd.fc.readable) fail(where + nd.fc.refusal);
-        ReaderColumn rc;
-        rc.name = name;
-        rc.type = nd.fc.type;
-        rc.precision = nd.fc.precision;
-        rc.scale = nd.fc.scale;
-        decode_leaf(sf, streams, nd.fc, rc, static_cast<uint32_t>(n), nd.leaf);
+        LeafCursor leaf(src, sf, streams, nd.fc, nd.fc.type, nd.fc.precision, nd.fc.scale);
+        leaf.seek(nullptr, nullptr);
+        leaf.read(static_cast<uint32_t>(n), nd.leaf);
         return nd;
     }
 
@@ -1362,57 +1552,286 @@ NestedNode OrcFile::Impl::build_node(const StripeFooter& sf, const StreamMap& st
     return nd;
 }
 
-void OrcFile::Impl::decode_nested(const StripeFooter& sf, const StreamMap& streams, const FileColumn& fc,
-                                  const ReaderColumn& rc, uint32_t rows, Column& out) const {
-    // A declared shape applies to a column that renders as JSON; an ARRAY (a list of a plain scalar) has no
-    // names to drift.
-    std::unique_ptr<DeclCtx> decl;
-    if (!rc.declared.empty() && fc.type == DRAKEN_NVARCHAR) decl = std::make_unique<DeclCtx>(rc.declared);
-    NestedNode top = build_node(sf, streams, fc.type_id, fc.name, std::string(), rows, decl.get(), decl ? 0 : -1);
-    out.type = rc.type;
-    out.length = rows;
+// ── stripe cursor ───────────────────────────────────────────────────────────
 
-    // The column's own nulls.
-    uint8_t* validity = validity_of(top);
-    struct Guard {
-        uint8_t*& p;
-        ~Guard() { draken_free(p); }
-    } validity_guard{validity};
+namespace {
 
-    if (fc.type == DRAKEN_ARRAY) {
-        // A LIST of a plain scalar, or of lists of one: the offsets, and the element column as decoded.
-        out.type = DRAKEN_ARRAY;
-        uint8_t* owned = validity;
-        validity = nullptr;   // fill_array's column owns it now
-        fill_array(top, out, owned);
+// `n` bits of LSB-first `src` from bit `from`, into `dst` (zeroed) from bit 0.
+void copy_bits(const uint8_t* src, size_t from, size_t n, uint8_t* dst) {
+    if ((from & 7) == 0) {
+        if (n == 0) return;
+        std::memcpy(dst, src + from / 8, (n + 7) / 8);
+        if ((n & 7) != 0) dst[n / 8] &= static_cast<uint8_t>((1u << (n & 7)) - 1);
         return;
     }
+    for (size_t i = 0; i < n; ++i)
+        if ((src[(from + i) >> 3] >> ((from + i) & 7)) & 1) dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+}
 
-    // Everything else is one JSON value per row.
+// Entries [from, from + n) of a validity bitmap; null stays null (every entry present).
+uint8_t* slice_validity(const uint8_t* v, size_t from, size_t n) {
+    if (v == nullptr) return nullptr;
+    uint8_t* out = alloc_zero(pad8((n + 7) / 8));
+    copy_bits(v, from, n, out);
+    return out;
+}
+
+// Rows [from, from + n) of an Array column (fill_array's shape), copied.
+void slice_array(const Column& src, size_t from, size_t n, Column& out) {
+    out.kind = OutKind::Array;
+    out.type = DRAKEN_ARRAY;
+    out.length = static_cast<uint32_t>(n);
+    out.validity = slice_validity(src.validity, from, n);
+    draken::AppendBuffer<uint8_t> off_buf;
+    off_buf.resize_uninit((n + 1) * sizeof(int32_t));
+    int32_t* offsets = reinterpret_cast<int32_t*>(off_buf.data());
+    const int32_t base = src.offsets[from];
+    for (size_t i = 0; i <= n; ++i) offsets[i] = src.offsets[from + i] - base;
+    out.offsets = reinterpret_cast<int32_t*>(off_buf.release());
+    const size_t cn = static_cast<size_t>(offsets[n]);
+    out.child_type = src.child_type;
+    out.child_length = static_cast<uint32_t>(cn);
+    if (src.child_type == DRAKEN_ARRAY) {
+        out.child_col = std::make_unique<Column>();
+        slice_array(*src.child_col, static_cast<size_t>(base), cn, *out.child_col);
+        return;
+    }
+    out.child_validity = slice_validity(src.child_validity, static_cast<size_t>(base), cn);
+    if (src.child_type == DRAKEN_VARCHAR || src.child_type == DRAKEN_VARBINARY) {
+        draken::AppendBuffer<DrakenStringSlot> slots;
+        draken::AppendBuffer<uint8_t> arena;
+        slots.resize_uninit(cn);
+        for (size_t i = 0; i < cn; ++i) {
+            const size_t e = static_cast<size_t>(base) + i;
+            if (!present_at(src.child_validity, e)) {
+                str_init_null(&slots[i]);
+                continue;
+            }
+            const DrakenStringSlot* slot = &src.slots[e];
+            build_slot(slots, arena, i, str_data(slot, src.arena), str_length(slot));
+        }
+        out.data = alloc_zero(16);
+        out.arena_len = arena.size();
+        out.slots = slots.release();
+        out.arena = arena.release();
+        return;
+    }
+    const uint8_t* d = static_cast<const uint8_t*>(src.data);
+    if (src.child_type == DRAKEN_BOOL) {
+        uint8_t* bits = alloc_zero(pad8((cn + 7) / 8));
+        copy_bits(d, static_cast<size_t>(base), cn, bits);
+        out.data = bits;
+        return;
+    }
+    const size_t w = width_of(src.child_type);
+    uint8_t* values = alloc_bytes(cn * w);
+    if (cn != 0) std::memcpy(values, d + static_cast<size_t>(base) * w, cn * w);
+    out.data = values;
+}
+
+// Rows [from, from + rows) of a JSON-rendered nested column. The node's render cursors carry on
+// from the previous range, so the ranges must come in order.
+void render_json(NestedNode& top, size_t from, uint32_t rows, DrakenType type, Column& out) {
+    const uint8_t* top_validity = top.validity.empty() ? nullptr : top.validity.data();
+    out.type = type;
+    out.length = rows;
     std::string all;
     std::vector<uint64_t> ends(rows);
     for (uint32_t r = 0; r < rows; ++r) {
-        if (present_at(validity, r)) render_value(all, top, r);
+        if (present_at(top_validity, from + r)) render_value(all, top, from + r);
         ends[r] = all.size();
     }
     draken::AppendBuffer<DrakenStringSlot> slots;
     draken::AppendBuffer<uint8_t> arena;
     slots.resize_uninit(rows);
-    uint64_t from = 0;
+    uint64_t at = 0;
     for (uint32_t r = 0; r < rows; ++r) {
-        if (!present_at(validity, r)) {
-            str_init_null(&slots[r]);
-        } else {
-            build_slot(slots, arena, r, reinterpret_cast<const uint8_t*>(all.data()) + from, ends[r] - from);
-        }
-        from = ends[r];
+        if (!present_at(top_validity, from + r)) str_init_null(&slots[r]);
+        else build_slot(slots, arena, r, reinterpret_cast<const uint8_t*>(all.data()) + at, ends[r] - at);
+        at = ends[r];
     }
     out.kind = OutKind::String;
     out.arena_len = arena.size();
     out.slots = slots.release();
     out.arena = arena.release();
-    out.validity = validity;
-    validity = nullptr;
+    out.validity = slice_validity(top_validity, from, rows);
+}
+
+}  // namespace
+
+// One bound column of the stripe: a primitive's cursor, a nested column decoded whole (rendered
+// or sliced a range at a time), or none (a NULL constant).
+struct StripeCursor::Col {
+    const ReaderColumn* rc = nullptr;
+    uint32_t type_id = 0;                 // a primitive: its type id (the column of its ROW_INDEX)
+    std::unique_ptr<LeafCursor> leaf;
+    std::vector<RowIndexEntry> index;     // a primitive: the stripe's row index, once read
+    std::unique_ptr<NestedNode> json;
+    uint32_t json_at = 0;                 // the next row the JSON renderer stands at
+    std::unique_ptr<Column> array;
+};
+
+// What the cursor keeps of the stripe: where its streams are, and its row groups.
+struct StripeCursor::Stripe {
+    const StreamSource* src = nullptr;
+    StreamMap streams;
+    uint32_t stride = 0;     // rows per row group; 0 = the file has no row index
+    int indexed = -1;        // -1 = not yet looked; 0 / 1
+};
+
+StripeCursor::StripeCursor(const OrcFile& file, size_t stripe, const std::vector<uint32_t>* columns)
+    : stripe_(new Stripe) {
+    const OrcFile::Impl& m = *file.impl_;
+    const StripeInfo& si = m.footer.stripes.at(stripe);
+    rows_ = static_cast<uint32_t>(si.rows);
+    stripe_->src = &m.src;
+    stripe_->stride = m.footer.row_index_stride;
+    std::vector<uint32_t> all;
+    if (columns == nullptr) {
+        for (uint32_t i = 0; i < m.plan.size(); ++i) all.push_back(i);
+        columns = &all;
+    }
+    if (columns->empty()) return;
+
+    // The stripe footer names every stream; offsets are the running sum of their lengths,
+    // index streams first, so a column that is not asked for is never touched.
+    const uint64_t footer_at = si.offset + si.index_length + si.data_length;
+    const Bytes footer_bytes = m.stream(footer_at, si.footer_length);
+    const StripeFooter sf = parse_stripe_footer({footer_bytes.p, footer_bytes.n});
+    StreamMap& streams = stripe_->streams;
+    uint64_t at = si.offset;
+    for (const StreamInfo& s : sf.streams) {
+        streams[{s.column, s.kind}] = {at, s.length};
+        at += s.length;
+    }
+    if (at > footer_at) fail("a stripe's streams extend past its data (the file is corrupt)");
+
+    cols_.reserve(columns->size());
+    for (const uint32_t i : *columns) {
+        if (i >= m.plan.size()) fail("a stripe cursor was asked for a column that is not bound");
+        const ColPlan& cp = m.plan[i];
+        auto c = std::make_unique<Col>();
+        c->rc = &cp.rc;
+        if (cp.file_col >= 0) {
+            const FileColumn& fc = m.columns[static_cast<size_t>(cp.file_col)];
+            if (!fc.nested) {
+                c->type_id = fc.type_id;
+                c->leaf = std::make_unique<LeafCursor>(m.src, sf, streams, fc, cp.rc.type, cp.rc.precision, cp.rc.scale);
+            } else {
+                // A declared shape applies to a column that renders as JSON; an ARRAY (a list of a plain
+                // scalar) has no names to drift.
+                std::unique_ptr<DeclCtx> decl;
+                if (!cp.rc.declared.empty() && fc.type == DRAKEN_NVARCHAR) decl = std::make_unique<DeclCtx>(cp.rc.declared);
+                NestedNode top = m.build_node(sf, streams, fc.type_id, fc.name, std::string(), rows_, decl.get(), decl ? 0 : -1);
+                if (fc.type == DRAKEN_ARRAY) {
+                    // A LIST of a plain scalar, or of lists of one: the offsets, and the element column as decoded.
+                    c->array = std::make_unique<Column>();
+                    fill_array(top, *c->array, validity_of(top));
+                } else {
+                    c->json = std::make_unique<NestedNode>(std::move(top));
+                }
+            }
+        }
+        cols_.push_back(std::move(c));
+    }
+}
+
+StripeCursor::~StripeCursor() = default;
+
+uint32_t StripeCursor::stride() const { return stripe_->stride; }
+
+bool StripeCursor::indexed() {
+    Stripe& st = *stripe_;
+    if (st.indexed >= 0) return st.indexed == 1;
+    st.indexed = 0;
+    if (st.stride == 0) return false;
+    const size_t groups = (static_cast<size_t>(rows_) + st.stride - 1) / st.stride;
+    for (auto& c : cols_) {
+        if (!c->leaf) continue;
+        auto it = st.streams.find({c->type_id, static_cast<uint32_t>(StreamKind::RowIndex)});
+        if (it == st.streams.end()) return false;
+        const Bytes b = st.src->get(it->second.first, it->second.second);
+        c->index = parse_row_index({b.p, b.n});
+        if (c->index.size() != groups)
+            fail(c->leaf->where + "its row index has " + std::to_string(c->index.size()) + " row groups, not " +
+                 std::to_string(groups) + " (the file is corrupt)");
+    }
+    st.indexed = 1;
+    return true;
+}
+
+Batch StripeCursor::next(uint32_t n) { return read(at_, n, rows_); }
+
+Batch StripeCursor::read(uint32_t first, uint32_t n, uint32_t run_end) {
+    if (first < at_ || n > run_end - first || run_end > rows_ || first > run_end)
+        fail("a stripe was read out of order or past its last row");
+    const bool contiguous = opened_ && first == at_ && first + n <= window_end_;
+    if (!contiguous) {
+        if (!opened_ && first == 0 && run_end == rows_) {
+            for (auto& c : cols_)
+                if (c->leaf) c->leaf->seek(nullptr, nullptr);
+            window_end_ = rows_;
+        } else if (indexed() && first % stripe_->stride == 0) {
+            // Open every primitive at the row group `first` starts, as far as the run needs.
+            const uint32_t stride = stripe_->stride;
+            const size_t group = first / stride;
+            const size_t until = (static_cast<size_t>(run_end) + stride - 1) / stride;
+            for (auto& c : cols_) {
+                if (!c->leaf) continue;
+                c->leaf->seek(&c->index[group], until < c->index.size() ? &c->index[until] : nullptr);
+            }
+            window_end_ = until < (static_cast<size_t>(rows_) + stride - 1) / stride ? static_cast<uint32_t>(until * stride) : rows_;
+        } else if (!opened_ || window_end_ == rows_) {
+            // No row index to seek by: read on from where the streams stand, dropping the rows between.
+            if (!opened_) {
+                for (auto& c : cols_)
+                    if (c->leaf) c->leaf->seek(nullptr, nullptr);
+                window_end_ = rows_;
+                at_ = 0;
+            }
+            if (first > at_) {
+                for (auto& c : cols_) {
+                    if (!c->leaf) continue;
+                    Column dropped;
+                    c->leaf->read(first - at_, dropped);
+                }
+            }
+        } else {
+            fail("a stripe cursor read starts inside a row group it has not opened");
+        }
+        opened_ = true;
+    }
+
+    Batch batch;
+    batch.rows = n;
+    batch.columns.resize(cols_.size());
+    for (size_t i = 0; i < cols_.size(); ++i) {
+        Col& c = *cols_[i];
+        Column& out = batch.columns[i];
+        if (c.leaf) {
+            c.leaf->read(n, out);
+        } else if (c.json) {
+            if (first > c.json_at) {   // the renderer's cursors only move forward, row by row
+                Column dropped;
+                render_json(*c.json, c.json_at, first - c.json_at, c.rc->type, dropped);
+            }
+            render_json(*c.json, first, n, c.rc->type, out);
+            c.json_at = first + n;
+        } else if (c.array && first == 0 && n == rows_) {
+            out = std::move(*c.array);
+        } else if (c.array) {
+            slice_array(*c.array, first, n, out);
+        } else {
+            null_constant(*c.rc, n, out);
+        }
+    }
+    at_ = first + n;
+    return batch;
+}
+
+Batch OrcFile::decode_stripe(size_t stripe) const {
+    StripeCursor cursor(*this, stripe);
+    return cursor.next(cursor.rows());
 }
 
 }  // namespace rugo::orc

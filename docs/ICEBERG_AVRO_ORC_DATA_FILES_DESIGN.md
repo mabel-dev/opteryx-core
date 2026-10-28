@@ -148,7 +148,7 @@ pushed predicate or limit is REMOVED from the plan, so an Avro dataset must not 
 same bind-time per-instance gating `FileSystemTable` uses) sets, for an AVRO manifest,
 `supports_predicate_pushdown`, `supports_limit_pushdown`, `supports_topn_pushdown` and
 `supports_int64_timestamp_retag` all False. Predicates and limits then stay as Filter / Limit
-nodes above the scan, which `_arm_avro_prefilter` (`compiler.py:6823`) already serves natively.
+nodes above the scan, which `_arm_two_pass_prefilter` (`compiler.py`, formerly `_arm_avro_prefilter`) already serves natively.
 File-level pruning from manifest min/max is format-independent and keeps working (Iceberg's
 Avro writer records no column bounds, so in practice an Avro file is read, not pruned).
 

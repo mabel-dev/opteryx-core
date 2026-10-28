@@ -12,7 +12,7 @@
 //
 // An OrcFile is opened over a caller-owned buffer that must outlive it. After bind(),
 // decode_stripe() is const and re-entrant: any number of threads may decode different
-// stripes of one file at once.
+// stripes of one file at once. A StripeCursor decodes one stripe a row range at a time.
 
 #include <cstdint>
 #include <memory>
@@ -98,8 +98,46 @@ public:
     Batch decode_stripe(size_t stripe) const;
 
 private:
+    friend class StripeCursor;
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// One stripe's bound columns (or `columns`, indices into them, in that order), decoded a row range
+// at a time, so a stripe becomes batches of a bounded size (docs/ORC_READER_DESIGN.md §6.3). Ranges
+// come in row order. A range may skip ahead: with a row index (§6.5) a range that starts a row
+// group seeks there and decompresses only as far as its run needs; without one, the rows between
+// are decoded and dropped. Nested columns are decoded whole for the stripe. One thread at a time;
+// the OrcFile must stay bound, unchanged, for the cursor's lifetime.
+class StripeCursor {
+public:
+    StripeCursor(const OrcFile& file, size_t stripe, const std::vector<uint32_t>* columns = nullptr);
+    ~StripeCursor();
+    StripeCursor(const StripeCursor&) = delete;
+    StripeCursor& operator=(const StripeCursor&) = delete;
+
+    uint32_t rows() const { return rows_; }
+    uint32_t remaining() const { return rows_ - at_; }
+    // Rows per row group; 0 when the file has no row index.
+    uint32_t stride() const;
+    // Whether every primitive column of the cursor has the stripe's row index (read on first ask).
+    bool indexed();
+
+    // The next `n` rows (none bound = a batch of only the row count).
+    Batch next(uint32_t n);
+    // Rows [first, first + n), at or after the last range's end, where [first, run_end) is the run
+    // of rows the caller will read in order from `first` before it skips again.
+    Batch read(uint32_t first, uint32_t n, uint32_t run_end);
+
+private:
+    struct Col;
+    struct Stripe;
+    uint32_t rows_ = 0;
+    uint32_t at_ = 0;
+    uint32_t window_end_ = 0;   // the open streams reach this row
+    bool opened_ = false;
+    std::vector<std::unique_ptr<Col>> cols_;
+    std::unique_ptr<Stripe> stripe_;
 };
 
 }  // namespace rugo::orc

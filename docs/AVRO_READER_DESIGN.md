@@ -773,7 +773,7 @@ Timing (local, cold process, median of 9 rotated rounds, full manifest build):
 
 The §20 build pushed projection only, with predicates deferred ("can come later"). Asked
 2026-10-11 ("1 - do it"): a WHERE directly over READ_AVRO now runs inside the scan
-(`NativeAvroScanSource::set_prefilter`, armed by `compiler._arm_avro_prefilter`), and the
+(`NativeAvroScanSource::set_prefilter`, armed by `compiler._arm_two_pass_prefilter`, formerly `_arm_avro_prefilter`), and the
 Filter above is not compiled. Arming needs no hoisted helper columns; the program is the
 one the ExprFilter would have run, resolved against the scan's two morsel layouts.
 

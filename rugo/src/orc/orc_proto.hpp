@@ -86,6 +86,18 @@ public:
         }
     }
 
+    // As repeated_varint, for 64-bit values.
+    void repeated_varint64(uint32_t wire, std::vector<uint64_t>& out) {
+        if (wire == 2) {
+            ProtoReader inner(bytes());
+            while (!inner.done()) out.push_back(inner.varint());
+        } else if (wire == 0) {
+            out.push_back(varint());
+        } else {
+            fail("a repeated integer field has wire type " + std::to_string(wire));
+        }
+    }
+
     bool done() const { return p_ == end_; }
 
 private:
@@ -186,6 +198,35 @@ struct StripeFooter {
     std::vector<ColumnEncoding> columns;
     std::string writer_timezone;
 };
+
+// One row group of a column's ROW_INDEX stream: where each of the column's streams stands at
+// the group's first row (docs/ORC_READER_DESIGN.md §6.5). Per stream, in the column's stream
+// order: the compressed chunk's offset in the stream and the offset in its decompressed bytes
+// (one byte offset when the file is uncompressed), then the run-length decoder's position.
+struct RowIndexEntry {
+    std::vector<uint64_t> positions;
+};
+
+inline std::vector<RowIndexEntry> parse_row_index(Slice s) {
+    std::vector<RowIndexEntry> entries;
+    ProtoReader r(s);
+    uint32_t field, wire;
+    while (r.next(field, wire)) {
+        if (field != 1) {
+            r.skip(wire);
+            continue;
+        }
+        RowIndexEntry e;
+        ProtoReader er(r.bytes());
+        uint32_t f, w;
+        while (er.next(f, w)) {
+            if (f == 1) er.repeated_varint64(w, e.positions);
+            else er.skip(w);
+        }
+        entries.push_back(std::move(e));
+    }
+    return entries;
+}
 
 inline PostScript parse_postscript(Slice s) {
     PostScript ps;

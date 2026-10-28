@@ -485,7 +485,7 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                             ]
                         # READ_AVRO prefilter: batches decoded two-pass / single-pass
                         # (native_avro_scan_source.hpp). Present only when one was armed.
-                        for key in ("avro_two_pass_batches", "avro_single_pass_batches"):
+                        for key in ("avro_two_pass_batches", "avro_single_pass_batches", "orc_pass2_rows"):
                             if key in facts:
                                 node_stat[key] = facts[key]
                         # TOP-N RUNTIME BOUNDARY: same contract — present only when
