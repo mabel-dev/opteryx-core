@@ -149,3 +149,31 @@ at best the CPU half of the gap. Stage 2 layout arms are therefore NOT justified
 leads are (a) the ramp-up and mid-run dips, (b) the merge's 2.11x multiplier. Next measurements,
 before any layout work: a 2 ms timeline correlated with phases (query start, flush, merge) and the
 split of Q35's remaining CPU outside the probe.
+
+## 12. Q35 phase timeline and the real lead (2026-10-28, Mac, read-only)
+
+Samply at 4 kHz, 8 aligned iterations, samples weighted by time to the thread's next sample
+(rate-agnostic; mean busy 14.3 cores against 14.1 from getrusage). Busy cores by phase, Q35 (135 ms):
+
+| window | what runs | busy cores |
+|---|---|---|
+| 0-4 ms | Python planning, serial | ~1 |
+| 4-8 ms | pipeline ramp (page-index setup, first row groups) | ~9 |
+| 8-88 ms | sink (scan + local probe), dips to ~11-12 at ~36 and ~84 ms | 12-17 |
+| 88-92 ms | sink drains while the merge starts | ~12 |
+| 92-124 ms | merge | 15-16 |
+| 124-136 ms | post-merge stage: SortKeyCmp, sort_num_key, integer arithmetic, expression eval | 8-12 |
+
+The sink and merge phases are saturated; the shortfall is the serial start (~4 ms) and the
+post-merge tail (~12 ms at ~8-12 cores). The tail is plan shape: `GroupKeyReductionStrategy` makes the
+aggregate group by `ClientIP` only, and a Projection computing `ClientIP-1..-3` then sits between the
+aggregate and the Heap Sort. The top-k fusion (which makes the Q31/Q32 aggregates emit 2,560 and
+20,480 rows) therefore does not apply: EXPLAIN ANALYZE shows the aggregate emitting all 9,762,046
+groups, the Projection evaluating three arithmetic columns over them (30 ms thread time) and the Heap
+Sort (40 ms thread time).
+
+Ceiling test (interleaved, 9 rounds, fresh process per run, min of 3): Q35 as written 152 ms median
+against the equivalent `top-k on GROUP BY ClientIP, then project` rewrite 142 ms, B/A 0.927, faster
+8 of 9 rounds; identical top-10 counts and ClientIPs. About -7% on Q35, which would take
+it from ~1.12x to ~1.05x DuckDB. Not yet tried: fusing top-k through a row-preserving Projection in
+the optimizer (planner change, needs the architect), which is also what the rewrite emulates.

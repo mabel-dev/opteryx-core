@@ -34,7 +34,15 @@ namespace {
 
 constexpr size_t   kSlot      = DRAKEN_SLAB_SLOT;
 constexpr int      kSlotLog2  = 21;
-constexpr size_t   kReserve   = size_t(256) << 30;      // address space, never committed
+// Address space, never committed. RISC-V Sv39 gives a process 256 GiB in total, so
+// 256 GiB can never map there (MEASURED 2026-10-28, Orange Pi RV2, inside
+// python+opteryx: 160 GiB reserves, 192 GiB does not). 64 GiB is a quarter of Sv39
+// and several times the RAM + swap of any board that runs it.
+#if defined(__riscv) && (__riscv_xlen == 64)
+constexpr size_t   kReserve   = size_t(64) << 30;
+#else
+constexpr size_t   kReserve   = size_t(256) << 30;
+#endif
 constexpr uint32_t kMaxSlots  = uint32_t(kReserve / kSlot);
 constexpr uint32_t kGrowSlots = 16;                      // mprotect frontier growth: 32 MiB
 constexpr int      kClasses   = 5;                       // 64 KiB .. 1 MiB

@@ -108,11 +108,17 @@ int main() {
     }
 
     // The in-window conversion matches the checked one at and just inside both window edges,
-    // and the window test admits exactly [kWindowSecondsLo, kWindowSecondsHi].
-    using rugo::orc::kWindowSecondsHi;
+    // and the window test admits exactly [kWindowSecondsLo, kWindowSecondsLo + 2^44).
     using rugo::orc::kWindowSecondsLo;
     using rugo::orc::timestamp_micros_in_window;
-    using rugo::orc::timestamp_seconds_in_window;
+    using rugo::orc::timestamp_micros_run_checked;
+    // The reader's per-run window test: OR the offsets, test once.
+    auto timestamp_seconds_in_window = [](const int64_t* seconds, size_t n) {
+        uint64_t offsets = 0;
+        for (size_t i = 0; i < n; ++i) offsets |= rugo::orc::timestamp_seconds_offset(seconds[i]);
+        return rugo::orc::timestamp_offsets_in_window(offsets);
+    };
+    constexpr int64_t kWindowSecondsHi = kWindowSecondsLo + (int64_t{1} << rugo::orc::kWindowBits) - 1;
     for (const int64_t seconds : {kWindowSecondsLo, kWindowSecondsLo + 1, orc_seconds(-1), orc_seconds(0),
                                   kWindowSecondsHi - 1, kWindowSecondsHi}) {
         for (const uint64_t fraction : {0ULL, 999999ULL, 1000000ULL, 999999999ULL}) {
@@ -130,7 +136,7 @@ int main() {
     const int64_t extremes[] = {kMin, kMax};
     if (!timestamp_seconds_in_window(inside, 3) || timestamp_seconds_in_window(below, 3) ||
         timestamp_seconds_in_window(above, 3) || timestamp_seconds_in_window(extremes, 1) ||
-        timestamp_seconds_in_window(extremes + 1, 1)) {
+        timestamp_seconds_in_window(extremes + 1, 1) || !timestamp_seconds_in_window(inside, 0)) {
         std::cerr << "window test admits the wrong seconds\n";
         ++failures;
     }
@@ -141,6 +147,38 @@ int main() {
             std::cerr << "in-window conversion accepted bad nanos " << bad << "\n";
             ++failures;
         } catch (const std::runtime_error&) {
+        }
+    }
+
+    // The checked rerun overwrites exactly the run's present rows, skipping absent ones.
+    {
+        const int64_t secs[] = {orc_seconds(0), orc_seconds(kMax / 1000000), orc_seconds(-1)};
+        const int64_t fracs[] = {nanos(1000), nanos(775807000), nanos(5, 7)};
+        const uint8_t flags[] = {0, 1, 0, 1, 1, 0};
+        int64_t values[6] = {-7, -7, -7, -7, -7, -7};
+        timestamp_micros_run_checked(values, 0, flags, secs, fracs, 3, "");
+        const int64_t expected[6] = {-7, 1, -7, kMax, -1500000, -7};
+        for (int i = 0; i < 6; ++i)
+            if (values[i] != expected[i]) {
+                std::cerr << "checked rerun row " << i << ": expected " << expected[i] << ", got " << values[i] << "\n";
+                ++failures;
+            }
+        int64_t dense[3] = {};
+        timestamp_micros_run_checked(dense, 0, nullptr, secs, fracs, 3, "");
+        if (dense[0] != 1 || dense[1] != kMax || dense[2] != -1500000) {
+            std::cerr << "checked rerun without flags is wrong\n";
+            ++failures;
+        }
+        const int64_t bad_secs[] = {orc_seconds(0), kMax};
+        try {
+            timestamp_micros_run_checked(dense, 0, nullptr, bad_secs, fracs, 2, "column 't': ");
+            std::cerr << "checked rerun accepted out-of-range seconds\n";
+            ++failures;
+        } catch (const std::runtime_error& e) {
+            if (std::string(e.what()) != "ORC: column 't': " + bad_seconds) {
+                std::cerr << "checked rerun wrong error: " << e.what() << "\n";
+                ++failures;
+            }
         }
     }
 

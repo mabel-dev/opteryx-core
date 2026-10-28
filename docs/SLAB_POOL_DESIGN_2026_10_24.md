@@ -14,6 +14,8 @@ idea: 46 ns vs 249 ns per 2 MB acquire+release, 21% on TPC-H q21 from huge pages
 - D1 shape: reserve address space once (PROT_NONE, 256 GiB, MAP_NORESERVE), fault each 2 MiB slot
   the first time it is acquired, retain faulted slots for the process life up to a budget; a boot
   prefault size (config, default 0) for servers. Not a Pivot-style pool faulted whole at boot.
+  Amendment (architect, 2026-10-28): the reservation is 64 GiB on riscv64 (compile-time). Sv39 gives
+  a process 256 GiB in total, so 256 GiB aborted at first use on the Orange Pi RV2 (errno 12).
 - D2 budget: faulted slots (used + free) are charged to the process memory account, so the chunk
   cache gives way to them like any query memory. Free slots above `SLAB_POOL_BUDGET_BYTES`
   (default 4 GiB - the knee of the 2026-10-25 sweep, see below; `SHOW VARIABLES slab_pool_budget_bytes`) give their pages back

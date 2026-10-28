@@ -951,10 +951,7 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
                             }
                         }
                     };
-                    if (in_window)
-                        convert([](int64_t s, int64_t f, const std::string& w) { return timestamp_micros_in_window(s, f, w); });
-                    else
-                        convert([](int64_t s, int64_t f, const std::string& w) { return timestamp_micros(s, f, w); });
+                    convert([](int64_t s, int64_t f, const std::string& w) { return timestamp_micros_old(s, f, w); });
                     secs += count;
                 });
             });

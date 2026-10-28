@@ -316,6 +316,8 @@ def test_mixed_presence_across_kinds_and_compression(version, codec, dictionary)
         compression=codec,
         dictionary_key_size_threshold=dictionary,
         stripe_size=1024 * 1024,
+        # pyarrow's default batch_size (1024) cuts a stripe per batch; keep one stripe.
+        batch_size=n,
     )
     assert orc.read_metadata(data).compression == ("none" if codec == "uncompressed" else codec)
     if codec == "uncompressed":

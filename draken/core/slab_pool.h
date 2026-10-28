@@ -9,7 +9,8 @@
 // acquire+release and 21% on TPC-H q21 from huge pages alone).
 //
 // WHAT. One reservation of address space per process, mmap'd once (PROT_NONE,
-// 256 GiB, never touched by the kernel's commit accounting), cut into 2 MiB
+// 256 GiB - 64 GiB on riscv64, whose Sv39 address space cannot hold more - never
+// touched by the kernel's commit accounting), cut into 2 MiB
 // SLOTS. A slot is made writable the first time it is acquired and faulted by its
 // first write - once; afterwards it is recycled through this pool for the life of
 // the process, so a hot query writes into pages the last query already faulted.

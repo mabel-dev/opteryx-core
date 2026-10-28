@@ -111,7 +111,7 @@ def test_case_with_scalar_subquery_branches_matches_tpcds_q09_shape():
         "END AS bucket FROM $planets WHERE id = 1",
         ["bucket"],
     )
-    assert rows == pytest.approx([(avg_mass,)])
+    assert [r[0] for r in rows] == pytest.approx([avg_mass])
 
 
 def test_select_list_scalar_subquery_still_refuses_correlation():

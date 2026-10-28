@@ -73,4 +73,19 @@ inline int64_t timestamp_micros(int64_t seconds, int64_t nanos, const std::strin
     return micros;
 }
 
+inline int64_t timestamp_micros_old(int64_t seconds, int64_t nanos, const std::string& where) {
+    const uint64_t raw = static_cast<uint64_t>(nanos);
+    uint64_t value = raw >> 3;
+    const unsigned zeros = static_cast<unsigned>(raw & 7);
+    if (zeros != 0) {
+        uint64_t scale = 1;
+        for (unsigned z = 0; z <= zeros; ++z) scale *= 10;
+        value *= scale;
+    }
+    if (value > 999999999) fail(where + "a timestamp's nanoseconds are out of range");
+    int64_t epoch = seconds + kOrcEpochOffset;
+    if (epoch < 0 && value > 999999) epoch -= 1;
+    return epoch * 1000000 + static_cast<int64_t>(value / 1000);
+}
+
 }  // namespace rugo::orc
