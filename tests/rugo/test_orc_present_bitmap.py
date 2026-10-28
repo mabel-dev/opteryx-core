@@ -5,11 +5,13 @@
 
 """ORC PRESENT streams from the independent Apache ORC writer, through to Draken validity."""
 
+import datetime
 import io
 import json
+import sys
+import zlib
 from decimal import Decimal
 from pathlib import Path
-import sys
 
 import pytest
 import pyarrow as pa
@@ -105,7 +107,7 @@ def _fields(data):
             pos += size
         else:
             raise AssertionError(f"unexpected protobuf wire type {wire}")
-        fields.append ( (field, value) )
+        fields.append((field, value))
     return fields
 
 
@@ -115,14 +117,37 @@ def _one(fields, field, default=None):
     return values[0] if values else default
 
 
+def _zlib_blocks(data):
+    """Decode ORC's three-byte compression framing, including original blocks."""
+    out = bytearray()
+    original_flags = []
+    pos = 0
+    while pos < len(data):
+        assert pos + 3 <= len(data)
+        header = int.from_bytes(data[pos : pos + 3], "little")
+        pos += 3
+        size = header >> 1
+        assert pos + size <= len(data)
+        block = data[pos : pos + size]
+        pos += size
+        original = bool(header & 1)
+        original_flags.append(original)
+        out.extend(block if original else zlib.decompress(block, -15))
+    return bytes(out), original_flags
+
+
 def _stripe_streams(data):
-    """Return the streams and column encodings of one uncompressed stripe."""
+    """Return raw streams and encodings of one uncompressed or zlib stripe."""
     ps_length = data[-1]
     ps = _fields(data[-1 - ps_length : -1])
-    assert _one(ps, 2, 0) == 0
+    compression = _one(ps, 2, 0)
+    assert compression in (0, 1)
     footer_length = _one(ps, 1)
     footer_end = len(data) - 1 - ps_length
-    footer = _fields(data[footer_end - footer_length : footer_end])
+    footer_bytes = data[footer_end - footer_length : footer_end]
+    if compression == 1:
+        footer_bytes = _zlib_blocks(footer_bytes)[0]
+    footer = _fields(footer_bytes)
     stripes = [value for field, value in footer if field == 3]
     assert len(stripes) == 1
     stripe = _fields(stripes[0])
@@ -131,7 +156,10 @@ def _stripe_streams(data):
     data_length = _one(stripe, 3, 0)
     stripe_footer_length = _one(stripe, 4)
     footer_at = offset + index_length + data_length
-    stripe_footer = _fields(data[footer_at : footer_at + stripe_footer_length])
+    stripe_footer_bytes = data[footer_at : footer_at + stripe_footer_length]
+    if compression == 1:
+        stripe_footer_bytes = _zlib_blocks(stripe_footer_bytes)[0]
+    stripe_footer = _fields(stripe_footer_bytes)
     streams = {}
     at = offset
     for field, value in stripe_footer:
@@ -176,6 +204,7 @@ def _scalars(keep):
         "byte": (pa.int8(), [i % 101 - 50 for i in range(n)]),
         "long": (pa.int64(), [i * 17 - 101 for i in range(n)]),
         "double": (pa.float64(), [(i % 19 - 9) / 4 for i in range(n)]),
+        "date": (pa.date32(), [datetime.date(1970, 1, 1) + datetime.timedelta(days=i - 256) for i in range(n)]),
         "bool": (pa.bool_(), [i % 3 == 0 for i in range(n)]),
         "string": (pa.string(), ["" if i % 4 == 0 else f"v{i % 11}" for i in range(n)]),
         "binary": (pa.binary(), [b"" if i % 4 == 0 else bytes([i % 256]) for i in range(n)]),
@@ -210,6 +239,20 @@ def test_partial_validity_bytes_and_boundaries(n, layout):
 
 
 @pytest.mark.parametrize("version", ["0.11", "0.12"])
+def test_omitted_present_and_all_null_present(version):
+    valid = list(range(129))
+    nulls = [None] * 129
+    table = pa.table({"valid": pa.array(valid, pa.int64()), "nulls": pa.array(nulls, pa.int64())})
+    data = _write(table, file_version=version, compression="uncompressed")
+    streams, _ = _stripe_streams(data)
+    assert (1, 0) not in streams
+    packed, _ = _decode_byte_rle(streams[2, 0])
+    assert packed[:16] == bytes(16)
+    assert packed[16] & 0x80 == 0
+    _check_columns(data, {"valid": valid, "nulls": nulls})
+
+
+@pytest.mark.parametrize("version", ["0.11", "0.12"])
 def test_orc_msb_present_becomes_draken_lsb_validity(version):
     first = [101] + [None] * 7
     last = [None] * 7 + [202]
@@ -240,6 +283,26 @@ def test_writer_present_contains_repeated_and_literal_byte_runs(version):
 
 
 @pytest.mark.parametrize("version", ["0.11", "0.12"])
+def test_present_stream_is_actually_zlib_compressed(version):
+    packed = bytes(range(1, 65)) * 64
+    keep = [bool(byte & (0x80 >> bit)) for byte in packed for bit in range(8)]
+    values = [i if present else None for i, present in enumerate(keep)]
+    data = _write(
+        pa.table({"x": pa.array(values, pa.int64())}),
+        file_version=version,
+        compression="zlib",
+        compression_block_size=65536,
+        stripe_size=4 * 1024 * 1024,
+    )
+    streams, encodings = _stripe_streams(data)
+    assert encodings[1] == (0 if version == "0.11" else 2)
+    present, original = _zlib_blocks(streams[1, 0])
+    assert original and not all(original)
+    assert _decode_byte_rle(present)[0] == packed
+    _check_columns(data, {"x": values})
+
+
+@pytest.mark.parametrize("version", ["0.11", "0.12"])
 @pytest.mark.parametrize("codec", ["uncompressed", "zlib", "snappy", "lz4", "zstd"])
 @pytest.mark.parametrize("dictionary", [0.0, 1.0], ids=["direct-strings", "dictionary-strings"])
 def test_mixed_presence_across_kinds_and_compression(version, codec, dictionary):
@@ -255,7 +318,22 @@ def test_mixed_presence_across_kinds_and_compression(version, codec, dictionary)
         stripe_size=1024 * 1024,
     )
     assert orc.read_metadata(data).compression == ("none" if codec == "uncompressed" else codec)
+    if codec == "uncompressed":
+        _, encodings = _stripe_streams(data)
+        assert encodings[2] == (0 if version == "0.11" else 2)
+        assert encodings[6] == (0 if version == "0.11" else 2) + int(dictionary == 1.0)
     _check_columns(data, expected)
+
+
+def test_presence_is_restarted_for_each_stripe():
+    n = 40000
+    keep = [i % 13 not in (0, 3, 8) for i in range(n)]
+    integers = [i - 123 if keep[i] else None for i in range(n)]
+    strings = [f"row-{i}-" + "x" * 40 if keep[i] else None for i in range(n)]
+    table = pa.table({"i": pa.array(integers, pa.int64()), "s": pa.array(strings, pa.string())})
+    data = _write(table, compression="uncompressed", stripe_size=64 * 1024)
+    assert orc.read_metadata(data).stripes > 1
+    _check_columns(data, {"i": integers, "s": strings})
 
 
 @pytest.mark.parametrize("version", ["0.11", "0.12"])

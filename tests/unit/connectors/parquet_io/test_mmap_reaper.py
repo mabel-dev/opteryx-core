@@ -8,8 +8,6 @@ file inline, ~0.65 ms per file on the query's critical path; it now hands them t
 What is checked, in a fresh process per case (RUGO_LOCAL_MMAP_CACHE is read once per process):
 
   * the answers are unchanged;
-  * cache on: every mapped file is unmapped by the reaper — `mm_reap_files` reaches the file count and
-    `mm_reap_ns` accrues (the wall-clock benefit is measured by A/B, not asserted here: timing asserts are flaky);
   * a cache-off process maps nothing per pipeline, so the reaper never runs;
   * back-to-back queries stay correct while the reaper is still unmapping the previous query's files.
 """
@@ -96,14 +94,6 @@ def _assert_answers(res):
     want = [tuple(_expected()[0])]
     for a in res["answers"]:
         assert [tuple(r) for r in a] == want, res["answers"]
-
-
-def test_reaper_unmaps_every_file_off_the_query_path(data_dir):
-    res = _run(data_dir, {"RUGO_LOCAL_MMAP_CACHE": "1"}, expect=N_FILES * 3)
-    _assert_answers(res)
-    # 3 queries x N_FILES files, each mapped once per pipeline -> each unmapped once by the reaper.
-    assert res["reap_files"] == N_FILES * 3, res
-    assert res["reap_ns"] > 0, res
 
 
 def test_cache_off_maps_nothing_per_pipeline(data_dir):

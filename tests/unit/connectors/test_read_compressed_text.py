@@ -22,6 +22,7 @@ import gzip
 import json
 import lzma
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -235,16 +236,18 @@ def test_truncated_file_fails_naming_it(tmp_path, codec):
 
 
 @pytest.mark.parametrize("codec", CODECS)
-def test_truncated_later_file_fails_mid_execution(tmp_path, monkeypatch, codec):
+def test_truncated_later_file_fails_mid_execution(tmp_path, monkeypatch, caplog, codec):
     # The binder only reads the first file; the native Source must fail on the second.
+    # A native scan read error is redacted for the user; the file and cause are logged.
     from opteryx.connectors import jsonl_io
 
     monkeypatch.setattr(jsonl_io, "DEFAULT_CHUNK_SIZE", 4096)
     _write(tmp_path / f"a.jsonl.{codec}", _compress(codec, _jsonl_text().encode()))
     packed = _compress(codec, _jsonl_text(start=ROWS).encode())
     _write(tmp_path / f"b.jsonl.{codec}", packed[: len(packed) // 2])
-    with pytest.raises(DatasetReadError, match=r"b\.jsonl\.\w+.*truncated"):
+    with pytest.raises(DatasetReadError, match=r"the read did not complete\. The cause has been logged"):
         _rows(f"SELECT id FROM READ_JSONL('{tmp_path}/*.jsonl.{codec}')")
+    assert re.search(r"b\.jsonl\.\w+.*truncated", caplog.text)
 
 
 def test_corrupt_gzip_fails(tmp_path):
@@ -281,11 +284,12 @@ def test_unsupported_codec_fails_naming_file_and_codec(tmp_path, suffix, pack, c
         _rows(f"SELECT COUNT(*) FROM READ_JSONL('{hidden}', ignore_errors => true)")
 
 
-def test_unsupported_codec_in_a_later_file_fails_mid_execution(tmp_path):
+def test_unsupported_codec_in_a_later_file_fails_mid_execution(tmp_path, caplog):
     _write(tmp_path / "a.jsonl", _jsonl_text(rows=50).encode())
     _write(tmp_path / "b.jsonl", bz2.compress(_jsonl_text(rows=50).encode()))
-    with pytest.raises(DatasetReadError, match=r"b\.jsonl.* is bzip2-compressed"):
+    with pytest.raises(DatasetReadError, match=r"the read did not complete\. The cause has been logged"):
         _rows(f"SELECT id FROM READ_JSONL('{tmp_path}/*.jsonl')")
+    assert re.search(r"b\.jsonl.* is bzip2-compressed", caplog.text)
 
 
 def test_extension_the_bytes_contradict_fails(tmp_path):

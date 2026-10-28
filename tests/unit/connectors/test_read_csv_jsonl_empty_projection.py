@@ -130,7 +130,7 @@ def divergent_glob(tmp_path):
 
 
 @pytest.mark.parametrize("fmt,ext", [("CSV", "csv"), ("JSONL", "jsonl")])
-def test_column_drift_across_a_glob_still_fails(divergent_glob, fmt, ext):
+def test_column_drift_across_a_glob_still_fails(divergent_glob, fmt, ext, caplog):
     """Projecting a column across files whose columns disagree must still fail
     loud, naming the offending file.
 
@@ -139,10 +139,16 @@ def test_column_drift_across_a_glob_still_fails(divergent_glob, fmt, ext):
     refusing a projection that names none of the file's columns (CSV, all absent),
     and the projected column's key being absent from every record of the file
     (JSONL, whose bound schema is pinned onto each chunk and reports the columns no
-    record carried)."""
+    record carried).
+
+    JSONL fails inside the native scan, whose read errors are redacted for the user
+    with the file and cause logged; CSV raises its message directly."""
     with pytest.raises(DatasetReadError) as exc:
         _rows(f"SELECT b FROM READ_{fmt}('{divergent_glob}/*.{ext}')")
     message = str(exc.value)
+    if fmt == "JSONL":
+        assert "the read did not complete. The cause has been logged" in message
+        message = caplog.text
     assert (
         "do not match the expected" in message
         or "none of the requested columns" in message
@@ -170,12 +176,13 @@ def type_drift_glob(tmp_path):
     return tmp_path
 
 
-def test_type_drift_across_a_glob_still_fails(type_drift_glob):
+def test_type_drift_across_a_glob_still_fails(type_drift_glob, caplog):
     """Name-level agreement is not enough -- the per-column type check must still
-    fire for a projected column."""
-    with pytest.raises(DatasetReadError) as exc:
+    fire for a projected column. The native scan's read error is redacted for the
+    user; the cause is logged."""
+    with pytest.raises(DatasetReadError, match=r"the read did not complete\. The cause has been logged"):
         _rows(f"SELECT b FROM READ_JSONL('{type_drift_glob}/*.jsonl')")
-    assert "at bind time" in str(exc.value)
+    assert "at bind time" in caplog.text
 
 
 if __name__ == "__main__":  # pragma: no cover

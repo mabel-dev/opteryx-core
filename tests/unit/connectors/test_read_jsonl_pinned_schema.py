@@ -27,6 +27,9 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import opteryx
 from opteryx.exceptions import DatasetReadError
 
+# What a native scan read error says to the user; the file and cause go to the log.
+_REDACTED = r"the read did not complete\. The cause has been logged"
+
 
 def _values(sql):
     """Every value the query produced, flattened, in output order."""
@@ -58,35 +61,37 @@ def test_a_sparse_key_is_not_drift(tmp_path):
     assert _values(f"SELECT a FROM READ_JSONL('{tmp_path}/*.jsonl') ORDER BY b") == [1, None, 2]
 
 
-def test_a_file_missing_a_bound_column_entirely_fails_loud_naming_both(tmp_path):
+def test_a_file_missing_a_bound_column_entirely_fails_loud_naming_both(tmp_path, caplog):
     """Column drift across a glob stays a loud failure (the decision the older
     per-chunk name check recorded): a file where a bound key appears on NO record
-    is a different file than the schema came from, not a column of NULLs."""
+    is a different file than the schema came from, not a column of NULLs. The
+    native scan's read error is redacted for the user; the cause is logged."""
     _write(tmp_path, "a.jsonl", '{"a": 1, "b": "x"}\n')
     _write(tmp_path, "b.jsonl", '{"b": "y"}\n')
-    with pytest.raises(DatasetReadError) as err:
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _values(f"SELECT a, b FROM READ_JSONL('{tmp_path}/*.jsonl')")
-    message = str(err.value)
+    message = caplog.text
     assert "b.jsonl" in message and "['a']" in message and "absent from every record" in message
 
 
-def test_a_file_with_none_of_the_bound_columns_fails_loud_naming_the_file(tmp_path):
+def test_a_file_with_none_of_the_bound_columns_fails_loud_naming_the_file(tmp_path, caplog):
     _write(tmp_path, "a.jsonl", '{"a": 1, "b": "x"}\n')
     _write(tmp_path, "b.jsonl", '{"c": 1}\n{"d": 2}\n')
-    with pytest.raises(DatasetReadError) as err:
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _values(f"SELECT a, b FROM READ_JSONL('{tmp_path}/*.jsonl')")
-    message = str(err.value)
+    message = caplog.text
     assert "b.jsonl" in message and "['a', 'b']" in message
 
 
-def test_a_value_that_does_not_fit_the_bound_type_fails_loud_naming_it(tmp_path):
+def test_a_value_that_does_not_fit_the_bound_type_fails_loud_naming_it(tmp_path, caplog):
     """Pinning is a contract, not a guess: a string in a column bound INT64 is a
-    data error that names the file, column, row and value."""
+    data error that names the file, column, row and value (in the log; the user
+    sees the redacted read error)."""
     _write(tmp_path, "a.jsonl", '{"a": 1}\n')
     _write(tmp_path, "b.jsonl", '{"a": 2}\n{"a": "oops"}\n')
-    with pytest.raises(DatasetReadError) as err:
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _values(f"SELECT a FROM READ_JSONL('{tmp_path}/*.jsonl')")
-    message = str(err.value)
+    message = caplog.text
     assert "b.jsonl" in message
     assert "column 'a'" in message and "row 1" in message and "oops" in message
 

@@ -17,6 +17,7 @@
 #include "lz4.h"
 #include "ops/float_ops.h"           // fp_canon: -0.0 / NaN canon, as the other renderers
 #include "orc_rle.hpp"
+#include "orc_timestamp.hpp"
 #include "snappy.h"
 #include "zstd.h"
 
@@ -28,8 +29,6 @@ using rugo::avro::OutKind;
 
 constexpr size_t kTailRead = 16 * 1024;
 constexpr size_t kDefaultBlock = 256 * 1024;
-// Seconds from 1970-01-01 to ORC's 2015-01-01 timestamp epoch.
-constexpr int64_t kOrcEpochOffset = 1420070400;
 
 constexpr size_t pad8(size_t bytes) { return (bytes + 7) & ~size_t(7); }
 
@@ -433,22 +432,6 @@ void read_bytes_into(ByteRle& reader, T* out, size_t count, const uint8_t* valid
         }
         count -= n;
     }
-}
-
-int64_t timestamp_micros(int64_t seconds, int64_t nanos, const std::string& where) {
-    const uint64_t raw = static_cast<uint64_t>(nanos);
-    uint64_t value = raw >> 3;
-    const unsigned zeros = static_cast<unsigned>(raw & 7);
-    if (zeros != 0) {
-        uint64_t scale = 1;
-        for (unsigned z = 0; z <= zeros; ++z) scale *= 10;
-        value *= scale;
-    }
-    if (value > 999999999) fail(where + "a timestamp's nanoseconds are out of range");
-    int64_t epoch = seconds + kOrcEpochOffset;
-    // Seconds are truncated toward zero; match the Java reader's pre-1970 adjustment.
-    if (epoch < 0 && value > 999999) epoch -= 1;
-    return epoch * 1000000 + static_cast<int64_t>(value / 1000);
 }
 
 uint8_t* alloc_bytes(size_t n) {
@@ -955,16 +938,23 @@ void OrcFile::Impl::decode_leaf(const StripeFooter& sf, const StreamMap& streams
             IntRle nanos(nano_b.p, nano_b.n, v2, false);
             size_t row = 0;
             seconds.read_runs(nn, [&](const int64_t* secs, size_t n) {
+                const bool in_window = timestamp_seconds_in_window(secs, n);
                 nanos.read_runs(n, [&](const int64_t* fractions, size_t count) {
-                    if (all_valid) {
-                        for (size_t i = 0; i < count; ++i, ++row)
-                            values[row] = timestamp_micros(secs[i], fractions[i], where);
-                    } else {
-                        for (size_t i = 0; i < count; ++i) {
-                            while (!flags[row]) ++row;
-                            values[row++] = timestamp_micros(secs[i], fractions[i], where);
+                    auto convert = [&](auto micros) {
+                        if (all_valid) {
+                            for (size_t i = 0; i < count; ++i, ++row)
+                                values[row] = micros(secs[i], fractions[i], where);
+                        } else {
+                            for (size_t i = 0; i < count; ++i) {
+                                while (!flags[row]) ++row;
+                                values[row++] = micros(secs[i], fractions[i], where);
+                            }
                         }
-                    }
+                    };
+                    if (in_window)
+                        convert([](int64_t s, int64_t f, const std::string& w) { return timestamp_micros_in_window(s, f, w); });
+                    else
+                        convert([](int64_t s, int64_t f, const std::string& w) { return timestamp_micros(s, f, w); });
                     secs += count;
                 });
             });

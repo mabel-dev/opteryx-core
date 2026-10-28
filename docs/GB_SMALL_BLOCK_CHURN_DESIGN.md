@@ -1,6 +1,7 @@
 # GROUP BY small-block churn (ClickBench Q32) — design note
 
-Status: RULED 2026-10-27 (§2). Nothing built.
+Status: RULED 2026-10-27 (§2). Built in private trees and A/B'd 2026-10-28: FAILED
+(§5), not landed.
 
 ## 1. Problem (measured)
 
@@ -135,7 +136,41 @@ Pass: Q32 hot wall faster with separated round ranges on every allocator; Q32 mi
 per hot try down by an order of magnitude; battery hot sum not slower; no guard > 1.02;
 Q09 peak RSS within 5%. Then a c6a official-shape confirmation. Slower = deleted.
 
-## 5. Open
+## 5. Result (2026-10-28): FAILED — not landed
+
+B (§3.1 + §3.2, 4 KiB smallest class, GB pool retired) was built in private trees
+(Mac `~/opteryx-smallslab/{base,b}`, x86 `~/ss-20261027/{base,b}`) from one main
+snapshot and run per §4: process per query, 1 fill + 2 hot, 9 interleaved rounds,
+arm order alternating per round and query. B passed `make q`, the native tests under
+ASan/UBSan (Mac + Linux) and TSan (Mac), and the memory-charge balance test. Main was
+not touched.
+
+| run | battery hot sum B/base | B faster rounds | Q32 | Q33 / Q34 |
+|---|---|---|---|---|
+| Mac ClickBench, system | 1.013 | 0/9 | 1.006 | 1.071 / 1.079 |
+| Mac TPC-H SF1, system | 1.013 | 1/9 | — | — |
+| x86 ClickBench, glibc | 1.022 | 0/9 | **1.080** | 1.064 / 1.062 |
+| x86 ClickBench, mimalloc | 1.011 | 0/9 | **0.976** (9/9, separated) | 1.059 / 1.053 |
+| x86 TPC-H SF1, glibc | 1.005 | 1/9 | — | — |
+| x86 TPC-H SF1, mimalloc | 1.008 | 2/9 | — | — |
+
+Guards: Q09 1.045 Mac (0/9), 1.013 x86 glibc (0/9) — over the 1.02 bar on the Mac.
+Peak RSS +5–20% on TPC-H (Mac). Digest differences seen are LIMIT ties present in
+both arms (several digests per arm; Q32 checked row by row: rows above the tie value
+identical).
+
+Why (slab counters, per process): with small blocks in the pool, peak slab demand
+exceeds the 4 GiB free-faulted budget, so B gives slots back to the OS and faults
+them again — x86 Q32 9,300 give-backs vs 0 in base, Q33 4,770 vs 800, Q18 4,450 vs
+0; system time on Q32 glibc 0.72 → 1.51 s, Q33 0.48 → 1.05 s. The target effect
+exists — x86 mimalloc Q32 minor faults 1.20 M → 0.31 M per hot try — but is bought
+back by give-back churn.
+
+Also found: x86 base Q32 on **glibc** takes 0.29 M faults per hot try, not 1.15 M;
+the 1.15 M of §1 is mimalloc's purge (the preload `make` uses). The c6a entry runs
+glibc, so §1's upper bound overstates what this lever could do on the board.
+
+## 6. Open
 
 1. Smallest class: 4 KiB proposed (one page). Lower means more blocks per slot and a
    larger bitmap.

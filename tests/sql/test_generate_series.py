@@ -234,12 +234,12 @@ def test_month_steps_use_calendar_arithmetic():
     ]
 
 
-def test_temporal_interval_pointing_the_wrong_way_is_refused():
-    """Another shape that would otherwise hang rather than answer."""
-    with pytest.raises(Exception, match="count up|count down"):
-        values(
-            f"SELECT * FROM GENERATE_SERIES({_JAN_3}, {_JAN_1}, INTERVAL '1' DAY) AS g"
-        )
+def test_temporal_interval_pointing_the_wrong_way_is_empty():
+    """A step pointing away from the end is an EMPTY series, not an error and not a
+    hang — the same answer the integer form gives (and DuckDB's)."""
+    assert values(
+        f"SELECT * FROM GENERATE_SERIES({_JAN_3}, {_JAN_1}, INTERVAL '1' DAY) AS g"
+    ) == []
 
 
 def test_temporal_series_needs_timestamp_bounds():

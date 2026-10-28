@@ -245,11 +245,17 @@ else
   ORC_FIXED_LINK_FLAGS := -shared
 endif
 
-.PHONY: bench-orc-fixed bench-orc-rle orc-rle-test orc-test
+.PHONY: bench-orc-fixed bench-orc-present bench-orc-rle orc-rle-test orc-timestamp-test orc-test
 bench-orc-fixed: ## Benchmark native ORC fixed-width stripe decoding (ORC_FIXED_ARGS="--rounds ... --iterations ...")
 	@mkdir -p /tmp/opteryx-tests
 	@clang++ -O3 -std=c++20 -Wall -Wextra -fPIC $(ORC_FIXED_LINK_FLAGS) -I$(CURDIR)/rugo/src -I$(CURDIR)/draken -I$(CURDIR)/third_party/cyan4973 $(CURDIR)/dev/bench_orc_fixed.cpp -o /tmp/opteryx-tests/bench_orc_fixed.so
 	@TZ=UTC $(PYTHON) dev/bench_orc_fixed.py /tmp/opteryx-tests/bench_orc_fixed.so $(ORC_FIXED_ARGS)
+
+ORC_PRESENT_ARGS ?=
+bench-orc-present: ## Benchmark native ORC PRESENT/null decode (ORC_PRESENT_ARGS="...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -O3 -std=c++20 -Wall -Wextra -fPIC $(ORC_FIXED_LINK_FLAGS) -I$(CURDIR)/rugo/src -I$(CURDIR)/draken -I$(CURDIR)/third_party/cyan4973 $(CURDIR)/dev/bench_orc_fixed.cpp -o /tmp/opteryx-tests/bench_orc_fixed.so
+	@TZ=UTC $(PYTHON) dev/bench_orc_present.py /tmp/opteryx-tests/bench_orc_fixed.so $(ORC_PRESENT_ARGS)
 
 bench-orc-rle: ## Benchmark native ORC RLEv2 decoding (ORC_RLE_BENCH_ARGS="rounds iterations")
 	@mkdir -p /tmp/opteryx-tests
@@ -260,6 +266,11 @@ orc-rle-test: ## Build and run the native ORC RLEv2 correctness tests
 	@mkdir -p /tmp/opteryx-tests
 	@clang++ -std=c++20 $(ORC_RLE_TEST_FLAGS) -Wall -Wextra -I$(CURDIR) $(CURDIR)/tests/rugo/orc_rlev2_test.cpp -o /tmp/opteryx-tests/orc_rlev2_test
 	@/tmp/opteryx-tests/orc_rlev2_test
+
+orc-timestamp-test: ## Build and run the native ORC timestamp conversion tests
+	@mkdir -p /tmp/opteryx-tests
+	@clang++ -std=c++20 -O2 -Wall -Wextra -I$(CURDIR) $(CURDIR)/tests/rugo/orc_timestamp_test.cpp -o /tmp/opteryx-tests/orc_timestamp_test
+	@/tmp/opteryx-tests/orc_timestamp_test
 
 orc-test: ## Run ORC reader and native scan tests
 	@$(PYTEST) tests/rugo/test_orc*.py tests/unit/connectors/test_orc_folder_dataset.py tests/unit/connectors/test_read_orc.py -q

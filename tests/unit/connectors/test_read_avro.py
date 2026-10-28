@@ -19,6 +19,7 @@ import datetime
 import decimal
 import http.server
 import os
+import re
 import sys
 import threading
 from functools import partial
@@ -307,20 +308,23 @@ def test_glob_resolves_evolved_files_onto_the_first(tmp_path):
     ], key=repr)
 
 
-def test_glob_file_that_cannot_resolve_fails_naming_it(tmp_path):
+def test_glob_file_that_cannot_resolve_fails_naming_it(tmp_path, caplog):
+    # A native scan read error is redacted for the user; the file and cause are logged.
     _write(tmp_path / "a.avro", _record([{"name": "id", "type": "long"}]), [{"id": 1}])
     _write(tmp_path / "b.avro", _record([{"name": "id", "type": "string"}]), [{"id": "x"}])
-    with pytest.raises(DatasetReadError, match=r"b\.avro.*the file's string cannot be read as long"):
+    with pytest.raises(DatasetReadError, match=r"the read did not complete\. The cause has been logged"):
         _rows(f"SELECT id FROM READ_AVRO('{tmp_path}/*.avro')")
+    assert re.search(r"b\.avro.*the file's string cannot be read as long", caplog.text)
 
 
-def test_corrupt_file_fails_naming_it(tmp_path):
+def test_corrupt_file_fails_naming_it(tmp_path, caplog):
     path = _write(tmp_path / "a.avro", _record([{"name": "id", "type": "long"}]), [{"id": i} for i in range(100)])
     data = bytearray(path.read_bytes())
     data[-1] ^= 0xFF  # the trailing sync marker
     path.write_bytes(bytes(data))
-    with pytest.raises(DatasetReadError, match=r"a\.avro.*sync marker"):
+    with pytest.raises(DatasetReadError, match=r"the read did not complete\. The cause has been logged"):
         _rows(f"SELECT id FROM READ_AVRO('{path}')")
+    assert re.search(r"a\.avro.*sync marker", caplog.text)
 
 
 def test_unreadable_header_fails_at_bind(tmp_path):

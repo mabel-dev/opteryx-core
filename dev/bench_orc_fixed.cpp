@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <vector>
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -100,3 +101,81 @@ extern "C" double orc_fixed_sample(void* handle, unsigned iterations, uint64_t* 
 }
 
 extern "C" void orc_fixed_destroy(void* handle) { delete static_cast<Case*>(handle); }
+
+// The PRESENT suite binds every column, including mixed fixed-width files.
+namespace {
+struct PresentCase {
+    OrcFile file;
+    uint32_t rows;
+    std::vector<DrakenType> types;
+    PresentCase(const uint8_t* bytes, size_t size, uint32_t n)
+        : file(bytes, size), rows(n) {}
+};
+}
+
+extern "C" void* orc_present_create(const uint8_t* bytes, size_t size, uint32_t rows,
+                                    unsigned columns, const unsigned* kinds,
+                                    const unsigned* types, const int64_t* expected,
+                                    const uint8_t* valid) {
+    try {
+        auto c = std::make_unique<PresentCase>(bytes, size, rows);
+        const auto& file_columns = c->file.file_columns();
+        if (c->file.num_rows() != rows || c->file.stripe_count() != 1 ||
+            c->file.compression() != rugo::orc::Compression::None ||
+            file_columns.size() != columns)
+            fail("PRESENT fixture metadata differs from requested single-stripe file");
+        for (unsigned j = 0; j < columns; ++j) {
+            if (static_cast<unsigned>(file_columns[j].kind) != kinds[j] ||
+                static_cast<unsigned>(file_columns[j].type) != types[j])
+                fail("PRESENT fixture column kind/type mismatch");
+            c->types.push_back(static_cast<DrakenType>(types[j]));
+        }
+        c->file.bind_all();
+        const auto batch = c->file.decode_stripe(0);
+        if (batch.rows != rows || batch.columns.size() != columns) fail("PRESENT batch shape mismatch");
+        for (unsigned j = 0; j < columns; ++j) {
+            const auto& col = batch.columns[j];
+            if (col.type != c->types[j] || col.length != rows || col.data == nullptr)
+                fail("PRESENT column layout mismatch");
+            for (uint32_t i = 0; i < rows; ++i) {
+                const size_t at = static_cast<size_t>(j) * rows + i;
+                const bool present = col.validity == nullptr || ((col.validity[i >> 3] >> (i & 7)) & 1);
+                if (present != (valid[at] != 0) || (present && value_at(col, i) != expected[at])) {
+                    std::fprintf(stderr, "column %u row %u: validity=%d expected=%d\n", j, i,
+                                 present, valid[at]);
+                    if (present) std::fprintf(stderr, "value=%lld expected=%lld\n",
+                                              static_cast<long long>(value_at(col, i)),
+                                              static_cast<long long>(expected[at]));
+                    fail("PRESENT decoded output differs from fixture");
+                }
+            }
+        }
+        return c.release();
+    } catch (const std::exception& e) {
+        fail(e.what());
+    }
+}
+
+extern "C" double orc_present_sample(void* handle, unsigned iterations, uint64_t* checksum) {
+    try {
+        auto& c = *static_cast<PresentCase*>(handle);
+        uint64_t sum = 0;
+        const auto start = Clock::now();
+        for (unsigned i = 0; i < iterations; ++i) {
+            auto batch = c.file.decode_stripe(0);
+            for (const auto& col : batch.columns) {
+                asm volatile("" : : "r"(col.data) : "memory");
+                const uint32_t row = i % c.rows;
+                if (col.validity == nullptr || ((col.validity[row >> 3] >> (row & 7)) & 1))
+                    sum += static_cast<uint64_t>(value_at(col, row));
+            }
+        }
+        const double ns = std::chrono::duration<double, std::nano>(Clock::now() - start).count();
+        *checksum += sum;
+        return ns / (static_cast<double>(iterations) * c.rows * c.types.size());
+    } catch (const std::exception& e) {
+        fail(e.what());
+    }
+}
+
+extern "C" void orc_present_destroy(void* handle) { delete static_cast<PresentCase*>(handle); }

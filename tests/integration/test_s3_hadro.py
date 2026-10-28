@@ -427,7 +427,7 @@ def test_catalog_aggregate_forces_a_read(s3_catalog_table):
     assert _rows(f"SELECT SUM(a) AS s FROM {s3_catalog_table}") == [{"s": 36 + 406}]
 
 
-def test_catalog_scan_signs_with_platform_credentials(s3_cold_catalog_table):
+def test_catalog_scan_signs_with_platform_credentials(s3_cold_catalog_table, caplog):
     """The catalog route DOES sign - and the server really is checking: with
     the wrong secret, the same scan is refused. The table is one no earlier test
     has read: bytes already in the chunk cache are served without a request, and
@@ -437,11 +437,13 @@ def test_catalog_scan_signs_with_platform_credentials(s3_cold_catalog_table):
     try:
         with pytest.raises(DatasetDataReadError) as refused:
             _rows(f"SELECT SUM(a) AS s FROM {s3_cold_catalog_table}")
-        # The refusal names the object and the status, never the presigned
-        # credential the URL carried.
-        assert "403" in str(refused.value)
-        assert "X-Amz-Signature" not in str(refused.value)
-        assert "X-Amz-Credential" not in str(refused.value)
+        # The refusal says what the status means; the status and the object are
+        # logged. Neither carries the presigned credential the URL held.
+        assert "access to the data file was denied" in str(refused.value)
+        assert "HTTP 403" in caplog.text
+        for text in (str(refused.value), caplog.text):
+            assert "X-Amz-Signature" not in text
+            assert "X-Amz-Credential" not in text
     finally:
         os.environ["AWS_SECRET_ACCESS_KEY"] = SECRET_KEY
         reset_credential_cache()

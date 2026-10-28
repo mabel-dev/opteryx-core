@@ -15,6 +15,7 @@ raised.
 
 import http.server
 import os
+import re
 import sys
 import threading
 from functools import partial
@@ -26,6 +27,9 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import opteryx
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidFunctionParameterError
+
+# What a native scan read error says to the user; the file and cause go to the log.
+_REDACTED = r"the read did not complete\. The cause has been logged"
 
 
 def _rows(sql):
@@ -64,13 +68,17 @@ def test_one_physical_column_under_two_identities(tmp_path):
     assert rows == [(2, "v2")]
 
 
-def test_malformed_record_in_a_later_file_fails_mid_execution(tmp_path):
+def test_malformed_record_in_a_later_file_fails_mid_execution(tmp_path, caplog):
+    # A native scan read error is redacted for the user; the file and cause are logged.
     _write(tmp_path, "a.jsonl", '{"a": 1, "b": "x"}\n')
     _write(tmp_path, "b.jsonl", '{"a": 2, "b": "y"}\nnot json\n')
-    with pytest.raises(DatasetReadError, match=r"b\.jsonl.*Malformed JSONL at line 2 \(byte offset 19\): 'not json'"):
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _rows(f"SELECT a FROM READ_JSONL('{tmp_path}/*.jsonl')")
-    with pytest.raises(DatasetReadError, match=r"Malformed JSONL at line 2"):
+    assert re.search(r"b\.jsonl.*Malformed JSONL at line 2 \(byte offset 19\): 'not json'", caplog.text)
+    caplog.clear()
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _rows(f"SELECT COUNT(*) FROM READ_JSONL('{tmp_path}/*.jsonl')")
+    assert "Malformed JSONL at line 2" in caplog.text
 
 
 def test_ignore_errors_drops_the_malformed_record(tmp_path):
@@ -79,18 +87,20 @@ def test_ignore_errors_drops_the_malformed_record(tmp_path):
     assert _rows(f"SELECT a FROM READ_JSONL('{tmp_path}/*.jsonl', ignore_errors => true)") == [(1,), (2,)]
 
 
-def test_declared_type_mismatch_in_a_later_file_fails_mid_execution(tmp_path):
+def test_declared_type_mismatch_in_a_later_file_fails_mid_execution(tmp_path, caplog):
     _write(tmp_path, "a.jsonl", '{"a": 1, "b": "x"}\n')
     _write(tmp_path, "b.jsonl", '{"a": "oops", "b": "y"}\n')
-    with pytest.raises(DatasetReadError, match=r"b\.jsonl.*does not fit the schema resolved at bind time.*'oops'"):
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _rows(f"SELECT a FROM READ_JSONL('{tmp_path}/*.jsonl')")
+    assert re.search(r"b\.jsonl.*does not fit the schema resolved at bind time.*'oops'", caplog.text)
 
 
-def test_a_file_lacking_a_bound_column_is_drift(tmp_path):
+def test_a_file_lacking_a_bound_column_is_drift(tmp_path, caplog):
     _write(tmp_path, "a.jsonl", '{"a": 1, "b": "x"}\n')
     _write(tmp_path, "b.jsonl", '{"b": "y"}\n')
-    with pytest.raises(DatasetReadError, match=r"b\.jsonl'\): the expected columns \['a'\]"):
+    with pytest.raises(DatasetReadError, match=_REDACTED):
         _rows(f"SELECT a FROM READ_JSONL('{tmp_path}/*.jsonl')")
+    assert re.search(r"b\.jsonl'\): the expected columns \['a'\]", caplog.text)
 
 
 def test_a_nested_column_absent_from_a_file_is_not_drift(tmp_path):

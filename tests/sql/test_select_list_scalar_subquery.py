@@ -82,7 +82,9 @@ def test_bare_scalar_subquery_in_select_list():
         "FROM $planets WHERE id IN (1, 9) ORDER BY id",
         ["id", "avg_moons"],
     )
-    assert rows == pytest.approx([(1, 210 / 9), (9, 210 / 9)])
+    # pytest.approx does not compare nested sequences; check each column.
+    assert [r[0] for r in rows] == [1, 9]
+    assert [r[1] for r in rows] == pytest.approx([210 / 9, 210 / 9])
 
 
 def test_case_with_scalar_subquery_branches_matches_tpcds_q09_shape():
@@ -96,7 +98,7 @@ def test_case_with_scalar_subquery_branches_matches_tpcds_q09_shape():
         "END AS bucket FROM $planets WHERE id = 1",
         ["bucket"],
     )
-    assert rows == pytest.approx([(30.0,)])
+    assert [r[0] for r in rows] == pytest.approx([30.0])
 
     # Same CASE, WHEN threshold raised past the subquery's actual count (9), so
     # the ELSE branch's subquery fires instead of the THEN branch's.

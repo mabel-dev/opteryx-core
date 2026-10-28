@@ -8,8 +8,8 @@ until a stage below passes its decision rule.
 ClickBench Q35 (`GROUP BY ClientIP, ClientIP-1, -2, -3`) is 1.12x DuckDB 2.0.0 and Q32
 1.14-1.28x (interleaved, `make clickbench-interleave`). Everywhere else group-by is level or
 ahead. Samply (Mac, 2026-10-27): Q35's `CarcharIndex::find_or_insert_id` is 34% of work
-samples, sink side 66% / merge 25%; telemetry `probe_s` is 83% of Pass A+B+C (about 26 ns/row,
-thread-summed). Q32 is merge-dominated with no hotspot and is out of scope here (ruled "no
+samples, sink side 66% / merge 25%; telemetry `probe_s` is 83% of Pass A+B+C (its timers are
+not CPU time: 2.6 s summed against 1.9 s of total process CPU - see section 11). Q32 is merge-dominated with no hotspot and is out of scope here (ruled "no
 open lever" 2026-10-27). Both engines saturate ~16 cores; the gap is cycles, not parallelism.
 
 The profile locates the cost. It does not prove the mechanism. This design separates
@@ -115,3 +115,37 @@ bound regardless).
 
 M1 and M2 first (hours). Each later stage runs only if the previous gate passed. A killed arm
 is recorded with its numbers, not left disabled.
+
+## 11. Stage 1 results (2026-10-28, Mac M5 Pro, offline POC; nothing in the engine changed)
+
+Harness: private `probe.cpp` (real `CarcharIndex`) replaying the REAL `ClientIP` stream (99,997,497
+rows, 1,526 morsels, dumped in scan arrival order) with the engine's local-sink shape. Hash is
+splitmix64(ClientIP) - same identity as Q35's composite hash, not the engine's exact function.
+M1 was answered offline from the real stream instead of a private engine build (the data is the
+same; the engine's dynamic morsel dealing differs from the harness's round-robin).
+
+**M1 - local dedup is productive.** Per-window distinct ratio (groups / rows) at 65,536-group
+windows: 1 worker - 278 windows, none above 0.6, median ~0.2-0.3; 16 workers - 282 windows, none
+above 0.6. Raw mode (>0.9) never triggers and would be wrong for Q35. Local groups total 20.6M
+against 9.76M global distinct, so the merge sees 2.11x the distinct groups.
+
+**M2/M3 - the probe is cheap on this stream.** Hit-only ns/probe by table size (1 thread):
+1k-16k entries 1.3-1.5; 65k 2.2; 262k 3.0; 1M 13.1; 4M 20.0; 16M 24.2. Real-stream replay:
+5.6 ns/row with 1 worker, 8.7 ns/row with 16 workers (thread time). The window table (<=65,536
+entries) sits in the L2-resident region.
+
+**Cross-check.** Samply: `find_or_insert_id` is 34% of work samples = ~0.37 s of ~1.09 s work
+CPU per run = ~3.7 ns/row, the same order as the replay. The earlier "26 ns/row" came from
+telemetry `probe_s`, which is not CPU time and is withdrawn.
+
+**Q35 CPU timeline (same sampler both engines).** Opteryx 1,904 CPU-ms, 135 ms wall, 14.1 busy
+cores; DuckDB 2.0.0 1,784 CPU-ms, 119 ms wall, 15.0 cores. The 16 ms gap is roughly half extra CPU
+(+6.7%) and half parallelism: Opteryx is at 4.6 cores in the first 10 ms (DuckDB 10.7) and dips to
+7.2 cores around 20 ms and 90 ms.
+
+**Verdict against section 2's gates.** The layout hypothesis (probe misses two cache lines) is
+NOT supported: the probe is already near L2 speed. Even a 30% better probe is ~5-8% of Q35 CPU,
+at best the CPU half of the gap. Stage 2 layout arms are therefore NOT justified yet. The new
+leads are (a) the ramp-up and mid-run dips, (b) the merge's 2.11x multiplier. Next measurements,
+before any layout work: a 2 ms timeline correlated with phases (query start, flush, merge) and the
+split of Q35's remaining CPU outside the probe.
