@@ -3491,6 +3491,10 @@ cdef class NativeScanPlan:
             # Scan prefilter: rows reaching the worker-side predicate / surviving it.
             "prefilter_rows_in": self.pipeline_ptr.prefilter_rows_in(),
             "prefilter_rows_out": self.pipeline_ptr.prefilter_rows_out(),
+            # Runtime join KEY filter: rows tested against a build side's key filter
+            # in the decode workers / kept (docs/VELOX_BORROW_PLAN.md item 1).
+            "key_filter_rows_in": self.pipeline_ptr.key_filter_rows_in(),
+            "key_filter_rows_out": self.pipeline_ptr.key_filter_rows_out(),
             # Range settlement: rows proven ALL-PASS by statistics, never evaluated.
             "settled_rows": self.pipeline_ptr.settled_rows(),
             # The submission window this scan actually ran — the read-back that

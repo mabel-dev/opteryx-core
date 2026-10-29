@@ -7473,7 +7473,36 @@ class _Compiler:
         # cannot use a bound pays nothing for one.
         self.nplan.set_join2_bound_slots(build_pipeline, slots)
         self.runtime_bounds_wired += wired
+        self._wire_runtime_key_filter(build_pipeline, probe_pipeline, build_keys,
+                                      probe_keys, slots, scan_columns, parquet_plan)
         return wired
+
+    def _wire_runtime_key_filter(self, build_pipeline, probe_pipeline, build_keys,
+                                 probe_keys, slots, scan_columns, parquet_plan):
+        """Arm the runtime join KEY filter beside the bound just wired
+        (src/cpp/engine/runtime_key_filter.hpp; docs/VELOX_BORROW_PLAN.md item 1):
+        the build side's key hashes, tested per row in the probe scan's decode
+        workers so a row no build key can match is never decoded for its other
+        columns. Same eligibility as the bound — this is only reached after
+        `_wire_runtime_bounds` accepted the key — plus three conditions of its own:
+
+        1. A NATIVE PARQUET probe scan. (Skene is the spill format.)
+        2. A single-column join key: the join hashes a multi-column key as one
+           mixed value, which the scan cannot reproduce from one column.
+        3. Not BOOL: two values cannot reject anything worth a test.
+
+        The filter only ever admits a SUPERSET of the join's matches, so an unbuilt
+        or unpublished filter — and every decline in the workers — admits every row."""
+        if parquet_plan is None or len(build_keys) != 1 or slots[0] < 0:
+            return
+        probe_ct = self._cts.get(probe_keys[0])
+        if probe_ct is None or probe_ct.physical == DrakenType.BOOL:
+            return
+        slot = self.nplan.new_runtime_key_filter()
+        self.nplan.add_parquet_key_filter(probe_pipeline, slot,
+                                          scan_columns[probe_keys[0]],
+                                          probe_ct.physical.value)
+        self.nplan.set_join2_key_filter_slot(build_pipeline, slot)
 
     def _remember_types(self, columns):
         for col in columns or []:

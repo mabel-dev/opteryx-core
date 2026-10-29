@@ -134,6 +134,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t settled_rows() nogil
         uint64_t prefilter_rows_in() nogil
         uint64_t prefilter_rows_out() nogil
+        uint64_t key_filter_rows_in() nogil
+        uint64_t key_filter_rows_out() nogil
         void clear_eq_needles() nogil
         bint try_get_result(MorselRef& out) nogil
         bint wait_and_get_result(MorselRef& out) nogil

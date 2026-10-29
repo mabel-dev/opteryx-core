@@ -1,6 +1,6 @@
 # What to borrow from Velox — ranked plan
 
-Status: PLAN — awaiting ratification. Nothing is built.
+Status: M1/M2 measured; item 1 LANDED in main 2026-10-29 (uncommitted), make q + make slt green in main.
 Date: 2026-10-23
 Basis: Velox's vector/evaluation model (from knowledge, not re-read for this doc) checked
 against the opteryx tree as of today. Every "opteryx does X" claim below cites the code read.
@@ -148,6 +148,119 @@ frozen ABI is untouched.
 4. x86 confirmation for anything kept (ARCHPERF).
 
 Each step ends on `make q`; anything kept ends on `make slt`.
+
+## Results — M1 and M2, measured 2026-10-29 (ARM, M-series; x86 owed)
+
+Private bench tree built from main as of 2026-10-29 with measurement-only probes
+(`scratch/velox_borrow/apply_probes.py`; nothing landed). One query at a time,
+EXPLAIN ANALYZE, warm run discarded. Raw results: `scratch/velox_borrow/results_2026_10_29/`.
+Shares are of suite wall time, each query's CPU share weighted by its wall time.
+
+**M1 — build-side key filter into the probe scan. PASSES the gate on every suite, even at
+the tight bound.**
+
+| Suite | Tight | Middle | Upper | Gate |
+|---|---|---|---|---|
+| SSB SF10 | 17.9% | 26.5% | 46.6% | 5% |
+| TPC-H SF10 | 5.7% | 7.8% | 12.7% | 3% |
+| TPC-DS SF1 | 14.5% | 16.8% | 18.8% | 3% |
+
+- Tight = scan decode + operators below the join, for rows a join later rejects. Middle adds
+  the join's match work (gather/emit + the matching share of the probe loop) on rows a join
+  ABOVE it rejects. Upper adds that join's whole CPU.
+- Where it comes from: SSB Q1.x is decode of lineorder rows the date join rejects (the
+  runtime min/max bound already cut Q1.1's scan from 60M to 7.9M rows; the rest falls
+  inside the bound). SSB Q4.x and TPC-H Q05/Q07 are match work in the first fact join on
+  rows a later join drops (Q4.1: 12.3M rows match the first join, 0.98M survive the chain).
+  TPC-H Q19 rejects 98.9% of lineitem at its one join.
+- Not counted: the filter's own cost (one key-set lookup per scanned row) against the join
+  hash and miss work it removes for the same rows, assumed to cancel; 5 TPC-H and 13 TPC-DS
+  joins that run inside another operator (excluded, so the ceiling is understated there).
+
+**M2 — narrowed, runtime-ordered AND terms. FAILS the gate everywhere.**
+
+| Suite | Narrowing (today's order) | Reordering on top | Total | Gate |
+|---|---|---|---|---|
+| TPC-H SF10 | 0.8% | 0.6% | 1.4% | 3% |
+| TPC-DS SF1 | 0.2% | 0.2% | 0.4% | 3% |
+| ClickBench | 0.0% | 0.0% | 0.0% | 3% |
+
+- Upper bounds (free narrowing). All AND-term evaluation in the VM totals 199 ms (TPC-H),
+  85 ms (TPC-DS) and 9.6 ms (ClickBench) of thread time: there is little to save.
+- ClickBench predicates are settled in the scan (zone maps, range settlement, page search);
+  the VM only sees undecided rows. M2 does NOT cover predicate-column DECODE: every
+  predicate column is decoded for every undecided row before any term runs. Narrowing that
+  decode (Velox's column-by-column filter in the reader) is a separate, unmeasured hypothesis.
+
+**Consequence for the order of work:** item 2 is dropped as specified. Item 1 is the
+build, subject to D1. Item 3 is unchanged (small, certain, independent).
+
+## Item 1 build — design as measured (D1 approved 2026-10-29)
+
+Built and measured in a private tree, then LANDED in main on the architect's go
+(2026-10-29; uncommitted). Landed from `scratch/velox_borrow/key_filter.patch`; main
+rebuilt, `make q` 530/530 and `make slt` green there. Extends the runtime min/max join bound
+(docs/RUNTIME_MINMAX_FILTER_DESIGN.md): same eligibility, same barrier, same publish
+point, same switch (`disable_runtime_minmax_join_filter`).
+
+- **What the filter holds:** the build side's 64-bit key hashes — the draken hash the join
+  itself treats as key identity — so it admits a superset of the join's matches. Built in
+  `Join2BuildSink::finalize` from the queued hash chunks (keyed rows only): an exact set up
+  to 65,536 keyed rows, a split-block bloom (~16 bits/key) up to 16M, none above.
+  `src/cpp/engine/runtime_key_filter.hpp`.
+- **Eligibility:** the runtime bound's, plus a single-column key on a native parquet probe
+  scan, BOOL refused.
+- **Applied AFTER decode, not as a decode mask.** The first build used the key bits as the
+  mask the other columns decode under; profiling TPC-DS Q96 showed row-masked decode on
+  narrow integer columns costs MORE than decoding everything (per-value appends), plus
+  re-decodes when a mask narrowed. So every column decodes exactly as before; the decode
+  worker tests the key columns over the rows the result emits and returns a
+  `MorselRef::key_mask`; the Source drops those rows with the existing lazy-selection
+  filter before any operator sees them. The saving is the joins' probe and emit work on
+  rows a join would drop — which M1's middle estimate said was the bulk of the ceiling.
+- **Several filters on one scan narrow:** smallest build first (a proxy for most
+  selective), and each later filter hashes only the rows still alive (fixed-width keys are
+  gathered densely before hashing). Without this, SSB's three-filter scans hashed every
+  row three times and went 27% slower.
+- A key column that is also a pushed-predicate column has the predicate's full length;
+  its bits are compacted onto the predicate's survivors before joining the mask.
+- Not armed under range settlement; self-disables after 1M rows tested if it keeps >95%.
+- **Telemetry:** `key_filter_rows_in` / `key_filter_rows_out` in `io_scan_diagnostics`.
+
+## Item 1 — results (2026-10-29, ARM; x86 owed)
+
+**Correctness.** `make q` 530/530 and `make slt` (every group) green in the private tree.
+26 integration/unit tests (`tests/integration/test_runtime_key_filter.py`,
+`tests/unit/operators/test_runtime_key_filter_absent_key.py`): on/off result identity,
+refused modes test no row, settlement does not arm, both filter shapes fire, a
+schema-evolved probe, and a predicate key beside a second key. The off/on oracle compares
+FULL results across TPC-H SF1 (22), SSB SF1 (13), TPC-DS SF1 (99) and SF0.01 (99): no
+mismatch except TPC-DS Q75, whose float sums differ run-to-run within the BASELINE itself
+(~1e-14 relative), same magnitude across trees, every non-float value identical.
+
+⛔ An earlier oracle run reported "0 mismatches" while every query had errored in both
+trees on result extraction — it compared nothing. The oracle now reports how many queries
+produced a result and declares itself invalid below 90%. The re-run found two real bugs
+(a predicate key mixing lengths, and a crash it caused in the join); both are fixed and
+covered by tests.
+
+**Timing**, interleaved A/B, 9 rounds, both trees built identically, sum of medians:
+
+| Suite | B/A total | Geomean | Slower >3% | Faster >3% |
+|---|---|---|---|---|
+| SSB SF10 | 0.893 | 0.914 | 3 of 13 | 6 of 13 |
+| TPC-H SF10 | 0.954 | 0.966 | 3 of 22 | 10 of 22 |
+| TPC-DS SF1 | 1.000 | 1.005 | 28 of 99 | 16 of 99 |
+| ClickBench subset (no joins, control) | ~1.00 | — | within ±5%, large queries ±2% | |
+
+- Best: SSB Q4.2 0.62, Q3.4 0.72, Q4.1 0.82; TPC-H Q05 0.84, Q21 0.87, Q10 0.89;
+  TPC-DS Q80 0.73, Q64 0.75.
+- Worst: TPC-DS Q91 1.17, Q62 1.13, Q74 1.12; SSB Q3.1 1.15; TPC-H Q07 1.10. These are
+  single-join or already-selective-first-join shapes where the scan's test duplicates work
+  the join does cheaply.
+- ⛔ TPC-H Q06 (no join) reads 0.91 in every run, including with identical builds. Not
+  explained; the ClickBench control shows no general offset between the trees. Read the
+  TPC-H total with that in mind.
 
 ## Decisions requested
 

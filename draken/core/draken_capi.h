@@ -25,6 +25,14 @@ extern "C" {
 // GIL-free. 0, or -1 with the reason written to `error`.
 int draken_hash_rows(const VectorOwner* v, uint64_t* out, char* error, size_t error_len);
 
+// draken_hash_view_rows — each logical row's single-column key hash (the value
+// draken_hash_shaped gives it: what cxx_hash keys a ONE-column join, group or
+// distinct on) for a BORROWED vector, into out[0..v->length). For callers that hold
+// a DrakenVector view rather than an owner — a decode worker testing a runtime join
+// key filter. Pure C++, GIL-free. 0, or -1 for a type with no ops-table hash
+// (ARRAY, NULL, VECTOR_FP16, DECIMAL128) or an allocation failure.
+int draken_hash_view_rows(const DrakenVector* v, uint64_t* out);
+
 // draken_vecresult_child_owner_new_c — heap-allocate a VectorOwner from a VecResult,
 // with NO Python object created (unlike draken_vecresult_own_c). For embedding as
 // ANOTHER VectorOwner's child_owner (an ARRAY result's element vector), where a

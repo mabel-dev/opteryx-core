@@ -109,6 +109,7 @@
 #include "metadata.hpp"           // FileStats, RowGroupStats, ColumnStats
 #include "engine/parquet_footer_map.hpp"  // ParquetFooterMap: shared, never-copied footers
 #include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
+#include "runtime_key_filter.hpp"  // runtime join KEY filter, tested in the decode workers
 #include "parquet_stat_ordinal.hpp"  // stat_bytes_to_ordinal — footer stats -> draken ordinal
 #include "topn_boundary.hpp"         // TopNBoundary — Top-N runtime boundary
 #include "parquet_bloom_probe.hpp"   // ParquetBloomProbe — remote bloom membership
@@ -887,6 +888,103 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
 
     void set_runtime_pruned_counter(int64_t* slot) { row_groups_pruned_runtime_ = slot; }
 
+    // Runtime join KEY filter (runtime_key_filter.hpp; docs/VELOX_BORROW_PLAN.md item
+    // 1). Plan-time only, on the compiler's thread: `slot` is an engine-owned
+    // RuntimeKeyFilterSlot the build side's barrier publishes into, `want` the PLAN's
+    // type of the key column (what this Source emits for it). Armed on the pipeline
+    // per run in make_global, and only when a filter was actually published. The
+    // decode workers test the key over the rows each result emits and hand back
+    // MorselRef::key_mask, applied below before any operator sees a row.
+    struct KeyFilterWire {
+        std::string column;                       // physical (in-file) name
+        const RuntimeKeyFilterSlot* slot = nullptr;
+        DrakenType want = static_cast<DrakenType>(0);
+        std::unique_ptr<KeyAdmissionCtx> ctx;
+    };
+    std::vector<KeyFilterWire> key_filters_;
+
+    void add_key_filter(std::string physical_column, const RuntimeKeyFilterSlot* slot,
+                        DrakenType want) {
+        KeyFilterWire w;
+        w.column = std::move(physical_column);
+        w.slot = slot;
+        w.want = want;
+        w.ctx = std::make_unique<KeyAdmissionCtx>();
+        key_filters_.push_back(std::move(w));
+    }
+
+    // On the driver thread in make_global, after the build pipeline's barrier: arm
+    // every wired key filter whose slot was published. Not under range settlement
+    // (the pipeline refuses it), and not for a column outside the read set.
+    void arm_key_filters() {
+        if (key_filters_.empty() || pipeline == nullptr) return;
+        std::vector<rugo::KeyAdmission> armed;
+        if (!pipeline->range_settle_armed()) {
+            for (KeyFilterWire& w : key_filters_) {
+                if (w.slot == nullptr || w.slot->filter == nullptr) continue;
+                if (std::find(column_names->begin(), column_names->end(), w.column) ==
+                    column_names->end())
+                    continue;
+                w.ctx->reset(w.slot->filter);
+                w.ctx->want = w.want;
+                rugo::KeyAdmission ka;
+                ka.fn = &opteryx_key_admission_eval;
+                ka.ctx = w.ctx.get();
+                ka.col = w.column;
+                armed.push_back(std::move(ka));
+            }
+        }
+        // Smallest build first: a proxy for most selective, so the filters after it
+        // test (and hash) only the rows it kept.
+        std::stable_sort(armed.begin(), armed.end(),
+                         [](const rugo::KeyAdmission& a, const rugo::KeyAdmission& b) {
+                             return static_cast<const KeyAdmissionCtx*>(a.ctx)->filter->keys <
+                                    static_cast<const KeyAdmissionCtx*>(b.ctx)->filter->keys;
+                         });
+        pipeline->set_key_admissions(std::move(armed));
+    }
+
+    // Drop the rows a result's key_mask rejects (MorselRef::key_mask, one bit per row
+    // of `m` as assembled). False = failed (err set). `m` is replaced by the
+    // filtered morsel; an emptied one is the caller's to skip.
+    bool apply_key_mask(const rugo::MorselRef& result, std::shared_ptr<CxxMorsel>& m,
+                        ErrCtx& err) const {
+        if (result.key_mask.empty()) return true;
+        const uint32_t n = static_cast<uint32_t>(m->num_rows());
+        bool lengths_agree = result.key_mask_rows == n;
+        for (const CxxColumn& c : m->columns)
+            if (c.view.length != n) lengths_agree = false;
+        if (!lengths_agree) {
+            // Exact, not byte-granular: a mask a few rows short of the morsel would
+            // otherwise read padding bits as "drop" — a wrong answer, not an error.
+            static thread_local std::string key_mask_err;
+            key_mask_err = "NativeParquetScanSource: key mask covers " +
+                           std::to_string(result.key_mask_rows) + " rows but the assembled "
+                           "morsel holds " + std::to_string(n) + " (column lengths:";
+            for (size_t ci = 0; ci < m->columns.size(); ++ci) {
+                key_mask_err += " " + (ci < column_names->size() ? (*column_names)[ci] : std::string("?")) +
+                                "=" + std::to_string(m->columns[ci].view.length);
+                if (ci < prefilter_is_pred_.size() && prefilter_is_pred_[ci]) key_mask_err += "[pred]";
+            }
+            key_mask_err += "; key filters:";
+            for (const KeyFilterWire& w : key_filters_) key_mask_err += " " + w.column;
+            key_mask_err += ")";
+            err.code = 1;
+            err.msg = key_mask_err.c_str();
+            return false;
+        }
+        DrakenVector mv = draken_vector_from_dense(
+            const_cast<uint8_t*>(result.key_mask.data()), n, DRAKEN_BOOL, nullptr);
+        CxxMorsel* masked = cxx_mask_c(m.get(), &mv);
+        if (masked == nullptr) {
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: key mask gather failed";
+            return false;
+        }
+        m = std::shared_ptr<CxxMorsel>(masked, cxx_morsel_delete);
+        return true;
+    }
+
     // Remote bloom membership: the plan's probes (borrowed; the plan outlives the
     // run) and the plan's slot for how many units they excluded. Plan-time only,
     // on the compiler's thread, before run() is entered.
@@ -1318,6 +1416,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         // pipeline has completed and Engine::run() has published the bound, so
         // every bound this reads is either filled or honestly invalid.
         apply_runtime_bounds(*g);
+        arm_key_filters();
         apply_row_admission(*g);
         g->submit_cap = limit_submit_cap(*g);
         assign_fetch_blocks(*g);
@@ -1939,6 +2038,8 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 if (!identity_kinds_.empty() &&
                     !append_row_identity(*m, result.path, result.rg_idx, kept_ptr, kept_len, -1, err))
                     return SourceResult::FINISHED;
+                if (!apply_key_mask(result, m, err)) return SourceResult::FINISHED;
+                if (m->num_rows() == 0) continue;
             } else {
                 m->columns.resize(ncols);
                 // The fill's length: any column that was read, else the unread count.
@@ -1957,6 +2058,10 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 if (!identity_kinds_.empty() &&
                     !append_row_identity(*m, result.path, result.rg_idx, kept_ptr, kept_len, -1, err))
                     return SourceResult::FINISHED;
+                // The key mask is over the rows as assembled here, BEFORE the serial
+                // prefilter below narrows them.
+                if (!apply_key_mask(result, m, err)) return SourceResult::FINISHED;
+                if (m->num_rows() == 0) continue;
                 if (prefilter_) {
                     // The worker declined: run the program over the whole row group.
                     CxxMorsel* filtered = nullptr;

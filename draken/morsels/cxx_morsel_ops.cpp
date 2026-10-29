@@ -609,6 +609,28 @@ extern "C" int draken_hash_rows(const VectorOwner* v, uint64_t* out, char* error
     }
 }
 
+// draken_hash_view_rows — see core/draken_capi.h. The same draken_hash_shaped
+// hash_shaped_impl uses for every type it routes through the ops table, so a row's
+// value here equals the one a single-column cxx_hash produces for it (the E37
+// carried-seed path there is byte-identical by construction).
+extern "C" int draken_hash_view_rows(const DrakenVector* v, uint64_t* out) {
+    const DrakenType t = v->type;
+    if (t == DRAKEN_ARRAY || t == DRAKEN_NULL || t == DRAKEN_VECTOR_FP16 ||
+        t == DRAKEN_DECIMAL128)
+        return -1;
+    try {
+        const VectorOwner hashed = vecresult_to_owner(draken_hash_shaped(*v));
+        const uint32_t n = hashed.vec.length;
+        if (n > 0u && hashed.vec.data == nullptr) return -1;
+        const uint64_t* data = static_cast<const uint64_t*>(hashed.vec.data);
+        const uint32_t* sel = hashed.vec.selection;   // never NULL (§11)
+        for (uint32_t i = 0; i < n; ++i) out[i] = data[sel[i]];
+        return 0;
+    } catch (const std::exception&) {
+        return -1;
+    }
+}
+
 namespace draken::morsel_ops {
 
 // S0: gather all columns of a CxxMorsel at the given row indices (nogil; reuses

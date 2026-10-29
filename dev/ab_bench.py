@@ -117,10 +117,33 @@ def _worker_load_job(tree: str, dataset_override: str | None = None) -> list[tup
     return out
 
 
+def _worker_load_runner(tree: str, suite: str, scale: str, variant: str) -> list[tuple[str, str]]:
+    """[(name, sql)] from the SSB / TPC-DS runner's own loader, so a query here is
+    byte-for-byte the query `make ssb-sf<N>` / `make tpcds-sf<N>` times."""
+    import importlib.util
+
+    import opteryx
+    from opteryx.connectors import DiskConnector
+
+    opteryx.register_workspace("testdata", DiskConnector)
+    runner_dir = os.path.join(tree, "tests", "performance", suite)
+    sys.path.insert(0, os.path.join(tree, "tests", "performance"))
+    sys.path.insert(0, runner_dir)
+    spec = importlib.util.spec_from_file_location(f"{suite}_runner", os.path.join(runner_dir, "runner.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    if suite == "tpcds":
+        return mod._load_queries(scale, "", variant)
+    return mod._load_queries(scale, variant)
+
+
 def _query_names(spec: str, suite: str) -> set[str]:
-    """--queries / --controls → result names: numbers for clickbench/tpch, JOB ids (1a,33c)."""
+    """--queries / --controls → result names: numbers for clickbench/tpch, JOB ids (1a,33c),
+    the runner's own names for ssb/tpcds (Q1.1, Q05)."""
     if not spec:
         return set()
+    if suite in ("ssb", "tpcds"):
+        return {q.strip() for q in spec.split(",")}
     if suite == "job":
         return {f"J{q.strip()}" for q in spec.split(",")}
     return {f"Q{int(q):02d}" for q in spec.split(",")}
@@ -139,6 +162,8 @@ def _worker(args: argparse.Namespace) -> None:
         queries = _worker_load_clickbench(tree, args.dataset)
     elif args.suite == "job":
         queries = _worker_load_job(tree, args.dataset)
+    elif args.suite in ("ssb", "tpcds"):
+        queries = _worker_load_runner(tree, args.suite, args.scale, args.variant)
     else:
         queries = _worker_load_tpch(tree, args.scale, args.dataset)
 
@@ -248,7 +273,7 @@ def _run_side(arm: dict, args: argparse.Namespace) -> dict:
     tree = arm["tree"]
     cmd = [
         sys.executable, os.path.abspath(__file__), "--worker",
-        "--suite", args.suite, "--scale", args.scale,
+        "--suite", args.suite, "--scale", args.scale, "--variant", args.variant,
     ]
     if args.queries:
         cmd += ["--queries", args.queries]
@@ -509,12 +534,14 @@ def _orchestrate(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--suite", choices=("clickbench", "tpch", "job"), required=True)
+    parser.add_argument("--suite", choices=("clickbench", "tpch", "job", "ssb", "tpcds"), required=True)
     parser.add_argument("--queries", default="", help="comma-separated query numbers, e.g. 6,19,21 (empty = all)")
     parser.add_argument("--a", default=None, help="baseline tree root (omit for single-tree timing)")
     parser.add_argument("--b", default=_REPO_ROOT, help="candidate tree root (default: this repo)")
     parser.add_argument("--iterations", type=int, default=5, help="interleaved rounds per side (default 5)")
     parser.add_argument("--scale", default="1", help="TPC-H scale suffix (testdata/tpch_<scale>, default 1)")
+    parser.add_argument("--variant", default="",
+                        help="ssb/tpcds dataset variant, e.g. rugo (testdata/<suite>_<scale>_<variant>)")
     parser.add_argument("--dataset", default=None, help="ClickBench dataset override (default: runner's DATASET)")
     parser.add_argument("--profile", action="store_true", help="add an EXPLAIN ANALYZE attribution pass per run")
     parser.add_argument("--arms", default=None,

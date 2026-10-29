@@ -208,6 +208,9 @@ struct PipelineNode {
     // into post-run, or -1. Empty for every pipeline that is not an eligible
     // join build. See docs/RUNTIME_MINMAX_FILTER_DESIGN.md.
     std::vector<int> fill_bound_slots;
+    // Runtime join KEY filter: the runtime_key_filters slot this build sink's
+    // key filter is published into post-run, or -1 (runtime_key_filter.hpp).
+    int fill_key_filter_slot = -1;
     std::vector<int> reads_buffers;   // buffers indexes this pipeline's source reads, so
                                       // run() can free a buffer after its LAST consumer
     int dop_override = 0;     // >0 forces this pipeline's degree (order-sensitive
@@ -289,6 +292,10 @@ public:
     // on the driver thread between two pipelines — never concurrently with any
     // reader.
     std::vector<std::unique_ptr<RuntimeKeyBound>> runtime_bounds;
+    // Runtime join KEY filter slots (runtime_key_filter.hpp): address-stable for the
+    // same reason as runtime_bounds. Each points at a build global's filter once its
+    // pipeline has run, else null (admit everything).
+    std::vector<std::unique_ptr<RuntimeKeyFilterSlot>> runtime_key_filters;
     // Top-N runtime boundary slots (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md). unique_ptr
     // for the same address-stability reason as runtime_bounds; unlike those, these are
     // written WHILE their scan runs (the producer is in the same pipeline), which is
@@ -658,6 +665,33 @@ public:
     size_t new_runtime_bound() {
         runtime_bounds.push_back(std::make_unique<RuntimeKeyBound>());
         return runtime_bounds.size() - 1;
+    }
+
+    // ── Runtime join KEY filter (runtime_key_filter.hpp) ───────────────────────────
+    // A fresh, unpublished slot. Wired to one build sink and one probe scan column by
+    // the two calls below, both at plan time on the compiler's thread.
+    size_t new_runtime_key_filter() {
+        runtime_key_filters.push_back(std::make_unique<RuntimeKeyFilterSlot>());
+        return runtime_key_filters.size() - 1;
+    }
+    void set_join2_key_filter_slot(size_t p, size_t slot) {
+        auto* sink = dynamic_cast<Join2BuildSink*>(pipelines[p]->sink.get());
+        if (sink == nullptr)
+            throw std::runtime_error(
+                "set_join2_key_filter_slot: pipeline sink is not a join build sink");
+        if (sink->key_idx.size() != 1)
+            throw std::runtime_error(
+                "set_join2_key_filter_slot: the key filter is single-column only");
+        sink->key_filter_wanted = true;
+        pipelines[p]->fill_key_filter_slot = static_cast<int>(slot);
+    }
+    void add_parquet_key_filter(size_t p, size_t slot, std::string column, int want_type) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "add_parquet_key_filter: pipeline source is not a native parquet scan");
+        src->add_key_filter(std::move(column), runtime_key_filters[slot].get(),
+                            static_cast<DrakenType>(want_type));
     }
     // Wire an already-created skene Source to a bound slot. Called AFTER
     // set_native_skene_scan_source for the same pipeline: the compiler compiles
@@ -1908,6 +1942,12 @@ public:
                 out.hi = bg->bound_hi[k];
                 out.valid = 1;
             }
+            // RUNTIME KEY FILTER — same publish point, same argument. Assigned every
+            // run (null when this run built none), so a re-run never leaves a slot
+            // pointing at a previous run's build global.
+            if (pn->fill_key_filter_slot >= 0)
+                runtime_key_filters[static_cast<size_t>(pn->fill_key_filter_slot)]->filter =
+                    bg->key_filter.get();
         }
         if (!rs.completed[idx].exchange(true)) {
             for (int b : pn->reads_buffers) {

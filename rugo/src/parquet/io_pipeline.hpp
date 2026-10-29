@@ -521,6 +521,13 @@ struct MorselRef {
     // applicable → the consumer evaluates on the main thread (fallback). std::vector,
     // freed automatically — NOT a draken buffer, so NOT touched by free_fn below.
     std::vector<uint8_t> survivor_mask;
+    // Runtime key admission (set_key_admissions): bit-packed, one bit per row this
+    // result EMITS (after the predicate, if any), 1 = the row's join key may match.
+    // Empty = no key filter applied (or every row kept). The consumer filters the
+    // assembled morsel by it before any operator sees a row. std::vector, freed
+    // automatically — NOT a draken buffer, so NOT touched by free_fn.
+    std::vector<uint8_t> key_mask;
+    uint32_t key_mask_rows = 0;   // the rows key_mask covers (bits beyond are padding)
     // Range settlement (ParquetIOPipeline::set_range_settle): the worker applied the
     // whole predicate itself — rows proven ALL-PASS without evaluating, the rest
     // evaluated — so every non-predicate column already holds exactly the
@@ -566,6 +573,22 @@ struct Pass1Pred {
     Pass1PredFn fn = nullptr;
     void*       ctx = nullptr;
     std::vector<std::string> cols;   // predicate column names, in pass-order
+};
+
+// Runtime key admission (opteryx docs/VELOX_BORROW_PLAN.md item 1): a join's
+// build-side key filter, tested over a decoded probe-key column on the decode
+// worker. `fn` is an opaque C-ABI callback (opteryx_key_admission_eval):
+// int fn(void* ctx, DrakenVector* col, uint32_t n, const uint8_t* in_bits,
+// uint8_t* out_bits) — bit i set when row i may match; `in_bits` (nullable) marks the
+// rows still alive, the only ones tested; non-zero = declined, and every row is kept.
+// The filter is a
+// SUPERSET of the join's matches, so declining is always safe. rugo stays
+// opteryx-free — only draken's DrakenVector and this fn-ptr cross the boundary.
+typedef int (*KeyAdmitFn)(void*, DrakenVector*, uint32_t, const uint8_t*, uint8_t*);
+struct KeyAdmission {
+    KeyAdmitFn  fn = nullptr;
+    void*       ctx = nullptr;
+    std::string col;   // the key column's in-file name
 };
 
 // The DrakenType a fixed-width direct kind's buffers hold — the SAME mapping the
@@ -2270,6 +2293,11 @@ class ParquetIOPipeline {
     bool report_kept_rows_ = false;
     std::atomic<uint64_t> prefilter_rows_in_{0};
     std::atomic<uint64_t> prefilter_rows_out_{0};
+    // Runtime key admission (set_key_admissions): set before any submit; workers read
+    // it const. Never armed together with range settlement (see set_key_admissions).
+    std::vector<KeyAdmission> key_admit_;
+    std::atomic<uint64_t> key_admit_rows_in_{0};
+    std::atomic<uint64_t> key_admit_rows_out_{0};
 
     // ── PageIndex region cache ───────────────────────────────────────────────
     // A writer lays every ColumnIndex of the file out contiguously, then every
@@ -4313,6 +4341,101 @@ class ParquetIOPipeline {
                     }
                 }
             }
+
+            // ── Runtime key admission (set_key_admissions) ──────────────────────
+            // After every column decoded EXACTLY as without it (no narrower decode
+            // mask: on narrow columns a row-masked decode costs more than it saves,
+            // measured 2026-10-29), each armed key column is tested and the bits —
+            // one per row this result EMITS — are ANDed into `key_mask`; the consumer
+            // drops those rows before any operator sees them, which is where the
+            // saving is (a join's probe and emit work). The survivor mask is never
+            // touched: the other columns were decoded under it.
+            //
+            // A key column that is ALSO a prefilter predicate column holds the
+            // predicate's full length (np), so its bits are compacted onto the rows
+            // the predicate kept (the rows the result emits) before the AND.
+            // Not for a pass-2 item, the latmat pass-1 predicate without the
+            // prefilter, or a settled result (refused at arm time anyway).
+            if (!key_admit_.empty() && result.success && !result.empty_filtered &&
+                !result.settled && item.row_mask.empty() && !range_settle_ &&
+                !(pass1_pred_.fn != nullptr && !prefilter)) {
+                const bool have_sm = prefilter && !result.survivor_mask.empty();
+                uint32_t emit_rows = 0;
+                bool emit_known = false;
+                for (const KeyAdmission& ka : key_admit_) {
+                    size_t ci = SIZE_MAX;
+                    for (size_t i = 0; i < ncols_total; ++i) {
+                        if (item.column_stats[i].name != ka.col) continue;
+                        bool nested_leaf = false;
+                        if (item.nested)
+                            for (const NestedGroup& g : item.nested->groups)
+                                if (i >= g.first && i < g.first + g.count) { nested_leaf = true; break; }
+                        if (!nested_leaf && item.column_stats[i].max_repetition_level == 0) ci = i;
+                        break;
+                    }
+                    if (ci == SIZE_MAX || ci >= result.columns.size()) continue;
+                    ColumnOut& c = result.columns[ci];     // the view builder takes it non-const
+                    const uint32_t n = static_cast<uint32_t>(c.length);
+                    if (n == 0) continue;
+                    bool pred_col = false;
+                    if (prefilter)
+                        for (const auto& pc : pass1_pred_.cols)
+                            if (pc == ka.col) { pred_col = true; break; }
+                    DrakenStringArena sa;
+                    DrakenVector dv;
+                    if (!pass1_build_dv_view(c, n, sa, dv)) continue;
+                    std::vector<uint8_t> bits((static_cast<size_t>(n) + 7) >> 3, 0);
+                    // Only rows earlier filters kept are tested (a predicate column's
+                    // bits are over the predicate's length, so it tests every row).
+                    const uint8_t* live = (!pred_col || !have_sm) && !result.key_mask.empty() &&
+                                                  result.key_mask_rows == n
+                                              ? result.key_mask.data() : nullptr;
+                    if (ka.fn(ka.ctx, &dv, n, live, bits.data()) != 0) continue;
+                    if (pred_col && have_sm) {
+                        // Bits over the predicate's np rows -> bits over its survivors.
+                        if (result.survivor_mask.size() != bits.size())
+                            throw std::logic_error("key admission: predicate key column and "
+                                                   "survivor mask disagree in length");
+                        const uint8_t* sm = result.survivor_mask.data();
+                        std::vector<uint8_t> cb(bits.size(), 0);
+                        uint32_t j = 0;
+                        for (uint32_t r = 0; r < n; ++r) {
+                            if (!((sm[r >> 3] >> (r & 7)) & 1u)) continue;
+                            if ((bits[r >> 3] >> (r & 7)) & 1u)
+                                cb[j >> 3] |= static_cast<uint8_t>(1u << (j & 7));
+                            ++j;
+                        }
+                        cb.resize((static_cast<size_t>(j) + 7) >> 3);
+                        bits.swap(cb);
+                        if (emit_known && j != emit_rows)
+                            throw std::logic_error("key admission: key columns disagree on the "
+                                                   "emitted row count");
+                        emit_rows = j;
+                    } else {
+                        if (emit_known && n != emit_rows)
+                            throw std::logic_error("key admission: key columns disagree on the "
+                                                   "emitted row count");
+                        emit_rows = n;
+                    }
+                    emit_known = true;
+                    if (result.key_mask.empty()) {
+                        result.key_mask.swap(bits);
+                        result.key_mask_rows = emit_rows;
+                    } else {
+                        for (size_t b = 0; b < result.key_mask.size(); ++b)
+                            result.key_mask[b] &= bits[b];
+                    }
+                }
+                if (!result.key_mask.empty()) {
+                    const uint32_t kept = survivor_bits_count(result.key_mask.data(), emit_rows);
+                    key_admit_rows_in_.fetch_add(emit_rows, std::memory_order_relaxed);
+                    key_admit_rows_out_.fetch_add(kept, std::memory_order_relaxed);
+                    if (kept == emit_rows) {                         // nothing to drop
+                        result.key_mask.clear();
+                        result.key_mask_rows = 0;
+                    }
+                }
+            }
         } catch (const std::exception& e) {
             result.success = false;
             result.error = e.what();
@@ -4831,6 +4954,19 @@ class ParquetIOPipeline {
         pass1_pred_.cols = cols;
     }
     void clear_pass1_predicate() { pass1_pred_.fn = nullptr; pass1_pred_.ctx = nullptr; pass1_pred_.cols.clear(); }
+
+    // Runtime key admission: REPLACES the armed set (a Source re-arms per run). Set
+    // before any submit. Refused under range settlement: settlement returns its
+    // predicate columns EMPTY as filter-only, so a settled result has no rows to
+    // carry a key mask over.
+    void set_key_admissions(std::vector<KeyAdmission> admissions) {
+        if (range_settle_ && !admissions.empty())
+            throw std::logic_error("set_key_admissions: refused under range settlement");
+        key_admit_ = std::move(admissions);
+    }
+    bool range_settle_armed() const { return range_settle_; }
+    uint64_t key_filter_rows_in() const { return key_admit_rows_in_.load(std::memory_order_relaxed); }
+    uint64_t key_filter_rows_out() const { return key_admit_rows_out_.load(std::memory_order_relaxed); }
     // Make the registered pass-1 predicate this scan's filter (scan prefilter).
     // Set once before submit; requires set_pass1_predicate.
     void set_prefilter(bool on) { prefilter_ = on; }
@@ -4863,6 +4999,8 @@ class ParquetIOPipeline {
         if (on) {
             if (!prefilter_ || pass1_pred_.fn == nullptr || pass1_pred_.cols.empty())
                 throw std::logic_error("set_range_settle: needs the scan prefilter armed first");
+            if (!key_admit_.empty())
+                throw std::logic_error("set_range_settle: refused with key admission armed");
             for (const auto& pc : pass1_pred_.cols) {
                 auto vit = value_preds_.find(pc);
                 if (vit == value_preds_.end() || vit->second.kind != 6)

@@ -44,6 +44,7 @@
 #include "morsels/cxx_hash.h"       // cxx_hash_c — draken owns the join-key hash
 #include "morsels/cxx_ordinal.h"     // cxx_ordinal_bounds_c — draken owns the ordinal
 #include "runtime_bound.hpp"         // RuntimeKeyBound — runtime min/max join filter
+#include "runtime_key_filter.hpp"    // RuntimeKeyFilter — runtime join KEY filter
 #include "carchar_join_index.hpp"   // opteryx::carchar::CarcharJoinIndex
 #include "core/mem_account.h"       // draken::MemCharge — build memory no allocator charges
 
@@ -441,6 +442,12 @@ struct Join2BuildGlobal : GlobalSinkState {
     // with a probe. `bound_any[i] == 0` means "no bound", i.e. prune nothing.
     std::vector<int64_t> bound_lo, bound_hi;
     std::vector<uint8_t> bound_any;
+    // Runtime join KEY filter (runtime_key_filter.hpp): the keyed build rows' hashes,
+    // built by finalize() when the sink's `key_filter_wanted`, before the CSR / radix
+    // build consumes the hash chunks. Null when not wanted or not buildable. Read by
+    // Engine::run at the same barrier as the bounds above, and by the probe scan's
+    // decode workers only after it.
+    std::unique_ptr<RuntimeKeyFilter> key_filter;
 
     // The two build-table operations the probe modes use.
     //
@@ -993,6 +1000,10 @@ struct Join2BuildSink : Sink {
     // constructor: eligibility depends on the probe leg, which is compiled after
     // this sink is wired. Empty until then, and empty is the pre-feature path.
     std::vector<int> bound_slots;
+    // Runtime join KEY filter: set by Engine::set_join2_key_filter_slot AFTER
+    // construction, for the same reason as bound_slots, under the same eligibility
+    // plus a single-column key (the compiler decides; nothing here re-decides it).
+    bool key_filter_wanted = false;
     // Rows this join is ESTIMATED to emit (JoinBuildShapeStrategy), or -1 for
     // unknown. The only input finalize() cannot measure for itself; it weighs this
     // against the REAL byte size of the retained build payload to decide whether to
@@ -1359,6 +1370,13 @@ struct Join2BuildSink : Sink {
         // instead of queuing hash chunks, but it queues row addresses like everyone
         // else). Nothing may touch the build address space before this returns.
         merge_build_rows(g);
+        // Runtime join KEY filter — FROM the queued hash chunks, so BEFORE the CSR /
+        // radix build below consumes and frees them. Keyed rows only (NULL keys are
+        // staged apart in combine()). An unbuildable filter is simply absent.
+        if (key_filter_wanted && g.csr_active) {
+            auto f = std::make_unique<RuntimeKeyFilter>();
+            if (f->build(g.hash_chunks)) g.key_filter = std::move(f);
+        }
         // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
         if (g.csr_active) {
             if (g.total_rows >= kRadixMinBuildRows) {
