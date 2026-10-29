@@ -20,8 +20,11 @@ import csv
 import datetime
 import json
 import os
+import re
+import socket
 import subprocess
 import sys
+import urllib.parse
 from typing import Iterable, Optional
 
 
@@ -300,6 +303,60 @@ def print_banner(
 AISTOR_WORKSPACE = "aistor"
 AISTOR_WAREHOUSE = "benchmarks"
 AISTOR_REGION = "us-east-1"
+
+
+def aistor_network_path() -> str:
+    """Label the network path this machine uses to reach AIStor.
+
+    Remote numbers depend on the link as much as on the engine: on 2026-10-29
+    the Mac silently fell back from the wired 5GbE adapter to Wi-Fi and every
+    AIStor result got worse. The label is recorded with the results so a run
+    always says which path it measured, e.g. `wired en8 (USB 10/100/1G/2.5G/5G
+    LAN, 5000Base-T)` or `wifi en0 (Wi-Fi)`. A path that cannot be identified
+    raises - an unlabelled remote result is exactly what this exists to stop.
+    """
+    host = urllib.parse.urlsplit(os.environ["AISTOR_ENDPOINT"]).hostname
+    if host is None:
+        raise ValueError(f"AISTOR_ENDPOINT has no host: {os.environ['AISTOR_ENDPOINT']!r}")
+    address = socket.gethostbyname(host)
+
+    if sys.platform == "darwin":
+        route = subprocess.check_output(["route", "-n", "get", address], text=True)
+        interface = re.search(r"^\s*interface:\s*(\S+)", route, re.MULTILINE)
+        if interface is None:
+            raise RuntimeError(f"`route -n get {address}` reported no interface:\n{route}")
+        device = interface.group(1)
+        if device.startswith("lo"):
+            return f"loopback {device}"
+        ports = subprocess.check_output(["networksetup", "-listallhardwareports"], text=True)
+        port = re.search(
+            rf"^Hardware Port: (.+)\nDevice: {re.escape(device)}$", ports, re.MULTILINE
+        )
+        if port is None:
+            raise RuntimeError(f"interface {device} is not in `networksetup -listallhardwareports`")
+        port_name = port.group(1)
+        if port_name == "Wi-Fi":
+            return f"wifi {device} ({port_name})"
+        ifconfig = subprocess.check_output(["ifconfig", device], text=True)
+        media = re.search(r"media: \S+ \((\S+)", ifconfig)
+        if media is None:
+            raise RuntimeError(f"`ifconfig {device}` reported no negotiated media:\n{ifconfig}")
+        return f"wired {device} ({port_name}, {media.group(1)})"
+
+    if sys.platform.startswith("linux"):
+        route = subprocess.check_output(["ip", "route", "get", address], text=True)
+        interface = re.search(r"\bdev (\S+)", route)
+        if interface is None:
+            raise RuntimeError(f"`ip route get {address}` reported no device:\n{route}")
+        device = interface.group(1)
+        if device.startswith("lo"):
+            return f"loopback {device}"
+        if os.path.isdir(f"/sys/class/net/{device}/wireless"):
+            return f"wifi {device}"
+        with open(f"/sys/class/net/{device}/speed") as speed:
+            return f"wired {device} ({speed.read().strip()} Mb/s)"
+
+    raise RuntimeError(f"no network path detection for platform {sys.platform!r}")
 
 
 def register_aistor_workspace() -> None:

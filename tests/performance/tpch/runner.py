@@ -37,6 +37,7 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 from _common import (  # noqa: E402
     AISTOR_WORKSPACE,
+    aistor_network_path,
     load_duckdb_baseline,
     load_duckdb_shapes,
     open_results_csv,
@@ -402,12 +403,15 @@ def main() -> int:
         if warm_session is not None:
             warm_session.close()
 
+    network = aistor_network_path() if args.variant == AISTOR_WORKSPACE else "local"
+
     print_banner(
         title="TPC-H BENCHMARK",
         opteryx_version=opteryx.__version__,
         metadata=[
             ("Scale factor", f"{args.scale}  ({dataset})"),
             ("Format", args.variant or "parquet"),
+            ("Network", network),
             ("Queries", str(len(queries))),
             ("Iterations", f"{args.iterations} warm runs per query"),
         ],
@@ -431,6 +435,7 @@ def main() -> int:
             "duckdb_min_ms",
             "duckdb_rows",
             "duckdb_cols",
+            "network",
             "error",
         ],
     )
@@ -470,6 +475,7 @@ def main() -> int:
                             "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
                             "duckdb_rows": d_shape[0] if d_shape is not None else "",
                             "duckdb_cols": d_shape[1] if d_shape is not None else "",
+                            "network": network,
                             "error": "",
                         }
                     )
@@ -492,6 +498,7 @@ def main() -> int:
                             "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
                             "duckdb_rows": d_shape[0] if d_shape is not None else "",
                             "duckdb_cols": d_shape[1] if d_shape is not None else "",
+                            "network": network,
                             "error": msg,
                         }
                     )
@@ -538,6 +545,7 @@ def main() -> int:
         f"\033[38;2;255;121;198m{failed} failed\033[0m   "
         f"({elapsed_s:.1f}s)"
     )
+    print(f"  network: {network}")
     print(f"  results: {os.path.relpath(csv_path, _REPO_ROOT)}")
 
     if args.profile:

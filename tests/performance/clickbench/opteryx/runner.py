@@ -286,6 +286,7 @@ if __name__ == "__main__":  # pragma: no cover
     # Shared with the JOB/TPC-H runners so one analysis tool reads every history.
     sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
     from _common import AISTOR_WAREHOUSE
+    from _common import aistor_network_path
     from _common import open_results_csv
     from _common import register_aistor_workspace
 
@@ -352,6 +353,8 @@ if __name__ == "__main__":  # pragma: no cover
         # Remote: the catalog answers whether the table exists - a missing one
         # fails every query, it is never swapped for a local copy.
         register_aistor_workspace()
+        network = aistor_network_path()
+        print(f"Network: {network}")
         dataset_path = f"iceberg {os.environ['AISTOR_ENDPOINT']} warehouse {AISTOR_WAREHOUSE}"
         dataset_entries = "remote"
     else:
@@ -359,6 +362,7 @@ if __name__ == "__main__":  # pragma: no cover
         # silently ran against parquet for as long as the mapping was wrong; the only
         # defence against the next mis-wiring is refusing to run on a dataset we
         # cannot locate.
+        network = "local"
         dataset_path = resolve_dataset_path(DATASET)
         dataset_entries = len(os.listdir(dataset_path))
     RELATION = relation_sql(DATASET, dataset_path)
@@ -596,7 +600,7 @@ if __name__ == "__main__":  # pragma: no cover
             "results",
             f"{DATASET.name}_EXTENDED" if args.extended else DATASET.name,
         ),
-        fieldnames=["query", "run", "status", "elapsed_ms", "duckdb_min_ms", "error"],
+        fieldnames=["query", "run", "status", "elapsed_ms", "duckdb_min_ms", "network", "error"],
     )
 
     def record(query_num: str, run_ix: int, status: str, elapsed_ms: float, index: int, error: str) -> None:
@@ -612,6 +616,7 @@ if __name__ == "__main__":  # pragma: no cover
                 "status": status,
                 "elapsed_ms": f"{elapsed_ms:.3f}",
                 "duckdb_min_ms": duckdb_ms,
+                "network": network,
                 "error": error,
             }
         )
@@ -897,6 +902,7 @@ if __name__ == "__main__":  # pragma: no cover
             f"\n  vs {baseline_name} {sum_base_min_ms / 1000:.2f}s  "
             f"{format_ratio(sum_min_ms, sum_base_min_ms)}  (orientation only)"
         )
+    summary += f"\n  network: {network}"
     print(summary)
 
     if args.json:

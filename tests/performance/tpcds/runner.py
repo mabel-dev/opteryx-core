@@ -56,6 +56,7 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 from _common import (  # noqa: E402
     AISTOR_WORKSPACE,
+    aistor_network_path,
     load_duckdb_baseline,
     open_results_csv,
     print_banner,
@@ -213,12 +214,15 @@ def main() -> int:
         os.path.join(os.path.dirname(__file__), "duckdb", f"results.sf{args.scale}.json")
     )
 
+    network = aistor_network_path() if args.variant == AISTOR_WORKSPACE else "local"
+
     print_banner(
         title="TPC-DS",
         opteryx_version=opteryx.__version__,
         metadata=[
             ("Scale factor", f"{args.scale}  (testdata.{suffix})"),
             ("Format", args.variant or "parquet"),
+            ("Network", network),
             ("Queries", str(len(queries))),
             ("Iterations", f"{args.iterations} runs per query; reported = min, total = sum of mins"),
             ("Worker", "one process reused across queries (in-process caches stay warm); "
@@ -231,7 +235,7 @@ def main() -> int:
     csv_writer, csv_path, csv_handle = open_results_csv(
         _RESULTS_DIR,
         fieldnames=[
-            "scale", "variant", "query", "status", "elapsed_ms", "runs_ms", "row_count", "duckdb_min_ms", "error",
+            "scale", "variant", "query", "status", "elapsed_ms", "runs_ms", "row_count", "duckdb_min_ms", "network", "error",
         ],
     )
 
@@ -279,6 +283,7 @@ def main() -> int:
                     "runs_ms": ";".join(f"{r:.3f}" for r in runs_ms),
                     "row_count": rows,
                     "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
+                    "network": network,
                     "error": err,
                 }
             )
@@ -301,6 +306,7 @@ def main() -> int:
         f"   sum of min-of-{args.iterations}: {total_min_ms / 1000:.2f}s over {passed} queries"
         f"   (wall {elapsed_s:.1f}s, worker processes: {worker.starts})"
     )
+    print(f"  network: {network}")
     print(f"  results: {os.path.relpath(csv_path, _REPO_ROOT)}")
 
     if failures:

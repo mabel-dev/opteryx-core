@@ -36,6 +36,7 @@ sys.path.insert(0, str(_REPO_ROOT / "tests" / "performance"))
 
 from _common import (  # noqa: E402
     AISTOR_WORKSPACE,
+    aistor_network_path,
     load_duckdb_baseline,
     open_results_csv,
     print_banner,
@@ -219,12 +220,15 @@ def main() -> int:
         str(HERE / "duckdb" / f"results.{args.size}.json")
     )
 
+    network = aistor_network_path() if args.variant == AISTOR_WORKSPACE else "local"
+
     print_banner(
         title="H2O db-benchmark",
         opteryx_version=opteryx.__version__,
         metadata=[
             ("Size", args.size),
             ("Workloads", ", ".join(workloads)),
+            ("Network", network),
             ("Iterations", f"{args.iterations} per query (1=cold, 2=warm)"),
             ("Timeout", f"{args.timeout:.0f}s/query"),
         ],
@@ -245,6 +249,7 @@ def main() -> int:
             "elapsed_ms",
             "row_count",
             "duckdb_min_ms",
+            "network",
             "error",
         ],
     )
@@ -291,6 +296,7 @@ def main() -> int:
                             "elapsed_ms": f"{elapsed_ms:.3f}",
                             "row_count": rows,
                             "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
+                            "network": network,
                             "error": msg,
                         }
                     )
@@ -328,6 +334,7 @@ def main() -> int:
         f"\033[38;2;255;165;0m{counts['timeout']} timeout\033[0m   "
         f"({elapsed_s:.1f}s)"
     )
+    print(f"  network: {network}")
     print(f"  results: {os.path.relpath(csv_path, _REPO_ROOT)}")
     return 1 if counts["error"] else 0
 
