@@ -928,16 +928,117 @@ inline void agg2_merge_str(const AggCell& into, const AggCell& from,
         into_s = from_s;
 }
 
-// Emit a string MIN/MAX result column as ONE canonical consolidated block
-// (same layout emit_key_columns' string arm builds). NULL where valid[g] == 0.
-// Inputs are per-group LANES (v3 columnar collectors), not interleaved cells.
-inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
-                                         const std::string* svals,
-                                         const int64_t* valid, uint32_t n) {
+// ---- string MIN/MAX extremes in GROUP BY (docs/STRING_MINMAX_GROUPBY_DESIGN.md) -----
+// One 24-byte record per group instead of a std::string: no malloc/free per extreme,
+// no per-string teardown, and a compare that decides on the record's first 8 bytes
+// without touching the extreme's (cold) bytes.
+//
+// A value of <= kGBStrInline bytes lives in the record until the group first reserves
+// arena bytes; from then on every winner is written into the reservation — in place
+// when it fits, else into a fresh max(len, 2*cap) range. The abandoned range is
+// garbage the arena holds until teardown; doubling bounds it by the final reservation.
+// `ext.ptr` is absolute (GBArena chunks never move), so records copy, swap (top-k
+// cut) and span freely. cap == 0 with len > kGBStrInline means the bytes belong to
+// ANOTHER lanes' arena (adopted at merge — combine_into keeps that arena alive in the
+// destination's skeep) or to the caller (gbs_refer) — never written through.
+
+constexpr uint32_t kGBStrInline = 16;
+
+struct GBStrExt {
+    uint32_t len;
+    uint32_t cap;                  // bytes reserved at ext.ptr in THIS lanes' arena
+    union {
+        uint8_t inl[kGBStrInline];
+        struct {
+            uint8_t  prefix[8];    // first min(len, 8) bytes
+            uint8_t* ptr;
+        } ext;
+    };
+};
+static_assert(sizeof(GBStrExt) == 24, "GBStrExt is a 24-byte lane row");
+static_assert(std::is_trivially_copyable_v<GBStrExt>, "GBStrExt lives in a GBSegVec");
+
+inline bool gbs_is_inline(const GBStrExt& r) noexcept {
+    return r.cap == 0 && r.len <= kGBStrInline;
+}
+inline const uint8_t* gbs_data(const GBStrExt& r) noexcept {
+    return gbs_is_inline(r) ? r.inl : r.ext.ptr;
+}
+// 8 readable bytes starting with the value's first min(len, 8) bytes.
+inline const uint8_t* gbs_head(const GBStrExt& r) noexcept {
+    return gbs_is_inline(r) ? r.inl : r.ext.prefix;
+}
+
+// Make r hold [p, p+len), long values in `arena`. Throws std::bad_alloc.
+inline void gbs_set(GBStrExt& r, GBArena& arena, const uint8_t* p, uint32_t len) {
+    if (r.cap == 0 && len <= kGBStrInline) {
+        r.len = len;
+        if (len > 0) std::memcpy(r.inl, p, len);
+        return;
+    }
+    if (len > r.cap) {
+        const uint32_t cap = len > 2 * r.cap ? len : 2 * r.cap;
+        r.ext.ptr = arena.alloc(cap);
+        r.cap = cap;
+    }
+    std::memcpy(r.ext.ptr, p, len);
+    std::memcpy(r.ext.prefix, p, len < 8 ? len : 8);
+    r.len = len;
+}
+
+// Make r REFER to [p, p+len) without copying a long value; the caller keeps the bytes
+// alive for r's life.
+inline void gbs_refer(GBStrExt& r, const uint8_t* p, uint32_t len) noexcept {
+    r.len = len;
+    r.cap = 0;
+    if (len <= kGBStrInline) {
+        if (len > 0) std::memcpy(r.inl, p, len);
+        return;
+    }
+    std::memcpy(r.ext.prefix, p, 8);
+    r.ext.ptr = const_cast<uint8_t*>(p);
+}
+
+// Three-way byte-lexicographic compare of a value (len bytes; `head` holds its first
+// min(len, 8) bytes with 8 readable, `data` all of them) against record r. The first 8
+// bytes decide from the record alone; only a tie reads r's bytes. MEASURED 2026-10-29
+// (Mac, vs a plain memcmp): 0.88 on GROUP BY RegionID / 0.93 on CounterID string
+// extremes, ~1.01 when one group's values share their first 8 bytes. An equality-first
+// rewrite of the tie path measured slower (1.07 / 1.13) and was dropped.
+inline int gbs_cmp(const uint8_t* head, const uint8_t* data, uint32_t len,
+                   const GBStrExt& r) noexcept {
+    const uint32_t n = len < r.len ? (len < 8 ? len : 8) : (r.len < 8 ? r.len : 8);
+    if (n > 0) {
+        uint64_t a, b;
+        std::memcpy(&a, head, 8);
+        std::memcpy(&b, gbs_head(r), 8);
+        a = __builtin_bswap64(a);
+        b = __builtin_bswap64(b);
+        const uint64_t keep = n == 8 ? ~uint64_t(0) : ~(~uint64_t(0) >> (8 * n));
+        a &= keep;
+        b &= keep;
+        if (a != b) return a < b ? -1 : 1;
+    }
+    if (n == 8) {
+        const uint32_t m = len < r.len ? len : r.len;
+        if (m > 8) {
+            const int c = std::memcmp(data + 8, gbs_data(r) + 8, m - 8);
+            if (c != 0) return c;
+        }
+    }
+    return len < r.len ? -1 : (len > r.len ? 1 : 0);
+}
+
+// Emit a string result column as ONE canonical consolidated block (same layout
+// emit_key_columns' string arm builds). NULL where valid[g] == 0; get(g) is the
+// value's bytes for a valid g.
+template <class Get>
+inline CxxColumn emit_string_column_by(const AggColMeta& meta, const int64_t* valid,
+                                       uint32_t n, Get&& get) {
     size_t total_arena = 0;
     for (uint32_t g = 0; g < n; ++g) {
         if (valid[g] == 0) continue;
-        size_t len = svals[g].size();
+        size_t len = get(g).size();
         if (len > STR_INLINE_MAX) total_arena += len;
     }
     size_t slots_off = sizeof(DrakenStringArena);
@@ -963,7 +1064,7 @@ inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
             vbits[g >> 3] &= static_cast<uint8_t>(~(1u << (g & 7)));
             continue;
         }
-        const std::string& val = svals[g];
+        const std::string_view val = get(g);
         const uint8_t* bytes = reinterpret_cast<const uint8_t*>(val.data());
         uint32_t len = static_cast<uint32_t>(val.size());
         if (len <= STR_INLINE_MAX) {
@@ -985,6 +1086,24 @@ inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
     c.own->logical_type = meta.logical;
     c.view = c.own->vec;
     return c;
+}
+
+// Per-group LANES (v3 columnar collectors), not interleaved cells.
+inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
+                                         const std::string* svals,
+                                         const int64_t* valid, uint32_t n) {
+    return emit_string_column_by(meta, valid, n, [svals](uint32_t g) {
+        return std::string_view(svals[g]);
+    });
+}
+
+inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
+                                         const GBStrExt* sext,
+                                         const int64_t* valid, uint32_t n) {
+    return emit_string_column_by(meta, valid, n, [sext](uint32_t g) {
+        return std::string_view(reinterpret_cast<const char*>(gbs_data(sext[g])),
+                                sext[g].len);
+    });
 }
 
 // ---- fixed-width column emit at a given type/width ---------------------------------
@@ -1485,7 +1604,7 @@ struct GBLaneView {
     const double*      f64yy = nullptr;   // CORR Σy²
     const double*      f64xy = nullptr;   // CORR Σxy
     const __int128*    i128  = nullptr;   // DECIMAL128 sums / extremes
-    const std::string* sval  = nullptr;   // string extremes
+    const GBStrExt*    sext  = nullptr;   // string extremes
     GBArrayAggState*   aa    = nullptr;   // ARRAY_AGG element lists
     const AggSpec2*    aa_spec = nullptr; // ARRAY_AGG DISTINCT/ORDER BY/LIMIT modifiers
     opteryx::roaring32::Roaring32* cidr = nullptr;   // CIDR_AGG per-group address sets
@@ -1824,7 +1943,7 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
         case GBKind::MinMaxNum:
             return emit_fixed_column(L.i64, valid_ok(), n, meta.type, meta.logical, err);
         case GBKind::MinMaxStr:
-            return emit_string_lane_column(meta, L.sval, L.valid, n);
+            return emit_string_lane_column(meta, L.sext, L.valid, n);
         case GBKind::ArrayAgg:
             return emit_array_lane_column(meta, *L.aa_spec, L.aa, n, err);
         case GBKind::CidrAgg:
@@ -3022,9 +3141,13 @@ struct UngroupedAggSink : Sink {
                 default:
                     break;
             }
+            // The one string extreme, referred to in place (g.strs outlives the emit).
+            GBStrExt sext1{};
+            gbs_refer(sext1, reinterpret_cast<const uint8_t*>(g.strs[s].data()),
+                      static_cast<uint32_t>(g.strs[s].size()));
             GBLaneView lv;
             lv.rows = &rows1; lv.valid = &valid1; lv.i64 = &i641;
-            lv.f64 = &f641; lv.f64sq = &f64sq1; lv.i128 = &i1281; lv.sval = &g.strs[s];
+            lv.f64 = &f641; lv.f64sq = &f64sq1; lv.i128 = &i1281; lv.sext = &sext1;
             lv.f64y = &f64y1; lv.f64yy = &f64yy1; lv.f64xy = &f64xy1;
             // A shared-buffer quantile reads its owner's (checked at capture).
             lv.quantile = &g.quantiles[specs[s].quantile_owner == kQuantileOwnsBuffer
@@ -3082,7 +3205,11 @@ struct GBLanes {
     GBSegVec<double>   f64xy;   // Corr Σxy
     GBSegVec<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
     GBSegVec<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
-    std::vector<std::string> sval; // MinMaxStr extremes
+    GBSegVec<GBStrExt> sext;    // MinMaxStr extremes (records)
+    // MinMaxStr long-extreme bytes. Shared so the (adopting) merge can keep a source's
+    // bytes alive (skeep) after the source table is released.
+    std::shared_ptr<GBArena> sbytes;
+    std::vector<std::shared_ptr<GBArena>> skeep;   // adopted sources' bytes
     std::vector<GBArrayAggState> aa;  // ArrayAgg per-group element lists
     std::vector<opteryx::roaring32::Roaring32> cidr;  // CidrAgg per-group address sets
     std::vector<opteryx::ungrouped::QuantileState> quantile;  // Quantile per-group buffers (MEDIAN / PERCENTILE_CONT)
@@ -3093,7 +3220,7 @@ struct GBLanes {
     void hint(size_t rows) noexcept {
         valid.hint(rows); i64.hint(rows); f64.hint(rows); f64sq.hint(rows);
         f64y.hint(rows); f64yy.hint(rows); f64xy.hint(rows); mkey.hint(rows);
-        i128.hint(rows);
+        i128.hint(rows); sext.hint(rows);
     }
 };
 
@@ -3105,7 +3232,7 @@ struct GBLanes {
 inline void gb_lanes_swap(GBLanes& L, size_t a, size_t b) {
     auto sw = [a, b](auto& lane) { if (!lane.empty()) std::swap(lane[a], lane[b]); };
     sw(L.valid); sw(L.i64); sw(L.f64); sw(L.f64sq); sw(L.f64y); sw(L.f64yy);
-    sw(L.f64xy); sw(L.mkey); sw(L.i128); sw(L.sval); sw(L.aa); sw(L.cidr);
+    sw(L.f64xy); sw(L.mkey); sw(L.i128); sw(L.sext); sw(L.aa); sw(L.cidr);
     sw(L.quantile); sw(L.hll); sw(L.td);
 }
 
@@ -3143,7 +3270,8 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             L.valid.resize(n); L.i64.resize(n); L.mkey.resize(n);
             return;
         case GBKind::MinMaxStr:
-            L.valid.resize(n); L.sval.resize(n);
+            L.valid.resize(n); L.sext.resize(n);
+            if (!L.sbytes) L.sbytes = std::make_shared<GBArena>();
             return;
         case GBKind::ArrayAgg:
             // No `valid` lane: an ARRAY_AGG row is never NULL, and the element
@@ -3222,7 +3350,8 @@ struct GBFlatLanes {
     double*   f64xy = nullptr;
     uint64_t* mkey  = nullptr;
     __int128* i128  = nullptr;
-    std::string* sval = nullptr;
+    GBStrExt* sext  = nullptr;
+    GBArena*  sbytes = nullptr;
     GBArrayAggState* aa = nullptr;
     opteryx::roaring32::Roaring32* cidr = nullptr;
     opteryx::ungrouped::QuantileState* quantile = nullptr;
@@ -3241,11 +3370,15 @@ inline bool gb_flat_lanes(GBLanes& L, size_t n, GBFlatLanes& f) {
     };
     take(L.valid, f.valid); take(L.i64, f.i64); take(L.f64, f.f64); take(L.f64sq, f.f64sq);
     take(L.f64y, f.f64y); take(L.f64yy, f.f64yy); take(L.f64xy, f.f64xy);
-    take(L.mkey, f.mkey); take(L.i128, f.i128);
-    f.sval = L.sval.data(); f.aa = L.aa.data(); f.cidr = L.cidr.data();
+    take(L.mkey, f.mkey); take(L.i128, f.i128); take(L.sext, f.sext);
+    f.sbytes = L.sbytes.get(); f.aa = L.aa.data(); f.cidr = L.cidr.data();
     f.quantile = L.quantile.data(); f.hll = L.hll.data(); f.td = L.td.data();
     return ok;
 }
+
+// The MinMaxStr byte arena of either lane form.
+inline GBArena& gb_sbytes(GBLanes& L) noexcept { return *L.sbytes; }
+inline GBArena& gb_sbytes(GBFlatLanes& L) noexcept { return *L.sbytes; }
 
 template <class RD, class Resolve>
 inline bool gb_apply_row_kind_rd(GBKind kind, bool want_max, bool is_f, const DrakenVector& v,
@@ -4641,21 +4774,21 @@ struct GroupBySink : Sink {
                 break;
             }
             case GBKind::MinMaxStr: {
+                // A slot's payload always has 8 readable bytes (12 inline in the
+                // 16-byte slot, > 12 in the arena), so it is its own gbs_cmp head.
                 const DrakenStringArena* sa = string_arena_of(v);
                 for (uint32_t i = 0; i < rows; ++i) {
                     if (!row_ok(i)) continue;
                     auto& L = lanes_of(gb_part(mkh[i]));
-                    uint32_t e = l.mk_ent[i];
+                    const uint32_t e = mke[i];
                     const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
-                    const char* p =
-                        reinterpret_cast<const char*>(str_data(slot, sa->arena));
-                    uint32_t len = str_length(slot);
-                    std::string_view sv(p, len);
-                    std::string& cur = L.sval[e];
+                    const uint8_t* p = str_data(slot, sa->arena);
+                    const uint32_t len = str_length(slot);
+                    GBStrExt& cur = L.sext[e];
                     if (L.valid[e] == 0
-                            || (want_max ? sv > std::string_view(cur)
-                                         : sv < std::string_view(cur)))
-                        cur.assign(p, len);
+                            || (want_max ? gbs_cmp(p, p, len, cur) > 0
+                                         : gbs_cmp(p, p, len, cur) < 0))
+                        gbs_set(cur, gb_sbytes(L), p, len);
                     L.valid[e] += 1;
                 }
                 break;
@@ -5538,10 +5671,17 @@ struct GroupBySink : Sink {
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
                         if (S.valid[e] == 0) continue;
                         uint32_t m = ge[e];
+                        const GBStrExt& sx = S.sext[e];
                         if (D.valid[m] == 0
-                                || (want_max ? S.sval[e] > D.sval[m]
-                                             : S.sval[e] < D.sval[m]))
-                            D.sval[m] = S.sval[e];
+                                || (want_max ? gbs_cmp(gbs_head(sx), gbs_data(sx), sx.len, D.sext[m]) > 0
+                                             : gbs_cmp(gbs_head(sx), gbs_data(sx), sx.len, D.sext[m]) < 0)) {
+                            // Adopt: point at the source's bytes, which the caller
+                            // keeps alive in the destination (skeep). Copying them
+                            // into the destination's arena MEASURED slower everywhere
+                            // (2026-10-29, 0.93-1.00) with no peak-RSS change.
+                            if (sx.len <= kGBStrInline) gbs_refer(D.sext[m], gbs_data(sx), sx.len);
+                            else { GBStrExt& d = D.sext[m]; d.len = sx.len; d.cap = 0; d.ext = sx.ext; }
+                        }
                         D.valid[m] += S.valid[e];
                     }
                     break;
@@ -5636,6 +5776,15 @@ struct GroupBySink : Sink {
             GBFlatLanes fd, fs;
             const bool flat = gb_flat_lanes(dst.lanes[s], dst.size(), fd)
                               && gb_flat_lanes(src.lanes[s], src.size(), fs);
+            // Adopted records point into the source's arenas: keep them for the
+            // destination's life (the source may be released, or merged on into
+            // other radix buckets, before the destination emits).
+            if (kind == GBKind::MinMaxStr && src.lanes[s].sbytes) {
+                GBLanes& DL = dst.lanes[s];
+                const GBLanes& SL = src.lanes[s];
+                DL.skeep.push_back(SL.sbytes);
+                DL.skeep.insert(DL.skeep.end(), SL.skeep.begin(), SL.skeep.end());
+            }
             if (!(flat ? fold(fd, fs) : fold(dst.lanes[s], std::as_const(src.lanes[s]))))
                 return false;
         }
@@ -5852,6 +6001,7 @@ struct GroupBySink : Sink {
         std::vector<int64_t> rows, valid, i64;
         std::vector<double> f64, f64sq, f64y, f64yy, f64xy;
         std::vector<__int128> i128;
+        std::vector<GBStrExt> sext;
     };
 
     // Read-only view of spec `s`'s lanes in `P` over groups [start, start+n) — what
@@ -5901,7 +6051,7 @@ struct GroupBySink : Sink {
             if (!L.f64yy.empty()) lv.f64yy = L.f64yy.span(start, n, sc.f64yy);
             if (!L.f64xy.empty()) lv.f64xy = L.f64xy.span(start, n, sc.f64xy);
             if (!L.i128.empty())  lv.i128  = L.i128.span(start, n, sc.i128);
-            if (!L.sval.empty())  lv.sval  = L.sval.data() + start;
+            if (!L.sext.empty())  lv.sext  = L.sext.span(start, n, sc.sext);
         }
         return lv;
     }

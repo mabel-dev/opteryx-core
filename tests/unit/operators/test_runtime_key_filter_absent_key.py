@@ -7,6 +7,9 @@ the survivor mask like one of them. A file written before the key column existed
 not hold it: that file must read the key as NULL (absent_fill), match nothing, and
 never be treated as holding a predicate column — the gather over a column the file
 lacks is a hard error in the Source.
+
+Two joins over the fact scan (on `k` and on `v`): a lone first-join filter arms nothing
+(rule R1', docs/VELOX_BORROW_PLAN.md), so one join would not exercise the filter at all.
 """
 
 import os
@@ -42,7 +45,12 @@ def folders(tmp_path_factory):
         "k": pa.array(range(100), pa.int64()),
         "tag": pa.array(["a" if i % 10 == 0 else "b" for i in range(100)]),
     }), dim / "dim.parquet")
-    return str(fact), str(dim)
+    dim2 = tmp_path_factory.mktemp("kf_dim2")
+    pq.write_table(pa.table({
+        "v": pa.array(range(7), pa.int64()),
+        "keep": pa.array([v in (3, 4, 5) for v in range(7)]),
+    }), dim2 / "dim2.parquet")
+    return str(fact), str(dim), str(dim2)
 
 
 def _run(sql, enabled):
@@ -59,12 +67,14 @@ def _run(sql, enabled):
 
 
 def test_old_file_without_the_key_matches_nothing_and_does_not_fail(folders):
-    fact, dim = folders
+    fact, dim, dim2 = folders
     # `f.v > 2` is a pushed predicate the query also READS (not filter-only, so no
-    # range settlement): the scan runs the prefilter path the key column joins.
+    # range settlement): the scan runs the prefilter path the key columns join.
     sql = (f"SELECT f.id, f.v FROM '{fact}' AS f INNER JOIN '{dim}' AS d ON f.k = d.k "
-           f"WHERE d.tag = 'a' AND f.v > 2")
-    expected = sorted((i, i % 7) for i in range(NEW_ROWS) if (i % 100) % 10 == 0 and i % 7 > 2)
+           f"INNER JOIN '{dim2}' AS e ON f.v = e.v "
+           f"WHERE d.tag = 'a' AND e.keep = true AND f.v > 2")
+    expected = sorted((i, i % 7) for i in range(NEW_ROWS)
+                      if (i % 100) % 10 == 0 and i % 7 in (3, 4, 5))
     on_rows, tested = _run(sql, True)
     off_rows, off_tested = _run(sql, False)
     assert sorted(on_rows) == expected

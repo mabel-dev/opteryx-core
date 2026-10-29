@@ -592,32 +592,14 @@ class GBArena {
     // Copy len bytes in; returns their offset. Throws std::bad_alloc on failure.
     uint64_t put(const uint8_t* p, size_t len) {
         if (len == 0) return used_;
-        const bool fits = !chunks_.empty()
-            && used_ + len <= chunk_start(chunks_.size() - 1) + chunk_size(chunks_.size() - 1);
-        if (!fits) {
-            // Skip (unallocated) chunks too small for this string; past the doubling
-            // chunks every chunk is 1 MiB and a longer string spans several.
-            size_t k = chunks_.size();
-            while (k < kGrowChunks && chunk_size(k) < len) {
-                chunks_.push_back(nullptr);
-                owner_bytes_.push_back(0);
-                ++k;
-            }
-            const size_t span = len <= chunk_size(k)
-                ? 1 : static_cast<size_t>((len + kChunk - 1) >> kChunkLog2);
-            const size_t bytes = span == 1 ? static_cast<size_t>(chunk_size(k)) : span * kChunk;
-            auto* blk = static_cast<uint8_t*>(GBBlockPool::instance().acquire(bytes));
-            for (size_t j = 0; j < span; ++j) {
-                chunks_.push_back(blk + j * kChunk);
-                owner_bytes_.push_back(j == 0 ? bytes : 0);
-            }
-            used_ = chunk_start(k);
-        }
-        const uint64_t off = used_;
+        const uint64_t off = reserve(len);
         std::memcpy(resolve_mut(off), p, len);
-        used_ = off + len;
         return off;
     }
+
+    // Reserve len > 0 bytes for the caller to write; returns their address, which is
+    // stable for the arena's life (chunks never move). Throws std::bad_alloc on failure.
+    uint8_t* alloc(size_t len) { return resolve_mut(reserve(len)); }
 
     inline const uint8_t* resolve(uint64_t off) const noexcept { return resolve_mut(off); }
 
@@ -641,6 +623,34 @@ class GBArena {
     }
 
   private:
+    // Claim len > 0 bytes; returns their offset.
+    uint64_t reserve(size_t len) {
+        const bool fits = !chunks_.empty()
+            && used_ + len <= chunk_start(chunks_.size() - 1) + chunk_size(chunks_.size() - 1);
+        if (!fits) {
+            // Skip (unallocated) chunks too small for this string; past the doubling
+            // chunks every chunk is 1 MiB and a longer string spans several.
+            size_t k = chunks_.size();
+            while (k < kGrowChunks && chunk_size(k) < len) {
+                chunks_.push_back(nullptr);
+                owner_bytes_.push_back(0);
+                ++k;
+            }
+            const size_t span = len <= chunk_size(k)
+                ? 1 : static_cast<size_t>((len + kChunk - 1) >> kChunkLog2);
+            const size_t bytes = span == 1 ? static_cast<size_t>(chunk_size(k)) : span * kChunk;
+            auto* blk = static_cast<uint8_t*>(GBBlockPool::instance().acquire(bytes));
+            for (size_t j = 0; j < span; ++j) {
+                chunks_.push_back(blk + j * kChunk);
+                owner_bytes_.push_back(j == 0 ? bytes : 0);
+            }
+            used_ = chunk_start(k);
+        }
+        const uint64_t off = used_;
+        used_ = off + len;
+        return off;
+    }
+
     uint8_t* resolve_mut(uint64_t off) const noexcept {
         const size_t k = chunk_of(off);
         return chunks_[k] + (off - chunk_start(k));

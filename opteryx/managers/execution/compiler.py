@@ -5698,8 +5698,12 @@ class _Compiler:
         # first, which is the very property that makes the bound safe).
         # `probe_keys` is post-coercion, so a synthetic CAST key is not a scanned
         # column and is refused inside.
+        # A join whose match costs more than a hash miss — a SEMI join, or any
+        # residual condition — gains from a scan-side key filter even as the first
+        # join over the scan's rows (NativeParquetScanSource::arm_key_filters).
+        costly_match = mode == 2 or residual is not None or filter_residual is not None
         self._wire_runtime_bounds(bp, pp, mode, build_keys, probe_keys,
-                                  existence_name)
+                                  existence_name, costly_match=costly_match)
         probe_payload = _live_positions(playout, payload_live) if prune_payload \
             else list(range(len(playout)))
         # SEMI/ANTI EMIT set. An existence filter emits surviving PROBE rows, so its
@@ -7402,7 +7406,7 @@ class _Compiler:
         return True
 
     def _wire_runtime_bounds(self, build_pipeline, probe_pipeline, mode,
-                             build_keys, probe_keys, existence_name):
+                             build_keys, probe_keys, existence_name, costly_match=False):
         """Arm runtime min/max capture for whichever key columns of this join can
         actually prune the probe scan. Returns the number of bounds wired (0 when
         nothing was eligible, which leaves both sides byte-for-byte unchanged).
@@ -7474,11 +7478,13 @@ class _Compiler:
         self.nplan.set_join2_bound_slots(build_pipeline, slots)
         self.runtime_bounds_wired += wired
         self._wire_runtime_key_filter(build_pipeline, probe_pipeline, build_keys,
-                                      probe_keys, slots, scan_columns, parquet_plan)
+                                      probe_keys, slots, scan_columns, parquet_plan,
+                                      costly_match)
         return wired
 
     def _wire_runtime_key_filter(self, build_pipeline, probe_pipeline, build_keys,
-                                 probe_keys, slots, scan_columns, parquet_plan):
+                                 probe_keys, slots, scan_columns, parquet_plan,
+                                 costly_match):
         """Arm the runtime join KEY filter beside the bound just wired
         (src/cpp/engine/runtime_key_filter.hpp; docs/VELOX_BORROW_PLAN.md item 1):
         the build side's key hashes, tested per row in the probe scan's decode
@@ -7491,17 +7497,25 @@ class _Compiler:
            mixed value, which the scan cannot reproduce from one column.
         3. Not BOOL: two values cannot reject anything worth a test.
 
+        Each filter carries its join's POSITION over the scan's rows: how many join
+        probes the probe pipeline already holds when it is wired (compile order is the
+        order the rows meet the joins). The Source tests the filters in that order and
+        drops a scan's filter set when it is only the first join's (see
+        NativeParquetScanSource::arm_key_filters for why).
+
         The filter only ever admits a SUPERSET of the join's matches, so an unbuilt
         or unpublished filter — and every decline in the workers — admits every row."""
         if parquet_plan is None or len(build_keys) != 1 or slots[0] < 0:
             return
+        position = self.nplan.join_probes_in_pipeline(probe_pipeline)
         probe_ct = self._cts.get(probe_keys[0])
         if probe_ct is None or probe_ct.physical == DrakenType.BOOL:
             return
         slot = self.nplan.new_runtime_key_filter()
         self.nplan.add_parquet_key_filter(probe_pipeline, slot,
                                           scan_columns[probe_keys[0]],
-                                          probe_ct.physical.value)
+                                          probe_ct.physical.value, position,
+                                          costly_match)
         self.nplan.set_join2_key_filter_slot(build_pipeline, slot)
 
     def _remember_types(self, columns):

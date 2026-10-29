@@ -589,8 +589,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           SkeneIo* io)
         size_t new_runtime_bound()
         size_t new_runtime_key_filter()
+        size_t join_probes_in_pipeline(size_t p)
         void set_join2_key_filter_slot(size_t p, size_t slot) except +
-        void add_parquet_key_filter(size_t p, size_t slot, string column, int want_type) except +
+        void add_parquet_key_filter(size_t p, size_t slot, string column, int want_type,
+                                    size_t position, bint costly_match) except +
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void add_parquet_runtime_bound(size_t p, size_t bound_idx, string column,
                                        int64_t* pruned_slot)
@@ -3652,6 +3654,11 @@ cdef class NativePlan:
             v.push_back(<int>i)
         self._e.set_join2_bound_slots(p, v)
 
+    def join_probes_in_pipeline(self, size_t p):
+        """How many join probe operators pipeline ``p`` already holds (see
+        Engine::join_probes_in_pipeline)."""
+        return self._e.join_probes_in_pipeline(p)
+
     def new_runtime_key_filter(self):
         """Allocate an UNPUBLISHED runtime join KEY filter slot and return its index
         (src/cpp/engine/runtime_key_filter.hpp; docs/VELOX_BORROW_PLAN.md item 1).
@@ -3668,14 +3675,16 @@ cdef class NativePlan:
         into ``slot``. Eligibility is the CALLER's — the same as a runtime bound's."""
         self._e.set_join2_key_filter_slot(p, slot)
 
-    def add_parquet_key_filter(self, size_t p, size_t slot, str column, int want_type):
+    def add_parquet_key_filter(self, size_t p, size_t slot, str column, int want_type,
+                               size_t position, bint costly_match):
         """Wire pipeline ``p``'s native parquet scan to KEY filter ``slot`` on physical
         column ``column``, whose PLAN type is ``want_type`` (a DrakenType value: what
         the Source emits for that column, which the decode workers retag or widen to
         before hashing). Fails loud (from C++) when the source is not a native parquet
         scan."""
         cdef bytes name = column.encode("utf-8")
-        self._e.add_parquet_key_filter(p, slot, <string>name, want_type)
+        self._e.add_parquet_key_filter(p, slot, <string>name, want_type, position,
+                                       costly_match)
 
     def set_unmatched_build_source(self, size_t p, size_t ref, list probe_types,
                                    list probe_logical, list probe_element,

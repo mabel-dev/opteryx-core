@@ -899,16 +899,20 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         std::string column;                       // physical (in-file) name
         const RuntimeKeyFilterSlot* slot = nullptr;
         DrakenType want = static_cast<DrakenType>(0);
+        size_t position = 0;   // join probes between this scan and the filter's join
+        bool costly_match = false;   // its join's match costs more than a hash miss
         std::unique_ptr<KeyAdmissionCtx> ctx;
     };
     std::vector<KeyFilterWire> key_filters_;
 
     void add_key_filter(std::string physical_column, const RuntimeKeyFilterSlot* slot,
-                        DrakenType want) {
+                        DrakenType want, size_t position, bool costly_match) {
         KeyFilterWire w;
         w.column = std::move(physical_column);
         w.slot = slot;
         w.want = want;
+        w.position = position;
+        w.costly_match = costly_match;
         w.ctx = std::make_unique<KeyAdmissionCtx>();
         key_filters_.push_back(std::move(w));
     }
@@ -919,9 +923,33 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     void arm_key_filters() {
         if (key_filters_.empty() || pipeline == nullptr) return;
         std::vector<rugo::KeyAdmission> armed;
+        // Join order over the scan's rows: the optimizer put the joins in this order,
+        // so the first is usually the most selective, and every later filter then hashes
+        // only the rows it kept — as a later join only probes an earlier one's survivors.
+        std::vector<KeyFilterWire*> order;
+        for (KeyFilterWire& w : key_filters_)
+            if (w.slot != nullptr && w.slot->filter != nullptr) order.push_back(&w);
+        std::stable_sort(order.begin(), order.end(),
+                         [](const KeyFilterWire* a, const KeyFilterWire* b) {
+                             return a->position < b->position;
+                         });
+        // A scan whose ONLY filter is the first join's arms nothing: a row that filter
+        // rejects, the first join rejects itself at the same per-row price (a hash and a
+        // miss), so alone it only duplicates the join. Its value is as the cheap first
+        // stage in front of later filters (measured 2026-10-29: TPC-DS Q96 scan +12.6 ms
+        // for join -12.8 ms alone; SSB Q2.3 1.02 -> 1.45 when dropped from in front of
+        // the supplier filter).
+        // Unless the join's per-row work is not that cheap after all:
+        //  * its MATCH costs more than a hash miss (a SEMI join, or a residual
+        //    condition) — TPC-H Q04;
+        //  * its build is LARGE (RuntimeKeyFilter::kLargeBuildKeys), so its hash-table
+        //    probe misses cache where the compact filter does not — TPC-H Q21, Q03.
+        if (order.size() == 1 && order[0]->position == 0 && !order[0]->costly_match &&
+            order[0]->slot->filter->keys < RuntimeKeyFilter::kLargeBuildKeys)
+            order.clear();
         if (!pipeline->range_settle_armed()) {
-            for (KeyFilterWire& w : key_filters_) {
-                if (w.slot == nullptr || w.slot->filter == nullptr) continue;
+            for (KeyFilterWire* wp : order) {
+                KeyFilterWire& w = *wp;
                 if (std::find(column_names->begin(), column_names->end(), w.column) ==
                     column_names->end())
                     continue;
@@ -934,13 +962,6 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 armed.push_back(std::move(ka));
             }
         }
-        // Smallest build first: a proxy for most selective, so the filters after it
-        // test (and hash) only the rows it kept.
-        std::stable_sort(armed.begin(), armed.end(),
-                         [](const rugo::KeyAdmission& a, const rugo::KeyAdmission& b) {
-                             return static_cast<const KeyAdmissionCtx*>(a.ctx)->filter->keys <
-                                    static_cast<const KeyAdmissionCtx*>(b.ctx)->filter->keys;
-                         });
         pipeline->set_key_admissions(std::move(armed));
     }
 

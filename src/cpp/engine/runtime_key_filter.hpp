@@ -44,6 +44,13 @@ namespace opteryx::engine {
 
 struct RuntimeKeyFilter {
     static constexpr uint64_t kExactMaxKeys = 65536;
+    // A join build at least this large (keyed rows) is LARGE: probing its hash table
+    // misses cache on most rows, while this filter (an exact set or a bloom a fraction
+    // of the size) stays resident — so a scan-side filter is cheaper per row than the
+    // join's own miss path. See NativeParquetScanSource::arm_key_filters. Measured
+    // 2026-10-29 against 1M: 256k recovers TPC-H Q21 (x86 0.76, Mac 0.83 vs baseline)
+    // and Q03; 1M misses Q21. TPC-DS SF1 and SSB SF10 unchanged.
+    static constexpr uint64_t kLargeBuildKeys = 262144;
     static constexpr uint64_t kBloomMaxKeys = 16ull << 20;
 
     bool exact = false;
@@ -127,7 +134,7 @@ struct KeyAdmissionCtx {
     // keep rate above which it does. The filter is a superset of the join's matches,
     // so not testing changes no answer — it only stops paying for a test that rejects
     // too little to repay it. Defaults, to be measured, not policy.
-    static constexpr uint64_t kProbeRows = 1ull << 20;
+    static constexpr uint64_t kProbeRows = 1ull << 16;
     static constexpr double   kKeepOff = 0.95;
 
     const RuntimeKeyFilter* filter = nullptr;

@@ -1,6 +1,6 @@
 # What to borrow from Velox — ranked plan
 
-Status: M1/M2 measured; item 1 LANDED in main 2026-10-29 (uncommitted), make q + make slt green in main.
+Status: M1/M2 measured; item 1 LANDED in main 2026-10-29 with tail fix R1', the costly-match and the large-build exceptions (uncommitted), make q + make slt green in main.
 Date: 2026-10-23
 Basis: Velox's vector/evaluation model (from knowledge, not re-read for this doc) checked
 against the opteryx tree as of today. Every "opteryx does X" claim below cites the code read.
@@ -261,6 +261,167 @@ covered by tests.
 - ⛔ TPC-H Q06 (no join) reads 0.91 in every run, including with identical builds. Not
   explained; the ClickBench control shows no general offset between the trees. Read the
   TPC-H total with that in mind.
+
+## Item 1 — x86 results (2026-10-29)
+
+Intel i5-8500 (6 cores, AVX2, gcc 12, `-march=haswell`), the same baseline and key-filter
+sources as the ARM run, both built on the box, the Mac's own rugo-v2 datasets shipped
+there, 9 interleaved rounds. Raw: `scratch/velox_borrow/results_x86_2026_10_29/`.
+
+Correctness on x86: the full-result oracle over TPC-DS SF1 compares all 99 queries; the
+only difference is Q75's baseline float noise, as on ARM. The filter fired on 93 queries
+and kept 14.7% of the rows it tested (ARM: 14.9%).
+
+| Suite (x86) | B/A total | Geomean | Slower >3% | Faster >3% |
+|---|---|---|---|---|
+| SSB SF10 | 0.917 | 0.960 | 6 of 13 | 5 of 13 |
+| TPC-H SF10 | 0.948 | 0.967 | 4 of 22 | 8 of 22 |
+| TPC-DS SF1 | 1.007 | 1.029 | 51 of 99 | 11 of 99 |
+
+- TPC-H controls are clean on x86 (Q01 0.993, Q06 1.011): the ARM Q06 reading of 0.91 is
+  specific to the Mac runs.
+- Best: TPC-DS Q80 0.54, Q64 0.63; SSB Q4.2 0.62; TPC-H Q21 0.79, Q05 0.81.
+- Worst: TPC-DS Q62 1.36, Q21 1.35, Q91 1.23, Q96 1.18; SSB Q2.3 1.22; TPC-H Q08 1.13.
+- The TPC-DS tail is heavier on x86 than ARM (51 slower vs 28). Suite totals still net
+  out: faster on SSB and TPC-H, flat on TPC-DS.
+
+## Item 1 — tail fix R1' (2026-10-29, LANDED in main, uncommitted)
+
+**Diagnosis** (per-operator CPU, baseline vs filter, TPC-DS losers vs winners):
+
+| Query | Scan CPU | Join CPU | Net |
+|---|---|---|---|
+| Q62 | +19.8 ms | first join -4.7 ms, the rest flat | +15 ms |
+| Q21 | +4.5 ms | first join -1.4 ms | +3 ms |
+| Q91 | +10 ms | -2 ms | +8 ms |
+| Q96 | +12.6 ms | first join -12.8 ms | ~0 |
+| Q80 | +36 ms | LEFT OUTER 153 -> 3 ms | -185 ms |
+
+1. A filter from the FIRST join over the scan's rows only duplicates that join: a row it
+   rejects, the join rejects itself at the same price (~4.5 ns: a hash and a miss). The
+   saving exists only for rows an EARLIER join or operator would have worked on before a
+   LATER join drops them (Q80: inner-join filters ahead of a LEFT OUTER join).
+2. Filter ORDER matters: "smallest build first" put unfiltered small dimensions
+   (warehouse, ship mode, web site in Q62) first, each a full hash pass that rejects
+   nothing, and the 1M-row self-disable never triggered on a 719k-row scan.
+3. But the first join's filter is valuable as the cheap first stage IN FRONT of later
+   filters (SSB Q2.3: dropping it took 1.02 -> 1.45, because the supplier filter then
+   hashed every row instead of the part filter's 0.1% survivors).
+
+**Rule R1' (proposed):**
+- Each filter records its join's POSITION over the scan's rows (join probes already in the
+  probe pipeline when it is wired).
+- The scan tests filters in join order (the optimizer's order, selective first), not by
+  build size.
+- A scan whose ONLY published filter is position 0 arms nothing (pure duplication).
+- The self-disable checks after 64k rows tested, not 1M.
+
+Patch against main as landed: `scratch/velox_borrow/key_filter_rule_r1prime.patch`
+(dry-run clean). Correctness: only drops or reorders filters (mask AND is
+order-independent); full-result oracle clean on TPC-H SF1, SSB SF1, TPC-DS SF1 (Q75 float
+noise only); the 22 result/refusal tests pass. The 4 positive controls use SINGLE-join
+shapes, which R1' deliberately disarms — they must move to multi-join shapes if adopted.
+
+**Measured (Mac, three interleaved arms, 9 rounds; raw in
+`scratch/velox_borrow/results_rule_2026_10_29/`):**
+
+| Suite | Current / base | R1' / base | Slower >3%: current -> R1' | Worst under R1' |
+|---|---|---|---|---|
+| SSB SF10 | 0.891 | 0.900 | 1 -> 0 | Q3.1 1.02 |
+| TPC-H SF10 | 0.962 | 0.967 | 4 -> 2 | Q04 1.08 |
+| TPC-DS SF1 | 0.994 | 0.979 | 22 -> 8 | Q74 1.16 |
+
+Wins kept: TPC-DS Q80 0.72, TPC-H Q05 0.83, Q07 1.10 -> 0.85. Wins reduced: TPC-H Q21
+0.87 -> 1.02, SSB Q4.2 0.61 -> 0.73. Q21's first join is a semi join with a RESIDUAL
+condition, whose match work is not a cheap miss — a candidate refinement is to keep a lone
+first-join filter when its join carries a residual. Not measured.
+
+An intermediate rule R1 (never arm the first join's filter) was also measured: better
+totals (TPC-DS 0.981) but SSB Q2.3 1.45 and Q3.3 1.17 — finding 3 above.
+
+Landed on the architect's go (2026-10-29) with the positive controls moved to two-join
+shapes and a new `test_lone_first_join_filter_does_not_arm`; main rebuilt, 72 join-filter
+tests + `make q` 530/530 + `make slt` green there.
+
+**x86 for R1'** (i5-8500, same box and datasets as the first x86 run, baseline vs the
+R1' sources, 9 rounds; raw in `scratch/velox_borrow/results_x86_rule_2026_10_29/`). Oracle
+on TPC-DS SF1: all 99 match (Q75 float noise only); filter fired on 67 queries.
+
+| Suite (x86) | Before R1' / base | R1' / base | Slower >3%: before -> R1' | Worst under R1' |
+|---|---|---|---|---|
+| SSB SF10 | 0.917 | 0.897 | 6 -> 3 | Q2.3 1.23 |
+| TPC-H SF10 | 0.948 | 0.986 | 4 -> 3 | Q02 1.06 |
+| TPC-DS SF1 | 1.007 | 0.978 | 51 -> 20 | Q99 1.11 |
+
+TPC-H controls clean (Q01 1.001, Q06 1.007). The tail is fixed on x86 too (51 -> 20
+slower, worst 1.36 -> 1.11) and SSB improved; TPC-H gave back most of its gain (only Q05
+0.80 and Q07 0.83 remain clearly faster; Q21 was 0.79 before R1'). SSB Q2.3 stays 1.23 on
+x86. Both point at the same refinement: keep a lone first-join filter when its join's
+match work is not a cheap miss (a residual / semi-anti condition).
+
+## Item 1 — refinement: costly-match exception (2026-10-29, LANDED in main, uncommitted)
+
+**Rule:** a lone first-join filter still arms when its join's match costs more than a
+hash miss — a SEMI join, or any residual condition (`costly_match`, decided in
+`_compile_join`). Patch against main as landed: `scratch/velox_borrow/key_filter_costly_match.patch`
+(code only, tests unchanged). Landed on the architect's go; main rebuilt, 72 join-filter
+tests + `make q` 530/530 + `make slt` green there. Correctness: 30 key filter tests pass;
+full-result oracle clean on TPC-H, SSB and TPC-DS SF1 (Q75 float noise only); the filter
+now fires on 9 TPC-H queries (R1': 7) and 68 TPC-DS (R1': 67).
+
+Measured, three interleaved arms (baseline, R1', refinement), 9 rounds; raw in
+`scratch/velox_borrow/results_refinement_2026_10_29/`:
+
+| Suite | Mac: refinement / R1' | x86: refinement / R1' |
+|---|---|---|
+| SSB SF10 | 1.004 | 1.005 |
+| TPC-H SF10 | 0.988 (slower >3%: 5 -> 1) | 0.994 |
+| TPC-DS SF1 | 0.986 (noise, see below) | 1.003 |
+
+- The one real effect: TPC-H **Q04** (EXISTS semi join) — Mac 1.05 -> 0.99, x86 1.03 -> 0.84.
+  Nothing else moves beyond noise on x86.
+- TPC-H **Q21 is NOT recovered** (Mac 1.04 -> 1.01, x86 1.02 -> 1.03; it was 0.79-0.87
+  before R1'). Its pre-R1' win was not from its semi join's residual.
+- Untested hypothesis for Q21 and Q03 (both lost their pre-R1' wins on x86): a lone
+  first-join filter is NOT pure duplication when the join's build is large. The join then
+  probes a large hash table with a cache miss per row, while the filter (exact set or
+  bloom, a fraction of the size) stays cache-resident. Q03's lineitem filter sits on a
+  plain inner join to ~1.5M orders.
+- ⛔ TPC-DS small-query counts are noise-dominated between runs: R1' read 8 slower in one
+  Mac run and 32 in the next. Compare TPC-DS on totals, and on the same run's arms only.
+
+## Item 1 — large-build exception (2026-10-29, LANDED in main, uncommitted)
+
+**Hypothesis (confirmed):** a lone first-join filter is not pure duplication when the
+join's build is LARGE. The join then probes a hash table that misses cache on most rows,
+while the filter (exact set or bloom, a fraction of the size) stays resident.
+
+**Rule:** a lone first-join filter also arms when its build has at least
+`RuntimeKeyFilter::kLargeBuildKeys` = 262,144 keyed rows. Patch against main as landed:
+`scratch/velox_borrow/key_filter_large_build.patch`, landed on the architect's go (main
+rebuilt; 74 join-filter tests + `make q` 530/530 + `make slt` green there): the constant, the
+condition in `NativeParquetScanSource::arm_key_filters`, and a new test that a lone
+first-join filter with a ~960k-key build arms (32 key filter tests pass). Full-result
+oracle clean on TPC-H SF1 and TPC-DS SF1 (Q75 float noise only).
+
+**Measured** with the threshold as an experiment-only environment knob in one tree
+(arms differ only in the setting), four interleaved arms — baseline, current, 256k, 1M —
+9 rounds; raw in `scratch/velox_borrow/results_large_build_2026_10_29/`:
+
+| Suite | Mac: current / 256k / 1M vs base | x86: current / 256k / 1M vs base |
+|---|---|---|
+| SSB SF10 | 0.905 / 0.911 / 0.907 | 0.902 / 0.901 / 0.901 |
+| TPC-H SF10 | 0.958 / **0.934** / 0.949 | 0.979 / **0.935** / 0.962 |
+| TPC-DS SF1 | 0.993 / 1.006 / 1.007 (arm bias, below) | 0.976 / 0.977 / 0.976 |
+
+- TPC-H at 256k vs baseline: **Q21** Mac 0.83, x86 0.76 (current: 1.02 on both);
+  **Q03** Mac 0.94, x86 0.86. On x86, 256k vs current: 4 faster, 0 slower; Q16 0.85,
+  Q12 0.89. Controls clean on x86 (Q01 0.999, Q06 0.991).
+- 1M misses Q21 (its lineitem builds sit between the two thresholds); 256k wins on both.
+- TPC-DS: only 7 queries change arming at 256k (Q04 Q11 Q18 Q22 Q57 Q72 Q74). On x86 they
+  read 1.00 except Q18 1.06; the 92 unaffected read 1.001. On the Mac the 92 UNAFFECTED
+  queries read 1.016 in the threshold arms — an arm bias from the environment-knob arms,
+  not the rule (identical code path); the 7 affected sit within it. SSB unchanged.
 
 ## Decisions requested
 

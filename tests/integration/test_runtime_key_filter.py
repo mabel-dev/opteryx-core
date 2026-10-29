@@ -28,6 +28,10 @@ change an answer. Held up three ways, as for the bound:
 3. ``test_positive_control_*`` — the filter really fires and really rejects rows on
    the shapes it exists for, through both filter shapes. Without these, 1 and 2 would
    pass with the feature doing nothing.
+4. ``test_lone_first_join_filter_does_not_arm`` — a scan whose only filter belongs to
+   the FIRST join over its rows arms nothing: on its own that filter only duplicates the
+   join (docs/VELOX_BORROW_PLAN.md, rule R1'). The positive controls therefore use
+   shapes with two joins over the fact scan.
 
 The switch is the runtime min/max filter's: ``disable_runtime_minmax_join_filter``
 turns both off (one feature family, one barrier, one eligibility).
@@ -114,6 +118,25 @@ ORACLE_STATEMENTS = [
     f"WHERE ss_item_sk = i_item_sk AND ss_sold_date_sk = d_date_sk "
     f"AND ss_item_sk < 9000 AND i_category IN ('Music', 'Books') AND d_moy = 11",
 
+    # --- ONE join over the fact scan, but a LARGE build (customer_demographics, one
+    # gender: ~960k keys, above RuntimeKeyFilter::kLargeBuildKeys): the lone first-join
+    # filter arms. Named below as LONE_LARGE_BUILD_SHAPE.
+    f"SELECT COUNT(*) c, SUM(ss_sales_price) s FROM {DS}store_sales, {DS}customer_demographics "
+    f"WHERE ss_cdemo_sk = cd_demo_sk AND cd_gender = 'F'",
+
+    # --- TWO joins over one fact scan: the filters arm (rule R1'), tested in join order.
+    # Indices 13-15; the positive controls below name them.
+    f"SELECT COUNT(*) c, SUM(ss_net_paid) s FROM {DS}store_sales, {DS}item, {DS}date_dim "
+    f"WHERE ss_item_sk = i_item_sk AND ss_sold_date_sk = d_date_sk "
+    f"AND i_category = 'Music' AND d_year = 2001",
+    f"SELECT COUNT(*) c, SUM(ss_sales_price) s "
+    f"FROM {DS}store_sales, {DS}customer_demographics, {DS}date_dim "
+    f"WHERE ss_cdemo_sk = cd_demo_sk AND ss_sold_date_sk = d_date_sk "
+    f"AND cd_gender = 'F' AND cd_marital_status = 'M' AND d_year = 2001",
+    f"SELECT SUM(ss_quantity) q, COUNT(*) c FROM {DS}store_sales, {DS}item, {DS}date_dim "
+    f"WHERE ss_item_sk = i_item_sk AND ss_sold_date_sk = d_date_sk "
+    f"AND i_category = 'Books' AND d_moy = 11 AND ss_quantity > 50",
+
     # --- refused modes, present so a refusal cannot silently change an answer.
     f"SELECT COUNT(*) c FROM {DS}store_sales LEFT OUTER JOIN {DS}item "
     f"ON ss_item_sk = i_item_sk AND i_category = 'Music'",
@@ -194,10 +217,34 @@ def test_not_armed_under_range_settlement():
         )
 
 
+EXACT_SET_SHAPE = ORACLE_STATEMENTS[-5]
+BLOOM_SHAPE = ORACLE_STATEMENTS[-4]
+PREDICATE_SHAPE = ORACLE_STATEMENTS[-3]
+LONE_FIRST_JOIN_SHAPE = ORACLE_STATEMENTS[0]
+LONE_LARGE_BUILD_SHAPE = ORACLE_STATEMENTS[-6]
+
+
+def test_lone_first_join_filter_does_not_arm():
+    """One join over the scan, small build: its filter would only duplicate the join,
+    so none arms."""
+    _, scans = _run(LONE_FIRST_JOIN_SHAPE, True)
+    assert _tested(scans) == 0, "a lone first-join key filter armed"
+
+
+def test_lone_first_join_filter_arms_for_a_large_build():
+    """One join over the scan, but its build (customer_demographics, one gender: ~960k
+    keys) is above RuntimeKeyFilter::kLargeBuildKeys: probing that table costs more per
+    row than the compact filter, so the filter arms."""
+    _, scans = _run(LONE_LARGE_BUILD_SHAPE, True)
+    tested, kept = _tested(scans), _kept(scans)
+    assert tested > 0, "a lone first-join filter with a large build did not arm"
+    assert kept < tested
+
+
 def test_positive_control_exact_set():
-    """Scattered keys (one item category across store_sales): the min/max bound has
-    nothing to prune, the key filter must reject most rows."""
-    _, scans = _run(ORACLE_STATEMENTS[0], True)
+    """Scattered keys (one item category across store_sales, one year): the min/max
+    bound has little to prune, the key filters must reject most rows."""
+    _, scans = _run(EXACT_SET_SHAPE, True)
     tested, kept = _tested(scans), _kept(scans)
     assert tested > 0, "the key filter did not fire on its own case"
     assert kept < tested / 2, f"the key filter kept {kept} of {tested} rows"
@@ -205,7 +252,7 @@ def test_positive_control_exact_set():
 
 def test_positive_control_bloom():
     """A build side above the exact-set limit goes through the bloom and still rejects."""
-    _, scans = _run(ORACLE_STATEMENTS[4], True)
+    _, scans = _run(BLOOM_SHAPE, True)
     tested, kept = _tested(scans), _kept(scans)
     assert tested > 0, "the bloom-shaped key filter did not fire"
     assert kept < tested, "the bloom-shaped key filter rejected nothing"
@@ -214,7 +261,7 @@ def test_positive_control_bloom():
 def test_positive_control_with_pushed_predicate():
     """The prefilter path: the key bits AND into the predicate's survivor mask, so the
     rows tested are the predicate's survivors, and fewer come out."""
-    _, scans = _run(ORACLE_STATEMENTS[2], True)
+    _, scans = _run(PREDICATE_SHAPE, True)
     tested, kept = _tested(scans), _kept(scans)
     assert tested > 0, "the key filter did not fire alongside a pushed predicate"
     assert kept < tested
@@ -228,6 +275,8 @@ if __name__ == "__main__":  # pragma: no cover
         test_refused_for_unsound_modes(sql)
         print(f"  refused {i + 1:02d} OK")
     test_not_armed_under_range_settlement()
+    test_lone_first_join_filter_does_not_arm()
+    test_lone_first_join_filter_arms_for_a_large_build()
     test_positive_control_exact_set()
     test_positive_control_bloom()
     test_positive_control_with_pushed_predicate()

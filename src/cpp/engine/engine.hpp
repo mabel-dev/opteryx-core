@@ -670,6 +670,17 @@ public:
     // ── Runtime join KEY filter (runtime_key_filter.hpp) ───────────────────────────
     // A fresh, unpublished slot. Wired to one build sink and one probe scan column by
     // the two calls below, both at plan time on the compiler's thread.
+    // Join probe operators already in pipeline `p` — every hash-join flavour (INNER /
+    // LEFT / SEMI / ANTI / ASOF / BAND) probes through DeferredJoin2Probe. Read by the
+    // compiler before wiring a key filter: a join whose probe pipeline holds no earlier
+    // probe is the FIRST join over the scan's rows, and its key filter could only
+    // duplicate that join's own (cheap) miss path.
+    size_t join_probes_in_pipeline(size_t p) const {
+        size_t n = 0;
+        for (const auto& op : pipelines[p]->operators)
+            if (dynamic_cast<const DeferredJoin2Probe*>(op.get()) != nullptr) ++n;
+        return n;
+    }
     size_t new_runtime_key_filter() {
         runtime_key_filters.push_back(std::make_unique<RuntimeKeyFilterSlot>());
         return runtime_key_filters.size() - 1;
@@ -685,13 +696,14 @@ public:
         sink->key_filter_wanted = true;
         pipelines[p]->fill_key_filter_slot = static_cast<int>(slot);
     }
-    void add_parquet_key_filter(size_t p, size_t slot, std::string column, int want_type) {
+    void add_parquet_key_filter(size_t p, size_t slot, std::string column, int want_type,
+                                size_t position, bool costly_match) {
         auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
         if (src == nullptr)
             throw std::runtime_error(
                 "add_parquet_key_filter: pipeline source is not a native parquet scan");
         src->add_key_filter(std::move(column), runtime_key_filters[slot].get(),
-                            static_cast<DrakenType>(want_type));
+                            static_cast<DrakenType>(want_type), position, costly_match);
     }
     // Wire an already-created skene Source to a bound slot. Called AFTER
     // set_native_skene_scan_source for the same pipeline: the compiler compiles
