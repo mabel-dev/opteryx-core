@@ -1212,4 +1212,30 @@ deleted.
   first repeat → image hits, rugo and V2 files; page-pruned compressed fetch fills
   nothing and is then served COMPRESSED with no swap). `make q` and `make slt`
   pass (private tree, identical sources); cache tests re-run green in main.
-- Measurement owed (above): hadro A/B, official shape.
+
+**Measured (Mac, 2026-10-30).** 50 canon files on hadro over SigV4 (120 ms + 30 ms
+jitter, 480 / 2000 Mbps, fault seed 7), official shape (each query in a fresh
+process, 3 tries), `CHUNK_CACHE_MEMORY_PERCENT=10` → 2.40 GiB budget, 3 rounds
+with arms alternating first; A = before, B = §30, each a private build tree.
+Hot = best of tries 2-3, cold = try 1, medians over rounds; row counts identical.
+Harness and raw data: scratch/c7compressed/.
+
+| | A | B | B/A |
+|---|---|---|---|
+| Σ hot, ms | 52224 | **12068** | **0.231** (geomean 0.565) |
+| Σ cold, ms | 109147 | 108946 | 0.998 |
+
+Where the hot gain comes from — two effects, both of §30 itself:
+1. **Scan admission.** A's `cache_fill_bytes` (uncompressed) exceeds the 2.4 GiB
+   headroom on Q20-Q23, Q27, Q28, Q33, Q34, so A never fills them and every try
+   re-fetches. B fills them compressed (smaller), so its repeats skip most GETs:
+   Q22 11077 → 478 ms, Q20 4331 → 192, Q21 5109 → 362, Q27/Q28/Q33/Q34 ~4.5 s →
+   0.3-0.6 s.
+2. **Predicated decodes now fill.** A fills only after a complete decode, so a
+   page jump or a stopped-short predicate fills nothing; B fills the fetched bytes:
+   Q19 706 → 158, Q38 616 → 148, Q39 697 → 232, Q17 436 → 140, Q40 328 → 158.
+
+Queries both arms cache fully are flat (0.94-1.12, overlapping ranges): B's try 2
+pays decompress + swap, its try 3 reads the image like A. **Cold is unchanged**
+(0.998): the cheaper fill is lost under GET latency. Not covered: x86, a
+budget large enough for A to admit everything, a one-process (aged) workload.
