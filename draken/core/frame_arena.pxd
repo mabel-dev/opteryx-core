@@ -44,8 +44,9 @@ cdef extern from "core/frame_arena.h":
     # The arena will draken_free it on destroy unless release()'d first.
     # Used to fold the results of existing kernels (which allocate via
     # draken_malloc themselves and return draken-owned buffers) into a
-    # frame's arena scope. No-op when `ptr` is NULL.
-    void draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr) nogil
+    # frame's arena scope. No-op (0) when `ptr` is NULL. Ownership passes on the
+    # call: on OOM the arena frees `ptr` and returns -1 (the result is unusable).
+    int draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr) nogil
 
     # Test-only introspection: number of pointers currently tracked.
     size_t draken_frame_arena_size(const DrakenFrameArena* arena) nogil

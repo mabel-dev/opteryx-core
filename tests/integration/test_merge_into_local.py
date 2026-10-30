@@ -159,7 +159,20 @@ def merge_env(tmp_path):
         [(2, 77), (2, 88)],
         disk_io,
     )
-    datasets = {"col.tgt": target, "col.src": source, "col.dup": dup_source}
+    # Sixty new keys in small row groups, then cve 2 twice in the last one: the
+    # violation surfaces only after earlier batches were written to data files.
+    late_dup_source = _build_dataset(
+        str(tmp_path / "latedup"),
+        "col.latedup",
+        ["cve", "details"],
+        [(100 + i, i) for i in range(60)] + [(2, 77), (2, 88)],
+        disk_io,
+        max_rows_per_row_group=10,
+    )
+    datasets = {
+        "col.tgt": target, "col.src": source, "col.dup": dup_source,
+        "col.latedup": late_dup_source,
+    }
 
     catalog = local_catalog_class(str(tmp_path), disk_io)
     for identifier, dataset in datasets.items():
@@ -455,6 +468,45 @@ def test_ctas_through_the_catalog_creates_the_dataset_with_its_rows(merge_env):
     workspace, relative_id = connector._parse_identifier(made)
     snapshot = connector._get_catalog(workspace).load_dataset(relative_id).snapshot()
     assert snapshot is not None and snapshot.summary["added-records"] == 3
+
+
+def test_a_late_cardinality_violation_leaves_no_written_file_behind(merge_env, tmp_path, monkeypatch):
+    """The violation arrives after earlier batches were already written to (and
+    closed as) data files. Every one of them is unreferenced, so the refused
+    statement must remove them - not only the writer still open."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    # One file per batch, two rows per batch: files close long before the end.
+    monkeypatch.setattr("opteryx.planner.compaction.constants.TARGET_SIZE_BYTES", 1)
+    # Record every data file the statement closes, so the test also proves the
+    # case it is about happened: files written before the violation was found.
+    closed = []
+    real_close = _LocalDiskIO._Out.close
+
+    def recording_close(out):
+        real_close(out)
+        if "/data/" in out._path:
+            closed.append(out._path)
+
+    monkeypatch.setattr(_LocalDiskIO._Out, "close", recording_close)
+    session = opteryx.session(user="tester")
+    list(session.execute_to_morsels("SET write_coalesce_rows = 2"))
+    files_before = sorted(p for p in (tmp_path / "tgt").rglob("*") if p.is_file())
+
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {WORKSPACE}.col.latedup AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN UPDATE SET details = t.details
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="cardinality violation"):
+        list(session.execute_to_morsels(sql))
+
+    assert closed, "no data file was written before the violation - the case is not exercised"
+    assert not any(os.path.exists(path) for path in closed)
+    assert sorted(p for p in (tmp_path / "tgt").rglob("*") if p.is_file()) == files_before
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
 
 
 # ── WHEN NOT MATCHED BY SOURCE ──────────────────────────────────────────────

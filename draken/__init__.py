@@ -2,6 +2,44 @@ import ctypes
 import os
 import sys
 
+# x86-64 builds target -march=haswell (build_common.py). On an older CPU the first
+# native instruction is a SIGILL with no message, so check the floor here, in
+# Python, before any extension loads. The flags are those -march=haswell lets the
+# compiler emit on its own (cpuinfo names; `abm` is LZCNT).
+_HASWELL_FLAGS = frozenset(
+    {"sse4_2", "popcnt", "avx", "avx2", "fma", "f16c", "bmi1", "bmi2", "movbe", "abm"}
+)
+
+
+def _missing_x86_flags(cpuinfo_text: str) -> frozenset:
+    """The Haswell-floor flags absent from a /proc/cpuinfo text."""
+    for line in cpuinfo_text.splitlines():
+        if line.startswith("flags"):
+            return _HASWELL_FLAGS - set(line.split(":", 1)[1].split())
+    return frozenset()
+
+
+def _require_x86_floor() -> None:
+    import platform
+
+    if sys.platform != "linux" or platform.machine() != "x86_64":
+        return
+    # shortcut: no readable /proc/cpuinfo (exotic sandboxes) skips the check and
+    # leaves the old SIGILL behaviour; add a cpuid probe if that ever matters.
+    if not os.path.exists("/proc/cpuinfo"):
+        return
+    with open("/proc/cpuinfo") as cpuinfo:
+        missing = _missing_x86_flags(cpuinfo.read())
+    if missing:
+        raise ImportError(
+            "draken (opteryx/rugo) is built for x86-64 CPUs with the Haswell (2013) "
+            f"instruction set or newer; this CPU lacks {', '.join(sorted(missing))}. "
+            "Run on a newer CPU, or a VM that exposes AVX2/BMI2/FMA to the guest."
+        )
+
+
+_require_x86_floor()
+
 # Load draken_native with RTLD_GLOBAL so bridge symbols (draken_vector_unwrap,
 # draken_vector_own_raw, draken_vector_own) are visible to consumer extensions
 # compiled against draken/vectors/_vector_bridge.h / draken/core/draken_capi.h at runtime.

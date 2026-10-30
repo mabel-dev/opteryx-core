@@ -69,17 +69,17 @@ extern "C" void draken_frame_arena_release(DrakenFrameArena* arena, void* ptr) {
     // Silent no-op if not found — per contract.
 }
 
-extern "C" void draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr) {
-    if (arena == nullptr || ptr == nullptr) return;
+extern "C" int draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr) {
+    if (arena == nullptr || ptr == nullptr) return 0;
     try {
         arena->ptrs.push_back(ptr);
     } catch (...) {
-        // push_back may throw bad_alloc. We don't own the pointer yet (caller
-        // hasn't been told the adopt succeeded), so just propagate the failure
-        // by NOT adding to tracking. Caller retains ownership and is
-        // responsible for `draken_free`ing it themselves.
-        // Note: this is best-effort; under OOM the caller may not check.
+        // Ownership passed on the call, so a pointer the arena cannot track is
+        // freed here rather than leaked; -1 tells the caller it is gone.
+        draken_free(ptr);
+        return -1;
     }
+    return 0;
 }
 
 extern "C" int draken_frame_arena_contains(const DrakenFrameArena* arena, const void* ptr) {

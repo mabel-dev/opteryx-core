@@ -1161,7 +1161,9 @@ static const uint8_t *SkipDeltaBinaryPacked(const uint8_t *ptr,
       if (bit_width > 0) {
         const uint64_t bytes_needed =
             (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (bytes_needed > static_cast<uint64_t>(end - ptr)) break;
+        // Truncated: stop at the end rather than re-reading data as a header
+        // (see DecodeDeltaBinaryPacked); whatever follows then decodes short.
+        if (bytes_needed > static_cast<uint64_t>(end - ptr)) return end;
         ptr += bytes_needed;
       }
       skipped += (int32_t)values_per_miniblock;

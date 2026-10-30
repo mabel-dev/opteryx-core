@@ -1479,18 +1479,21 @@ cdef inline int _dv_vecresult_adopt_c(
     everything) — into the frame arena and push it. DECIMAL/DECIMAL128/TIMESTAMP64
     results fold as RAW values (the VM's whole decimal/temporal model is
     raw-domain — int64 or int128 — with bind-time scale/unit ctx; the descriptor
-    is re-attached at the plan-known boundary — ExprProjectOperator). rc 0."""
-    draken_frame_arena_adopt(arena, vr.data)
+    is re-attached at the plan-known boundary — ExprProjectOperator). rc 0, or
+    rc 99 when the arena could not take a buffer (it freed it: nothing is pushed)."""
+    cdef int adopt_rc = draken_frame_arena_adopt(arena, vr.data)
     if vr.owns_selection:
-        draken_frame_arena_adopt(arena, <void*><uint32_t*>vr.selection)
+        adopt_rc |= draken_frame_arena_adopt(arena, <void*><uint32_t*>vr.selection)
     if vr.validity != NULL and not vr.validity_embedded:
-        draken_frame_arena_adopt(arena, vr.validity)
+        adopt_rc |= draken_frame_arena_adopt(arena, vr.validity)
     # A separately-allocated string arena is a SECOND owned buffer behind the same
     # slot. The arena's tracking is what `_slot_to_pyobj` later reads to decide
     # whether a pointer is independently owned (the same question it already asks
     # of `validity`), so adopting it here is both the free and the record of it.
     if vr.arena != NULL:
-        draken_frame_arena_adopt(arena, vr.arena)
+        adopt_rc |= draken_frame_arena_adopt(arena, vr.arena)
+    if adopt_rc != 0:
+        return 99
     dv_store[slot_idx].data = vr.data
     dv_store[slot_idx].selection = vr.selection
     dv_store[slot_idx].data_length = vr.data_length

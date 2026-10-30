@@ -56,13 +56,16 @@ DrakenVector* finalise_result(const VecResult& vr, DrakenFrameArena* arena) {
     // Adopt owned buffers into the arena. Selection is only adopted when
     // VecResult declares ownership — otherwise it points at a global
     // (draken_identity_sel / draken_zero_sel) that must never be freed.
-    draken_frame_arena_adopt(arena, vr.data);
+    // Every buffer is handed over (each adopt takes ownership even when it
+    // fails), then one check: a buffer the arena could not track is already freed.
+    int rc = draken_frame_arena_adopt(arena, vr.data);
     if (vr.validity != nullptr) {
-        draken_frame_arena_adopt(arena, vr.validity);
+        rc |= draken_frame_arena_adopt(arena, vr.validity);
     }
     if (vr.owns_selection && vr.selection != nullptr) {
-        draken_frame_arena_adopt(arena, const_cast<uint32_t*>(vr.selection));
+        rc |= draken_frame_arena_adopt(arena, const_cast<uint32_t*>(vr.selection));
     }
+    if (rc != 0) return nullptr;
 
     return out;
 }

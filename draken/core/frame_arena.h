@@ -59,9 +59,11 @@ void draken_frame_arena_release(DrakenFrameArena* arena, void* ptr);
 // The arena will `draken_free` it on `destroy` unless `release`d first.
 // Used to fold the results of existing kernels (which allocate via
 // `draken_malloc` themselves and return draken-owned buffers via
-// `VecResult`) into a frame's arena scope without copying. No-op when
-// `ptr` is NULL.
-void draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr);
+// `VecResult`) into a frame's arena scope without copying. No-op (0) when
+// `ptr` is NULL. Ownership passes on the call: if the arena cannot track the
+// pointer (out of memory) it frees it and returns -1, so the caller must treat
+// its result as failed - and can adopt every buffer first, then check once.
+int draken_frame_arena_adopt(DrakenFrameArena* arena, void* ptr);
 
 // Non-zero when `ptr` is currently tracked by the arena. This is the ONLY way a
 // consumer can tell an INDEPENDENTLY-allocated buffer (adopted → tracked → the

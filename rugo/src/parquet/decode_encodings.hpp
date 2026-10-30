@@ -176,7 +176,11 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
 
     for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
       uint8_t bit_width = bit_widths[mb];
-      if (bit_width > 64) break;  // corrupt: ReadPackedLSB holds widths <= 64
+      // Corrupt input ends the decode outright: a `break` here only left this
+      // block, and the outer loop then re-read the miniblock's data bytes as the
+      // next block's header - zero bytes "decoding" as a run of the first value.
+      // Returning short lets the caller's count check raise.
+      if (bit_width > 64) return decoded;  // ReadPackedLSB holds widths <= 64
 
       if (bit_width == 0) {
         // All deltas in this miniblock equal min_delta; no data bytes needed.
@@ -188,7 +192,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
       } else {
         const uint64_t bytes_needed =
             (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (bytes_needed > static_cast<uint64_t>(end - ptr)) break;
+        if (bytes_needed > static_cast<uint64_t>(end - ptr)) return decoded;
 
         for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
           const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
@@ -256,7 +260,11 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
 
     for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
       uint8_t bit_width = bit_widths[mb];
-      if (bit_width > 64) break;  // corrupt: ReadPackedLSB holds widths <= 64
+      // Corrupt input ends the decode outright: a `break` here only left this
+      // block, and the outer loop then re-read the miniblock's data bytes as the
+      // next block's header - zero bytes "decoding" as a run of the first value.
+      // Returning short lets the caller's count check raise.
+      if (bit_width > 64) return decoded;  // ReadPackedLSB holds widths <= 64
 
       if (bit_width == 0) {
         // All deltas in this miniblock equal min_delta; no data bytes needed.
@@ -268,7 +276,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
       } else {
         const uint64_t bytes_needed =
             (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (bytes_needed > static_cast<uint64_t>(end - ptr)) break;
+        if (bytes_needed > static_cast<uint64_t>(end - ptr)) return decoded;
 
         for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
           const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
