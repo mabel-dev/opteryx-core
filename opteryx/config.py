@@ -401,10 +401,10 @@ row group's column chunks are contiguous — merging them wastes nothing.
 Unbounded wins on an UNCAPPED link (0.60s vs 0.90s) but is 2x worse here, so
 the default is bounded until production tells us which regime it is in."""
 
-PARQUET_IO_COALESCE_GAP_BYTES: int = int(get("PARQUET_IO_COALESCE_GAP_BYTES", 64 * 1024))
+PARQUET_IO_COALESCE_GAP_BYTES: int = int(get("PARQUET_IO_COALESCE_GAP_BYTES", 512 * 1024))
 """Merge two remote byte runs whose gap is at most this many bytes, whatever the
 waste ratio says (still bounded by PARQUET_IO_COALESCE_MAX_BYTES). 0 = off.
-Default 64 KiB — UNRATIFIED for production (see the regime note below).
+Default 512 KiB (architect, 2026-10-30), set from the GCS measurement below.
 
 The waste ratio is RELATIVE: it prices thrown-away bytes against useful ones and
 never against what a range GET costs. PageIndex page pruning is where that bites:
@@ -421,7 +421,16 @@ HTTP/1.1, 3 connections), 20 ClickBench files at 64 KiB pages, hot medians vs 0:
     64 KiB   0.28 (288->55 GETs)  0.43              1.01            flat
     256 KiB  0.26                 0.41              1.15            flat
     1 MiB    0.38                 0.55              1.92            flat
-Past ~256 KiB it re-buys the bytes page pruning removed. GCS (HTTP/2) unmeasured."""
+Past ~256 KiB it re-buys the bytes page pruning removed — on that rig's 12.5 MB/s
+link, which is ~17x slower per connection than GCS.
+
+Measured 2026-10-30, GCS from an n4a-standard-4 in us-east1 (curl CLI, HTTP/2,
+reused connection): first byte ~30 ms at every size, ~220 MiB/s per stream,
+~260 MiB/s aggregate across parallel streams. Break-even gap = latency x rate:
+~6.5 MiB for one stream alone, ~0.5 MiB at 16 requests in flight (the aggregate
+cap shares the bandwidth, the latency overlaps). 512 KiB is the concurrent end
+of that range. Umbra's AnyBlob paper (VLDB 2023) gets ~1.5 MiB on S3 by the
+same rule (similar latency, ~50 MiB/s per request)."""
 
 SKENE_IO_COALESCE_WASTE_RATIO: float = float(get("SKENE_IO_COALESCE_WASTE_RATIO", 0.10))
 """Skene's own range coalescer (design R12, docs/SKENE_V3_FORMAT_DESIGN.md): merge
