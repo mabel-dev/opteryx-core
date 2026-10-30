@@ -1239,3 +1239,11 @@ Queries both arms cache fully are flat (0.94-1.12, overlapping ranges): B's try 
 pays decompress + swap, its try 3 reads the image like A. **Cold is unchanged**
 (0.998): the cheaper fill is lost under GET latency. Not covered: x86, a
 budget large enough for A to admit everything, a one-process (aged) workload.
+
+**Ruling 2026-10-30 — remembered keys 2048 → 8192.** Production is a mix of
+tables from a mix of users, so a chunk's second touch often lands past the
+probation window. Ruled: scale the key-only memory (`kRemembered`, 512 per shard)
+rather than move the probation:MAIN split off 10:90 — keys cost no MAIN space.
+Built; `make q` and `make slt` pass. Not measured: the ClickBench shape cannot
+show it (the cache barely fills); prod telemetry `chunk_cache_remembered_hits`
+against `promotions` is the read.

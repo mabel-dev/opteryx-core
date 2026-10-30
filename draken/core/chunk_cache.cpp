@@ -67,7 +67,9 @@ constexpr size_t kShards = 16;
 // Probation's share of the cache limit (S3-FIFO's small queue).
 constexpr int64_t kProbationPercent = 10;
 // Recent probation evictions remembered (keys only), split across the shards.
-constexpr size_t kRemembered = 2048;
+// 8192 (ruled 2026-10-30, §30): mixed-table prod traffic re-touches chunks past the
+// probation window; keys cost nothing next to the chunks.
+constexpr size_t kRemembered = 8192;
 constexpr size_t kRememberedPerShard = kRemembered / kShards;
 // Extra sweeps a hit can buy: 8 lives in all with the ref bit's own sweep.
 constexpr uint8_t kMaxWeight = 7;
