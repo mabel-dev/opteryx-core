@@ -363,10 +363,12 @@ HTTP_PIPEWAIT: bool = get_bool("OPTERYX_HTTP_PIPEWAIT", False)
 Default False = historical behaviour. INDEPENDENT of DISABLE_HTTP_MULTIPLEXING:
 libcurl already defaults CURLMOPT_PIPELINING to multiplex, so multiplexing was
 always on; PIPEWAIT additionally makes each batch WAIT for the first connection
-to negotiate h2 before the rest proceed. Because get_many() creates a fresh CURLM
-per batch with no CURLOPT_SHARE, connections are never reused across batches, so
-PIPEWAIT pays a serialised handshake on every row-group fetch instead of letting
-handshakes overlap. Opt-in until measured to be a net win."""
+to negotiate h2 before the rest proceed. get_many() drives one persistent CURLM
+per thread (thread_multi in src/cpp/http_client.cpp), so warm connections are
+reused across that thread's batches; but on a batch that finds no warm
+connection (the thread's first batch, or after the server closed idle ones)
+PIPEWAIT pays a serialised handshake instead of letting handshakes overlap.
+Opt-in until measured to be a net win."""
 
 DISABLE_HTTP2: bool = get_bool("OPTERYX_HTTP_DISABLE_HTTP2", False)
 

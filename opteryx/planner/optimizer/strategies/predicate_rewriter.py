@@ -1957,9 +1957,6 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
             predicate = predicate.with_fields(value="InList")
 
     if predicate.value in IN_REWRITES:
-        # The binder may have pre-baked the IN-list into a CarcharSetWrapper
-        # (hash-only, not iterable, original values discarded). Skip the
-        # IN→Eq rewrite in that case — the evaluator hash-set path handles it.
         if (
             predicate.right.node_type == NodeType.LITERAL
             and isinstance(predicate.right.value, (list, tuple, set, frozenset))

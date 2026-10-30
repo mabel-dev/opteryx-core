@@ -523,8 +523,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         # `col = NULL` (or any bound against a NULL literal) is not orderable —
         # three-valued SQL semantics mean a NULL never participates in range logic.
-        # Nor is a pool of literals from different families; the binder may have
-        # pre-baked an IN-list into a non-iterable set, which reads as unsupported.
+        # Nor is a pool of literals from different families.
         literal_pool: list = []
         for occ in valued:
             if occ.operator == "InList":

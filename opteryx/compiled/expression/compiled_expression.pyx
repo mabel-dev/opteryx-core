@@ -685,8 +685,7 @@ def _decimal_unscaled(value, int scale, lo, hi):
 def _membership_values(values):
     """Common shape gate for both membership blob builders: a plain literal
     collection, non-empty, no NULLs (three-valued semantics the blob cannot
-    carry). Returns the value list, or None to keep the caller on the Python path.
-    CarcharSet / PerfectHashSet wrappers are not literal collections → None."""
+    carry). Returns the value list, or None to keep the caller on the Python path."""
     if not isinstance(values, (list, tuple, set, frozenset)):
         return None
     vals = list(values)
@@ -917,9 +916,6 @@ def _build_single_item_blob(value, item_ct, element_ct):
         return _pack_membership_blob([value], 1, 0)
     return None
 
-
-cdef type _CarcharSetWrapper_t = None
-cdef type _PerfectHashSet_t = None
 
 # Result-handling flag bits (read by execute_bytecode after kernel return).
 # Set at bind time; used to dispatch result wrapping without isinstance/type checks.
@@ -1205,15 +1201,6 @@ cdef inline _ensure_sql_types():
         _STRING_FAMILY = (_LogicalCategory_VARCHAR, LogicalCategory.NVARCHAR, _LogicalCategory_BLOB, LogicalCategory.VARIANT)
 
 
-cdef inline _ensure_set_types():
-    global _CarcharSetWrapper_t, _PerfectHashSet_t
-    if _CarcharSetWrapper_t is None:
-        from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-        from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet
-        _CarcharSetWrapper_t = CarcharSetWrapper
-        _PerfectHashSet_t = PerfectHashSet
-
-
 # ---------------------------------------------------------------------------
 # CompiledBytecode container
 # ---------------------------------------------------------------------------
@@ -1478,14 +1465,7 @@ cdef Py_ssize_t _linearize(
             slot.opcode = BC_LOAD_LIT_BOOL
             slot.bool_value = 1 if value_obj else 0
         else:
-            _ensure_set_types()
-            if isinstance(value_obj, _CarcharSetWrapper_t) or isinstance(value_obj, _PerfectHashSet_t):
-                # Set / hash-set literal — consumed as a Python object by a
-                # downstream BC_COMPARE; never a DrakenVector on the stack.
-                slot.opcode = BC_LOAD_LIT_SET
-                bc._hold(value_obj)
-                slot.literal_obj = <PyObject*>value_obj
-            elif node.physical_type == <int>DRAKEN_INTERVAL:
+            if node.physical_type == <int>DRAKEN_INTERVAL:
                 # INTERVAL literal — its value is a (months, microseconds) tuple,
                 # but it is a genuine scalar, not an in-list collection. Materialise
                 # a constant INTERVAL Vector (must precede the tuple/in-list branch
@@ -1649,9 +1629,9 @@ cdef Py_ssize_t _linearize(
     # pre-read schema types, run temporal validation once.
     #
     # IN-list fold (BC_CMP_INLIST_INLINE): when the right operand is an
-    # NT_LITERAL whose value is a set/list/CarcharSet we fold it directly
+    # NT_LITERAL whose value is a list/tuple/set we fold it directly
     # into the BC_COMPARE instruction (slot.literal_obj) instead of
-    # emitting a separate BC_LOAD_LIT_SET instruction.  This removes the
+    # pushing it as a separate operand.  This removes the
     # set from the execution stack entirely — sets cannot become
     # DrakenVector* and must not appear as stack operands.
     # Folded BC_COMPARE pops ONE item (left) and pushes one result;
@@ -2070,13 +2050,7 @@ cdef Py_ssize_t _linearize(
         inlist_set_obj = None
         if node.right != NULL and node.right.node_type == _NT_LITERAL:
             inlist_set_obj = <object>node.right.value
-            _ensure_set_types()
-            if (
-                isinstance(inlist_set_obj, _CarcharSetWrapper_t)
-                or isinstance(inlist_set_obj, _PerfectHashSet_t)
-            ):
-                right_is_inlist_literal = True
-            elif isinstance(inlist_set_obj, (list, tuple, set, frozenset)):
+            if isinstance(inlist_set_obj, (list, tuple, set, frozenset)):
                 right_is_inlist_literal = True
                 # The string in-list edge (vector_in_list) is bytes-only — encode
                 # str members to bytes ONCE at bind (str must not reach the Draken

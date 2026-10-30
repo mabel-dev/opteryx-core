@@ -18,8 +18,6 @@ from opteryx.compiled.expression.compiled_expression import (
     BC_RESULT_WRAP_AS_BOOL,
     BC_RESULT_NO_DV,
 )
-from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
-from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet as _PerfectHashSet
 from opteryx.compiled.nanobind.vectors import vector_bitwise_not as _vector_bitwise_not
 from opteryx.compiled.nanobind.vectors import (
     vector_string_is_empty as _vector_string_is_empty,
@@ -563,7 +561,6 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_LOAD_LIT_BOOL,
     BC_LOAD_LIT_CONST,
     BC_LOAD_LIT_SCALAR,
-    BC_LOAD_LIT_SET,
     BC_NOT,
     BC_OR,
     BC_UNARY_OP,
@@ -4128,15 +4125,6 @@ cdef Py_ssize_t _gil_run(
             continue
 
         # ----------------------------------------------------------
-        # BC_LOAD_LIT_SET — non-DV slot (set/CarcharSet objects)
-        # ----------------------------------------------------------
-        if opcode == BC_LOAD_LIT_SET:
-            anchor[sp] = <object>slot.literal_obj
-            dv_stack[sp] = NULL
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
         # BC_LOAD_LIT_SCALAR — IN-list collection / set literal.
         #
         # Genuine scalar literals are pre-materialised at bind time and use
@@ -4147,8 +4135,7 @@ cdef Py_ssize_t _gil_run(
         # ----------------------------------------------------------
         if opcode == BC_LOAD_LIT_SCALAR:
             scalar_obj = <object>slot.literal_obj
-            if isinstance(scalar_obj, (_CarcharSetWrapper, _PerfectHashSet,
-                                       list, tuple, set, frozenset)):
+            if isinstance(scalar_obj, (list, tuple, set, frozenset)):
                 anchor[sp] = scalar_obj
                 dv_stack[sp] = NULL
                 sp += 1
@@ -4724,7 +4711,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     Phase 5 — DV* stack: every stack slot is a (DrakenVector*, Python anchor) pair.
     - dv_stack[sp]: raw DrakenVector* — borrowed (from Python Vector.unified()) or
       arena-allocated (from draken_compare_dv / draken_arithmetic_dv / combinator).
-      NULL for non-vector slots (sets, CarcharSet, etc.).
+      NULL for non-vector slots (IN-list collections).
     - anchor[sp]: Python object keeping the vector alive (None for arena results).
 
     Boolean combinators (BC_AND/OR/XOR/NOT) call the C-level bitmap kernels

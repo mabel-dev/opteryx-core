@@ -111,7 +111,8 @@ cdef enum BCOpcode:
     BC_LOAD_COL          = 1
     BC_LOAD_LIT_BOOL     = 2
     BC_LOAD_LIT_SCALAR   = 3
-    BC_LOAD_LIT_SET      = 4
+    # 4 was BC_LOAD_LIT_SET (CarcharSet / PerfectHashSet literals) — removed; no
+    # producer built those literals. Value left unused, not reissued.
     BC_AND               = 5
     BC_OR                = 6
     BC_XOR               = 7
@@ -148,9 +149,9 @@ cdef enum BCCompareFlag:
     BC_CMP_RIGHT_TEMPORAL = 2
     # Right operand is a set/list literal folded into literal_obj at bind time.
     # BC_COMPARE pops only ONE item from the stack (the left/column operand);
-    # the right operand (set/list/CarcharSet) is read from slot.literal_obj.
-    # This eliminates BC_LOAD_LIT_SET as a stack operand — sets can never be
-    # DrakenVector* so they must not appear on the execution stack.
+    # the right operand (list/tuple/set) is read from slot.literal_obj.
+    # Sets can never be DrakenVector* so they must not appear on the
+    # execution stack.
     BC_CMP_INLIST_INLINE  = 4
 
 
@@ -195,7 +196,7 @@ ctypedef struct BytecodeInstr:
     int op_code              # OP_EQ / OP_GT / ... for BC_COMPARE
     int flags                # bitfield of BCCompareFlag
     int bool_value           # 0/1 for BC_LOAD_LIT_BOOL; 1 = is_nb_callable for BC_FUNCTION (legacy)
-    PyObject* literal_obj    # for BC_LOAD_LIT_SCALAR / BC_LOAD_LIT_SET; key for BC_EXTRACTION
+    PyObject* literal_obj    # for BC_LOAD_LIT_SCALAR; key for BC_EXTRACTION
     PyObject* compare_op_str # for BC_COMPARE (AnyOp fallback); op string for BC_BINARY_OP / BC_EXTRACTION
     int16_t left_type_code   # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
     int16_t right_type_code  # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
