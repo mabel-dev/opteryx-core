@@ -289,6 +289,9 @@ cdef extern from "core/chunk_cache.h" nogil:
         int64_t probation_bytes
         int64_t promotions
         int64_t remembered_hits
+        int64_t compressed_bytes
+        int64_t compressed_hits
+        int64_t swaps
     DrakenChunkCacheStats draken_cc_stats()
     void draken_cc_flush()
 
@@ -376,6 +379,9 @@ def chunk_cache_stats() -> dict:
         "probation_bytes": s.probation_bytes,
         "promotions": s.promotions,
         "remembered_hits": s.remembered_hits,
+        "compressed_bytes": s.compressed_bytes,
+        "compressed_hits": s.compressed_hits,
+        "swaps": s.swaps,
         "budget": draken_mem_cache_budget(),
         "limit": draken_mem_cache_limit(),
         # Compressor pressure since the last peak reset (query start): highest

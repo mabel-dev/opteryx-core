@@ -15,6 +15,11 @@
 // Files are immutable for the life of the process (ruling), so the key is the
 // file path plus the chunk's first byte offset.
 //
+// An entry has one of two forms (docs/C7_PAGE_CACHE_DESIGN.md §30): an IMAGE as
+// above, or COMPRESSED — a remote compressed chunk's bytes as fetched, with no
+// page index, decoded like a fetched chunk. A remote miss fills COMPRESSED; a
+// complete decode of a COMPRESSED entry swaps in its IMAGE (draken_cc_replace).
+//
 // Memory: entry bytes are reported to the process memory account
 // (mem_account.h) as CACHE bytes, separately from query bytes. The account
 // shrinks the cache when query memory grows (give-way); the cache never
@@ -55,6 +60,10 @@ const DrakenChunkEntry* draken_cc_lookup_hit(const char* path, size_t path_len,
 // ChunkPageSource::commit) — the chunk re-laid as an UNCOMPRESSED column chunk.
 void draken_cc_entry_bytes(const DrakenChunkEntry* entry, const uint8_t** data, int64_t* len);
 
+// 1 when the entry is COMPRESSED: its bytes are the chunk as fetched (decode them
+// as the chunk; draken_cc_page finds nothing), 0 for an IMAGE.
+int draken_cc_entry_compressed(const DrakenChunkEntry* entry);
+
 // Remember that a predicate decode of this chunk did not touch every page.
 void draken_cc_mark_incomplete(const char* path, size_t path_len, int64_t chunk_offset);
 
@@ -90,6 +99,19 @@ const DrakenChunkEntry* draken_cc_insert_pinned(const char* path, size_t path_le
                                                 uint8_t* buffer, int64_t buffer_bytes,
                                                 const int64_t* page_index, int32_t npages, int64_t cost_ns);
 
+// As draken_cc_insert, for a COMPRESSED entry: `buffer` is the whole chunk as
+// fetched, `cost_ns` its modelled re-fetch. Probation, or MAIN if remembered.
+int draken_cc_insert_compressed(const char* path, size_t path_len, int64_t chunk_offset,
+                                uint8_t* buffer, int64_t buffer_bytes, int64_t cost_ns);
+
+// Swap `old` (a COMPRESSED entry the caller holds pinned) for the IMAGE in `buffer`,
+// placed in MAIN. Takes ownership of `buffer` in every case. Refused (0) when the
+// image does not fit or `old` is no longer the key's entry; `old` then stays as it is.
+// `old` leaves the cache on success and is freed when its last pin goes.
+int draken_cc_replace(const char* path, size_t path_len, int64_t chunk_offset,
+                      const DrakenChunkEntry* old, uint8_t* buffer, int64_t buffer_bytes,
+                      const int64_t* page_index, int32_t npages, int64_t cost_ns);
+
 // Drop every unpinned entry (pinned ones go as soon as their readers finish).
 void draken_cc_flush(void);
 
@@ -106,6 +128,9 @@ typedef struct {
     int64_t probation_bytes;  // currently held on probation
     int64_t promotions;       // probation -> MAIN (hit while on probation)
     int64_t remembered_hits;  // fills that skipped probation (recently evicted)
+    int64_t compressed_bytes; // currently held by COMPRESSED entries
+    int64_t compressed_hits;  // hits on COMPRESSED entries
+    int64_t swaps;            // COMPRESSED entries replaced by their IMAGE
 } DrakenChunkCacheStats;
 DrakenChunkCacheStats draken_cc_stats(void);
 

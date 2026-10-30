@@ -326,3 +326,60 @@ def test_local_uncompressed_is_not_cached(cache_on, served):
     after = chunk_cache_stats()
     assert after["inserts"] == before["inserts"]
     assert after["hits"] == before["hits"]
+
+
+@pytest.mark.parametrize("arm", ["rugo", "v2"])
+def test_remote_compressed_fills_as_fetched_then_swaps_to_the_image(cache_on, served, arm):
+    """docs/C7_PAGE_CACHE_DESIGN.md §30: a remote compressed miss fills the chunk
+    as fetched (no image); the first repeat decodes those bytes with no GET and
+    swaps each one for its image; the next repeat reads only images."""
+    rel = f"ccgs_{arm}.{arm}"
+    sql = "SELECT * FROM {rel}"
+    expected = _local_cache_off(sql, served[arm])
+    flush_chunk_cache()
+    before = chunk_cache_stats()
+    first, gets1, _ = _run(sql.format(rel=rel))
+    cold = chunk_cache_stats()
+    assert first == expected
+    assert gets1 > 0
+    assert cold["compressed_bytes"] > 0, "a remote compressed miss filled no compressed entry"
+    assert cold["swaps"] == before["swaps"]
+    second, gets2, _ = _run(sql.format(rel=rel))
+    warm = chunk_cache_stats()
+    assert second == expected
+    assert gets2 == 0
+    assert warm["compressed_hits"] > cold["compressed_hits"]
+    assert warm["swaps"] > cold["swaps"]
+    assert warm["compressed_bytes"] == 0, "a complete decode left a compressed entry unswapped"
+    third, gets3, _ = _run(sql.format(rel=rel))
+    hot = chunk_cache_stats()
+    assert third == expected
+    assert gets3 == 0
+    assert hot["hits"] > warm["hits"]
+    assert hot["compressed_hits"] == warm["compressed_hits"]
+    assert hot["swaps"] == warm["swaps"]
+
+
+def test_compressed_page_pruned_fetch_fills_nothing(cache_on, served):
+    """A page-pruned remote fetch of a compressed chunk holds only the surviving
+    page runs, so it fills nothing; a whole fetch fills it as fetched, and the
+    pruned scan is then served from that COMPRESSED entry with no data GET and
+    no swap (a page jump skips pages, so it builds no image)."""
+    rel = "ccgs_v2.v2"
+    sql = "SELECT a, s, g FROM {rel} WHERE a BETWEEN 3100 AND 3350"
+    expected = _local_cache_off(sql, served["v2"])
+    flush_chunk_cache()
+    before = chunk_cache_stats()
+    rows, gets, _ = _run(sql.format(rel=rel))
+    assert rows == expected
+    assert gets > 0
+    assert chunk_cache_stats()["inserts"] == before["inserts"], "a page-pruned fetch filled the cache"
+    _run(f"SELECT * FROM {rel}")
+    filled = chunk_cache_stats()
+    assert filled["compressed_bytes"] > 0
+    rows, gets, _ = _run(sql.format(rel=rel))
+    after = chunk_cache_stats()
+    assert rows == expected
+    assert gets == 0
+    assert after["compressed_hits"] > filled["compressed_hits"]
+    assert after["swaps"] == filled["swaps"]

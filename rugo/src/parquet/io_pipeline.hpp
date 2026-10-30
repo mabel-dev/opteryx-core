@@ -2833,7 +2833,7 @@ class ParquetIOPipeline {
             if (p != nullptr) draken_cc_unpin(p);
         blk.cc_pins.assign(members.size() * ncols, nullptr);
         // C7: a chunk already in the cache needs no bytes — pin it and buy nothing
-        // for it. Same key as the decoder's (the path up to any '?', the chunk's
+        // for it (an IMAGE or the COMPRESSED chunk as fetched, §30). Same key as the decoder's (the path up to any '?', the chunk's
         // first byte). Every codec: a block is remote, and a remote UNCOMPRESSED
         // chunk is cached too — its GET is the cost a hit saves.
         const bool cc_on = draken_cc_enabled() != 0;
@@ -3963,7 +3963,7 @@ class ParquetIOPipeline {
                                        std::to_string(i);
                         return false;
                     }
-                    // A pinned cache hit was never fetched: no bytes, decoded from the image.
+                    // A pinned cache hit was never fetched: no bytes, decoded from the entry.
                     const uint8_t* raw_data = cc_pinned != nullptr ? nullptr : col_ptr[i];
                     const size_t   raw_size = cc_pinned != nullptr ? 0 : col_len[i];
                     if (cc_pinned == nullptr)

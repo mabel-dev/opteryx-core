@@ -1,5 +1,5 @@
 // Policy tests for the chunk cache (chunk_cache.cpp): S3-FIFO admission, the
-// remembered probation evictions, and cost-weighted CLOCK. Built and run by
+// remembered probation evictions, cost-weighted CLOCK, and COMPRESSED -> IMAGE swaps. Built and run by
 // `make chunk-cache-test` against chunk_cache.cpp + mem_account.cpp only.
 #include <cstdio>
 #include <cstdlib>
@@ -117,6 +117,64 @@ static void flush_forgets_everything() {
     CHECK(s.remembered_hits == b.remembered_hits, "flush kept remembered evictions");
 }
 
+// §30: a COMPRESSED entry goes on probation; a swap puts its IMAGE in MAIN while a
+// reader still holding the COMPRESSED pin keeps its bytes; a swap of an entry that
+// left the cache is refused and stays gone.
+static void compressed_entry_swaps_to_its_image() {
+    reset(50);
+    const std::string p = path_for("swap", 0);
+    uint8_t* raw = draken_cc_fill_alloc(kChunk / 4);
+    for (int64_t i = 0; i < kChunk / 4; ++i) raw[i] = 0xAB;
+    const DrakenChunkCacheStats b = draken_cc_stats();
+    CHECK(draken_cc_insert_compressed(p.data(), p.size(), 0, raw, kChunk / 4, kDearNs) == 1,
+          "compressed insert refused");
+    DrakenChunkCacheStats s = draken_cc_stats();
+    CHECK(s.compressed_bytes == b.compressed_bytes + kChunk / 4, "compressed bytes not counted");
+    CHECK(s.probation_bytes == b.probation_bytes + kChunk / 4, "compressed entry not on probation");
+
+    int fill_ok = 1;
+    const DrakenChunkEntry* old = draken_cc_lookup(p.data(), p.size(), 0, 0, &fill_ok);
+    CHECK(old != nullptr && draken_cc_entry_compressed(old) == 1, "lookup did not find the compressed entry");
+    CHECK(draken_cc_stats().compressed_hits == s.compressed_hits + 1, "compressed hit not counted");
+    const uint8_t* page = nullptr;
+    int64_t page_len = 0;
+    CHECK(draken_cc_page(old, 0, &page, &page_len) == 0, "a compressed entry indexed a page");
+
+    uint8_t* img = draken_cc_fill_alloc(kChunk);
+    const int64_t index[3] = {0, 0, kChunk};
+    CHECK(draken_cc_replace(p.data(), p.size(), 0, old, img, kChunk, index, 1, kDearNs) == 1,
+          "swap refused");
+    s = draken_cc_stats();
+    CHECK(s.swaps == b.swaps + 1, "swap not counted");
+    CHECK(s.compressed_bytes == b.compressed_bytes, "swapped-out bytes still counted compressed");
+    CHECK(s.probation_bytes == b.probation_bytes, "image went to probation, not MAIN");
+    CHECK(s.bytes == b.bytes + kChunk, "cache holds %lld bytes after the swap", (long long)s.bytes);
+    CHECK(s.inserts == b.inserts + 1, "a swap counted as an insert");
+    const uint8_t* old_bytes = nullptr;
+    int64_t old_len = 0;
+    draken_cc_entry_bytes(old, &old_bytes, &old_len);
+    CHECK(old_len == kChunk / 4 && old_bytes[0] == 0xAB && old_bytes[old_len - 1] == 0xAB,
+          "the pinned compressed bytes did not survive the swap");
+    const DrakenChunkEntry* now = draken_cc_lookup(p.data(), p.size(), 0, 0, &fill_ok);
+    CHECK(now != nullptr && now != old && draken_cc_entry_compressed(now) == 0,
+          "the key does not hold the image after the swap");
+    if (now != nullptr) draken_cc_unpin(now);
+    draken_cc_unpin(old);   // the swapped-out entry is freed here
+
+    // A swap of an entry that left the cache meanwhile is refused.
+    const std::string q = path_for("swap", 1);
+    draken_cc_insert_compressed(q.data(), q.size(), 0, draken_cc_fill_alloc(kChunk / 4), kChunk / 4, kDearNs);
+    const DrakenChunkEntry* gone = draken_cc_lookup(q.data(), q.size(), 0, 0, &fill_ok);
+    CHECK(gone != nullptr, "second compressed entry missing");
+    draken_cc_flush();
+    const DrakenChunkCacheStats f = draken_cc_stats();
+    CHECK(draken_cc_replace(q.data(), q.size(), 0, gone, draken_cc_fill_alloc(kChunk), kChunk, index, 1,
+                            kDearNs) == 0,
+          "a swap of an evicted entry was admitted");
+    CHECK(draken_cc_stats().bytes == f.bytes, "a refused swap changed the cache");
+    if (gone != nullptr) draken_cc_unpin(gone);
+}
+
 // draken::MemCharge (mem_account.h): a held charge makes a full cache give way
 // exactly as an allocator charge does, and set / move / adopt / destruction
 // leave the account where it started - a leak here would starve the cache.
@@ -154,6 +212,7 @@ int main() {
     one_hit_chunks_leave_first_and_are_remembered();
     expensive_chunks_outlive_cheap_ones();
     flush_forgets_everything();
+    compressed_entry_swaps_to_its_image();
     mem_charge_gives_way_and_balances();
     draken_cc_flush();
     if (g_failures != 0) {

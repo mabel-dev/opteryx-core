@@ -1101,9 +1101,9 @@ separate path), Q28.
 **Cost.** Uncompressed chunks occupy their wire size: WatchID alone would be
 ~800 MB on full ClickBench. Admission/eviction (§27) is unchanged.
 
-## 30. Compressed probation for remote chunks — RULED 2026-10-30, not built
+## 30. Compressed probation for remote chunks — RULED and BUILT 2026-10-30, not measured
 
-Status: ruled, nothing built or measured. **Reopens D-C7-1** ("No compressed
+Status: ruled and built (see **Built** below); not measured. **Reopens D-C7-1** ("No compressed
 tier, no decoded tier") for remote chunks on probation only.
 
 **Rulings (architect, 2026-10-30):** the recommendations below stand —
@@ -1191,5 +1191,25 @@ deleted.
   decode would skip — it is no worse than a miss, minus the GET.
 - The replace op is a new path through the pin/EVICTED lifetime; it needs a
   `make chunk-cache-test` case (swap while another reader holds the old pin).
-- Remembered keys still send a refilled chunk straight to MAIN — as IMAGE only
-  when the refill decode was complete; otherwise COMPRESSED (D-C7-30-3).
+- Remembered keys still send a refilled chunk straight to MAIN — COMPRESSED (a
+  miss always fills COMPRESSED); its next complete decode swaps in the IMAGE.
+
+**Built (2026-10-30).**
+- `chunk_cache.h/.cpp`: entry `compressed` flag; `draken_cc_entry_compressed`,
+  `draken_cc_insert_compressed`, `draken_cc_replace` (swap under the shard lock;
+  refused when the entry left the cache; the old entry is freed at its last
+  unpin). Stats `compressed_bytes`, `compressed_hits`, `swaps` (telemetry
+  `chunk_cache_*`); a swap is not counted as an insert.
+- `decode_column.cpp`: a remote compressed miss copies the fetched chunk (whole
+  fetch only) into a COMPRESSED entry, cost = modelled re-fetch, no image fill;
+  a COMPRESSED hit (decoder lookup or the IO planner's pin) is decoded from its
+  bytes, and a complete decode builds the image and calls `draken_cc_replace`.
+  Page jumps never swap; swap decodes never mark a chunk incomplete.
+- `pool_reader.pyx`: `cache_fill_bytes` counts a remote chunk at its
+  `total_compressed_size`.
+- Tests: `make chunk-cache-test` (swap while pinned, refused swap, counters;
+  ASan/UBSan clean); test_chunk_cache_get_skip.py +3 (compressed fill → swap on
+  first repeat → image hits, rugo and V2 files; page-pruned compressed fetch fills
+  nothing and is then served COMPRESSED with no swap). `make q` and `make slt`
+  pass (private tree, identical sources); cache tests re-run green in main.
+- Measurement owed (above): hadro A/B, official shape.

@@ -3835,8 +3835,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     #
     # The cache-fill walk sums what a full chunk-cache fill of this scan would hold
     # (NativeScanPlan.cache_fill_bytes): the decoder fills a chunk only when it is
-    # compressed or remote (decode_column.cpp DecodeColumnFromChunk), and an image
-    # is the chunk's total_uncompressed_size (ChunkPageSource).
+    # compressed or remote (decode_column.cpp DecodeColumnFromChunk). A local fill is
+    # an image, the chunk's total_uncompressed_size; a remote fill is the chunk as
+    # fetched, its total_compressed_size (ChunkPageSource, §30).
     cdef vector[string] proj_names
     for name in column_names:
         proj_names.push_back(name.encode('utf-8'))
@@ -3925,7 +3926,9 @@ cpdef NativeScanPlan open_native_scan_plan(
             for ci in proj_idx:
                 if rgp.columns[ci].total_uncompressed_size > 0:
                     rg_bytes += rgp.columns[ci].total_uncompressed_size
-                    if rgp.columns[ci].codec != 0 or fill_remote:
+                    if fill_remote:   # a remote miss fills the chunk as fetched (§30)
+                        fill_bytes += rgp.columns[ci].total_compressed_size
+                    elif rgp.columns[ci].codec != 0:
                         fill_bytes += rgp.columns[ci].total_uncompressed_size
             if rg_bytes > max_rg_bytes:
                 max_rg_bytes = rg_bytes

@@ -13,7 +13,8 @@ could never reuse, and on SF100 that fill cost was most of Q18's gap to skene.
 Pinned here:
   * NativeScanPlan.cache_fill_bytes is the projected chunks' footer
     total_uncompressed_size, counting only chunks the decoder fills (compressed,
-    or remote) - a local UNCOMPRESSED chunk counts nothing;
+    or remote; a remote chunk fills as fetched, its total_compressed_size, §30)
+    - a local UNCOMPRESSED chunk counts nothing;
   * admission consumes headroom in scan order, and a declined scan consumes none;
   * the decision is reported in query telemetry.
 """

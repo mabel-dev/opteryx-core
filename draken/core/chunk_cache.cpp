@@ -16,6 +16,9 @@
 //   `weight` extra sweeps (0..kMaxWeight) on top of the ref bit, from its cost
 //   to rebuild per byte, so an expensive chunk outlives a cheap one while both
 //   are going cold. weight 0 is plain CLOCK.
+// - Forms (rulings 2026-10-30, §30): a COMPRESSED entry goes through the same
+//   probation and MAIN as an IMAGE. A swap (draken_cc_replace) puts the IMAGE
+//   straight in MAIN in place of its COMPRESSED entry.
 //
 // Lifetime: an entry's `state` word holds its reader pin count plus an
 // EVICTED bit. Eviction sets the bit; whoever observes pins == 0 with the bit
@@ -50,6 +53,7 @@ struct DrakenChunkEntry {
     uint8_t weight = 0;           // extra CLOCK sweeps a hit buys (cost per byte)
     uint8_t lives = 0;            // extra sweeps left (MAIN only)
     bool main = false;            // false: on probation
+    bool compressed = false;      // the chunk as fetched, not its image (§30)
     std::atomic<uint32_t> state{0};
     std::atomic<uint8_t> ref{0};
 };
@@ -101,7 +105,7 @@ std::atomic<size_t> g_next_shard{0};
 
 std::atomic<int64_t> g_entries{0}, g_hits{0}, g_misses{0}, g_inserts{0}, g_refused{0},
     g_evictions{0}, g_give_way{0}, g_probation_bytes{0}, g_promotions{0},
-    g_remembered_hits{0};
+    g_remembered_hits{0}, g_compressed_bytes{0}, g_compressed_hits{0}, g_swaps{0};
 
 // Why an eviction is happening. Only an ADMIT eviction from probation is a
 // verdict on the chunk ("filled, not used again"), so only it is remembered.
@@ -135,10 +139,24 @@ void remember(Shard& sh, const Key& k) {
 void drop(Shard& sh, DrakenChunkEntry* e) {
     sh.map.erase(Key{e->path, e->offset});
     if (!e->main) g_probation_bytes.fetch_sub(e->bytes, std::memory_order_relaxed);
+    if (e->compressed) g_compressed_bytes.fetch_sub(e->bytes, std::memory_order_relaxed);
     draken_mem_cache_sub(e->bytes);
     g_entries.fetch_sub(1, std::memory_order_relaxed);
     const uint32_t prev = e->state.fetch_or(kEvicted, std::memory_order_acq_rel);
     if ((prev & kPinMask) == 0) destroy(e);
+}
+
+// Under the shard lock: take `e` out of its queue (probation or MAIN), not the map.
+// Linear in the queue; only a swap (once per chunk) comes here.
+void detach(Shard& sh, DrakenChunkEntry* e) {
+    if (!e->main) {
+        sh.probation.erase(std::find(sh.probation.begin(), sh.probation.end(), e));
+        return;
+    }
+    const size_t i = static_cast<size_t>(std::find(sh.ring.begin(), sh.ring.end(), e) - sh.ring.begin());
+    sh.ring[i] = sh.ring.back();
+    sh.ring.pop_back();
+    if (sh.hand >= sh.ring.size()) sh.hand = 0;
 }
 
 // Free one entry from one shard. Returns 1 evicted, 0 nothing here. `patient`:
@@ -256,6 +274,7 @@ const DrakenChunkEntry* draken_cc_lookup(const char* path, size_t path_len, int6
     e->state.fetch_add(1, std::memory_order_acq_rel);
     e->ref.store(1, std::memory_order_relaxed);
     g_hits.fetch_add(1, std::memory_order_relaxed);
+    if (e->compressed) g_compressed_hits.fetch_add(1, std::memory_order_relaxed);
     return e;
 }
 
@@ -270,6 +289,7 @@ const DrakenChunkEntry* draken_cc_lookup_hit(const char* path, size_t path_len,
     e->state.fetch_add(1, std::memory_order_acq_rel);
     e->ref.store(1, std::memory_order_relaxed);
     g_hits.fetch_add(1, std::memory_order_relaxed);
+    if (e->compressed) g_compressed_hits.fetch_add(1, std::memory_order_relaxed);
     return e;
 }
 
@@ -277,6 +297,8 @@ void draken_cc_entry_bytes(const DrakenChunkEntry* entry, const uint8_t** data, 
     *data = entry->buffer;
     *len = entry->bytes;
 }
+
+int draken_cc_entry_compressed(const DrakenChunkEntry* entry) { return entry->compressed ? 1 : 0; }
 
 int draken_cc_page(const DrakenChunkEntry* entry, int64_t body_offset,
                    const uint8_t** data, int64_t* len) {
@@ -317,11 +339,15 @@ void draken_cc_fill_discard(uint8_t* buffer) { std::free(buffer); }
 
 namespace {
 
-// draken_cc_insert / draken_cc_insert_pinned. `pinned`: an admitted entry comes back pinned,
-// and a refused buffer stays the caller's (not freed).
+// draken_cc_insert / _insert_pinned / _insert_compressed / _replace. `pinned`: an
+// admitted entry comes back pinned, and a refused buffer stays the caller's (not
+// freed). `compressed`: the entry is the chunk as fetched. `replaces`: the
+// COMPRESSED entry this IMAGE swaps out (the caller holds it pinned); the image
+// goes straight to MAIN, and the swap is refused if `replaces` left the cache.
 DrakenChunkEntry* insert_entry(const char* path, size_t path_len, int64_t chunk_offset,
                                uint8_t* buffer, int64_t buffer_bytes,
-                               const int64_t* page_index, int32_t npages, int64_t cost_ns, bool pinned) {
+                               const int64_t* page_index, int32_t npages, int64_t cost_ns, bool pinned,
+                               bool compressed, const DrakenChunkEntry* replaces) {
     auto refuse = [&]() -> DrakenChunkEntry* {
         if (!pinned) std::free(buffer);
         g_refused.fetch_add(1, std::memory_order_relaxed);
@@ -330,13 +356,15 @@ DrakenChunkEntry* insert_entry(const char* path, size_t path_len, int64_t chunk_
     const int64_t budget = draken_mem_cache_budget();
     if (budget <= 0 || buffer_bytes <= 0 || buffer_bytes > budget) return refuse();
     const int64_t limit = draken_mem_cache_limit();
+    // A swap frees the entry it replaces: only the growth needs room.
+    const int64_t grow = buffer_bytes - (replaces != nullptr ? replaces->bytes : 0);
     // Under query-memory pressure (the limit is below the budget) an insert may
     // only use free room: evicting residents to admit would refill the cache the
     // running queries are making it give away — churn, not caching.
     const bool pressure = limit < budget;
-    const bool fits_free = draken_mem_cache_bytes() + buffer_bytes <= limit;
+    const bool fits_free = draken_mem_cache_bytes() + grow <= limit;
     if (buffer_bytes > limit || (pressure && !fits_free) ||
-        (!fits_free && !make_room(limit - buffer_bytes, Why::kAdmit)))
+        (!fits_free && !make_room(limit - grow, Why::kAdmit)))
         return refuse();
 
     auto* e = new DrakenChunkEntry();
@@ -344,6 +372,7 @@ DrakenChunkEntry* insert_entry(const char* path, size_t path_len, int64_t chunk_
     e->offset = chunk_offset;
     e->buffer = buffer;
     e->bytes = buffer_bytes;
+    e->compressed = compressed;
     e->weight = weight_for(cost_ns, buffer_bytes);
     e->index.reserve(static_cast<size_t>(npages) * 3);
     std::vector<size_t> order(static_cast<size_t>(npages));
@@ -361,13 +390,26 @@ DrakenChunkEntry* insert_entry(const char* path, size_t path_len, int64_t chunk_
     Shard& sh = shard_for(k);
     {
         std::lock_guard<std::mutex> lk(sh.mu);
-        if (sh.map.find(k) != sh.map.end()) {   // another reader filled it first
+        auto it = sh.map.find(k);
+        if (replaces != nullptr) {
+            if (it == sh.map.end() || it->second != replaces) {   // evicted meanwhile: stays gone
+                destroy(e);
+                g_refused.fetch_add(1, std::memory_order_relaxed);
+                return nullptr;
+            }
+            DrakenChunkEntry* old = it->second;
+            detach(sh, old);
+            drop(sh, old);   // the caller's pin keeps its bytes alive until unpinned
+            e->main = true;
+            e->lives = e->weight;
+            sh.ring.push_back(e);
+            g_swaps.fetch_add(1, std::memory_order_relaxed);
+        } else if (it != sh.map.end()) {        // another reader filled it first
             if (pinned) e->buffer = nullptr;    // the buffer stays the caller's
             destroy(e);
             g_refused.fetch_add(1, std::memory_order_relaxed);
             return nullptr;
-        }
-        if (sh.remembered_set.erase(k) != 0) {
+        } else if (sh.remembered_set.erase(k) != 0) {
             // Evicted from probation recently and wanted again: straight to MAIN.
             sh.remembered.erase(std::find(sh.remembered.begin(), sh.remembered.end(), k));
             e->main = true;
@@ -380,9 +422,10 @@ DrakenChunkEntry* insert_entry(const char* path, size_t path_len, int64_t chunk_
         }
         sh.map.emplace(std::move(k), e);
         draken_mem_cache_add(buffer_bytes);
+        if (compressed) g_compressed_bytes.fetch_add(buffer_bytes, std::memory_order_relaxed);
     }
     g_entries.fetch_add(1, std::memory_order_relaxed);
-    g_inserts.fetch_add(1, std::memory_order_relaxed);
+    if (replaces == nullptr) g_inserts.fetch_add(1, std::memory_order_relaxed);
     return e;
 }
 
@@ -394,13 +437,27 @@ int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
                      uint8_t* buffer, int64_t buffer_bytes,
                      const int64_t* page_index, int32_t npages, int64_t cost_ns) {
     return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, page_index, npages, cost_ns,
-                        false) != nullptr ? 1 : 0;
+                        false, false, nullptr) != nullptr ? 1 : 0;
 }
 
 const DrakenChunkEntry* draken_cc_insert_pinned(const char* path, size_t path_len, int64_t chunk_offset,
                                                 uint8_t* buffer, int64_t buffer_bytes,
                                                 const int64_t* page_index, int32_t npages, int64_t cost_ns) {
-    return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, page_index, npages, cost_ns, true);
+    return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, page_index, npages, cost_ns, true,
+                        false, nullptr);
+}
+
+int draken_cc_insert_compressed(const char* path, size_t path_len, int64_t chunk_offset,
+                                uint8_t* buffer, int64_t buffer_bytes, int64_t cost_ns) {
+    return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, nullptr, 0, cost_ns,
+                        false, true, nullptr) != nullptr ? 1 : 0;
+}
+
+int draken_cc_replace(const char* path, size_t path_len, int64_t chunk_offset,
+                      const DrakenChunkEntry* old, uint8_t* buffer, int64_t buffer_bytes,
+                      const int64_t* page_index, int32_t npages, int64_t cost_ns) {
+    return insert_entry(path, path_len, chunk_offset, buffer, buffer_bytes, page_index, npages, cost_ns,
+                        false, false, old) != nullptr ? 1 : 0;
 }
 
 void draken_cc_flush(void) {
@@ -425,6 +482,9 @@ DrakenChunkCacheStats draken_cc_stats(void) {
     s.probation_bytes = g_probation_bytes.load(std::memory_order_relaxed);
     s.promotions = g_promotions.load(std::memory_order_relaxed);
     s.remembered_hits = g_remembered_hits.load(std::memory_order_relaxed);
+    s.compressed_bytes = g_compressed_bytes.load(std::memory_order_relaxed);
+    s.compressed_hits = g_compressed_hits.load(std::memory_order_relaxed);
+    s.swaps = g_swaps.load(std::memory_order_relaxed);
     return s;
 }
 
