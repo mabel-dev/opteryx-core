@@ -1,6 +1,6 @@
 [project]
 name = "opteryx_core"
-version = "0.9.175"
+version = "0.9.176"
 description = "Embeddable analytical SQL engine: Python planning, native execution, zero install dependencies"
 requires-python = '>=3.11'
 readme = {file = "README.md", content-type = "text/markdown"}
