@@ -1100,3 +1100,96 @@ separate path), Q28.
 
 **Cost.** Uncompressed chunks occupy their wire size: WatchID alone would be
 ~800 MB on full ClickBench. Admission/eviction (§27) is unchanged.
+
+## 30. Compressed probation for remote chunks — RULED 2026-10-30, not built
+
+Status: ruled, nothing built or measured. **Reopens D-C7-1** ("No compressed
+tier, no decoded tier") for remote chunks on probation only.
+
+**Rulings (architect, 2026-10-30):** the recommendations below stand —
+D-C7-30-1 reopen D-C7-1, remote only; D-C7-30-2 both promotions (S3-FIFO lazy
+move kept, eager swap on a complete decode added); D-C7-30-3 a used
+COMPRESSED chunk moves to MAIN still COMPRESSED; D-C7-30-4 parquet only.
+
+**Idea (architect, 2026-10-30).** Cost escalates with how often a chunk has been
+seen:
+
+| Chunk state | Pays GET | Pays decompress |
+|---|---|---|
+| never seen | yes | yes |
+| on probation (compressed bytes) | no | yes |
+| in MAIN (image) | no | no |
+
+Probation holds the bytes as fetched, so the same 10% share holds roughly 3-5x
+more chunks (the codec ratio). Promotion to MAIN stores the chunk image as today.
+
+**What is there today (§27, chunk_cache.cpp, decode_column.cpp).**
+- Probation and MAIN both hold the chunk IMAGE (the chunk re-laid uncompressed).
+  Probation is a per-shard FIFO capped at 10% of the limit; MAIN is
+  cost-weighted CLOCK; 2048 remembered keys skip probation on refill.
+- Promotion is lazy (S3-FIFO): a hit on probation sets `ref`; the chunk moves to
+  MAIN when the probation hand reaches it.
+- A fill commits only after a complete decode; page jumps never fill;
+  predicated decodes that stop short are remembered as incomplete and not refilled.
+- Remote codec-0 chunks (§29) are cached verbatim: their image already is the
+  fetched bytes.
+
+**Why remote only.**
+- Local: the compressed bytes are already in the OS page cache (§2, T0 local
+  "~0"). A compressed copy duplicates them. Local probation stays as it is.
+- Remote: prod's floor is GCS round trips (§9; GCS from n4a: TTFB h2 ~30 ms,
+  ~220 MB/s/stream). A T1 hit is worth about a third of the measured decompress
+  time (§15), so most of a remote chunk's value is the GET, which the compressed
+  form already saves.
+
+**Mechanics.**
+1. **Entry form.** `DrakenChunkEntry` gains a form: COMPRESSED (the chunk bytes
+   as fetched, index = page header offsets, as §29's verbatim index) or IMAGE.
+   A remote codec-0 chunk is IMAGE as today — the two forms are the same bytes.
+2. **Fill.** A remote compressed chunk fetched WHOLE (`req->whole`, the §29 D3
+   test) is inserted COMPRESSED on probation: one copy of the compressed bytes,
+   no decompress-into-slots, no image build. This lowers the cold-run fill cost
+   (§28 cold Q21 1.51, Q22 1.39, Q28 1.26). It does not need a complete decode,
+   so page-jump and stopped-short predicated decodes can fill it too; the
+   incomplete set no longer blocks a remote fill.
+3. **GET skip.** `plan_block`'s pin may return a COMPRESSED entry; the decoder
+   then uses the entry bytes as `file_data` and runs the normal decompress path
+   (a hit is a pin plus the existing miss decode, minus the fetch).
+4. **Promotion.** A complete decode of a COMPRESSED entry already decompresses
+   every page, so `ChunkPageSource` fills the image as a byproduct and the cache
+   swaps it in under the same key (new op: replace; the old entry is marked
+   EVICTED and freed at its last unpin). The image goes to MAIN with the measured
+   decompress cost plus the modelled re-fetch, as today.
+5. **Eviction.** MAIN eviction drops the entry; there is no demotion back to
+   COMPRESSED (re-compressing is wasted work, and keeping both forms doubles
+   hot chunks).
+6. **Counters.** `compressed_bytes`, `compressed_hits`, `swaps`
+   (COMPRESSED → IMAGE). `chunk_cache_get_skipped_*` (GET-skip doc) already
+   counts the GETs saved.
+
+**Decisions for the architect.**
+
+| # | Question | Options | Recommendation |
+|---|---|---|---|
+| D-C7-30-1 | Reopen D-C7-1 for compressed probation | yes, remote only / no | yes, remote only |
+| D-C7-30-2 | Promotion | eager swap on a complete decode, plus S3-FIFO lazy move / eager only | both: the lazy move keeps §27's admission rule; the swap fixes the form |
+| D-C7-30-3 | A hit COMPRESSED chunk reaches the probation hand without a complete decode (predicated hits only) | moves to MAIN still COMPRESSED / evicted | moves to MAIN COMPRESSED (it was used; it becomes IMAGE on its first complete decode) |
+| D-C7-30-4 | ORC (docs/ORC_CHUNK_CACHE_DESIGN.md) | parquet only / both | parquet only (ORC is "supported", no perf work) |
+
+**Default knob, not a ruling.** Probation stays at 10% of the limit by bytes.
+Measured, not argued.
+
+**Measurement.** Official shape (process per query), hadro with GCS-like
+latency (120 ms + 30 ms jitter, as the §28 leave-one-out), budget squeezed so
+probation binds (40% → 2.18 GiB). Arms: today vs compressed probation,
+interleaved. Report hot and cold sums, hits by form, swaps, GETs skipped, and
+probation chunk count. Kill criterion: hot no faster and cold no faster →
+deleted.
+
+**Risks.**
+- A COMPRESSED hit pays the full decompress, including pages a selective
+  decode would skip — it is no worse than a miss, minus the GET.
+- The replace op is a new path through the pin/EVICTED lifetime; it needs a
+  `make chunk-cache-test` case (swap while another reader holds the old pin).
+- Remembered keys still send a refilled chunk straight to MAIN — as IMAGE only
+  when the refill decode was complete; otherwise COMPRESSED (D-C7-30-3).
