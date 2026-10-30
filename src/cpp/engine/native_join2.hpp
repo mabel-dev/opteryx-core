@@ -275,9 +275,9 @@ struct JoinCsr {
 };
 
 // Builds of at least this many rows take the radix-partitioned table below instead of
-// JoinCsr. 1M is NOT swept (2026-10-09): builds of ~700K rows still pay
-// ~6ms in build_join_csr's atomic histogram, so the right gate is probably lower.
-inline constexpr uint64_t kRadixMinBuildRows = 1u << 20;
+// JoinCsr. Swept 2026-10-30 on ARM (Mac), 1M vs 128k, 4 ABBA rounds: geomean TPC-H SF10
+// 0.985, SF1 0.954, JOB 0.960; 64k turns worse at SF10 (Q05 +10%). x86 not yet measured.
+inline constexpr uint64_t kRadixMinBuildRows = 1u << 17;
 // Target bytes per partition table — the partition count is derived from it.
 inline constexpr size_t kRadixPartBytes = 256u << 10;
 
