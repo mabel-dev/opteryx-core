@@ -32,7 +32,7 @@ make h2o-aistor                           12119ms    (15-OCT) [medium]
 make job-aistor                           26878ms    (15-OCT) [3.98x]
 make tpch-sf01-aistor                       986ms    (29-OCT) [8.7x]
 make tpcds-sf01-aistor                    74600ms    (12-OCT) [1 fails (Q51)]
-make clickbench-aistor-canon-split-10      9485ms    (29-OCT) [4.12x] [10M rows]
+make clickbench-aistor-canon-split-10      1810ms    (30-OCT) [0.79x] [10M rows]
 make clickbench-aistor-rugo-split-10       1647ms    (29-OCT) [0.74x] [10M rows]
 make h2o-small-aistor                      1150ms    (29-OCT) [0.41x]
 
