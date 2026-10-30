@@ -180,7 +180,13 @@ class MergeNode(BasePlanNode):
             )
             return
 
-        self._consume(morsel)
+        # Any failure mid-stream (a cardinality violation, a gather, a push)
+        # must leave no data file behind: nothing references them yet.
+        try:
+            self._consume(morsel)
+        except Exception:
+            self._stream.abandon()
+            raise
 
     def _consume(self, morsel):
         """Split one joined morsel into delete addresses and rows to append.
@@ -221,11 +227,7 @@ class MergeNode(BasePlanNode):
         # substrate; `select` narrows to the target's own columns, dropping the
         # three control columns the sink has now consumed.
         rows = morsel.take(indices).select(morsel.column_names[:n_target])
-        try:
-            self._stream.push(rows)
-        except Exception:
-            self._stream.abandon()
-            raise
+        self._stream.push(rows)
 
     def _raise_split_error(self, int status):
         from opteryx.exceptions import InvalidInternalStateError

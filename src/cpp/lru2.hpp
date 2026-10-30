@@ -20,6 +20,9 @@
 //
 // Both heaps use lazy deletion: when an entry's generation changes (new
 // access recorded), the old heap entry is left in place and skipped on pop.
+// Generations come from one cache-wide counter, so an erased-then-reinserted key
+// can never match a stale item; and the heaps are compacted once stale items
+// outnumber live ones, so a cache that never evicts does not grow per hit.
 
 namespace opteryx {
 
@@ -62,18 +65,20 @@ public:
     int64_t misses()         const noexcept { return misses_; }
     int64_t evictions()      const noexcept { return evictions_; }
     int64_t inserts()        const noexcept { return inserts_; }
+    // Heap items held, live + stale: bounded by ~2x size() + 64 (see compact_heaps).
+    int64_t heap_items()     const noexcept { return (int64_t)(young_heap_.size() + mature_heap_.size()); }
 
 private:
     struct Entry {
         std::string value;
         uint64_t    last_access;  // most recent clock tick
         uint64_t    prev_access;  // 2nd-most-recent; 0 means fewer than 2 accesses
-        uint32_t    generation;   // bumped on each access; invalidates stale heap entries
+        uint64_t    generation;   // fresh on each access; invalidates stale heap entries
     };
 
     struct HeapItem {
         uint64_t    priority;     // lower = evict first
-        uint32_t    generation;   // generation at push time
+        uint64_t    generation;   // generation at push time
         std::string key;
         bool operator>(const HeapItem& o) const noexcept { return priority > o.priority; }
     };
@@ -91,6 +96,7 @@ private:
     int64_t size_;
     int64_t current_memory_;
     uint64_t clock_;
+    uint64_t generation_;  // cache-wide; unique per access
 
     int64_t hits_;
     int64_t misses_;
@@ -98,6 +104,7 @@ private:
     int64_t inserts_;
 
     void record_access(Entry& entry, const std::string& key);
+    void compact_heaps();
     bool should_evict() const noexcept;
     std::pair<std::string, std::string> evict_from_young(bool need_value);
     std::pair<std::string, std::string> evict_from_mature(bool need_value);
@@ -107,30 +114,43 @@ private:
 
 inline LRU2::LRU2(int64_t max_size, int64_t max_memory)
     : max_size_(max_size), max_memory_(max_memory),
-      size_(0), current_memory_(0), clock_(0),
+      size_(0), current_memory_(0), clock_(0), generation_(0),
       hits_(0), misses_(0), evictions_(0), inserts_(0) {}
 
 inline void LRU2::record_access(Entry& entry, const std::string& key) {
     ++clock_;
-    bool was_mature = (entry.prev_access > 0);
+    entry.generation = ++generation_;   // invalidates any older heap item for this key
 
     if (entry.last_access == 0) {
         // First access ever
         entry.last_access = clock_;
         young_heap_.push({clock_, entry.generation, key});
-    } else if (!was_mature) {
-        // Second access: transition young → mature
-        entry.prev_access = entry.last_access;
-        entry.last_access = clock_;
-        ++entry.generation; // invalidate old young_heap entry
-        mature_heap_.push({entry.prev_access, entry.generation, key});
     } else {
-        // Subsequent access on mature entry
+        // Second or later access: (re)enters the mature heap at its 2nd-most-recent time
         entry.prev_access = entry.last_access;
         entry.last_access = clock_;
-        ++entry.generation; // invalidate old mature_heap entry
         mature_heap_.push({entry.prev_access, entry.generation, key});
     }
+    // Each live entry has exactly one valid item; past 2x that, drop the stale ones.
+    if (young_heap_.size() + mature_heap_.size() > 2 * cache_.size() + 64)
+        compact_heaps();
+}
+
+inline void LRU2::compact_heaps() {
+    auto keep_live = [this](MinHeap& heap) {
+        std::vector<HeapItem> live;
+        live.reserve(heap.size());
+        while (!heap.empty()) {
+            HeapItem item = heap.top();
+            heap.pop();
+            auto it = cache_.find(item.key);
+            if (it != cache_.end() && it->second.generation == item.generation)
+                live.push_back(std::move(item));
+        }
+        heap = MinHeap(std::greater<HeapItem>(), std::move(live));
+    };
+    keep_live(young_heap_);
+    keep_live(mature_heap_);
 }
 
 inline bool LRU2::should_evict() const noexcept {
@@ -162,7 +182,6 @@ LRU2::set(const char* key, int64_t key_len,
         entry.value.assign(val, val_len);
         entry.last_access = 0;
         entry.prev_access = 0;
-        entry.generation  = 0;
         record_access(entry, k);
     }
 

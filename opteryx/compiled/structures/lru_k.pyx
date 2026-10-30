@@ -137,6 +137,11 @@ cdef class LRU_K:
         return self._lru.inserts()
 
     @property
+    def heap_items(self):
+        """Eviction-index items held, live and stale; bounded by ~2x size."""
+        return self._lru.heap_items()
+
+    @property
     def stats(self):
         """(hits, misses, evictions, inserts) — matches old API."""
         return (self._lru.hits(), self._lru.misses(),

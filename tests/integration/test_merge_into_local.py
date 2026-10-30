@@ -412,7 +412,7 @@ def test_a_scan_inside_the_source_never_gets_the_target_s_row_identity(merge_env
 
 
 
-def test_cardinality_violation_is_refused(merge_env):
+def test_cardinality_violation_is_refused(merge_env, tmp_path):
     """A target row matched by two source rows must raise, not be acted on twice.
 
     Acting twice would mark one ordinal deleted and append two replacements —
@@ -423,6 +423,7 @@ def test_cardinality_violation_is_refused(merge_env):
 
     target = merge_env["col.tgt"]
     before = target.metadata.current_snapshot_id
+    files_before = sorted(p for p in (tmp_path / "tgt").rglob("*") if p.is_file())
 
     sql = f"""
     MERGE INTO {TARGET} AS n
@@ -433,9 +434,11 @@ def test_cardinality_violation_is_refused(merge_env):
     with pytest.raises(UnsupportedSyntaxError, match="cardinality violation"):
         list(opteryx.session(user="tester").execute_to_morsels(sql))
 
-    # Refused before anything committed: no snapshot, target untouched.
+    # Refused before anything committed: no snapshot, target untouched, and no
+    # data file the refused statement wrote is left behind in storage.
     assert target.metadata.current_snapshot_id == before
     assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+    assert sorted(p for p in (tmp_path / "tgt").rglob("*") if p.is_file()) == files_before
 
 
 # ── WHEN NOT MATCHED BY SOURCE ──────────────────────────────────────────────

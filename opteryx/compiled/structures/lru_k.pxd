@@ -22,6 +22,7 @@ cdef extern from "lru2.hpp" namespace "opteryx" nogil:
         int64_t misses()
         int64_t evictions()
         int64_t inserts()
+        int64_t heap_items()
 
 cdef class LRU_K:
     cdef CppLRU2* _lru

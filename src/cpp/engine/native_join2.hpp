@@ -1661,8 +1661,18 @@ struct Join2ProbeOperator : Operator {
         return out;
     }
 
+    // An input is finished on any result but HAVE_MORE; forgetting it here means
+    // the same MorselPtr arriving again (a shared buffer, a pass-through) is
+    // probed afresh instead of being taken for an exhausted continuation.
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
+        const OpResult r = execute_input(in, st_, out, err);
+        if (r != OpResult::HAVE_MORE) static_cast<Join2ProbeState&>(st_).pending_in.reset();
+        return r;
+    }
+
+    OpResult execute_input(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                           ErrCtx& err) {
         // A morsel can legitimately carry 0 rows with an EMPTY columns vector (the
         // engine's zero-column-morsel convention for a row-count-only shape — see
         // e.g. GroupBySink::sink's identical guard). compute_row_hashes indexes
@@ -1839,8 +1849,18 @@ struct AsofProbeOperator : SortedGroupProbeOperator {
         }
     }
 
+    // An input is finished on any result but HAVE_MORE; forgetting it here means
+    // the same MorselPtr arriving again (a shared buffer, a pass-through) is
+    // probed afresh instead of being taken for an exhausted continuation.
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
+        const OpResult r = execute_input(in, st_, out, err);
+        if (r != OpResult::HAVE_MORE) static_cast<Join2ProbeState&>(st_).pending_in.reset();
+        return r;
+    }
+
+    OpResult execute_input(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                           ErrCtx& err) {
         // See the identical guard in Join2ProbeOperator::execute above — a 0-row
         // morsel here can carry an EMPTY columns vector, and both compute_row_hashes
         // and the in->columns[asof_probe_idx] read below assume a real column exists.
@@ -1964,8 +1984,18 @@ struct BandProbeOperator : SortedGroupProbeOperator {
         if (end < begin) end = begin;
     }
 
+    // An input is finished on any result but HAVE_MORE; forgetting it here means
+    // the same MorselPtr arriving again (a shared buffer, a pass-through) is
+    // probed afresh instead of being taken for an exhausted continuation.
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
+        const OpResult r = execute_input(in, st_, out, err);
+        if (r != OpResult::HAVE_MORE) static_cast<BandProbeState&>(st_).pending_in.reset();
+        return r;
+    }
+
+    OpResult execute_input(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                           ErrCtx& err) {
         // See the identical guard in Join2ProbeOperator::execute — a 0-row morsel
         // can carry an EMPTY columns vector, and both compute_row_hashes and the
         // bound-column reads below assume real columns exist.
@@ -2450,8 +2480,18 @@ struct RadixJoin2ProbeOperator : Join2ProbeOperator {
     }
 
     // Join2ProbeOperator::execute's emit, reading each row's matches from its run.
+    // An input is finished on any result but HAVE_MORE; forgetting it here means
+    // the same MorselPtr arriving again (a shared buffer, a pass-through) is
+    // probed afresh instead of being taken for an exhausted continuation.
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
+        const OpResult r = execute_input(in, st_, out, err);
+        if (r != OpResult::HAVE_MORE) static_cast<RadixJoin2ProbeState&>(st_).pending_in.reset();
+        return r;
+    }
+
+    OpResult execute_input(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                           ErrCtx& err) {
         if (in->num_rows() == 0) return OpResult::NEED_INPUT;
         auto& st = static_cast<RadixJoin2ProbeState&>(st_);
         const Join2BuildGlobal& g = *ref->g;

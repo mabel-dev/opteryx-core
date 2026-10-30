@@ -3,7 +3,7 @@
 //
 // One SpillStore per Engine run, created lazily on the FIRST flush (a query
 // that never spills never creates a directory, let alone a file). It owns one
-// directory under the configured spill root, named q<pid>-<seq> so ownership
+// directory under the configured spill root, named q<pid>-<token>-<seq> so ownership
 // is readable from the name alone, and removes it wholesale in its destructor.
 //
 // This is the native implementation of the per-query spill store that
@@ -35,6 +35,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -119,10 +120,12 @@ class SpillStore {
         static std::atomic<uint64_t> instance_seq{0};
         dir_ = (fs::path(root) /
                 ("q" + std::to_string(static_cast<long>(::getpid())) + "-" +
-                 std::to_string(instance_seq.fetch_add(1)))).string();
-        fs::create_directory(dir_, ec);
-        if (ec) {
-            err_ = "spill dir '" + dir_ + "': " + ec.message();
+                 process_token() + "-" + std::to_string(instance_seq.fetch_add(1)))).string();
+        // create_directory returns false, with no error, when the path exists:
+        // that directory is someone else's (or a crashed run's), never adopt it.
+        const bool created = fs::create_directory(dir_, ec);
+        if (ec || !created) {
+            err_ = "spill dir '" + dir_ + "': " + (ec ? ec.message() : std::string("already exists"));
             dir_.clear();
             return;
         }
@@ -182,6 +185,19 @@ class SpillStore {
     }
 
   private:
+    // Random per process: pid + seq alone repeats across containers sharing a
+    // spill volume (each is PID 1) and across restarts of the same container.
+    static const std::string& process_token() {
+        static const std::string token = [] {
+            std::random_device rd;
+            const uint64_t v = (static_cast<uint64_t>(rd()) << 32) ^ rd();
+            char buf[17];
+            std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+            return std::string(buf);
+        }();
+        return token;
+    }
+
     // Once per root per process. Removes q<pid>-* directories whose pid no
     // longer exists. ESRCH is the only proof of death accepted: EPERM means the
     // process exists but is not ours to signal, and an unparseable name is not

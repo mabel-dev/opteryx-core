@@ -223,6 +223,33 @@ def test_young_entries_are_evicted_in_arrival_order():
     assert lru.get(b"f") == b"f"
 
 
+@skip_if(is_windows())
+def test_lruk_hits_do_not_grow_the_index():
+    # A cache under budget never evicts; each hit used to leave a stale heap item
+    # behind forever (the process-wide parquet footer cache hits once per file per query).
+    lru = LRU_K()
+    for i in range(100):
+        lru.set(f"k{i}".encode(), b"v", False)
+    for _ in range(1000):
+        for i in range(100):
+            assert lru.get(f"k{i}".encode()) == b"v"
+    assert lru.size == 100
+    assert lru.heap_items <= 2 * 100 + 64 + 1, lru.heap_items
+
+
+@skip_if(is_windows())
+def test_lruk_reinserted_key_is_not_evicted_by_its_stale_item():
+    # Re-adding an erased key must start fresh: its old heap items (from before the
+    # erase) must not make it the eviction victim ahead of an older young entry.
+    lru = LRU_K()
+    lru.set(b"a", b"1", False)
+    lru.set(b"b", b"2", False)
+    lru.get(b"a")
+    lru.delete(b"a")
+    lru.set(b"a", b"1", False)
+    assert lru.evict(False) == (b"b", None)
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
