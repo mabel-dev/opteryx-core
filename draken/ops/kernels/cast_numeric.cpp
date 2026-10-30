@@ -801,7 +801,8 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         for (uint32_t j = 0u; j < k; ++j) {                                              \
             const double d = is64 ? static_cast<const double*>(v->data)[j]               \
                                   : static_cast<double>(static_cast<const float*>(v->data)[j]); \
-            if (!(d >= 0.0) || d > static_cast<double>(UMAX)) {                          \
+            /* (double)UINT64_MAX rounds up to 2^64, so `d > UMAX` lets 2^64 through */   \
+            if (!(d >= 0.0) || d > static_cast<double>(UMAX) || d >= 18446744073709551616.0) { \
                 if (lv && !lv[j]) { out[j] = 0; continue; }                              \
                 if (!is_safe) {                                                          \
                     draken_free(out);                                                         \

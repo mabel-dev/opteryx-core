@@ -101,8 +101,8 @@ VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32
         // The CIDR is a scalar: only row 0 is read. A constant-shape vector maps
         // every logical row to the same slot, so this is correct for a literal.
         const uint32_t cidr_slot = cidr->selection[0];
-        if (cidr->validity != nullptr
-                && !((cidr->validity[cidr_slot >> 3] >> (cidr_slot & 7)) & 1u))
+        // Validity is per LOGICAL row: row 0 is bit 0, whatever slot it reads.
+        if (cidr->validity != nullptr && !(cidr->validity[0] & 1u))
             return draken_error_sentinel("draken_ipv4_in_cidr: CIDR operand is NULL");
 
         const DrakenStringArena* ca =
@@ -173,7 +173,8 @@ VecResult draken_ip_trunc(void* ctx, const DrakenVector* const* args, uint32_t n
         // is not what the function means and would silently produce a column whose
         // values are not comparable with each other.
         const uint32_t pslot = pfx->selection[0];
-        if (pfx->validity != nullptr && !((pfx->validity[pslot >> 3] >> (pslot & 7)) & 1u))
+        // Validity is per LOGICAL row: row 0 is bit 0, whatever slot it reads.
+        if (pfx->validity != nullptr && !(pfx->validity[0] & 1u))
             return draken_error_sentinel("IP_TRUNC: prefix must not be NULL");
         int64_t prefix_raw;
         switch (pfx->type) {

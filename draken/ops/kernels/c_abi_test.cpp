@@ -740,6 +740,43 @@ void test_cast_float_to_int_skips_dead_slots() {
     }
 }
 
+// IP_TRUNC reads its scalar prefix from LOGICAL row 0; validity is per logical
+// row, so a permuted prefix vector must test bit 0, not bit selection[0].
+void test_ip_trunc_prefix_null_bit_is_logical() {
+    const uint32_t addr_vals[] = {0xC0A80105u};   // 192.168.1.5
+    auto* addr = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* ad = static_cast<uint32_t*>(malloc(sizeof(uint32_t)));
+    auto* asel = static_cast<uint32_t*>(malloc(sizeof(uint32_t)));
+    ad[0] = addr_vals[0]; asel[0] = 0;
+    addr->data = ad; addr->selection = asel; addr->data_length = 1; addr->length = 1;
+    addr->validity = nullptr; addr->type = DRAKEN_UINT32; addr->flags = 0;
+
+    // Row 0 reads slot 2 (24). Old code tested validity bit 2 (= row 2) instead.
+    const int64_t pvals[] = {0, 0, 24};
+    const uint32_t psel[] = {2, 0, 1};
+    DrakenVector* pfx = create_int64_dict_vector(pvals, 3, psel, 3);
+    pfx->validity = static_cast<uint8_t*>(malloc(8));
+    memset(pfx->validity, 0, 8);
+    pfx->validity[0] = 0x03;   // rows 0,1 valid; row 2 NULL
+    const DrakenVector* args[] = {addr, pfx};
+    VecResult r = draken_ip_trunc(nullptr, args, 2);
+    assert(!is_error(r));
+    assert(static_cast<const uint32_t*>(r.data)[0] == 0xC0A80100u);
+    draken_free(r.data); draken_free(r.validity);
+
+    pfx->validity[0] = 0x06;   // row 0 NULL (row 2 valid): must refuse, not use 24
+    assert(is_error(draken_ip_trunc(nullptr, args, 2)));
+    free_vector(pfx); free_vector(addr);
+}
+
+// (double)UINT64_MAX rounds to 2^64: the cast must still refuse exactly 2^64.
+void test_cast_float_to_uint64_rejects_two_pow_64() {
+    const double d[] = {18446744073709551616.0};
+    DrakenVector* v = create_float64_vector(d, 1);
+    assert(is_error(draken_cast_float_to_uint64(nullptr, v)));
+    free_vector(v);
+}
+
 static void assert_extr_rejects_int64(VecResult (*fn)(void*, const DrakenVector*, const DrakenVector*),
                                       int32_t sub_op) {
     int64_t d[] = {1};
@@ -1218,6 +1255,8 @@ int main() {
     // inputs; they do NOT add to the registered-kernel count.
     const struct { const char* name; void (*fn)(); } shape_tests[] = {
         {"cast_float_to_int_skips_dead_slots", test_cast_float_to_int_skips_dead_slots},
+        {"ip_trunc_prefix_null_bit_is_logical", test_ip_trunc_prefix_null_bit_is_logical},
+        {"cast_float_to_uint64_rejects_two_pow_64", test_cast_float_to_uint64_rejects_two_pow_64},
         // REPLACE / SOUNDEX value + shape parity (func_fn_t string kernels).
         {"soundex_values", test_soundex_values},
         {"soundex_empty_nonalpha_null", test_soundex_empty_and_nonalpha_null},

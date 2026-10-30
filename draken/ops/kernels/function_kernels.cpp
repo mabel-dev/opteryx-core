@@ -22,6 +22,7 @@
 // str.upper() semantics.
 
 #include <algorithm>   // std::binary_search — draken_in_list
+#include "ops/float_ops.h"   // fp_canon (rounding can yield -0.0; hashes need +0.0)
 #include <vector>      // per-value staging
 #include <cstdint>
 #include <cstring>
@@ -457,7 +458,7 @@ inline double fk_round_dbl_value(double x, double scale, int op) {
     double r = (op == 0) ? std::round(scaled)
              : (op == 1) ? std::floor(scaled)
                          : std::ceil(scaled);
-    return r / scale;
+    return draken::ops::fp_canon(r / scale);   // ROUND(-0.4) / CEIL(-0.5) give -0.0
 }
 
 // Digits for the compressed path: absent, or ONE non-null integer constant. Any

@@ -56,6 +56,9 @@ struct ColumnStats {
   bool has_max = false;
   std::string min;
   std::string max;
+  // min or max came from the deprecated Statistics fields 1/2, whose sort order
+  // is signed bytes; only trusted for signed-sort types (see the parse pass).
+  bool minmax_legacy = false;
   int64_t null_count = -1;
   int64_t distinct_count = -1;
 

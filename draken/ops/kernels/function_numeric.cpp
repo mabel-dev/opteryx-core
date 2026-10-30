@@ -44,6 +44,7 @@
 #include "core/vector_alloc.h"            // draken_identity_sel
 #include "ops/kernels/compressed_helpers.h"   // kernel_map_compressed
 #include "ops/vec_result.h"
+#include "ops/float_ops.h"                // fp_canon (TRUNC(-0.5) is -0.0; hashes need +0.0)
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx — the (absent) DECIMAL scale vehicle
 #include "ops/kernels/error_handling.h"
 
@@ -397,7 +398,7 @@ VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t narg
             const double scale = std::pow(10.0, static_cast<double>(cd));
             return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
                 const double x = fn_read_double_at(v, j);
-                return dg == nullptr ? std::trunc(x) : std::trunc(x * scale) / scale;
+                return draken::ops::fp_canon(dg == nullptr ? std::trunc(x) : std::trunc(x * scale) / scale);
             });
         }
     }
@@ -446,7 +447,7 @@ VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t narg
             }
             double x = fn_read_double(v, i);
             if (dg == nullptr) {
-                out[i] = std::trunc(x);
+                out[i] = draken::ops::fp_canon(std::trunc(x));
                 continue;
             }
             int64_t d = 0;
@@ -455,7 +456,7 @@ VecResult draken_trunc(void* ctx, const DrakenVector* const* args, uint32_t narg
                 return draken_error_sentinel("draken_trunc: integer scale required");
             }
             double scale = std::pow(10.0, static_cast<double>(d));
-            out[i] = std::trunc(x * scale) / scale;
+            out[i] = draken::ops::fp_canon(std::trunc(x * scale) / scale);
         }
     }
     const DrakenVector* srcs[2] = {v, dg};

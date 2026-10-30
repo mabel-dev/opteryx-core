@@ -37,6 +37,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
+#include "ops/float_ops.h"   // fp_canon: results must not carry -0.0 (hash contract)
 
 namespace draken { namespace ops {
 
@@ -222,21 +223,21 @@ static inline VecResult fm_sqrt_float_tmpl(const DrakenVector& a) {
 // ---------------------------------------------------------------------------
 
 static inline double fm_ceil_scaled(double x, int scale) noexcept {
-    if (scale == 0) return std::ceil(x);
+    if (scale == 0) return fp_canon(std::ceil(x));   // CEIL(-0.5) is -0.0
     double sf = std::pow(10.0, static_cast<double>(std::abs(scale)));
-    return (scale > 0) ? std::ceil(x * sf) / sf : std::ceil(x / sf) * sf;
+    return fp_canon((scale > 0) ? std::ceil(x * sf) / sf : std::ceil(x / sf) * sf);
 }
 
 static inline double fm_floor_scaled(double x, int scale) noexcept {
-    if (scale == 0) return std::floor(x);
+    if (scale == 0) return fp_canon(std::floor(x));
     double sf = std::pow(10.0, static_cast<double>(std::abs(scale)));
-    return (scale > 0) ? std::floor(x * sf) / sf : std::floor(x / sf) * sf;
+    return fp_canon((scale > 0) ? std::floor(x * sf) / sf : std::floor(x / sf) * sf);
 }
 
 static inline double fm_trunc_scaled(double x, int scale) noexcept {
-    if (scale == 0) return std::trunc(x);
+    if (scale == 0) return fp_canon(std::trunc(x));   // TRUNC(-0.5) is -0.0
     double sf = std::pow(10.0, static_cast<double>(std::abs(scale)));
-    return (scale > 0) ? std::trunc(x * sf) / sf : std::trunc(x / sf) * sf;
+    return fp_canon((scale > 0) ? std::trunc(x * sf) / sf : std::trunc(x / sf) * sf);
 }
 
 // ---------------------------------------------------------------------------

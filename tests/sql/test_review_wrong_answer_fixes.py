@@ -55,5 +55,12 @@ def test_float_to_int64_out_of_range_fails():
     assert _scalar("SELECT SAFE_CAST(1e19 AS INT64)") is None
 
 
+def test_rounding_to_zero_groups_with_zero():
+    # CEIL(-0.5) / TRUNC(-0.5) / ROUND(-0.4) are -0.0, which must hash as 0.0.
+    assert _scalar("SELECT COUNT(DISTINCT c) FROM (SELECT CEIL(x) AS c FROM UNNEST([-0.5, 0.0]) AS x)") == 1
+    assert _scalar("SELECT COUNT(DISTINCT c) FROM (SELECT TRUNC(x) AS c FROM UNNEST([-0.5, 0.2]) AS x)") == 1
+    assert _scalar("SELECT COUNT(DISTINCT c) FROM (SELECT ROUND(x) AS c FROM UNNEST([-0.4, 0.0]) AS x)") == 1
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

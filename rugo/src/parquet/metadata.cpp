@@ -546,6 +546,7 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
   } else if (legacy_min_set) {
     cs.min.assign(legacy_min.data(), legacy_min.size());
     cs.has_min = true;
+    cs.minmax_legacy = true;
   } else {
     cs.min.clear();
     cs.has_min = false;
@@ -557,6 +558,7 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
   } else if (legacy_max_set) {
     cs.max.assign(legacy_max.data(), legacy_max.size());
     cs.has_max = true;
+    cs.minmax_legacy = true;
   } else {
     cs.max.clear();
     cs.has_max = false;
@@ -1364,6 +1366,25 @@ static void ApplyLeafInfosByIndex(FileStats &fs,
   }
 }
 
+// Legacy min/max (Statistics fields 1/2) were written in SIGNED order by old
+// writers, so for byte arrays ("a" < "é" inverted) and unsigned ints they bound
+// the wrong range and pruning drops matching row groups. Kept only for types
+// whose signed order is their real order (parquet-cpp's HasCorrectStatistics).
+static void DropUntrustedLegacyMinMax(FileStats &fs) {
+  for (auto &rg : fs.row_groups)
+    for (auto &col : rg.columns) {
+      if (!col.minmax_legacy) continue;
+      const std::string &pt = col.physical_type;
+      const bool signed_sort = (pt == "boolean" || pt == "int32" || pt == "int64" ||
+                                pt == "float32" || pt == "float64") &&
+                               !StatsLogicalIsUnsigned(col.logical_type);
+      if (signed_sort) continue;
+      col.has_min = col.has_max = false;
+      col.min.clear();
+      col.max.clear();
+    }
+}
+
 // ------------------- Draken logical descriptor side channel -------------------
 //
 // rugo writes FileMetaData.key_value_metadata (parquet.thrift field 5) entries
@@ -1491,6 +1512,7 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
   }
 
   ApplyDrakenLogicalKV(fs);
+  DropUntrustedLegacyMinMax(fs);
 
   return fs;
 }
