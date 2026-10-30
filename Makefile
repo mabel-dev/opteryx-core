@@ -11,6 +11,9 @@ SHELL := /bin/bash
 #   make PYTHON_GIL=0 <target>
 #
 PYTHON_GIL ?=
+# READ_* of local paths / private-network hosts is refused unless opted in
+# (opteryx/config.py ALLOW_LOCAL_READS); every make target here is local dev.
+export ALLOW_LOCAL_READS ?= 1
 # Prefer python3.14 by default for consistent ABI and compiled artifacts.
 # Users may override by passing PYTHON='python3.x' on the make commandline.
 PYTHON ?= $(if $(PYTHON_GIL),PYTHON_GIL=$(PYTHON_GIL)) python3.14
@@ -635,6 +638,7 @@ DRAKEN_KERNEL_SRCS := \
 	$(CURDIR)/draken/ops/kernels/function_vector_distance.cpp \
 	$(CURDIR)/draken/ops/kernels/function_rlike.cpp \
 	$(CURDIR)/draken/ops/kernels/function_like_any.cpp \
+	$(CURDIR)/draken/ops/kernels/function_json_validate.cpp \
 	$(CURDIR)/draken/core/frame_arena.cpp \
 	$(CURDIR)/third_party/crypto/md5.cpp \
 	$(CURDIR)/third_party/crypto/sha1.cpp \

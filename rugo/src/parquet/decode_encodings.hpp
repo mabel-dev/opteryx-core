@@ -121,6 +121,14 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
 // DELTA_BINARY_PACKED (encoding id 4) -- template; must live in header
 // ---------------------------------------------------------------------------
 
+// Spec shape (as parquet-cpp enforces): block size a multiple of 128 and
+// fitting int32, miniblocks dividing it into multiples of 32 values. Bounds
+// values_per_miniblock so a hostile header cannot overflow the size math.
+static inline bool delta_header_valid(uint64_t block_size, uint64_t num_miniblocks) {
+  return block_size % 128u == 0 && block_size <= INT32_MAX &&
+         block_size % num_miniblocks == 0 && (block_size / num_miniblocks) % 32u == 0;
+}
+
 // Decode DELTA_BINARY_PACKED for int32 or int64 columns.
 // Returns the number of values decoded, or -1 on error.
 template <typename T>
@@ -152,6 +160,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
   if (num_values == 1) return 1;
 
   int32_t decoded = 1;
+  if (!delta_header_valid(block_size, num_miniblocks)) return -1;
   uint32_t values_per_miniblock = static_cast<uint32_t>(block_size / num_miniblocks);
 
   while (decoded < num_values && ptr < end) {
@@ -177,9 +186,9 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
           decoded++;
         }
       } else {
-        int32_t bytes_needed =
-            (static_cast<int32_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (ptr + bytes_needed > end) break;
+        const uint64_t bytes_needed =
+            (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
+        if (bytes_needed > static_cast<uint64_t>(end - ptr)) break;
 
         for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
           const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
@@ -231,6 +240,7 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
   if (num_values == 1) return 1;
 
   int32_t decoded = 1;
+  if (!delta_header_valid(block_size, num_miniblocks)) return -1;
   uint32_t values_per_miniblock = static_cast<uint32_t>(block_size / num_miniblocks);
 
   while (decoded < num_values && ptr < end) {
@@ -256,9 +266,9 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
           decoded++;
         }
       } else {
-        int32_t bytes_needed =
-            (static_cast<int32_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (ptr + bytes_needed > end) break;
+        const uint64_t bytes_needed =
+            (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
+        if (bytes_needed > static_cast<uint64_t>(end - ptr)) break;
 
         for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
           const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);

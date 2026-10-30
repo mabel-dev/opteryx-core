@@ -155,7 +155,8 @@ SELECT name, magnitude FROM testdata.satellites WHERE magnitude BETWEEN -5 AND 5
 statement ok
 SELECT p.name AS planet_name, s.name AS satellite_name FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.density * s.density > 10000
 
-statement ok
+# albedo holds NaN (not NULL): NaN has no integer value, so the cast refuses.
+statement error .*cast float->int64: value nan out of range for INT64
 SELECT * FROM testdata.satellites WHERE albedo IS NULL OR CAST(albedo AS INTEGER) = 0
 
 statement ok

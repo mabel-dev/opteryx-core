@@ -123,5 +123,9 @@ PageHeader ParsePageHeader(TInput &in) {
     }
   }
 
+  // Callers step the cursor by these sizes; a negative one would stall the
+  // page loop or walk it backwards out of the chunk.
+  if (header.compressed_page_size < 0 || header.uncompressed_page_size < 0)
+    throw std::runtime_error("Parquet page header: negative page size (corrupt file)");
   return header;
 }

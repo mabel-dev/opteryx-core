@@ -288,7 +288,8 @@ SELECT RPAD(name, 10, '-') FROM $planets
 query shape 9 1
 SELECT CAST(id AS VARCHAR) FROM $planets
 
-query shape 177 1
+# magnitude holds NaN (not NULL): NaN has no integer value, so the cast refuses.
+statement error .*cast float->int64: value nan out of range for INT64
 SELECT CAST(magnitude AS INTEGER) FROM testdata.satellites WHERE magnitude IS NOT NULL
 
 query shape 1 1

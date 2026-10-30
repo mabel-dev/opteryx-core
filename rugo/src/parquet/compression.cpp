@@ -116,23 +116,32 @@ namespace {
             throw std::runtime_error(oss.str());
         }
     }
+
+    // RawUncompress writes as many bytes as the stream's own preamble says, so
+    // that length must equal the buffer the page header sized for us.
+    void snappy_decode(const uint8_t* src, size_t n, uint8_t* out, size_t out_size) {
+        size_t len = 0;
+        if (!snappy::GetUncompressedLength(reinterpret_cast<const char*>(src), n, &len))
+            throw std::runtime_error("Snappy decompression failed: bad length preamble");
+        if (len != out_size) {
+            std::ostringstream oss;
+            oss << "Snappy decompressed size mismatch: expected " << out_size
+                << ", stream declares " << len;
+            throw std::runtime_error(oss.str());
+        }
+        if (!snappy::RawUncompress(reinterpret_cast<const char*>(src), n,
+                                   reinterpret_cast<char*>(out)))
+            throw std::runtime_error("Snappy decompression failed");
+    }
 } // anonymous namespace
 
 std::vector<uint8_t> DecompressSnappy(
-    const uint8_t* data, 
-    size_t size, 
+    const uint8_t* data,
+    size_t size,
     size_t uncompressed_size) {
-    
+
     std::vector<uint8_t> output(uncompressed_size);
-    
-    // Use vendored snappy to decompress
-    if (!snappy::RawUncompress(
-            reinterpret_cast<const char*>(data), 
-            size,
-            reinterpret_cast<char*>(output.data()))) {
-        throw std::runtime_error("Snappy decompression failed");
-    }
-    
+    snappy_decode(data, size, output.data(), uncompressed_size);
     return output;
 }
 
@@ -228,12 +237,7 @@ void DecompressIntoRaw(
             break;
 
         case CompressionCodec::SNAPPY: {
-            if (!snappy::RawUncompress(
-                    reinterpret_cast<const char*>(compressed_data),
-                    compressed_size,
-                    reinterpret_cast<char*>(out))) {
-                throw std::runtime_error("Snappy decompression failed");
-            }
+            snappy_decode(compressed_data, compressed_size, out, uncompressed_size);
             break;
         }
 
@@ -245,6 +249,12 @@ void DecompressIntoRaw(
             if (ZSTD_isError(result)) {
                 std::ostringstream oss;
                 oss << "Zstd decompression failed: " << ZSTD_getErrorName(result);
+                throw std::runtime_error(oss.str());
+            }
+            if (result != uncompressed_size) {
+                std::ostringstream oss;
+                oss << "Zstd decompressed size mismatch: expected "
+                    << uncompressed_size << ", got " << result;
                 throw std::runtime_error(oss.str());
             }
             break;

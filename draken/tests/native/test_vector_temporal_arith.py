@@ -333,19 +333,22 @@ class TestDateDiff:
         # 21 days = 3 weeks
         assert pylist(ta.vector_date_diff(start, end, "weeks")) == [3]
 
-    def test_months_approximate(self):
-        # 90 days ÷ 30 = 3 months (approx, matching old code)
-        start = ts_us([dt(2023, 1, 1)])
-        end   = ts_us([dt(2023, 4, 1)])  # exactly 90 days
-        result = pylist(ta.vector_date_diff(start, end, "months"))[0]
-        assert result == 3
+    def test_months_calendar(self):
+        # Calendar month boundaries crossed, not days ÷ 30 (59 days here).
+        start = ts_us([dt(2023, 1, 1), dt(2023, 1, 31), dt(2023, 3, 1)])
+        end   = ts_us([dt(2023, 3, 1), dt(2023, 2, 1),  dt(2023, 1, 1)])
+        assert pylist(ta.vector_date_diff(start, end, "months")) == [2, 1, -2]
 
-    def test_years_approximate(self):
-        # 2023-01-01 to 2026-01-01 = 365+366+365 = 1096 days ÷ 365 = 3 years (approx)
-        start = ts_us([dt(2023, 1, 1)])
-        end   = ts_us([dt(2026, 1, 1)])
-        result = pylist(ta.vector_date_diff(start, end, "years"))[0]
-        assert result == 3
+    def test_quarters_calendar(self):
+        start = ts_us([dt(2023, 1, 1), dt(2023, 3, 31)])
+        end   = ts_us([dt(2023, 4, 1), dt(2023, 1, 1)])
+        assert pylist(ta.vector_date_diff(start, end, "quarters")) == [1, 0]
+
+    def test_years_calendar(self):
+        # 1826 days ÷ 365 would say 5; the calendar says 4.
+        start = ts_us([dt(2020, 1, 1), dt(2023, 1, 1)])
+        end   = ts_us([dt(2024, 12, 31), dt(2026, 1, 1)])
+        assert pylist(ta.vector_date_diff(start, end, "years")) == [4, 3]
 
     def test_singular_form(self):
         # "day" == "days"

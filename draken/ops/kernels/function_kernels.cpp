@@ -2162,7 +2162,12 @@ inline void fk_substr_range(const uint8_t* data, uint32_t blen, bool is_utf8,
     long s = start0;
     if (s < 0) { s += unit_len; if (s < 0) s = 0; } else if (s > unit_len) s = unit_len;
     long e;
-    if (has_count) {
+    if (has_count && start0 < 0) {
+        // From-the-end start: the window runs `count` units from the resolved
+        // start, as the column-argument path (vector_string_slice) does.
+        e = s + count;
+        if (e > unit_len) e = unit_len;
+    } else if (has_count) {
         e = count + start0;
         if (e < 0) { e += unit_len; if (e < 0) e = 0; } else if (e > unit_len) e = unit_len;
     } else {

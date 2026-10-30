@@ -1956,11 +1956,6 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
             telemetry.optimization_predicate_rewriter_any_to_inlist += 1
             predicate = predicate.with_fields(value="InList")
 
-    if predicate.value == "AnyOpNotEq":
-        if predicate.right.node_type == NodeType.LITERAL:
-            telemetry.optimization_predicate_rewriter_any_to_inlist += 1
-            predicate = predicate.with_fields(value="NotInList")
-
     if predicate.value in IN_REWRITES:
         # The binder may have pre-baked the IN-list into a CarcharSetWrapper
         # (hash-only, not iterable, original values discarded). Skip the

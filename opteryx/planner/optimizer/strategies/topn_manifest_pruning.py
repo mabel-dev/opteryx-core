@@ -95,8 +95,9 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
         sort_name = node.topn_sort_name
         limit = node.topn_limit
         # LAW: prune_files_for_topn drops files by their bounds; stale bounds
-        # would drop the rows the top-N actually wanted.
-        if node.manifest is None or not node.manifest.stats_are_authoritative:
+        # would drop the rows the top-N actually wanted. Deletes likewise: the
+        # threshold sums physical record_count, which counts deleted rows as live.
+        if node.manifest is None or not node.manifest.stats_are_authoritative or node.manifest.has_deletes():
             return context
         if not sort_name or not limit:
             return context

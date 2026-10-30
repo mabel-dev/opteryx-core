@@ -60,6 +60,8 @@ constexpr uint32_t kOrcMorselRows = 65536;
 struct OrcScanSpec {
     std::vector<std::string> files;          // as resolved at bind time; named in messages
     std::vector<std::string> urls;           // parallel: "" = local path, else the URL to GET
+    bool deny_private_addresses = false;     // refuse non-public HTTP peers (READ_* of an
+                                             // http(s) URL with ALLOW_LOCAL_READS off)
     // The `Authorization` value every remote GET carries; empty when the URLs are signed.
     // Resolved at compile time by opteryx.connectors.io_systems.native_locations.
     std::string auth_header;
@@ -308,7 +310,7 @@ public:
         g->states.resize(spec_->files.size());
         for (const auto& url : spec_->urls) {
             if (!url.empty()) {
-                g->http = std::make_unique<HttpClient>();
+                g->http = std::make_unique<HttpClient>(128, 60000, spec_->deny_private_addresses);
                 break;
             }
         }

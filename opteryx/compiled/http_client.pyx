@@ -117,7 +117,7 @@ cdef void _raise_http_error() except *:
 cdef extern from "http_client.hpp":
     # Alias the C++ class as CHttpClient to avoid collision with the Python cdef class below
     cdef cppclass CHttpClient "HttpClient":
-        CHttpClient(int max_connections, long timeout_ms) except +_raise_http_error
+        CHttpClient(int max_connections, long timeout_ms, bint deny_private_addresses) except +_raise_http_error
         vector[unsigned char] get(
             string url,
             cpp_map[string, string] headers
@@ -171,10 +171,10 @@ cdef class HttpClient:
     cdef CHttpClient* _client   # C++ object — no PyObject* anywhere
     cdef bint _closed
 
-    def __init__(self, int max_connections=128, long timeout_ms=60000):
+    def __init__(self, int max_connections=128, long timeout_ms=60000, bint deny_private_addresses=False):
         # except +_raise_http_error on the constructor means a C++ throw here
         # surfaces as HttpStatusError (a RuntimeError), not a crash
-        self._client = new CHttpClient(max_connections, timeout_ms)
+        self._client = new CHttpClient(max_connections, timeout_ms, deny_private_addresses)
         self._closed = False
 
     def get(self, str url, dict headers=None):

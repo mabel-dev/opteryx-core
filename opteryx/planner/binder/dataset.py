@@ -189,6 +189,21 @@ def _validate_reader_options(function: str, args: list, named_args: dict, option
             raise InvalidFunctionParameterError(_unrecognized(name, operator_also_wrong=False))
 
 
+def _refuse_local_read(function: str, path: str, protocol: str) -> None:
+    """SECURITY: any SQL text can name any READ_* path, and a local one reads this
+    server's own files (its environment, its keys). Refused unless the deployment
+    opts in with ALLOW_LOCAL_READS; private-network HTTP hosts are refused by the
+    same flag natively at connect time (HttpClient deny_private_addresses)."""
+    from opteryx import config
+
+    if protocol in ("", "file") and not config.ALLOW_LOCAL_READS:
+        raise PermissionError(
+            f"{function}('{path}'): reading local files is disabled. Set the "
+            "ALLOW_LOCAL_READS=1 environment variable to allow it (local development "
+            "and tests), or read from gs://, s3:// or a public http(s):// URL."
+        )
+
+
 def _read_credential(function: str, path: str, protocol: str, named_args: dict, context):
     """The stored secret a READ_* names with `credentials =>`, resolved - or None.
 
@@ -338,6 +353,8 @@ def _bare_reader_source(function: str, example: str, node, context, options):
         raise InvalidFunctionParameterError(
             f"{function}('{path}'): 'file://' is not a supported scheme; use the local path."
         )
+
+    _refuse_local_read(function, path, protocol)
 
     credential = _read_credential(function, path, protocol, named_args, context)
     if credential is not None:
@@ -739,6 +756,7 @@ def visit_function_dataset(
         # NEVER retried with a credential (docs/ANONYMOUS_REMOTE_READS_DESIGN.md). This does
         # not touch create_filesystem itself, so catalog-backed GCS read paths (visit_scan)
         # are unaffected; READ_PARQUET, READ_CSV and READ_AVRO below follow the same rule.
+        _refuse_local_read("READ_JSONL", path, protocol)
         credential = _read_credential("READ_JSONL", path, protocol, named_args, context)
         if credential is not None:
             # A customer's own credential: listing is the store's to allow, so
@@ -1130,6 +1148,7 @@ def visit_function_dataset(
         # above -- READ_PARQUET is equally a bare dataset function with no
         # can_perform_action authorization layer, so it must never use this
         # process's ambient/platform GCS credentials for a user-supplied path.
+        _refuse_local_read("READ_PARQUET", path, protocol)
         credential = _read_credential(
             "READ_PARQUET", path, protocol, node.named_args or {}, context
         )
@@ -1356,6 +1375,7 @@ def visit_function_dataset(
         # above -- READ_CSV is equally a bare dataset function with no
         # can_perform_action authorization layer, so it must never use this
         # process's ambient/platform GCS credentials for a user-supplied path.
+        _refuse_local_read("READ_CSV", path, protocol)
         credential = _read_credential("READ_CSV", path, protocol, named_args, context)
         if credential is not None:
             filesystem = _credentialed_filesystem(credential, protocol)

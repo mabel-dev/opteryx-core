@@ -197,9 +197,10 @@ static inline void date_trunc_batch(
 //   3 = minutes        4 = hours          5 = days
 //   6 = weeks          7 = months         8 = quarters    9 = years
 //
-// Sub-month/year arithmetic: both inputs normalised to microseconds then divided.
-// Month/quarter/year: approximate via days÷30, days÷91, days÷365 — exactly matching
-// the old vector_date_diff.pyx semantics. All divisions use floor semantics (Python //).
+// Sub-month/year arithmetic: both inputs normalised to microseconds then divided
+// with floor semantics (Python //). Month/quarter/year count calendar boundaries
+// crossed (civil month/quarter/year of end minus that of start), so Jan-01 to
+// Mar-01 is 2 months regardless of month lengths.
 // ---------------------------------------------------------------------------
 
 static inline void date_diff_batch(
@@ -235,9 +236,18 @@ static inline void date_diff_batch(
             case 4: result = ta_floor_div(ev - sv,   3600000000LL);             break;
             case 5: result = ta_floor_div(ev - sv, US_PER_DAY);                 break;
             case 6: result = ta_floor_div(ta_floor_div(ev - sv, US_PER_DAY), 7LL);   break;
-            case 7: result = ta_floor_div(ta_floor_div(ev - sv, US_PER_DAY), 30LL);  break;
-            case 8: result = ta_floor_div(ta_floor_div(ev - sv, US_PER_DAY), 91LL);  break;
-            case 9: result = ta_floor_div(ta_floor_div(ev - sv, US_PER_DAY), 365LL); break;
+            case 7: case 8: case 9: {
+                int sy, sm, sd, ey, em, ed;
+                ta_days_to_ymd(ta_floor_div(sv, US_PER_DAY), &sy, &sm, &sd);
+                ta_days_to_ymd(ta_floor_div(ev, US_PER_DAY), &ey, &em, &ed);
+                if (diff_kind == 7)
+                    result = (int64_t)(ey * 12 + em) - (int64_t)(sy * 12 + sm);
+                else if (diff_kind == 8)
+                    result = (int64_t)(ey * 4 + (em - 1) / 3) - (int64_t)(sy * 4 + (sm - 1) / 3);
+                else
+                    result = (int64_t)ey - (int64_t)sy;
+                break;
+            }
             default: result = 0; break;
         }
         out[i] = result;

@@ -11,6 +11,10 @@ on:
   schedule:
     - cron: "0 4 * * *"
 
+# Tests READ_* local test data; opteryx refuses local reads unless opted in.
+env:
+  ALLOW_LOCAL_READS: 1
+
 jobs:
   # ── Build once, test in parallel. The tree is compiled a single time here and
   # published as an artifact; every test job below restores it instead of running

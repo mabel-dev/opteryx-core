@@ -895,6 +895,22 @@ def test_peak_used_size_is_the_high_water_mark():
     mp.py_release(c)
 
 
+def test_pool_charges_what_it_holds_not_what_it_reserves():
+    """docs/C7_PAGE_CACHE_DESIGN.md §22-23: a scan pool is sized for its whole in-flight
+    window but most scans write little or nothing into it, so the memory account is
+    charged its USED bytes, never the reservation. A 178 GB native-scan pool holding
+    392 bytes once charged 170 GiB, zeroing the chunk cache's limit (2026-10-30)."""
+    from opteryx.compiled.structures.memory_pool import process_memory_charged
+
+    before = process_memory_charged()
+    mp = MemoryPool(8 << 30)   # past the slab pool's 4 GiB retained set: a reservation charge cannot hide in it
+    ref = mp.py_commit(b"x" * 4096)
+    assert process_memory_charged() - before < 1 << 20
+    mp.py_release(ref)
+    del mp
+    assert abs(process_memory_charged() - before) < 1 << 20
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

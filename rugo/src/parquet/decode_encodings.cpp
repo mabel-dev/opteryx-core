@@ -32,6 +32,19 @@
 // Unpacks num_groups * 8 values from the packed bit stream at src.
 // ---------------------------------------------------------------------------
 
+// Size of a bit-packed run from its header, in 64-bit so a hostile header
+// cannot wrap the byte count past the bounds check. false = run exceeds page.
+static inline bool bitpacked_run_size(uint32_t header, int bit_width,
+                                      const uint8_t* ptr, const uint8_t* end,
+                                      int32_t& values_in_run, int32_t& bytes_needed) {
+  const uint64_t values = static_cast<uint64_t>(header >> 1) * 8u;
+  const uint64_t bytes  = (values * static_cast<uint64_t>(bit_width) + 7u) / 8u;
+  if (bytes > static_cast<uint64_t>(end - ptr) || values > INT32_MAX) return false;
+  values_in_run = static_cast<int32_t>(values);
+  bytes_needed  = static_cast<int32_t>(bytes);
+  return true;
+}
+
 // ---- scalar helper (one group of 8) ----------------------------------------
 // SAFE variant: never reads beyond this group's own byte span. Required for the
 // LAST group of a run — see unpack_group_8_scalar_fast.
@@ -338,11 +351,8 @@ int32_t DecodeRLEBitPackedIndices(const uint8_t *data, size_t data_size,
 
     if ((header & 1) == 1) {
       // Bit-packed run: (header >> 1) groups of 8 values.
-      int32_t num_groups    = (int32_t)(header >> 1);
-      int32_t values_in_run = num_groups * 8;
-      int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       decode_bitpacked_run(ptr, values_in_run, bytes_needed, num_values,
                            bit_width, indices, decoded);
@@ -401,11 +411,8 @@ int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t dat
 
     if ((header & 1) == 1) {
       // Bit-packed run: (header >> 1) groups of 8 values.
-      int32_t num_groups    = (int32_t)(header >> 1);
-      int32_t values_in_run = num_groups * 8;
-      int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       decode_bitpacked_run(ptr, values_in_run, bytes_needed, num_values,
                            bit_width, indices, decoded);
@@ -470,10 +477,8 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
     }
 
     if ((header & 1) == 1) {
-      int32_t num_groups    = (int32_t)(header >> 1);
-      int32_t values_in_run = num_groups * 8;
-      int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       decode_bitpacked_run(ptr, values_in_run, bytes_needed, num_values,
                            bit_width, indices, decoded);
@@ -533,10 +538,8 @@ static int32_t decode_codes_packed(const uint8_t *data, size_t data_size,
     }
 
     if ((header & 1) == 1) {
-      const int32_t num_groups    = (int32_t)(header >> 1);
-      const int32_t values_in_run = num_groups * 8;
-      const int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       const int32_t to_decode   = std::min(values_in_run, num_values - decoded);
       const int32_t full_groups = to_decode / 8;
@@ -662,10 +665,8 @@ int32_t DecodeRLEBitPackedVerdicts(const uint8_t *data, size_t data_size,
     }
 
     if ((header & 1) == 1) {
-      const int32_t num_groups    = (int32_t)(header >> 1);
-      const int32_t values_in_run = num_groups * 8;
-      const int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       const int32_t to_decode   = std::min(values_in_run, num_values - decoded);
       const int32_t full_groups = to_decode / 8;
@@ -840,17 +841,15 @@ int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
     }
 
     if ((header & 1) == 1) {
-      const int32_t num_groups    = (int32_t)(header >> 1);
-      const int32_t values_in_run = num_groups * 8;
-      const int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       const int32_t to_walk = std::min(values_in_run, num_values - walked);
 #ifdef RUGO_SELECTED_DECODE_NEON
       // Whole groups that are not the run's last take the over-reading
       // unpackers; the run's last group and a page-end partial group take the
       // safe scalar one below. Capacity was reserved up front, so no growth.
-      const int32_t fast_groups = std::max(0, std::min(to_walk / 8, num_groups - 1));
+      const int32_t fast_groups = std::max(0, std::min(to_walk / 8, values_in_run / 8 - 1));
       int32_t *const dst = out.data();
       size_t n = out.size();
       if (bit_width <= 8)
@@ -1035,10 +1034,8 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
     if ((header & 1) == 1) {
       // Bit-packed run: decode into a per-segment scratch buffer, then fold
       // consecutive equal codes into runs.
-      int32_t num_groups    = (int32_t)(header >> 1);
-      int32_t values_in_run = num_groups * 8;
-      int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
-      if (ptr + bytes_needed > end) break;
+      int32_t values_in_run, bytes_needed;
+      if (!bitpacked_run_size(header, bit_width, ptr, end, values_in_run, bytes_needed)) break;
 
       const int32_t to_decode = std::min(values_in_run, num_values - decoded);
       // Decode into the shared scratch buffer (O(segment_size), not O(column_size)).
@@ -1136,6 +1133,7 @@ static const uint8_t *SkipDeltaBinaryPacked(const uint8_t *ptr,
   ReadZigZagVarint(ptr, end);   // first_value
   if (ptr > end) return ptr;
 
+  if (!delta_header_valid(block_size, num_miniblocks)) return ptr;
   uint32_t values_per_miniblock =
       static_cast<uint32_t>(block_size / num_miniblocks);
   int32_t skipped = 1;
@@ -1161,9 +1159,9 @@ static const uint8_t *SkipDeltaBinaryPacked(const uint8_t *ptr,
     for (uint64_t mb = 0; mb < num_miniblocks && skipped < num_values; mb++) {
       uint8_t bit_width = bit_widths[mb];
       if (bit_width > 0) {
-        int32_t bytes_needed =
-            ((int32_t)values_per_miniblock * bit_width + 7) / 8;
-        if (ptr + bytes_needed > end) break;
+        const uint64_t bytes_needed =
+            (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
+        if (bytes_needed > static_cast<uint64_t>(end - ptr)) break;
         ptr += bytes_needed;
       }
       skipped += (int32_t)values_per_miniblock;

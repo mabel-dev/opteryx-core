@@ -262,7 +262,7 @@ DrakenVector* make_string_vec(const char* const* uniques, uint32_t k,
             str_init_inline(&slots[j], s, len);
         } else {
             memcpy(arena + pos, s, len);
-            str_init_extern(&slots[j], arena + pos, len, 0u, static_cast<uint32_t>(pos));
+            str_init_extern(&slots[j], arena + pos, len, static_cast<uint32_t>(pos));
             pos += len;
         }
     }
@@ -709,6 +709,37 @@ void test_draken_interval_interval_op() { int64_t d[] = {0}; DrakenVector* l = c
 // Extraction kernels take every bind-time parameter in extraction_ctx and ignore
 // the ABI's `key` operand. An INT64 operand is not a document/string column, so
 // each must FAIL LOUD (error sentinel), never silently produce a vector.
+// Float -> integer casts judge only slots a valid row reads: a dictionary entry
+// no row references (here NaN, left behind by a filter) must not raise.
+static DrakenVector* create_float64_dict_vector(const double* values, uint32_t data_length,
+                                                const uint32_t* codes, uint32_t length) {
+    auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
+    auto* vec_data = static_cast<double*>(malloc(data_length * sizeof(double)));
+    auto* selection = static_cast<uint32_t*>(malloc(length * sizeof(uint32_t)));
+    memcpy(vec_data, values, data_length * sizeof(double));
+    memcpy(selection, codes, length * sizeof(uint32_t));
+    vec->data = vec_data; vec->selection = selection; vec->data_length = data_length;
+    vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_FLOAT64; vec->flags = 0;
+    return vec;
+}
+
+void test_cast_float_to_int_skips_dead_slots() {
+    const double vals[] = {1.5, NAN, 2.5};
+    const uint32_t dead[] = {0, 2, 0, 2};   // NaN entry unreferenced
+    const uint32_t live[] = {0, 1, 2, 0};   // NaN entry read by row 1
+    VecResult (*casts[])(void*, const DrakenVector*) = {
+        draken_cast_float64_to_int64, draken_cast_float_to_int32, draken_cast_float_to_uint16};
+    for (auto cast : casts) {
+        DrakenVector* v = create_float64_dict_vector(vals, 3, dead, 4);
+        VecResult r = cast(nullptr, v);
+        assert(!is_error(r));
+        draken_free(r.data); draken_free(r.validity); free_vector(v);
+        v = create_float64_dict_vector(vals, 3, live, 4);
+        assert(is_error(cast(nullptr, v)));
+        free_vector(v);
+    }
+}
+
 static void assert_extr_rejects_int64(VecResult (*fn)(void*, const DrakenVector*, const DrakenVector*),
                                       int32_t sub_op) {
     int64_t d[] = {1};
@@ -753,7 +784,6 @@ void test_registry_honesty() {
         "draken_string_concat",
         "draken_temporal_interval_op", "draken_date_minus_date",
         "draken_interval_interval_op",
-        "draken_cast_timestamp_to_date32",
     };
     for (const char* name : removed_stubs) {
         fn = nullptr; ctx = nullptr;
@@ -765,7 +795,7 @@ void test_registry_honesty() {
         "draken_binop",
         "draken_cast_int64_to_float64", "draken_cast_int64_to_string",
         "draken_cast_float64_to_string", "draken_cast_string_to_float64",
-        "draken_cast_date32_to_timestamp",
+        "draken_cast_date32_to_timestamp", "draken_cast_timestamp_to_date32",
     };
     for (const char* name : real_kernels) {
         fn = nullptr; ctx = nullptr;
@@ -820,13 +850,18 @@ void test_draken_binop_int_arith() {
       assert(binop_equal(res,e,1,DRAKEN_INT64));
       free_vector(lv); free_vector(rv); draken_free(res.data); draken_free(res.validity); }
 
-    // INT_DIVIDE by zero → 0; MODULO by zero → 0 (int16/int16 → int32)
-    { int16_t l[]={10,10}, r[]={0,3}; int64_t ediv[]={0,3}, emod[]={0,1};
-      auto* lv=create_int16_vector(l,2); auto* rv=create_int16_vector(r,2);
-      VecResult rd=draken_binop(&c_idiv,lv,rv); assert(binop_equal(rd,ediv,2,DRAKEN_INT32));
-      VecResult rm=draken_binop(&c_mod ,lv,rv); assert(binop_equal(rm,emod,2,DRAKEN_INT32));
+    // INT_DIVIDE / MODULO (int16/int16 → int32); a zero divisor fails loud, never a silent 0
+    { int16_t l[]={10}, r[]={3}; int64_t ediv[]={3}, emod[]={1};
+      auto* lv=create_int16_vector(l,1); auto* rv=create_int16_vector(r,1);
+      VecResult rd=draken_binop(&c_idiv,lv,rv); assert(binop_equal(rd,ediv,1,DRAKEN_INT32));
+      VecResult rm=draken_binop(&c_mod ,lv,rv); assert(binop_equal(rm,emod,1,DRAKEN_INT32));
       free_vector(lv); free_vector(rv);
       draken_free(rd.data); draken_free(rd.validity); draken_free(rm.data); draken_free(rm.validity); }
+    { int16_t l[]={10}, r[]={0};
+      auto* lv=create_int16_vector(l,1); auto* rv=create_int16_vector(r,1);
+      assert(is_error(draken_binop(&c_idiv,lv,rv)));
+      assert(is_error(draken_binop(&c_mod ,lv,rv)));
+      free_vector(lv); free_vector(rv); }
 
     // null propagation: int8 + int8, left row 1 NULL → result row 1 NULL
     { int8_t l[]={10,20,30}, r[]={1,2,3}; uint8_t lvalid[]={1,0,1};
@@ -1182,6 +1217,7 @@ int main() {
     // Shape-parity tests (WP-03) — exercise existing kernels with dict/constant
     // inputs; they do NOT add to the registered-kernel count.
     const struct { const char* name; void (*fn)(); } shape_tests[] = {
+        {"cast_float_to_int_skips_dead_slots", test_cast_float_to_int_skips_dead_slots},
         // REPLACE / SOUNDEX value + shape parity (func_fn_t string kernels).
         {"soundex_values", test_soundex_values},
         {"soundex_empty_nonalpha_null", test_soundex_empty_and_nonalpha_null},

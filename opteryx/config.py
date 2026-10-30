@@ -85,6 +85,14 @@ DISABLE_OPTIMIZER: bool = get_bool("DISABLE_OPTIMIZER", False)
 OPTERYX_DEBUG: bool = get_bool("OPTERYX_DEBUG", False)
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
 
+ALLOW_LOCAL_READS: bool = get_bool("ALLOW_LOCAL_READS", False)
+"""Let READ_* table functions reach this machine and its private network: a local
+path (no scheme), and http(s) hosts that resolve to loopback, private, link-local
+or other non-public addresses (checked natively at connect time, so redirects and
+DNS tricks are covered too). Off by default, because on a shared deployment those
+reads expose the server's own files, environment and internal services. Set it
+for local development and tests."""
+
 EMIT_BILLING_EVENTS: bool = get_bool("EMIT_BILLING_EVENTS", False)
 """Print each billing event (opteryx/managers/billing) to stdout as one JSON line
 with `severity` BILLING, for the log pipeline to ingest. Off by default, so local

@@ -112,6 +112,8 @@ struct JsonlScanSpec {
     std::vector<std::string> files;          // as resolved at bind time; named in messages
     std::vector<std::string> urls;           // parallel: "" = local path, else the URL to
                                              // GET with NO credentials
+    bool deny_private_addresses = false;     // refuse non-public HTTP peers (READ_* of an
+                                             // http(s) URL with ALLOW_LOCAL_READS off)
     rugo::_jsonl::ParseContext context;      // projection, predicates, pinned schema, options
 
     // Per DECODED column (parallel vectors): each physical (pre-alias) name once.
@@ -347,7 +349,7 @@ public:
         g->files.resize(spec_->files.size());
         for (const auto& url : spec_->urls) {
             if (!url.empty()) {
-                g->http = std::make_unique<HttpClient>();
+                g->http = std::make_unique<HttpClient>(128, 60000, spec_->deny_private_addresses);
                 break;
             }
         }

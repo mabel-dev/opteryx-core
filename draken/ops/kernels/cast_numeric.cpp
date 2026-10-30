@@ -303,14 +303,32 @@ VecResult draken_cast_float64_to_int64(void* ctx, const DrakenVector* v) {
         const bool is64 = (v->type == DRAKEN_FLOAT64);
         int64_t* out = static_cast<int64_t*>(draken_malloc((k > 0u ? k : 1u) * sizeof(int64_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+        std::vector<uint8_t> live;
+        const uint8_t* lv = kernel_live_slots(v, live);   // nullptr = every slot live
         for (uint32_t j = 0u; j < k; ++j) {
             const double d = is64 ? static_cast<const double*>(v->data)[j]
                                   : static_cast<double>(static_cast<const float*>(v->data)[j]);
+            // ±2^63 are exact doubles; INT64_MAX is not, so the upper test is `<`.
+            // The negated form also rejects NaN (out-of-range conversion is UB).
+            // Slots no valid row reads (NULLs, filtered rows) are never judged.
+            if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0)) {
+                if (lv && !lv[j]) { out[j] = 0; continue; }
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "cast float->int64: value %g out of range for INT64", d);
+                }
+                out[j] = 0; bad[j] = 1u; any_bad = true; continue;
+            }
             out[j] = static_cast<int64_t>(d);  // truncate toward zero
         }
         VecResult r;
         r.data = out; r.type = DRAKEN_INT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }
@@ -778,10 +796,13 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         const bool is_safe = kernel_cast_is_safe(ctx);                                  \
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);                                  \
         bool any_bad = false;                                                           \
+        std::vector<uint8_t> live;  /* slots no valid row reads are never judged */ \
+        const uint8_t* lv = kernel_live_slots(v, live);                                 \
         for (uint32_t j = 0u; j < k; ++j) {                                              \
             const double d = is64 ? static_cast<const double*>(v->data)[j]               \
                                   : static_cast<double>(static_cast<const float*>(v->data)[j]); \
             if (!(d >= 0.0) || d > static_cast<double>(UMAX)) {                          \
+                if (lv && !lv[j]) { out[j] = 0; continue; }                              \
                 if (!is_safe) {                                                          \
                     draken_free(out);                                                         \
                     return draken_error_sentinel_fmt(                                         \
@@ -1686,10 +1707,13 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         const bool is_safe = kernel_cast_is_safe(ctx);                                  \
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);                                  \
         bool any_bad = false;                                                           \
+        std::vector<uint8_t> live;  /* slots no valid row reads are never judged */ \
+        const uint8_t* lv = kernel_live_slots(v, live);                                 \
         for (uint32_t j = 0u; j < k; ++j) {                                             \
             const double d = is64 ? static_cast<const double*>(v->data)[j]              \
                                   : static_cast<double>(static_cast<const float*>(v->data)[j]); \
             if (!(d >= static_cast<double>(IMIN)) || d > static_cast<double>(IMAX)) {    \
+                if (lv && !lv[j]) { out[j] = 0; continue; }                              \
                 if (!is_safe) {                                                          \
                     draken_free(out);                                                    \
                     return draken_error_sentinel_fmt(                                    \

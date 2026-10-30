@@ -1410,6 +1410,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 #endif
         }
         RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _dp_t0);
+        // Codes are bounds-checked against dict_size, so a dictionary body
+        // shorter than its header's num_values must fail here, not be
+        // truncated to fewer entries than the codes may address.
+        const size_t dict_loaded =
+            result.dict_int32_values.size() + result.dict_int64_values.size() +
+            result.dict_int128_values.size() + result.string_dict_offsets.size() +
+            result.dict_float32_values.size() + result.dict_float64_values.size();
+        if (dict_size > 0 && dict_loaded != static_cast<size_t>(dict_size)) {
+          result.error_message =
+              "dictionary page declares " + std::to_string(dict_size) +
+              " entries but holds " + std::to_string(dict_loaded) + " (corrupt file)";
+          return;
+        }
       }
     }
 

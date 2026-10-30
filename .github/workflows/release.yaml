@@ -11,6 +11,10 @@ on:
       - 'all-*'       # release opteryx_core + rugo together
       - 'ci-*'        # CI / dry-run builds
 
+# Tests READ_* local test data; opteryx refuses local reads unless opted in.
+env:
+  ALLOW_LOCAL_READS: 1
+
 jobs:
   # ── Release floor: the absolute minimum operational proof. rugo has had this
   # since its pipeline was written (release-rugo.yaml `floor`); opteryx_core —

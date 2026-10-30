@@ -900,8 +900,17 @@ static void ParseRowGroup(TInput &in, RowGroupStats &rg,
 
 // ------------------- Schema Walker -------------------
 
+// `budget` is how many SchemaElements the list still holds: a node cannot claim
+// more children than exist, which bounds the reserve() and, with the depth
+// cap, the recursion a hostile footer can force.
 static std::vector<SchemaElement>
-WalkSchema(TInput &in, int remaining, const std::string &parent_path = "") {
+WalkSchema(TInput &in, int remaining, uint32_t &budget, int depth,
+           const std::string &parent_path = "") {
+  if (remaining < 0 || static_cast<uint32_t>(remaining) > budget)
+    throw std::runtime_error("Parquet schema: num_children exceeds the schema element count (corrupt footer)");
+  if (depth > kMaxSkipDepth)
+    throw std::runtime_error("Parquet schema: nesting deeper than 64 levels (corrupt footer)");
+  budget -= static_cast<uint32_t>(remaining);
   std::vector<SchemaElement> nodes;
   nodes.reserve(remaining);
 
@@ -911,7 +920,7 @@ WalkSchema(TInput &in, int remaining, const std::string &parent_path = "") {
         parent_path.empty() ? elem.name : parent_path + "." + elem.name;
 
     if (elem.num_children > 0) {
-      elem.children = WalkSchema(in, elem.num_children, elem.full_name);
+      elem.children = WalkSchema(in, elem.num_children, budget, depth + 1, elem.full_name);
     }
 
     nodes.push_back(std::move(elem));
@@ -1149,7 +1158,8 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
 
     switch (fh.id) {
     case 2: { // schema (list<SchemaElement>)
-      ReadListHeader(in);
+      const auto schema_lh = ReadListHeader(in);
+      uint32_t schema_budget = schema_lh.size > 0 ? schema_lh.size - 1 : 0;
       // The first SchemaElement is always the file's message-level root — a
       // Parquet-spec wrapper (pyarrow's "schema", arrow-rs's "arrow_schema",
       // Hive's "hive_schema", ...) whose own name must never appear in a
@@ -1157,7 +1167,7 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
       // learn how many top-level columns follow, then store those columns
       // themselves — not the wrapper — as fs.schema.
       SchemaElement msg_root = ParseSchemaElement(in);
-      fs.schema = WalkSchema(in, msg_root.num_children);
+      fs.schema = WalkSchema(in, msg_root.num_children, schema_budget, 0);
       break;
     }
     case 3:

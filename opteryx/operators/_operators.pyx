@@ -319,10 +319,22 @@ cdef extern from "pg/pg_scan_spec.hpp" namespace "opteryx::pg" nogil:
         bint schema_from_catalog
         int64_t rows_read
 
+def _deny_private_addresses(files) -> bool:
+    """A native scan of a user-named http(s) URL may not reach this machine's own
+    network unless the deployment opts in (config.ALLOW_LOCAL_READS). Catalog data
+    files are gs:// or s3:// and keep their configured endpoints."""
+    from opteryx import config
+
+    return not config.ALLOW_LOCAL_READS and any(
+        path.startswith(("http://", "https://")) for path in files
+    )
+
+
 cdef extern from "engine/native_jsonl_scan_source.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass JsonlScanSpec:
         cppvector[string] files
         cppvector[string] urls
+        bint deny_private_addresses
         cppvector[string] decode_names
         cppvector[uint8_t] drift_exempt
         cppvector[string] out_identities
@@ -339,6 +351,7 @@ cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine
     cdef cppclass AvroScanSpec:
         cppvector[string] files
         cppvector[string] urls
+        bint deny_private_addresses
         string reader_schema
         cppvector[string] decode_names
         cppvector[string] out_identities
@@ -358,6 +371,7 @@ cdef extern from "engine/native_orc_scan_source.hpp" namespace "opteryx::engine"
     cdef cppclass OrcScanSpec:
         cppvector[string] files
         cppvector[string] urls
+        bint deny_private_addresses
         string auth_header
         cppvector[string] reader_names
         cppvector[int64_t] reader_field_ids
@@ -2574,6 +2588,7 @@ cdef class JsonlScanPlan:
             self.spec.files.push_back((<str>path).encode("utf-8"))
         for url in urls:
             self.spec.urls.push_back((<str>url).encode("utf-8"))
+        self.spec.deny_private_addresses = _deny_private_addresses(files)
         for name in decode_names:
             self.spec.decode_names.push_back((<str>name).encode("utf-8"))
         # Typed locals, not inline expressions: push_back takes `const T&`, and Cython
@@ -2657,6 +2672,7 @@ cdef class OrcScanPlan:
             self.spec.files.push_back((<str>path).encode("utf-8"))
         for url in urls:
             self.spec.urls.push_back((<str>url).encode("utf-8"))
+        self.spec.deny_private_addresses = _deny_private_addresses(files)
         self.spec.auth_header = auth_header.encode("utf-8")
         for name, field_id_obj, dtype_obj, precision_obj, scale_obj, nullable_obj, child_obj, depth_obj, declared_obj in reader_columns:
             field_id = -1 if field_id_obj is None else field_id_obj
@@ -2821,6 +2837,7 @@ cdef class AvroScanPlan:
             self.spec.files.push_back((<str>path).encode("utf-8"))
         for url in urls:
             self.spec.urls.push_back((<str>url).encode("utf-8"))
+        self.spec.deny_private_addresses = _deny_private_addresses(files)
         self.spec.reader_schema = reader_schema.encode("utf-8")
         for name in decode_names:
             self.spec.decode_names.push_back((<str>name).encode("utf-8"))

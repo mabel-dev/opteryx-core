@@ -17,6 +17,10 @@ name: Native Fuzz Replay
 on:
   workflow_call:
 
+# Tests READ_* local test data; opteryx refuses local reads unless opted in.
+env:
+  ALLOW_LOCAL_READS: 1
+
 jobs:
   native_fuzz_replay:
     name: "Native Fuzz Replay"

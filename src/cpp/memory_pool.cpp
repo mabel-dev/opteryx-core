@@ -1,6 +1,6 @@
 #include "memory_pool.hpp"
 
-#include "core/alloc.h"   // draken_malloc / draken_realloc / draken_free (the slab pool at these sizes)
+#include <sys/mman.h>
 
 namespace opteryx {
 
@@ -28,7 +28,7 @@ MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t
 
 MemoryPool::~MemoryPool() {
     if (pool_) {
-        draken_free(pool_);
+        munmap(pool_, static_cast<size_t>(size_));
         pool_ = nullptr;
     }
 }
@@ -144,25 +144,35 @@ void MemoryPool::compaction_no_lock() {
     segments_ = std::move(new_segments);
 }
 
-// The block is a draken allocation: at the pool's sizes (256 MiB and up) that is
-// a slab-pool run - prefaulted, recycled across scans, and charged to the memory
-// account by the slot the moment it exists. That charge replaced the per-segment
-// charging commit/release used to do: the block is memory the process holds
-// whether or not a segment is written yet.
+// The block is uncommitted address space: pages fault in as segments are written,
+// and the memory account is charged used_size_ (used_charge_), not the block. It
+// is NOT a draken (slab) allocation: the slab charges a run whole the moment it is
+// acquired, so a native scan's 178 GB window reservation holding 392 bytes charged
+// 170 GiB and zeroed the chunk cache's limit (2026-10-30). MAP_NORESERVE: a
+// reservation larger than RAM is the normal case here, not an overcommit.
+static unsigned char* map_block(int64_t size) {
+    void* p = mmap(nullptr, static_cast<size_t>(size), PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    return p == MAP_FAILED ? nullptr : static_cast<unsigned char*>(p);
+}
+
 bool MemoryPool::ensure_pool_no_lock() {
     if (pool_ != nullptr) return true;
-    pool_ = static_cast<unsigned char*>(draken_malloc(static_cast<size_t>(size_)));
+    pool_ = map_block(size_);
     return pool_ != nullptr;
 }
 
 bool MemoryPool::resize_pool_no_lock(int64_t new_size) {
-    unsigned char* new_pool = static_cast<unsigned char*>(
-        draken_realloc(pool_, static_cast<size_t>(new_size)));
-    if (!new_pool) {
-        return false;
+    if (pool_ != nullptr) {
+        unsigned char* new_pool = map_block(new_size);
+        if (!new_pool) {
+            return false;
+        }
+        std::memcpy(new_pool, pool_, static_cast<size_t>(size_));
+        munmap(pool_, static_cast<size_t>(size_));
+        pool_ = new_pool;
     }
-
-    pool_  = new_pool;
+    // A block not yet mapped just grows its size; ensure_pool_no_lock maps it.
     size_  = new_size;
     resizes_++;
     return true;
@@ -284,6 +294,7 @@ int64_t MemoryPool::commit(const void* data, int64_t length) {
     std::memcpy(pool_ + seg_key, data, length);
     metadata_[ref_id] = {seg_key, block_len, 0, length};
     used_size_ += block_len;
+    used_charge_.set(used_size_);
     if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
     commits_++;
 
@@ -347,6 +358,7 @@ void MemoryPool::release(int64_t ref_id) {
 
     it->second.is_free = true;
     used_size_ -= it->second.length;
+    used_charge_.set(used_size_);
 
     // Coalesce right neighbor
     auto right = std::next(it);
@@ -419,6 +431,7 @@ ReserveResult MemoryPool::reserve_for_write(int64_t size) {
     int64_t ref_id = next_ref_id_++;
     metadata_[ref_id] = {seg_key, block_len, 1, 0};
     used_size_ += block_len;
+    used_charge_.set(used_size_);
     if (used_size_ > peak_used_size_) peak_used_size_ = used_size_;
     commits_++;
     read_locks_++;
@@ -444,6 +457,7 @@ void MemoryPool::clear() {
     segments_.clear();
     metadata_.clear();
     used_size_    = 0;
+    used_charge_.set(0);
     next_ref_id_  = 1;
     commits_      = 0;
     failed_commits_ = 0;

@@ -72,6 +72,7 @@
 // rule on the engine side, and trace_bridge_c.h for why the bridge exists.
 #include "core/trace_bridge_c.h"
 #include "core/chunk_cache.h"     // C7: the planner pins cached chunks and skips their GET
+#include "core/mem_account.h"     // draken::MemCharge — a fetch block's bytes on the process account
 #include "bloom_bytes_cache.hpp"  // remote bloom bytes, read once per process
 
 // H6 whole-file local mmap cache: ON on every architecture. It shipped per-arch
@@ -2115,6 +2116,11 @@ class ParquetIOPipeline {
         std::vector<std::vector<int64_t>> base_offsets;   // [member][col]
         RemotePlan plan;
         std::vector<std::vector<uint8_t>> buffers;        // per coalesced group
+        // `buffers` on the process memory account, released with them. They are
+        // std::vectors no draken allocator charges, and fetch-ahead holds many
+        // blocks at once: uncharged, a 16 GiB worker's fetched bytes grew RSS past
+        // the account's reserve while the chunk cache never gave way (OOM, 2026-10-30).
+        draken::MemCharge buffers_charge;
         uint64_t fetch_ns = 0;            // folded into the first member's read_ns only
         std::exception_ptr error;         // a fetch failure, rethrown by every member's decode
         bool fetched = false;             // coupled path: guarded by `mu`
@@ -3114,8 +3120,12 @@ class ParquetIOPipeline {
                     std::max<int64_t>(it->est_compressed_bytes - cached_compressed_bytes(blk, m), 0);
                 ledger_charge(held_prefetch_, it->charged_compressed);
             }
-            if (!blk.plan.groups.empty())
+            if (!blk.plan.groups.empty()) {
                 blk.buffers = fetch_remote_groups(blk.path, blk.plan, &blk.fetch_ns);
+                int64_t held = 0;
+                for (const auto& b : blk.buffers) held += static_cast<int64_t>(b.capacity());
+                blk.buffers_charge.set(held);
+            }
         } catch (...) {
             blk.buffers.clear();
             blk.error = std::current_exception();

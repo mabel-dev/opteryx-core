@@ -20,6 +20,10 @@ on:
   schedule:
     - cron: '0 3 * * *'  # 0300 each day
 
+# Tests READ_* local test data; opteryx refuses local reads unless opted in.
+env:
+  ALLOW_LOCAL_READS: 1
+
 jobs:
   fuzz_testing:
     name: "Fuzz Testing"

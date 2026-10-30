@@ -165,7 +165,13 @@ inline ListHeader ReadListHeader(TInput &in) {
   return {elem_type, size};
 }
 
-inline void SkipField(TInput &in, uint8_t type) {
+// Parquet metadata nests a handful of levels; a hostile footer can nest
+// containers until the stack overflows, so bound the recursion.
+constexpr int kMaxSkipDepth = 64;
+
+inline void SkipField(TInput &in, uint8_t type, int depth = 0) {
+  if (depth > kMaxSkipDepth)
+    throw std::runtime_error("Thrift: nesting deeper than 64 levels (corrupt metadata)");
   switch (type) {
   case 0:
     return; // STOP
@@ -199,7 +205,7 @@ inline void SkipField(TInput &in, uint8_t type) {
       if (lh.elem_type == 1 || lh.elem_type == 2) {
         in.readByte();
       } else {
-        SkipField(in, lh.elem_type);
+        SkipField(in, lh.elem_type, depth + 1);
       }
     }
     return;
@@ -210,7 +216,7 @@ inline void SkipField(TInput &in, uint8_t type) {
       if (lh.elem_type == 1 || lh.elem_type == 2) {
         in.readByte();
       } else {
-        SkipField(in, lh.elem_type);
+        SkipField(in, lh.elem_type, depth + 1);
       }
     }
     return;
@@ -228,9 +234,9 @@ inline void SkipField(TInput &in, uint8_t type) {
 
     for (uint32_t i = 0; i < size; i++) {
       if (key_type == 1 || key_type == 2) in.readByte();
-      else SkipField(in, key_type);
+      else SkipField(in, key_type, depth + 1);
       if (val_type == 1 || val_type == 2) in.readByte();
-      else SkipField(in, val_type);
+      else SkipField(in, val_type, depth + 1);
     }
     return;
   }
@@ -239,7 +245,7 @@ inline void SkipField(TInput &in, uint8_t type) {
     while (true) {
       auto fh = ReadFieldHeader(in, last);
       if (fh.type == 0) break;
-      SkipField(in, fh.type);
+      SkipField(in, fh.type, depth + 1);
     }
     return;
   }

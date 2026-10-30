@@ -147,7 +147,10 @@ public:
      *
      * @throws std::runtime_error if CURLSH init fails
      */
-    HttpClient(int max_connections = 128, long timeout_ms = 60000);
+    // deny_private_addresses: refuse any connection whose peer is not a public
+    // unicast address (checked per socket, so redirects are covered).
+    HttpClient(int max_connections = 128, long timeout_ms = 60000,
+               bool deny_private_addresses = false);
     ~HttpClient();
 
     // Non-copyable — share handle is not copyable
@@ -275,6 +278,7 @@ private:
     std::mutex  share_mutexes_[CURL_LOCK_DATA_LAST]; // one mutex per curl_lock_data type
     int         max_connections_;                // per-host connection cap used by get_many()
     long        timeout_ms_;
+    bool        deny_private_;                   // refuse non-public peers (see ctor)
     std::string user_agent_;
     std::string ca_bundle_;                      // Path to CA bundle found at init time
 

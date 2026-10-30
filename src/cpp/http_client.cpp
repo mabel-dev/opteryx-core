@@ -16,6 +16,8 @@
 #include "http_client.hpp"
 
 #include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -65,15 +67,64 @@ constexpr long kCurlSelectFdLimit = OPTERYX_CURL_SELECT_FD_LIMIT;
 struct SocketGuard {
     curl_socket_t refused_fd = CURL_SOCKET_BAD;
     bool refused() const { return refused_fd != CURL_SOCKET_BAD; }
+    // Set when the client denies non-public peers; refused_address then names
+    // the address a connect (first hop, redirect or re-resolve) was refused for.
+    bool deny_private = false;
+    std::string refused_address;
+    bool refused_private() const { return !refused_address.empty(); }
 };
+
+// True for any address that is not a public unicast peer: loopback, RFC 1918,
+// CGNAT, link-local (cloud metadata 169.254.169.254), unspecified, multicast,
+// reserved, IPv6 ULA/link-local, and IPv4-mapped forms of all of those.
+bool is_non_public_ipv4(uint32_t a) {
+    const uint32_t o1 = a >> 24, o2 = (a >> 16) & 0xFFu;
+    return o1 == 0 || o1 == 10 || o1 == 127 || o1 >= 224 ||
+           (o1 == 100 && (o2 & 0xC0u) == 64) || (o1 == 169 && o2 == 254) ||
+           (o1 == 172 && (o2 & 0xF0u) == 16) || (o1 == 192 && o2 == 168);
+}
+
+bool is_non_public_address(const struct sockaddr* sa, std::string& text) {
+    char buf[INET6_ADDRSTRLEN] = {0};
+    if (sa->sa_family == AF_INET) {
+        const auto* in4 = reinterpret_cast<const struct sockaddr_in*>(sa);
+        ::inet_ntop(AF_INET, &in4->sin_addr, buf, sizeof(buf));
+        text = buf;
+        return is_non_public_ipv4(ntohl(in4->sin_addr.s_addr));
+    }
+    if (sa->sa_family == AF_INET6) {
+        const auto* in6 = reinterpret_cast<const struct sockaddr_in6*>(sa);
+        const uint8_t* b = in6->sin6_addr.s6_addr;
+        ::inet_ntop(AF_INET6, &in6->sin6_addr, buf, sizeof(buf));
+        text = buf;
+        static const uint8_t mapped[12] = {0,0,0,0,0,0,0,0,0,0,0xFF,0xFF};
+        if (std::memcmp(b, mapped, 12) == 0)
+            return is_non_public_ipv4((uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16) |
+                                      (uint32_t(b[14]) << 8) | uint32_t(b[15]));
+        bool zero_prefix = true;
+        for (int i = 0; i < 15; ++i) zero_prefix = zero_prefix && b[i] == 0;
+        return zero_prefix ||                       // :: and ::1
+               (b[0] & 0xFEu) == 0xFC ||            // fc00::/7 unique local
+               (b[0] == 0xFE && (b[1] & 0xC0u) == 0x80) ||  // fe80::/10 link-local
+               b[0] == 0xFF;                        // ff00::/8 multicast
+    }
+    text = "family " + std::to_string(sa->sa_family);
+    return true;  // not an IP peer at all: never a public HTTP host
+}
 
 // CURLOPT_OPENSOCKETFUNCTION: create the socket as libcurl would, and refuse one
 // libcurl could not wait on. Returning CURL_SOCKET_BAD fails the transfer; the
 // guard is how the caller learns the real reason.
 curl_socket_t open_guarded_socket(void* clientp, curlsocktype, struct curl_sockaddr* addr) {
+    auto* guard = static_cast<SocketGuard*>(clientp);
+    std::string text;
+    if (guard->deny_private && is_non_public_address(&addr->addr, text)) {
+        guard->refused_address = text;
+        return CURL_SOCKET_BAD;
+    }
     curl_socket_t fd = ::socket(addr->family, addr->socktype, addr->protocol);
     if (fd != CURL_SOCKET_BAD && fd >= kCurlSelectFdLimit) {
-        static_cast<SocketGuard*>(clientp)->refused_fd = fd;
+        guard->refused_fd = fd;
         ::close(fd);
         return CURL_SOCKET_BAD;
     }
@@ -81,12 +132,25 @@ curl_socket_t open_guarded_socket(void* clientp, curlsocktype, struct curl_socka
 }
 
 // Install the guard on a handle. No callback at all when libcurl has no ceiling.
-void configure_socket_guard(CURL* easy, SocketGuard* guard) {
+void configure_socket_guard(CURL* easy, SocketGuard* guard, bool deny_private) {
     guard->refused_fd = CURL_SOCKET_BAD;
-    if constexpr (kCurlSelectFdLimit > 0) {
+    guard->deny_private = deny_private;
+    guard->refused_address.clear();
+    if (kCurlSelectFdLimit > 0 || deny_private) {
         curl_easy_setopt(easy, CURLOPT_OPENSOCKETFUNCTION, &open_guarded_socket);
         curl_easy_setopt(easy, CURLOPT_OPENSOCKETDATA,     guard);
     }
+}
+
+// Non-retryable: the host resolves to the same non-public address on a retry.
+[[noreturn]] void throw_private_address(const char* who, const SocketGuard& guard,
+                                        const std::string& url) {
+    throw HttpError(
+        std::string(who) + ": refused to connect to non-public address " +
+            guard.refused_address + " (loopback, private, link-local or reserved). "
+            "Set the ALLOW_LOCAL_READS=1 environment variable to allow reads from "
+            "this machine's network. url=" + redact_url(url),
+        false, 0);
 }
 
 // Non-retryable: the same process state hands out the same fd on a retry.
@@ -662,10 +726,11 @@ void HttpClient::configure_share(void* easy_handle) const {
     );
 }
 
-HttpClient::HttpClient(int max_connections, long timeout_ms)
+HttpClient::HttpClient(int max_connections, long timeout_ms, bool deny_private_addresses)
     : share_handle_(nullptr),
       max_connections_(max_connections),
       timeout_ms_(timeout_ms),
+      deny_private_(deny_private_addresses),
       user_agent_("opteryx/1.0"),
       ca_bundle_(find_ca_bundle()) {
 
@@ -721,7 +786,7 @@ std::vector<uint8_t> HttpClient::get(
         curl_easy_setopt(easy, CURLOPT_WRITEDATA,       &buf);
         configure_ssl(easy);
         configure_share(easy);
-        configure_socket_guard(easy, &guard);
+        configure_socket_guard(easy, &guard, deny_private_);
 
         // Build custom header list
         struct curl_slist* hlist = nullptr;
@@ -747,6 +812,7 @@ std::vector<uint8_t> HttpClient::get(
         curl_easy_getinfo(easy, CURLINFO_OS_ERRNO, &os_errno);
         curl_easy_cleanup(easy);
 
+        if (guard.refused_private()) throw_private_address("get", guard, url);
         if (guard.refused()) throw_socket_fd_limit("get", guard, url);
         bool http_ok = curl_ok && http_status_ok(http_code);
         if (http_ok) return std::move(buf.body);
@@ -793,7 +859,7 @@ std::map<std::string, std::string> HttpClient::head(
     curl_easy_setopt(easy, CURLOPT_HEADERDATA,      &buf);
     configure_ssl(easy);
     configure_share(easy);
-    configure_socket_guard(easy, &guard);
+    configure_socket_guard(easy, &guard, deny_private_);
 
     // Build custom header list
     struct curl_slist* hlist = nullptr;
@@ -810,6 +876,7 @@ std::map<std::string, std::string> HttpClient::head(
     curl_slist_free_all(hlist);
     curl_easy_cleanup(easy);
 
+    if (guard.refused_private()) throw_private_address("head", guard, url);
     if (guard.refused()) throw_socket_fd_limit("head", guard, url);
     // HttpError, not a bare runtime_error, so the status survives the trip to
     // Python: callers such as the S3 filesystem's get_file_info must tell a 404
@@ -857,7 +924,7 @@ HttpClient::PutResponse HttpClient::put(
     curl_easy_setopt(easy, CURLOPT_HEADERDATA,       &buf);
     configure_ssl(easy);
     configure_share(easy);
-    configure_socket_guard(easy, &guard);
+    configure_socket_guard(easy, &guard, deny_private_);
 
     struct curl_slist* hlist = nullptr;
     for (const auto& kv : headers) {
@@ -875,6 +942,7 @@ HttpClient::PutResponse HttpClient::put(
     curl_slist_free_all(hlist);
     curl_easy_cleanup(easy);
 
+    if (guard.refused_private()) throw_private_address("put", guard, url);
     if (guard.refused()) throw_socket_fd_limit("put", guard, url);
     if (res != CURLE_OK) {
         throw HttpError(std::string("CURL error: ") + curl_easy_strerror(res),
@@ -1015,7 +1083,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
                                  (long)CURL_HTTP_VERSION_1_1);
             configure_ssl(easy);
-            configure_socket_guard(easy, &ctx[i].guard);
+            configure_socket_guard(easy, &ctx[i].guard, deny_private_);
             // No CURLOPT_SHARE: the thread's CURLM keeps its own connection
             // cache; CURLSH from multi+other-thread-get() could deadlock.
 
@@ -1073,6 +1141,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
         std::vector<size_t> retry_next;
         for (size_t i : pending) {
+            if (ctx[i].guard.refused_private()) throw_private_address("get_many", ctx[i].guard, requests[i].first);
             if (ctx[i].guard.refused()) throw_socket_fd_limit("get_many", ctx[i].guard, requests[i].first);
             bool curl_ok = (ctx[i].res == CURLE_OK);
             bool http_ok = curl_ok && http_status_ok(ctx[i].http_code);
@@ -1212,7 +1281,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
                                  (long)CURL_HTTP_VERSION_1_1);
             configure_ssl(easy);
-            configure_socket_guard(easy, &ctx[i].guard);
+            configure_socket_guard(easy, &ctx[i].guard, deny_private_);
             // No CURLOPT_SHARE: same rationale as get_many().
 
             for (const auto& kv : req_hdrs) {
@@ -1266,6 +1335,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
 
         std::vector<size_t> retry_next;
         for (size_t i : pending) {
+            if (ctx[i].guard.refused_private()) throw_private_address("head_many", ctx[i].guard, requests[i].first);
             if (ctx[i].guard.refused()) throw_socket_fd_limit("head_many", ctx[i].guard, requests[i].first);
             bool curl_ok = (ctx[i].res == CURLE_OK);
             bool http_ok = curl_ok && http_status_ok(ctx[i].http_code);

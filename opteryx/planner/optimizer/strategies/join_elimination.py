@@ -112,16 +112,20 @@ def _subtree_covers_relations(plan: LogicalPlan, nid: str, relations: set) -> bo
     return False
 
 
-def _right_is_provably_unique(plan: LogicalPlan, join_nid: str, right_relations: set) -> bool:
+def _right_is_provably_unique(
+    plan: LogicalPlan, join_nid: str, right_relations: set, right_keys: set
+) -> bool:
     """Conservatively decide whether the right input yields at most one row per join key.
 
     INNER → LEFT SEMI is only sound when each left row matches at most one right
     row (otherwise the inner join multiplies left rows but the semi-join collapses
     them, corrupting COUNT/SUM). That holds when the right side is unique on the
-    join key. The only proof we trust without alias-resolved key matching is a
-    `Distinct` below the right input (full-row uniqueness ⇒ unique on any subset),
-    reached through row-count-preserving nodes. Anything else (GROUP BY whose key
-    we cannot reliably match, a base scan, a join) is treated as not-provable.
+    join key. The only proof we trust is a plain `Distinct` below the right input,
+    reached through row-count-preserving nodes, whose projected columns are all
+    join keys: unique rows are unique on any SUPERSET of their columns, never on a
+    subset, so `DISTINCT k, v` proves nothing about `k`. Anything else (DISTINCT
+    ON, GROUP BY whose key we cannot reliably match, a base scan, a join) is
+    treated as not-provable.
     """
     # Identify the right child subtree of the join.
     right_child = None
@@ -137,7 +141,7 @@ def _right_is_provably_unique(plan: LogicalPlan, join_nid: str, right_relations:
     while True:
         node = plan[cur]
         if node.node_type == LogicalPlanStepType.Distinct:
-            return True
+            return node.on is None and _distinct_columns_are_keys(plan, cur, right_keys)
         if node.node_type not in _UNIQUENESS_PRESERVING:
             return False
         children = list(plan.ingoing_edges(cur))
@@ -145,6 +149,20 @@ def _right_is_provably_unique(plan: LogicalPlan, join_nid: str, right_relations:
             # A passthrough should have exactly one input; bail out conservatively.
             return False
         cur = children[0][0]
+
+
+def _distinct_columns_are_keys(plan: LogicalPlan, distinct_nid: str, right_keys: set) -> bool:
+    """True when the Project feeding the Distinct outputs only join-key columns."""
+    children = list(plan.ingoing_edges(distinct_nid))
+    if len(children) != 1:
+        return False
+    project = plan[children[0][0]]
+    if project.node_type != LogicalPlanStepType.Project or not project.columns:
+        return False
+    for col in project.columns:
+        if col.schema_column is None or col.schema_column.identity not in right_keys:
+            return False
+    return True
 
 
 class JoinEliminationStrategy(OptimizationStrategy):
@@ -171,7 +189,9 @@ class JoinEliminationStrategy(OptimizationStrategy):
             # Only sound when the right side has unique join keys; otherwise the
             # semi-join drops the extra matches an inner join would emit, changing
             # row counts (and thus COUNT/SUM above the join).
-            if not _right_is_provably_unique(plan, join_nid, right_relations):
+            if not _right_is_provably_unique(
+                plan, join_nid, right_relations, set(join_node.right_columns or [])
+            ):
                 continue
 
             join_node = plan[join_nid]

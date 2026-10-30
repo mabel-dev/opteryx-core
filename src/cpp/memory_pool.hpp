@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "core/mem_account.h"   // draken::MemCharge
+
 namespace opteryx {
 
 struct PoolStats {
@@ -109,6 +111,10 @@ private:
     unsigned char* pool_;
     int64_t size_;
     int64_t used_size_;
+    // The memory account holds used_size_, never size_ (docs/C7_PAGE_CACHE_DESIGN.md
+    // §22-23): the block is a reservation sized for a whole in-flight window. Set
+    // under mu_ wherever used_size_ changes.
+    draken::MemCharge used_charge_;
     int64_t alignment_;
     bool auto_resize_;
     std::string name_;
