@@ -32,6 +32,8 @@ import pyarrow.orc as po
 import opteryx
 from opteryx.exceptions import DataError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 UTC = datetime.timezone.utc
 ROWS = 150_007
 NAMES = ["id", "i16", "flag", "real", "unique", "few", "day", "ts", "price", "tags", "point"]

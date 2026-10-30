@@ -43,19 +43,29 @@ namespace draken::owner_ops {
 std::atomic<uint64_t> g_e37_carried_hits{0};
 
 // ---------------------------------------------------------------------------
-// D.11: null vector — self-describing, no data buffer, no validity buffer.
-// All rows are null; type tag is the sole signal — short-circuit on type==NULL.
+// D.11: null vector — self-describing, no data buffer; every row is null.
+// It carries an ALL-ZERO validity bitmap: everything that reads validity treats
+// a missing bitmap as all-VALID, so a bare type tag made COUNT(NULL) count every
+// row. Kernels may still short-circuit on type==NULL.
 // ---------------------------------------------------------------------------
 VectorOwner make_null_vector(uint32_t length) {
+    const uint32_t bm     = (length + 7u) / 8u;
+    const uint32_t padded = ((bm + 7u) & ~7u);
+    const size_t   vbytes = padded > 0u ? padded : 8u;
+    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+    if (!validity) throw std::bad_alloc();
+    std::memset(validity, 0, vbytes);
+    OwnedBuffer<uint8_t> validity_buf;
+    validity_buf.reset(validity);
     DrakenVector v;
     v.data        = nullptr;
     v.selection   = draken_zero_sel(length > 0u ? length : 1u);
     v.data_length = 0u;
     v.length      = length;
-    v.validity    = nullptr;
+    v.validity    = validity;
     v.type        = DRAKEN_NULL;
     v.flags       = 0u;
-    return VectorOwner(v, OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(nullptr));
+    return VectorOwner(v, OwnedBuffer<void>(nullptr), std::move(validity_buf));
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,7 +1013,7 @@ CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
 static bool clone_scalar_constant(const DrakenVector& scalar, uint32_t length,
                                   std::shared_ptr<VectorOwner>& out) {
     if (scalar.validity != nullptr || scalar.data == nullptr) return false;
-    const uint32_t src_idx = (scalar.selection != nullptr) ? scalar.selection[0] : 0u;
+    const uint32_t src_idx = scalar.selection[0];   // selection is never NULL
 
     if (draken_type_is_string_storage(scalar.type)) {
         const DrakenStringArena* src_sa =

@@ -30,6 +30,8 @@ import pyarrow.orc as po
 
 import opteryx
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 UTC = datetime.timezone.utc
 ROWS = 200_003
 MORSEL_ROWS = 65_536

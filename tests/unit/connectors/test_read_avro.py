@@ -35,6 +35,8 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import NotSupportedError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 SAMPLE = "testdata/avro/space_missions.avro"
 PARQUET = "testdata/missions/space_missions.parquet"
 UTC = datetime.timezone.utc

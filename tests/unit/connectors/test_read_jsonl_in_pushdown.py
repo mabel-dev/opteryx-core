@@ -17,6 +17,8 @@ import opteryx
 import rugo.rugo_native as rugo_native
 from opteryx.connectors import jsonl_io
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 ROWS = [
     r'{"id":1,"s":"a","n":1,"f":1.5,"b":true,"c":{"col":"post"}}',
     r'{"id":2,"s":"b","n":2,"f":2.5,"b":false,"c":{"col":"like"}}',

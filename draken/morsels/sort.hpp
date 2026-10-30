@@ -1767,23 +1767,30 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
         };
 
         if (t == DRAKEN_NULL) {
-            // Self-describing null (buffers.h): type==NULL ⟹ every row is null,
-            // no data buffer and no validity buffer. Which source rows were picked
-            // is irrelevant — the gather of n rows is just a length-n NULL vector.
-            // `selection` is the shared global zero vector (not owned); `data` is
-            // genuinely nullptr, which is why this cannot go through the width path
-            // below (0 there means "unsupported", not "no bytes by nature").
+            // Self-describing null (buffers.h): type==NULL ⟹ every row is null.
+            // Which source rows were picked is irrelevant — the gather of n rows is
+            // just a length-n NULL vector (no data, all-zero validity, as
+            // make_null_vector builds it), which is why this cannot go through the width path below
+            // (0 there means "unsupported", not "no bytes by nature").
+            // All-zero validity: a missing bitmap reads as all-VALID everywhere.
+            const uint32_t nbm = (n + 7u) / 8u;
+            const size_t nvbytes = nbm > 0u ? ((nbm + 7u) & ~7u) : 8u;
+            uint8_t* nvalid = static_cast<uint8_t*>(draken_malloc(nvbytes));
+            if (!nvalid) throw std::bad_alloc();
+            std::memset(nvalid, 0, nvbytes);
+            OwnedBuffer<uint8_t> nvalid_buf;
+            nvalid_buf.reset(nvalid);
             DrakenVector v;
             v.data = nullptr;
             v.selection = draken_zero_sel(n > 0 ? n : 1);
             v.data_length = 0;
             v.length = n;
-            v.validity = nullptr;
+            v.validity = nvalid;
             v.type = DRAKEN_NULL;
             v.flags = 0;
             CxxColumn c;
             c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(nullptr),
-                                                  OwnedBuffer<uint8_t>(nullptr));
+                                                  std::move(nvalid_buf));
             c.own->logical_type = src_lt;
             c.view = c.own->vec;
             out->columns.push_back(std::move(c));

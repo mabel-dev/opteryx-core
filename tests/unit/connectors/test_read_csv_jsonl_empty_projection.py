@@ -30,6 +30,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import opteryx
 from opteryx.exceptions import DatasetReadError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 ROWS = [
     {"id": 1, "name": "Alice", "score": 95},
     {"id": 2, "name": "Bob", "score": 82},

@@ -36,6 +36,8 @@ import opteryx
 from opteryx.exceptions import DataError
 from opteryx.exceptions import DatasetReadError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 ROWS = 3000
 
 

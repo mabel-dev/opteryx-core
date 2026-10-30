@@ -30,6 +30,8 @@ from tests.unit.connectors.parquet_io.test_fetch_blocks import _run
 from tests.unit.connectors.parquet_io.test_fetch_blocks import _server
 from tests.unit.connectors.parquet_io.test_fetch_blocks import _write
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 BLOCKS_PER_FILE = 2   # N_RG row groups at 4 per block
 
 

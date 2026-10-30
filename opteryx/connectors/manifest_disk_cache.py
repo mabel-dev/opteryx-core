@@ -422,9 +422,3 @@ class CachingFileIO:
 
     def cancel_upload_session(self, session_uri: str) -> None:
         return self._inner.cancel_upload_session(session_uri)
-
-
-
-# The disk-only name this module was introduced with, kept so existing callers and
-# tests keep working now that the wrapper takes a tier stack.
-DiskCachingFileIO = CachingFileIO

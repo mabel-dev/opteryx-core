@@ -32,6 +32,8 @@ from test_orc_uuid_fixed import _file as orc_file
 
 import opteryx
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 TIMES = [datetime.time(0, 0, 1), datetime.time(12, 30, 45, 123456), datetime.time(23, 59, 59, 999999)]
 MICROS = [((t.hour * 60 + t.minute) * 60 + t.second) * 1_000_000 + t.microsecond for t in TIMES]
 MILLIS_TIMES = [datetime.time(0, 0, 1), datetime.time(12, 30, 45, 123000), datetime.time(23, 59, 59, 999000)]

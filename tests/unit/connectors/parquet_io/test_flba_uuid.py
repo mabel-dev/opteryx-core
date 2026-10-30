@@ -18,6 +18,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 import opteryx
 from rugo import parquet
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 
 def _write(path, select):
     duckdb.sql(f"COPY ({select}) TO '{path}' (FORMAT PARQUET)")

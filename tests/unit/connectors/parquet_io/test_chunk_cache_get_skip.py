@@ -48,6 +48,8 @@ from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from rugo import parquet as rp
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 SERVER = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../dev/throttle_server.py")
 )

@@ -101,7 +101,9 @@ def _write_files(tmp):
 
 
 def _run(tmp, soft):
+    # The child reads local files, which the guard refuses unless ALLOW_LOCAL_READS is set.
     result = subprocess.run([sys.executable, "-c", _SCRIPT, REPO, str(soft)], cwd=tmp,
+                            env={**os.environ, "ALLOW_LOCAL_READS": "1"},
                             capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, result.stderr[-3000:]
     return json.loads(result.stdout.split("RESULT", 1)[1])

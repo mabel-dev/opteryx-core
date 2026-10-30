@@ -41,6 +41,8 @@ import pyarrow.parquet as pq
 
 import opteryx
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 # ── the data ────────────────────────────────────────────────────────────────
 
 STRUCT = pa.struct(

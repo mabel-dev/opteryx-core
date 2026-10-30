@@ -819,6 +819,12 @@ Status build_column(const ChunkNode& parsed,
         SKENE_RETURN_IF_ERROR(decode_into(validity_section, name, 0, 0,
                                           validity_buf.get()));
     }
+    if (type == DRAKEN_NULL && !has_validity) {
+        // A NULL column stores no validity (every row is null by its type), but
+        // the vector carries an all-zero bitmap: a missing one reads as all-valid.
+        SKENE_RETURN_IF_ERROR(allocate_buffer((static_cast<size_t>(head.length) + 7u) / 8u,
+                                             8u, &validity_buf));   // zero-filled
+    }
 
     // ── Payload ──
     OwnedBuffer<void> data_buf(nullptr);

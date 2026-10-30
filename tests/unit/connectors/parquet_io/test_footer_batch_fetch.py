@@ -32,6 +32,8 @@ from rugo import parquet as rp
 
 from tests.unit.connectors.parquet_io.test_fetch_blocks import _register_http_workspace
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 N_FILES = 8
 DELAY_S = 0.2
 # The suffix rule assumes the footer is at most 1/256 of the file, which rugo's

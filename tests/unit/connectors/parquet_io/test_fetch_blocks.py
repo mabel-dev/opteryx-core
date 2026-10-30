@@ -36,6 +36,8 @@ from opteryx.compiled.platform import cgroup_memory_limit_bytes, physical_memory
 from opteryx.compiled.structures.memory_pool import configure_chunk_cache
 from rugo import parquet as rp
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 SERVER = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../dev/throttle_server.py")
 )

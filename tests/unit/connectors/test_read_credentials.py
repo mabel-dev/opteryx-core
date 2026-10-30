@@ -30,6 +30,8 @@ from opteryx.managers import secrets as secrets_module
 from opteryx.managers.secrets import ObjectStoreCredential
 from opteryx.managers.secrets import register_secret_resolver
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 CANARY = "CANARY-77c1e0"
 # Fixtures the secrets scanner must not flag: AWS's documented example key id is
 # on its known-public list, and the service-account marker is assembled so the

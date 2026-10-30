@@ -27,6 +27,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import opteryx
 from opteryx.exceptions import DatasetReadError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 # What a native scan read error says to the user; the file and cause go to the log.
 _REDACTED = r"the read did not complete\. The cause has been logged"
 

@@ -17,6 +17,9 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
 
 
 def _empty_parquet(directory):

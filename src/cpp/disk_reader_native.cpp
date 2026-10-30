@@ -35,17 +35,6 @@ struct FileListGuard {
     }
 };
 
-struct FileNamesGuard {
-    char** files = nullptr;
-    size_t count = 0;
-
-    ~FileNamesGuard() {
-        if (files != nullptr) {
-            free_file_names(files, count);
-        }
-    }
-};
-
 struct MmapEntry {
     unsigned char* ptr = nullptr;
     size_t size = 0;
@@ -78,19 +67,6 @@ inline int normalize_error_code(int rc) {
     throw nb::python_error();
 }
 
-bool stat_file_size(const char* path, size_t& out_size) {
-    struct stat st {};
-    if (stat(path, &st) != 0) {
-        return false;
-    }
-    if (st.st_size < 0) {
-        out_size = 0;
-    } else {
-        out_size = static_cast<size_t>(st.st_size);
-    }
-    return true;
-}
-
 nb::object make_memoryview_from_object(PyObject* obj) {
     PyObject* mv = PyMemoryView_FromObject(obj);
     if (mv == nullptr) {
@@ -102,70 +78,6 @@ nb::object make_memoryview_from_object(PyObject* obj) {
 nb::object make_empty_memoryview() {
     nb::bytearray empty(nullptr, 0);
     return make_memoryview_from_object(empty.ptr());
-}
-
-nb::object read_file_impl(nb::str path, bool sequential, bool willneed, bool drop_after) {
-    const char* c_path = path.c_str();
-    size_t size = 0;
-
-    if (!stat_file_size(c_path, size)) {
-        raise_path_error(-errno, c_path, "Failed to stat file");
-    }
-
-    if (size == 0) {
-        return make_empty_memoryview();
-    }
-
-    nb::bytearray buffer(nullptr, size);
-    auto* dst = reinterpret_cast<unsigned char*>(buffer.data());
-    size_t out_len = 0;
-
-    int rc = read_all_pread(c_path, dst, &out_len, sequential, willneed, drop_after);
-    if (rc != 0) {
-        raise_path_error(rc, c_path, "Failed to read file");
-    }
-
-    if (out_len < size) {
-        buffer.resize(out_len);
-    }
-
-    return make_memoryview_from_object(buffer.ptr());
-}
-
-nb::object read_slice_impl(nb::str path, size_t offset, size_t length, 
-                           bool sequential, bool willneed, bool drop_after) {
-    const char* c_path = path.c_str();
-    size_t file_size = 0;
-
-    if (!stat_file_size(c_path, file_size)) {
-        raise_path_error(-errno, c_path, "Failed to stat file");
-    }
-
-    // Clamp to valid range
-    if (offset >= file_size) {
-        return make_empty_memoryview();
-    }
-
-    size_t to_read = (offset + length > file_size) ? (file_size - offset) : length;
-    
-    if (to_read == 0) {
-        return make_empty_memoryview();
-    }
-
-    nb::bytearray buffer(nullptr, to_read);
-    auto* dst = reinterpret_cast<unsigned char*>(buffer.data());
-    size_t out_len = 0;
-
-    int rc = read_slice_pread(c_path, offset, length, dst, &out_len, sequential, willneed, drop_after);
-    if (rc != 0) {
-        raise_path_error(rc, c_path, "Failed to read file slice");
-    }
-
-    if (out_len < to_read) {
-        buffer.resize(out_len);
-    }
-
-    return make_memoryview_from_object(buffer.ptr());
 }
 
 void parse_extensions(nb::handle extensions_obj, std::vector<std::string>& storage) {
@@ -196,42 +108,6 @@ void parse_extensions(nb::handle extensions_obj, std::vector<std::string>& stora
 }  // namespace
 
 void register_disk_reader(nb::module_ &m) {
-    m.def(
-        "read_file",
-        [](nb::str path, bool sequential, bool willneed, bool drop_after) {
-            return read_file_impl(path, sequential, willneed, drop_after);
-        },
-        nb::arg("path"),
-        nb::arg("sequential") = true,
-        nb::arg("willneed") = true,
-        nb::arg("drop_after") = false
-    );
-
-    m.def(
-        "read_file_to_bytes",
-        [](nb::str path, bool sequential, bool willneed, bool drop_after) {
-            nb::object mv = read_file_impl(path, sequential, willneed, drop_after);
-            return nb::bytes(nb::module_::import_("builtins").attr("bytes")(mv));
-        },
-        nb::arg("path"),
-        nb::arg("sequential") = true,
-        nb::arg("willneed") = true,
-        nb::arg("drop_after") = false
-    );
-
-    m.def(
-        "read_file_slice",
-        [](nb::str path, size_t offset, size_t length, bool sequential, bool willneed, bool drop_after) {
-            return read_slice_impl(path, offset, length, sequential, willneed, drop_after);
-        },
-        nb::arg("path"),
-        nb::arg("offset"),
-        nb::arg("length"),
-        nb::arg("sequential") = true,
-        nb::arg("willneed") = true,
-        nb::arg("drop_after") = false
-    );
-
     m.def(
         "read_file_ranges",
         [](nb::str path, nb::sequence ranges_seq) -> nb::list {
@@ -292,20 +168,6 @@ void register_disk_reader(nb::module_ &m) {
     );
 
     m.def(
-        "read_file_slice_to_bytes",
-        [](nb::str path, size_t offset, size_t length, bool sequential, bool willneed, bool drop_after) {
-            nb::object mv = read_slice_impl(path, offset, length, sequential, willneed, drop_after);
-            return nb::bytes(nb::module_::import_("builtins").attr("bytes")(mv));
-        },
-        nb::arg("path"),
-        nb::arg("offset"),
-        nb::arg("length"),
-        nb::arg("sequential") = true,
-        nb::arg("willneed") = true,
-        nb::arg("drop_after") = false
-    );
-
-    m.def(
         "list_directory",
         [](nb::str path) {
             const char* c_path = path.c_str();
@@ -330,42 +192,6 @@ void register_disk_reader(nb::module_ &m) {
             return out;
         },
         nb::arg("path")
-    );
-
-    m.def(
-        "list_files",
-        [](nb::str path, nb::handle extensions_obj) {
-            const char* c_path = path.c_str();
-
-            std::vector<std::string> ext_storage;
-            parse_extensions(extensions_obj, ext_storage);
-
-            std::vector<const char*> ext_ptrs;
-            ext_ptrs.reserve(ext_storage.size());
-            for (const std::string& ext : ext_storage) {
-                ext_ptrs.push_back(ext.c_str());
-            }
-
-            FileNamesGuard guard {};
-            int rc = list_matching_files(
-                c_path,
-                ext_ptrs.empty() ? nullptr : ext_ptrs.data(),
-                ext_ptrs.size(),
-                &guard.files,
-                &guard.count
-            );
-            if (rc != 0) {
-                raise_path_error(rc, c_path, "Failed to list files");
-            }
-
-            nb::list out;
-            for (size_t i = 0; i < guard.count; ++i) {
-                out.append(nb::str(guard.files[i] ? guard.files[i] : ""));
-            }
-            return out;
-        },
-        nb::arg("path"),
-        nb::arg("extensions")
     );
 
     m.def(
@@ -447,54 +273,6 @@ void register_disk_reader(nb::module_ &m) {
             return nb::steal<nb::object>(mv);
         },
         nb::arg("path")
-    );
-
-    m.def(
-        "read_file_mmap_slice",
-        [](nb::str path, size_t offset, size_t length) {
-            const char* c_path = path.c_str();
-            size_t base_size = 0;
-            if (!stat_file_size(c_path, base_size)) {
-                raise_path_error(-errno, c_path, "Failed to stat file");
-            }
-
-            unsigned char* mapped_data = nullptr;
-            size_t mapped_size = 0;
-
-            int rc = read_slice_mmap(c_path, offset, length, &mapped_data, &mapped_size);
-            if (rc != 0) {
-                raise_path_error(rc, c_path, "Failed to mmap file slice");
-            }
-
-            if (mapped_data == nullptr || mapped_size == 0) {
-                return make_empty_memoryview();
-            }
-
-            // read_slice_mmap maps the whole file and returns base + offset.
-            // Track the real base pointer so unmap_memory() releases the correct mapping.
-            unsigned char* base_ptr = mapped_data - offset;
-
-            PyObject* mv = PyMemoryView_FromMemory(
-                reinterpret_cast<char*>(mapped_data),
-                static_cast<Py_ssize_t>(mapped_size),
-                PyBUF_READ
-            );
-            if (mv == nullptr) {
-                unmap_memory_c(base_ptr, base_size);
-                throw nb::python_error();
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(g_mmap_mutex);
-                Py_INCREF(mv);
-                g_mmaps.emplace(mv, MmapEntry{base_ptr, base_size});
-            }
-
-            return nb::steal<nb::object>(mv);
-        },
-        nb::arg("path"),
-        nb::arg("offset"),
-        nb::arg("length")
     );
 
     m.def(

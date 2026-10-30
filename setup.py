@@ -1304,14 +1304,6 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # E.21b: morsel_ops.distinct — full implementation (Morsel.c_hash + _resolve_columns_to_indices now live).
-    Extension(
-        "opteryx.compiled.morsel_ops.distinct",
-        sources=["opteryx/compiled/morsel_ops/distinct.pyx"],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
     # NOTE: morsel_ops.sort moved to draken.morsels.sort (a Draken core primitive
     # built by build_common.draken_rugo_extensions, shipped in both wheels).
     # Thread pool (BS::thread_pool via BSThreadPoolBridge). thread_pool_bridge.cpp
@@ -1569,19 +1561,6 @@ extensions.append(
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
         language="c++",
-    )
-)
-
-extensions.append(
-    Extension(
-        "opteryx.compiled.io.process_ring",
-        sources=[
-            "opteryx/compiled/io/process_ring.pyx",
-        ],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,  # Pure C, no C++ needed
-        extra_link_args=LD_EXTRA,
-        language="c",
     )
 )
 

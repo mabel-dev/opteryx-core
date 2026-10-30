@@ -32,6 +32,8 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import NotSupportedError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 UTC = datetime.timezone.utc
 
 

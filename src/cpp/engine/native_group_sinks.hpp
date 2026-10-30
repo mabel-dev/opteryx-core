@@ -3098,7 +3098,14 @@ struct UngroupedAggSink : Sink {
                         size_t sp = items[it].first;
                         size_t part = items[it].second;
                         auto& list = g.dpending[sp][part];
+                        // Size the union once from the exact sum of worker sets: no doubling
+                        // rehashes. Q04 0.94x Mac / 0.94x x86 (2026-10-30 A/B); a largest-set
+                        // base on top measured nothing (0.999-1.011) and was dropped.
+                        size_t total = 0;
+                        for (const UCDPartition& d : list) total += d.size();
                         UCDPartition merged = std::move(list[0]);
+                        merged.seen.reserve(total);
+                        merged.distinct.reserve(total);
                         int64_t cnt = static_cast<int64_t>(merged.size());
                         for (size_t i = 1; i < list.size(); ++i) {
                             cnt += merged.absorb(list[i]);

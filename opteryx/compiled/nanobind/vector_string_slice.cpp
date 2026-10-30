@@ -34,6 +34,19 @@ namespace nb = nanobind;
 // Helpers
 // ---------------------------------------------------------------------------
 
+// VARCHAR slices bytes: a slice that starts or ends inside a multi-byte UTF-8
+// character is not text and fails every decode downstream, so it is refused.
+static inline void refuse_split_char(DrakenType type, const uint8_t* data, uint32_t blen,
+                                     uint32_t off, uint32_t len) {
+    if (type != DRAKEN_VARCHAR || len == 0) return;
+    auto continuation = [&](uint32_t b) { return b < blen && (data[b] & 0xC0u) == 0x80u; };
+    if (continuation(off) || continuation(off + len))
+        throw std::invalid_argument(
+            "SUBSTRING/LEFT/RIGHT on VARCHAR counts bytes, and this slice would cut a "
+            "multi-byte UTF-8 character in half. Cast the value to NVARCHAR to slice by "
+            "character, e.g. SUBSTRING(CAST(col AS NVARCHAR), 2, 1)");
+}
+
 static inline bool is_valid_at(const DrakenVector* dv, uint32_t i) noexcept {
     if (!dv->validity) return true;
     return ((dv->validity[i >> 3] >> (i & 7u)) & 1u) != 0u;
@@ -224,6 +237,7 @@ static nb::object impl_slice_left(nb::object str_obj, nb::object len_obj) {
         }
         if (take > unit_len) take = unit_len;
         const uint32_t take_bytes = is_utf8 ? cp_to_byte(sdata, slen, take) : take;
+        refuse_split_char(dv->type, sdata, slen, 0, take_bytes);
         out.emit_bytes(i, sdata, take_bytes);
     }
     return out.finish();
@@ -263,6 +277,7 @@ static nb::object impl_slice_right(nb::object str_obj, nb::object len_obj) {
             const uint32_t start_byte = cp_to_byte(sdata, slen, start_unit);
             out.emit_bytes(i, sdata + start_byte, slen - start_byte);
         } else {
+            refuse_split_char(dv->type, sdata, slen, start_unit, take);
             out.emit_bytes(i, sdata + start_unit, take);
         }
     }
@@ -321,6 +336,7 @@ static nb::object impl_substring(nb::object str_obj, nb::object from_obj, nb::ob
             const uint32_t e_byte = cp_to_byte(sdata, slen, s_idx + take);
             out.emit_bytes(i, sdata + s_byte, e_byte - s_byte);
         } else {
+            refuse_split_char(dv->type, sdata, slen, s_idx, take);
             out.emit_bytes(i, sdata + s_idx, take);
         }
     }

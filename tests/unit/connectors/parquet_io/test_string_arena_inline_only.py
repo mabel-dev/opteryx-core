@@ -27,6 +27,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 import opteryx
 from rugo.parquet import write_parquet
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 ROWS = 3000
 SLOT_BYTES = 16
 

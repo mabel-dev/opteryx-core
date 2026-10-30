@@ -107,5 +107,22 @@ def test_limit_below_correlation_and_scalar_top1_still_decorrelate():
     ) == 4
 
 
+def test_count_over_an_untyped_null_column_is_zero():
+    # A NULL-typed vector used to carry no validity bitmap, which every consumer
+    # reads as "all valid": COUNT(NULL) counted every row.
+    assert _scalar("SELECT COUNT(NULL) FROM $planets") == 0
+    assert _scalar("SELECT COUNT(x) FROM (SELECT NULL AS x FROM $planets) AS s") == 0
+    assert _scalar("SELECT COUNT(*) FROM (SELECT NULL AS x FROM $planets) AS s WHERE x IS NULL") == 9
+
+
+def test_varchar_slice_that_splits_a_character_is_refused():
+    # VARCHAR slices bytes; cutting 'é' in half used to produce non-text bytes
+    # that crashed on the way back to Python.
+    with pytest.raises(Exception, match="NVARCHAR"):
+        _scalar("SELECT SUBSTRING('éb', 2, 1)")
+    assert _scalar("SELECT SUBSTRING('éb', 1, 2)") == "é"
+    assert _scalar("SELECT SUBSTRING(CAST('éb' AS NVARCHAR), 2, 1)") == "b"
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

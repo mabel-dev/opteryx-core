@@ -35,6 +35,8 @@ from rugo import avro, csv, jsonl, orc, parquet
 
 from _recording_object_store import Store
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 ROWS = 40
 EXTENSIONS = {"parquet": "parquet", "avro": "avro", "jsonl": "jsonl", "csv": "csv", "orc": "orc"}
 FUNCTIONS = {"parquet": "READ_PARQUET", "avro": "READ_AVRO", "jsonl": "READ_JSONL", "csv": "READ_CSV", "orc": "READ_ORC"}

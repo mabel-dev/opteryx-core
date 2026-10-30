@@ -24,12 +24,15 @@ import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import opteryx
 from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
 from opteryx.managers.execution.compiler import _chunk_cache_admission
+
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
 
 ROW_GROUP_SIZE = 4_000
 N = ROW_GROUP_SIZE * 5

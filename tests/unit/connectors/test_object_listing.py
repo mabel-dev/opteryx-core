@@ -26,6 +26,8 @@ from opteryx.connectors.io_systems.object_listing import list_s3_objects
 from opteryx.exceptions import DatasetReadError
 from _recording_object_store import Store
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 UPDATED = "2026-10-25T21:02:08.697Z"
 
 

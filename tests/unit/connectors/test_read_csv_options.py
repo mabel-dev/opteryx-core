@@ -19,6 +19,8 @@ import opteryx
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidFunctionParameterError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 
 def _run(sql):
     session = opteryx.session()

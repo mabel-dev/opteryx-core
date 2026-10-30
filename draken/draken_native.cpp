@@ -9241,14 +9241,14 @@ NB_MODULE(draken_native, m) {
         "nullable: optional list of bool (True=valid); omit for all-valid.");
 
     // D.11 — NULL vector factory.
-    // A null vector carries no data and no validity buffer; type tag alone is the signal.
-    // Every row is null. Build from a row count or equivalently from [None]*n.
+    // A null vector carries no data and an all-zero validity bitmap; every row is null.
+    // Build from a row count or equivalently from [None]*n.
     m.def("vector_null_from_length",
         [](uint32_t length) { return make_null_vector(length); },
         nb::arg("length"),
         "Build a NULL Vector of the given length. All rows are null.\n"
-        "No data or validity buffers are allocated; type==NULL is self-describing.\n"
-        "Equivalent to ingesting [None]*length but without allocating any storage.");
+        "No data buffer; an all-zero validity bitmap marks every row null.\n"
+        "Equivalent to ingesting [None]*length.");
 
     // D.11 — fp16 embedding vector factory.
     // Physical: uint16_t[length * dimension] — dimension fp16 values per row.

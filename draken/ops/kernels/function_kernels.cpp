@@ -2150,6 +2150,21 @@ inline uint32_t fk_cp_to_byte(const uint8_t* data, uint32_t blen, long target) {
     return blen;
 }
 
+// VARCHAR slices bytes; a slice whose start or end lands inside a multi-byte
+// UTF-8 character produces bytes that are not text (and fail every decode
+// downstream), so it is refused rather than returned.
+inline bool fk_cuts_utf8_char(const uint8_t* data, uint32_t blen, uint32_t off, uint32_t len) {
+    auto continuation = [&](uint32_t b) { return b < blen && (data[b] & 0xC0u) == 0x80u; };
+    return len > 0 && (continuation(off) || continuation(off + len));
+}
+
+inline VecResult fk_split_char_error() {
+    return draken_error_sentinel(
+        "SUBSTRING/LEFT/RIGHT on VARCHAR counts bytes, and this slice would cut a "
+        "multi-byte UTF-8 character in half. Cast the value to NVARCHAR to slice by "
+        "character, e.g. SUBSTRING(CAST(col AS NVARCHAR), 2, 1)");
+}
+
 inline void fk_substr_range(const uint8_t* data, uint32_t blen, bool is_utf8,
                             long start0, bool has_count, long count,
                             uint32_t* out_off, uint32_t* out_len) {
@@ -2217,11 +2232,23 @@ VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t 
                                                   &slots, &arena_unused, &validity_unused);
     if (block == nullptr) return draken_error_sentinel("draken_substring: allocation failed");
 
+    const bool refuse_split = v->type == DRAKEN_VARCHAR;
+    std::vector<uint8_t> live;
+    const uint8_t* lv = nullptr;
+    bool lv_ready = false;
     for (uint32_t j = 0; j < k; ++j) {
         const DrakenStringSlot* slot = &sa->slots[j];
         const uint8_t* src = str_data(slot, sa->arena);
         uint32_t off, len;
         fk_substr_range(src, str_length(slot), is_utf8, start0, has_count, c->count, &off, &len);
+        if (refuse_split && fk_cuts_utf8_char(src, str_length(slot), off, len)) {
+            // Only a value some valid row reads can fail the statement.
+            if (!lv_ready) { lv = kernel_live_slots(v, live); lv_ready = true; }
+            if (lv == nullptr || lv[j]) {
+                draken_free(block);
+                return fk_split_char_error();
+            }
+        }
         const uint8_t* sub = src + off;
         if (len <= STR_INLINE_MAX)
             str_init_inline(&slots[j], sub, len);
@@ -2342,8 +2369,13 @@ VecResult fk_substring_dynamic_impl(FkSubstrDynMode mode, const DrakenVector* co
                 str_init_null(&slots[i]);
                 continue;
             }
-            validity[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
             const DrakenStringSlot* src_slot = &sa->slots[sv->selection[i]];
+            if (sv->type == DRAKEN_VARCHAR &&
+                    fk_cuts_utf8_char(str_data(src_slot, sa->arena), str_length(src_slot), off, len)) {
+                draken_free(block);
+                return fk_split_char_error();
+            }
+            validity[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
             const uint8_t* src = str_data(src_slot, sa->arena) + off;
             if (len <= STR_INLINE_MAX)
                 str_init_inline(&slots[i], src, len);

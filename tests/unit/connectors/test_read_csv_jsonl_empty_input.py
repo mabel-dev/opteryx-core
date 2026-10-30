@@ -41,6 +41,8 @@ import opteryx
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import DatasetReadError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 # A zero-byte file, and files whose only content is blank/whitespace lines.
 EMPTY = ""
 WHITESPACE_JSONL = "   \n\n  \n"

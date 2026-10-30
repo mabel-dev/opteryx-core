@@ -29,6 +29,8 @@ import fastavro
 
 import opteryx
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 T0 = datetime.datetime(2026, 3, 1, 12, 30, 45, 123456, tzinfo=datetime.timezone.utc)
 U1 = uuid.UUID("550e8400-e29b-41d4-a716-446655440000")
 U2 = uuid.UUID("00000000-0000-0000-0000-00000000000f")

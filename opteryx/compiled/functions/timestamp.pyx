@@ -8,20 +8,11 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from libc.time cimport tm, time_t
-from libc.string cimport memset
-from libc.stdint cimport int64_t, int32_t, int16_t, uint8_t, int8_t
+from libc.stdint cimport int32_t, int16_t, uint8_t, int8_t
 from cpython.bytes cimport PyBytes_AS_STRING
 
 import datetime
 
-cdef extern from "time.h":
-    time_t timegm(tm *timeptr)
-
-cdef const int64_t MICROS_PER_SEC = 1_000_000
-cdef int64_t MICROS_PER_MIN = 60 * MICROS_PER_SEC
-cdef int64_t MICROS_PER_HOUR = 60 * MICROS_PER_MIN
-cdef int64_t MICROS_PER_DAY = 24 * MICROS_PER_HOUR
 cdef const unsigned char CHAR_SPACE = 32
 cdef const unsigned char CHAR_T = 84
 cdef const unsigned char CHAR_COLON = 58
@@ -148,37 +139,6 @@ cdef inline ParsedDateTime _parse_iso_parts(bytes bts):
         raise ValueError("Second must be between 0 and 59")
 
     return out
-
-cpdef int64_t parse_iso_timestamp(bytes bts):
-    """
-    Parse a ISO format timestamp string to microseconds after the
-    linux epoch (including negative values)
-    """
-    cdef ParsedDateTime p = _parse_iso_parts(bts)
-    cdef tm t
-    memset(&t, 0, sizeof(tm))
-    t.tm_year = p.year - 1900
-    t.tm_mon = p.month - 1
-    t.tm_mday = p.day
-    t.tm_hour = p.hour
-    t.tm_min = p.minute
-    t.tm_sec = p.second
-
-    cdef time_t epoch = timegm(&t)
-
-    if epoch == -1:
-        # Dates before 1970-01-01 need manual handling
-        dt = datetime.datetime(p.year, p.month, p.day, p.hour, p.minute, p.second, p.micros)
-        delta = dt - datetime.datetime(1970, 1, 1)
-        return int(delta.total_seconds() * MICROS_PER_SEC)
-
-    cdef int64_t result = <int64_t>epoch * MICROS_PER_SEC + p.micros
-    if p.offset_sign:
-        result -= p.offset_sign * (
-            (<int64_t>p.offset_hour * 60 + p.offset_minute) * MICROS_PER_MIN
-        )
-    return result
-
 
 def parse_iso(bytes bts) -> datetime.datetime:
 

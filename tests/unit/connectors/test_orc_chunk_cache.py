@@ -31,6 +31,8 @@ from opteryx.compiled.structures.memory_pool import chunk_cache_stats
 from opteryx.compiled.structures.memory_pool import configure_chunk_cache
 from opteryx.compiled.structures.memory_pool import flush_chunk_cache
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 GIB = 1 << 30
 UTC = datetime.timezone.utc
 ROWS = 120_011

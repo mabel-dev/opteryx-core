@@ -28,6 +28,8 @@ import opteryx
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidFunctionParameterError
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 # What a native scan read error says to the user; the file and cause go to the log.
 _REDACTED = r"the read did not complete\. The cause has been logged"
 

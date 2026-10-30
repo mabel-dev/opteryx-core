@@ -37,6 +37,8 @@ from rugo import parquet as rp
 
 from tests.unit.connectors.parquet_io.test_fetch_blocks import _register_http_workspace
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 SERVER = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../dev/throttle_server.py")
 )

@@ -33,6 +33,8 @@ import pyarrow.orc as po
 
 import opteryx
 
+pytestmark = pytest.mark.usefixtures("allow_local_reads")
+
 UTC = datetime.timezone.utc
 ROWS = 150_007
 NAMES = ["id", "grp", "ts", "word", "real", "pad"]

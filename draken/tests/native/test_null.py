@@ -2,7 +2,7 @@
 Native unit + property tests for the DRAKEN_NULL type (D.11).
 
 Design contract (06_value_encoding.md):
-  - type == NULL ⟹ every row null; no data buffer, no validity buffer.
+  - type == NULL ⟹ every row null; no data buffer, an all-zero validity bitmap.
   - Self-describing: readers short-circuit on the type tag.
   - Ops: hash → null-hash sentinel; compare/between/in_list → all-NULL bool (3VL);
          take/materialize → still null; drop_nulls → empty null; reductions → 0 / raise.
