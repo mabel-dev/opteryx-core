@@ -1,7 +1,7 @@
 import datetime
-import os
 from enum import Enum
 
+from opteryx import config
 from opteryx.third_party.yyjson import dumps as json_dumps
 
 
@@ -77,6 +77,6 @@ def write_billing_event(
 
     structured_log["event"] = event_details
 
-    if os.environ.get("K_SERVICE"):
+    if config.EMIT_BILLING_EVENTS:
         payload = json_dumps(structured_log).decode()
         print(payload, flush=True)

@@ -85,6 +85,13 @@ DISABLE_OPTIMIZER: bool = get_bool("DISABLE_OPTIMIZER", False)
 OPTERYX_DEBUG: bool = get_bool("OPTERYX_DEBUG", False)
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
 
+EMIT_BILLING_EVENTS: bool = get_bool("EMIT_BILLING_EVENTS", False)
+"""Print each billing event (opteryx/managers/billing) to stdout as one JSON line
+with `severity` BILLING, for the log pipeline to ingest. Off by default, so local
+use and tests print nothing; every deployment that bills - the worker on Cloud Run
+and on the VM fleet - sets it explicitly. Deliberately not a session variable: a
+statement must not be able to switch its own billing off."""
+
 MATCH_THRESHOLD: float = float(get("MATCH_THRESHOLD", 0.5))
 """Default cosine similarity at or above which `MATCH (col) AGAINST (str)` is true.
 

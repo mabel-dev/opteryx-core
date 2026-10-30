@@ -117,6 +117,15 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
         def _dataset_location(self, collection, dataset_name):
             return os.path.join(root, self.workspace or "_", collection, dataset_name)
 
+        # Local locations derive from the name, so the "reservation" a CTAS's
+        # pending writers take is just the path create_dataset will use.
+        def _reserve_location(self, identifier):
+            return self._dataset_location(*identifier.split("."))
+
+        def _is_minted_location(self, location):
+            workspace_root = os.path.join(root, self.workspace or "_")
+            return os.path.dirname(os.path.dirname(location)) == workspace_root
+
         def _dataset_doc_ref(self, collection, dataset_name):
             """The one metastore read the borrowed methods make: does the name exist."""
             exists = f"{self.workspace}.{collection}.{dataset_name}" in datasets
@@ -158,14 +167,17 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
                 return "dataset", datasets[key]
             return None, None
 
-        def create_dataset(self, identifier, schema, properties=None, author=None):
+        def create_dataset(self, identifier, schema, properties=None, author=None, location=None):
             if author is None:
                 raise ValueError("author must be provided when creating a dataset")
             key = self._key(identifier)
             if key in datasets:
                 raise DatasetAlreadyExists(f"Dataset already exists: {identifier}")
             collection, name = identifier.split(".")
-            location = self._dataset_location(collection, name)
+            expected = self._dataset_location(collection, name)
+            if location is not None and location != expected:
+                raise ValueError(f"location {location!r} was not reserved for {identifier!r}")
+            location = expected
             os.makedirs(os.path.join(location, "data"), exist_ok=True)
             os.makedirs(os.path.join(location, "metadata"), exist_ok=True)
             metadata = DatasetMetadata(
