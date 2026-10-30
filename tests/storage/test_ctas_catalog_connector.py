@@ -79,6 +79,8 @@ class _CatalogShapedConnector(BaseConnector, Writable):
     be created with. Anything else is a lookup that cannot succeed.
     """
 
+    refuse_next_create = False  # class-level: the factory builds fresh instances
+
     def __init__(self, **kwargs):
         self._relations = {}  # name -> [schema, row_count]
         self.writer_calls = []  # (relation_name, pending_schema)
@@ -116,6 +118,14 @@ class _CatalogShapedConnector(BaseConnector, Writable):
         return _RecordedDataFile(
             f"memory://{relation_name}", [c.name for c in schema.columns]
         )
+
+    def create_relation_with_rows(self, relation_name, schema, rows, author=None, **kwargs):
+        # One publish, as the catalog's single transaction: a refused commit
+        # registers nothing.
+        if type(self).refuse_next_create:
+            type(self).refuse_next_create = False
+            raise RuntimeError("commit refused")
+        self._relations[relation_name] = [schema, rows.record_count()]
 
     def insert(self, relation_name, rows, author=None, **kwargs):
         self._relations[relation_name][1] += rows.record_count()
@@ -156,6 +166,22 @@ def test_ctas_creating_a_new_relation_does_not_ask_the_store_to_find_it():
     # ... and it IS the schema the create then registered, not a copy built
     # somewhere else. A second derivation is what would drift.
     assert connector._relations["ctascat.made"][0] is pending_schema
+
+
+def test_a_refused_ctas_commit_leaves_no_table_and_a_retry_succeeds():
+    # create-then-insert was two commits: a refused insert left an empty, visible
+    # table, and re-running the statement then failed with "already exists".
+    register_workspace("ctascat3", _CatalogShapedConnector)
+    session = opteryx.session()
+    sql = "CREATE TABLE ctascat3.made AS SELECT name FROM $planets"
+
+    _CatalogShapedConnector.refuse_next_create = True
+    with pytest.raises(RuntimeError, match="commit refused"):
+        list(session.execute_to_morsels(sql))
+    assert not _connector("ctascat3.made").relation_exists("ctascat3.made")
+
+    list(opteryx.session().execute_to_morsels(sql))
+    assert _connector("ctascat3.made")._relations["ctascat3.made"][1] == 9
 
 
 def test_writes_to_an_existing_relation_pass_no_pending_schema():

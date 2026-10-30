@@ -147,6 +147,15 @@ class _RecordingStore(LocalStoreConnector):
             relation_name, rows, author=author, commit_message=commit_message, **kwargs
         )
 
+    def create_relation_with_rows(
+        self, relation_name, schema, rows, author=None, commit_message=None, **kwargs
+    ):
+        # A CTAS / CREATE MATERIALIZED VIEW: the create and first write are one publish.
+        _RecordingStore.commits.append((relation_name, commit_message))
+        super().create_relation_with_rows(
+            relation_name, schema, rows, author=author, commit_message=commit_message, **kwargs
+        )
+
     def replace_relation(
         self, relation_name, schema, rows, author=None, commit_message=None, **kwargs
     ):

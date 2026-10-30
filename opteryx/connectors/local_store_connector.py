@@ -371,6 +371,42 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             json.dump(descriptor.to_dict(), f)
         os.replace(tmp_path, dataset_path)
 
+    def create_relation_with_rows(
+        self,
+        relation_name: str,
+        schema: RelationDescriptor,
+        rows,
+        author: Optional[str] = None,
+        location: Optional[str] = None,
+        commit_message: Optional[str] = None,
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
+    ) -> None:
+        """Create a relation holding `rows` as its first snapshot, atomically:
+        dataset.json is written last, so a failure before it leaves no relation.
+
+        `author`, `location`, `commit_message`, `read_sources` and `produced_by`
+        are accepted for the Writable contract and unused here, for the reasons
+        `create_relation` and `insert` give.
+        """
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        if os.path.isfile(os.path.join(relation_dir, "dataset.json")):
+            raise ValueError(f"relation already exists: {relation_name}")
+        self.assert_name_free(relation_name, "table")
+        os.makedirs(relation_dir, exist_ok=True)
+        descriptor = DatasetDescriptor(
+            format_version=1,
+            relation_name=relation_name,
+            schema=schema,
+            current_snapshot=None,
+            created_at=_now_utc_iso(),
+        )
+        with _commit_lock(relation_dir):
+            self._commit_locked(
+                relation_name, _assemble(schema, rows=rows), schema=schema, creating=descriptor
+            )
+
     def drop_relation(
         self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
     ) -> None:
@@ -1854,6 +1890,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_name: str,
         manifest,
         schema: Optional[RelationDescriptor] = None,
+        creating: Optional["DatasetDescriptor"] = None,
     ) -> None:
         """Optimistic concurrency control commit protocol. The caller holds the
         relation's commit lock.
@@ -1873,6 +1910,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 over the snapshot's schema (see `_assemble`)
             schema: Schema for the new snapshot; defaults to the relation's current
                 schema (pass explicitly only when the schema is changing, e.g. REPLACE)
+            creating: the descriptor of a relation being CREATED with this first
+                snapshot (CREATE TABLE AS). There is no dataset.json yet: it is
+                written last, so the relation appears with its data or not at all.
 
         Raises:
             ConcurrentModificationError: If relation was modified concurrently, or a
@@ -1897,7 +1937,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             )
 
         # Step 1: Read base descriptor and capture current snapshot
-        base_descriptor = self._read_dataset_json(relation_dir)
+        dataset_path = os.path.join(relation_dir, "dataset.json")
+        base_descriptor = creating if creating is not None else self._read_dataset_json(relation_dir)
         base_snapshot = base_descriptor.current_snapshot
         new_schema = schema if schema is not None else base_descriptor.schema
 
@@ -1952,9 +1993,13 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if self._pre_commit_recheck_hook:
             self._pre_commit_recheck_hook()
 
-        # Step 6: Re-check dataset.json before final write
-        check_descriptor = self._read_dataset_json(relation_dir)
-        if check_descriptor.current_snapshot != base_snapshot:
+        # Step 6: Re-check dataset.json before final write (a creation must still
+        # find none: another CTAS may have published the name meanwhile)
+        if creating is not None:
+            moved = os.path.isfile(dataset_path)
+        else:
+            moved = self._read_dataset_json(relation_dir).current_snapshot != base_snapshot
+        if moved:
             try:
                 os.remove(snapshot_path)
             except OSError:
@@ -1977,7 +2022,6 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         )
 
         # Step 8: Atomic descriptor write
-        dataset_path = os.path.join(relation_dir, "dataset.json")
         dataset_tmp = dataset_path + ".tmp"
         with open(dataset_tmp, "w") as f:
             json.dump(new_descriptor.to_dict(), f)

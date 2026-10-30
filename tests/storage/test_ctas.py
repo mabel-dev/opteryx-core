@@ -219,12 +219,13 @@ def test_ctas_without_or_replace_existing_still_rejected(tmp_path):
         list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 2 AS a"))
 
 
-def test_ctas_partial_failure_leaves_empty_relation(tmp_path):
+def test_ctas_failed_commit_leaves_no_relation(tmp_path):
     _setup_workspace(tmp_path)
 
-    # Force the snapshot commit to fail by raising in the pre-commit hook.
-    # Because create_relation runs first (lazy on first morsel/EOS) and only
-    # the insert commit fails, the empty dataset.json remains on disk.
+    # Force the snapshot commit to fail by raising in the pre-commit hook. The
+    # relation and its first snapshot are ONE publish (create_relation_with_rows:
+    # dataset.json is written last), so the failure leaves no relation behind -
+    # it used to leave an empty one, and a re-run then failed "already exists".
     from opteryx.connectors import _connector_cache
 
     # Wipe cache so we get a fresh connector instance to attach the hook to.
@@ -247,10 +248,9 @@ def test_ctas_partial_failure_leaves_empty_relation(tmp_path):
     finally:
         conn._pre_commit_recheck_hook = None
 
-    # dataset.json exists (create succeeded)
-    info = _read_dataset_json(tmp_path / "ws", "dst")
-    assert info["current_snapshot"] is None
+    assert not (tmp_path / "ws" / "dst" / "dataset.json").exists()
 
-    # Re-running CTAS without DROP should fail (relation exists).
-    with pytest.raises(ValueError, match="already exists"):
-        list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+    # Re-running the CTAS now succeeds: the name was never taken.
+    list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
+    info = _read_dataset_json(tmp_path / "ws", "dst")
+    assert info["current_snapshot"] is not None

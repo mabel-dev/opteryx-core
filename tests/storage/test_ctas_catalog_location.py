@@ -105,6 +105,12 @@ class _LocatingConnector(BaseConnector, Writable):
         self._relations[relation_name][1] += rows.record_count()
         self.inserted_paths = list(rows.file_paths())
 
+    def create_relation_with_rows(self, relation_name, schema, rows, author=None, location=None, **kwargs):
+        # A CTAS's one publish: created where its files are, holding them.
+        self._relations[relation_name] = [schema, rows.record_count()]
+        self.created_at[relation_name] = location
+        self.inserted_paths = list(rows.file_paths())
+
 
 def _connector(name):
     from opteryx.connectors import connector_factory

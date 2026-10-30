@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from opteryx.compiled.http_client import HttpStatusError
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidFunctionParameterError
@@ -64,6 +65,12 @@ class _FakeAnonymousHttpClient:
         if url in type(self).objects:
             return type(self).objects[url]
         raise RuntimeError("HTTP 403: access denied")
+
+    def head(self, url):
+        type(self).requested.append(url)
+        if url in type(self).objects:
+            return {"content-length": str(len(type(self).objects[url]))}
+        raise HttpStatusError("HTTP 403: access denied", 403)
 
 
 @pytest.fixture(autouse=True)

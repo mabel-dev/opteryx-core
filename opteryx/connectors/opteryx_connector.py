@@ -1902,6 +1902,40 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         located = {} if location is None else {"location": location}
         catalog.create_dataset(relative_id, schema, author=author, **located)
 
+    def create_relation_with_rows(
+        self,
+        relation_name: str,
+        schema,
+        rows,
+        author: Optional[str] = None,
+        location: Optional[str] = None,
+        commit_message: Optional[str] = None,
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
+    ) -> None:
+        """Create the dataset with `rows` as its first snapshot in one catalog
+        transaction (see `create_dataset_with_files`): a CTAS whose commit fails
+        leaves no dataset behind. No sync vector index files: a dataset that does
+        not exist yet has no index defined on it."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        manifest = self._catalog_manifest_bytes("create table as", rows)
+        located = {} if location is None else {"location": location}
+
+        def _commit_create():
+            return catalog.create_dataset_with_files(
+                relative_id,
+                schema,
+                manifest=manifest,
+                author=author,
+                commit_message=commit_message,
+                read_sources=None if read_sources is None else list(read_sources),
+                produced_by=produced_by,
+                **located,
+            )
+
+        self._commit(relation_name, _commit_create)
+
     def drop_relation(
         self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
     ) -> None:

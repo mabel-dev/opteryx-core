@@ -63,6 +63,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         data = self.server.objects.get(parts.path.lstrip("/"))
         self._send(200 if data is not None else 404, data or b"")
 
+    def do_HEAD(self):
+        parts = urllib.parse.urlsplit(self.path)
+        self.server.requests.append((parts.path, parts.query, dict(self.headers)))
+        data = None if self.server.deny else self.server.objects.get(parts.path.lstrip("/"))
+        self.send_response(403 if self.server.deny else 200 if data is not None else 404)
+        self.send_header("Content-Length", str(len(data or b"")))
+        self.end_headers()
+
     def _send(self, status, body):
         self.send_response(status)
         self.send_header("Content-Length", str(len(body)))

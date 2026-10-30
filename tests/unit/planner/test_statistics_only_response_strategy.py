@@ -78,6 +78,7 @@ def make_simple_count_plan(plan_context, count=9, alias="my_count"):
     scan = ScanStep()
     scan.relation = "planets"
     scan.alias = "planets"
+    scan.schema = RelationSchema(name="planets")
     scan.manifest = _manifest(count)
 
     # Aggregate node representing `SELECT COUNT(*) AS alias` over the scan

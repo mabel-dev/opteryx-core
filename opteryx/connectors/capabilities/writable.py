@@ -76,6 +76,30 @@ class Writable:
         """
         raise NotImplementedError
 
+    def create_relation_with_rows(
+        self,
+        relation_name: str,
+        schema: "RelationDescriptor",
+        rows: "NativeManifest",
+        author: Optional[str] = None,
+        location: Optional[str] = None,
+        commit_message: Optional[str] = None,
+        read_sources: Optional[List[dict]] = None,
+        produced_by: Optional[str] = None,
+    ) -> None:
+        """Create a relation and commit `rows` as its first snapshot in ONE
+        atomic publish (CREATE TABLE ... AS): the relation either appears with
+        its data or does not appear at all. `create_relation` then `insert` is
+        two commits, and a failure between them leaves an empty, visible
+        relation whose name a retry finds taken.
+
+        Arguments are those of `create_relation` and `insert`.
+
+        Raises:
+            ValueError: If relation already exists
+        """
+        raise NotImplementedError
+
     def drop_relation(
         self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
     ) -> None:

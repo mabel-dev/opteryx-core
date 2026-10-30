@@ -441,6 +441,22 @@ def test_cardinality_violation_is_refused(merge_env, tmp_path):
     assert sorted(p for p in (tmp_path / "tgt").rglob("*") if p.is_file()) == files_before
 
 
+def test_ctas_through_the_catalog_creates_the_dataset_with_its_rows(merge_env):
+    """CREATE TABLE AS on the catalog connector is ONE publish
+    (create_dataset_with_files): the dataset appears holding its first snapshot."""
+    made = f"{WORKSPACE}.col.made"
+    list(opteryx.session(user="tester").execute_to_morsels(
+        f"CREATE TABLE {made} AS SELECT cve, details FROM {SOURCE}"
+    ))
+    assert sorted(_rows(f"SELECT cve, details FROM {made}")) == [(2, 20), (3, 99), (4, 40)]
+    from opteryx.connectors import connector_factory
+
+    connector = connector_factory(made, telemetry=None)
+    workspace, relative_id = connector._parse_identifier(made)
+    snapshot = connector._get_catalog(workspace).load_dataset(relative_id).snapshot()
+    assert snapshot is not None and snapshot.summary["added-records"] == 3
+
+
 # ── WHEN NOT MATCHED BY SOURCE ──────────────────────────────────────────────
 #
 # The arm acts on target rows the source never mentioned, so the join widens to

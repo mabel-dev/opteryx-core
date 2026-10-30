@@ -168,6 +168,29 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
             return None, None
 
         def create_dataset(self, identifier, schema, properties=None, author=None, location=None):
+            key, ds = self._new_dataset(identifier, schema, properties, author, location)
+            datasets[key] = ds
+            return ds
+
+        def create_dataset_with_files(
+            self, identifier, schema, *, entries=None, manifest=None, author=None,
+            location=None, commit_message=None, read_sources=None, produced_by=None,
+            properties=None,
+        ):
+            # The store entry IS the dataset's visibility: it is published only once
+            # the first snapshot is built, mirroring the real catalog's one transaction.
+            key, ds = self._new_dataset(identifier, schema, properties, author, location)
+            snapshot = ds._stage_add_files(
+                entries=entries, manifest=manifest, author=author,
+                commit_message=commit_message, read_sources=read_sources,
+                produced_by=produced_by,
+            )
+            datasets[key] = ds
+            ds._after_commit(author, snapshot)
+            return ds
+
+        def _new_dataset(self, identifier, schema, properties, author, location):
+            """A dataset object for `identifier`, not yet published to the store."""
             if author is None:
                 raise ValueError("author must be provided when creating a dataset")
             key = self._key(identifier)
@@ -199,8 +222,7 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
             ds = SimpleDataset(identifier=identifier, _metadata=metadata)
             ds.io = io
             ds.catalog = self
-            datasets[key] = ds
-            return ds
+            return key, ds
 
         def drop_dataset(self, identifier, author=None):
             key = self._key(identifier)

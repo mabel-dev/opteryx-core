@@ -76,5 +76,36 @@ def test_position_counts_characters_for_nvarchar():
     assert _scalar("SELECT POSITION('b' IN 'xb')") == 2
 
 
+@pytest.mark.parametrize(
+    "subquery_condition",
+    [
+        "EXISTS (SELECT 1 FROM testdata.satellites AS s WHERE s.planetId = p.id LIMIT 1)",
+        "EXISTS (SELECT 1 FROM testdata.satellites AS s WHERE s.planetId = p.id LIMIT 1 OFFSET 1)",
+        "NOT EXISTS (SELECT 1 FROM testdata.satellites AS s WHERE s.planetId = p.id LIMIT 1)",
+        "p.id IN (SELECT s.planetId FROM testdata.satellites AS s WHERE s.planetId = p.id LIMIT 1)",
+        "(SELECT COUNT(*) FROM testdata.satellites AS s WHERE s.planetId = p.id LIMIT 1) > 1",
+    ],
+)
+def test_correlated_limit_is_refused_not_applied_globally(subquery_condition):
+    # Lifting the correlation into a join key put the LIMIT above every binding:
+    # EXISTS ... LIMIT 1 kept only Earth (DuckDB: 7 planets).
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    with pytest.raises(UnsupportedSyntaxError):
+        _scalar(f"SELECT COUNT(*) FROM testdata.planets AS p WHERE {subquery_condition}")
+
+
+def test_limit_below_correlation_and_scalar_top1_still_decorrelate():
+    # Expected values checked against DuckDB 2.0.0.
+    assert _scalar(
+        "SELECT COUNT(*) FROM testdata.planets AS p WHERE EXISTS (SELECT 1 FROM "
+        "(SELECT planetId FROM testdata.satellites ORDER BY id LIMIT 5) AS x WHERE x.planetId = p.id)"
+    ) == 3
+    assert _scalar(
+        "SELECT COUNT(*) FROM testdata.planets AS p WHERE (SELECT s.radius FROM testdata.satellites AS s "
+        "WHERE s.planetId = p.id ORDER BY s.radius DESC LIMIT 1) > 1000"
+    ) == 4
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

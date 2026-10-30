@@ -193,18 +193,18 @@ class InsertNode(BasePlanNode):
                     # Created where its files already are, when the store chose
                     # that location (see DataFileStream.pending_location). A
                     # CTAS that wrote no file has none, and the store picks.
+                    # One publish: the table appears with its rows or not at all.
                     located = (
                         {} if self._stream.pending_location is None
                         else {"location": self._stream.pending_location}
                     )
-                    self.connector.create_relation(
-                        self.relation_name, self.target_schema, author=self._author, **located
-                    )
-                    self.connector.insert(
-                        self.relation_name, rows, author=self._author,
+                    self.connector.create_relation_with_rows(
+                        self.relation_name, self.target_schema, rows,
+                        author=self._author,
                         commit_message=self._commit_message,
                         read_sources=self.read_sources,
                         produced_by=self.produced_by,
+                        **located,
                     )
                 else:
                     self.connector.insert(

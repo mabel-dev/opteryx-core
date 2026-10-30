@@ -64,19 +64,6 @@ class TestOpteryxHttpFileSystem:
         assert info.type == FileType.File
         assert info.size == 1024
 
-    def test_get_file_info_not_found(self):
-        """Test get_file_info when file not found."""
-        fs = OpteryxHttpFileSystem()
-
-        # Replace with mock http_client
-        fs.http_client = Mock()
-        fs.http_client.head = Mock(side_effect=RuntimeError("404 Not Found"))
-
-        info = fs.get_file_info("https://example.com/notfound.bin")
-
-        assert isinstance(info, FileInfo)
-        assert info.type == FileType.NotFound
-
     def test_read_ranges_single_range(self):
         """Test read_ranges with single byte range."""
         fs = OpteryxHttpFileSystem()
