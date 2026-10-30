@@ -153,15 +153,20 @@ class OpteryxHttpFileSystem:
         if single_path:
             paths = [paths]
 
+        from opteryx.compiled.http_client import HttpStatusError
+
         def _head_one(idx: int, path: str) -> Tuple[int, FileInfo]:
             url = self._normalize_url(path)
             try:
                 headers = self.http_client.head(url)
-                # HTTP HEAD succeeded (http_client raises RuntimeError on error)
-                size = int(headers.get("content-length", 0))
-                return idx, FileInfo(path=path, type=FileType.File, size=size)
-            except Exception:
-                return idx, FileInfo(path=path, type=FileType.NotFound)
+            except HttpStatusError as err:
+                # Only the server saying "no such object" is NotFound; a 403, a
+                # timeout or a refused address is a failure and must say so.
+                if err.status in (404, 410):
+                    return idx, FileInfo(path=path, type=FileType.NotFound)
+                raise
+            size = int(headers.get("content-length", 0))
+            return idx, FileInfo(path=path, type=FileType.File, size=size)
 
         # Fast path: avoid pool overhead for single file
         if len(paths) == 1:

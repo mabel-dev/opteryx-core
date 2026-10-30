@@ -379,7 +379,12 @@ int read_directory_entries(const std::string& dir_path, Visit&& visit) {
     alignas(8) char buf[64 * 1024];
     for (;;) {
         const int n = getattrlistbulk(fd, &al, buf, sizeof buf, 0);
-        if (n <= 0) break;   // 0: end of directory; -1: stop, as a readdir error did
+        if (n == 0) break;   // end of directory
+        if (n < 0) {         // a failed read must not pass for the end of the listing
+            const int e = errno;
+            close(fd);
+            return -e;
+        }
         const char* p = buf;
         for (int k = 0; k < n; ++k) {
             const char* rec = p;
@@ -417,8 +422,13 @@ int read_directory_entries(const std::string& dir_path, Visit&& visit) {
                 memcpy(&size, p, sizeof size);
                 have_size = true;
             }
-            // An entry whose attributes could not be read is skipped, as one whose
-            // lstat failed was.
+            // An entry whose attributes could not be read fails the listing (a
+            // silently short listing is a wrong COUNT(*)); one that vanished
+            // since the directory was read was never there to count.
+            if (err != 0 && err != ENOENT) {
+                close(fd);
+                return -static_cast<int>(err);
+            }
             if (err == 0 && name != nullptr) {
                 WalkEntry e{name, 0, 0, 0};
                 if (type == VDIR) {
@@ -441,7 +451,17 @@ int read_directory_entries(const std::string& dir_path, Visit&& visit) {
     if (!dir) return -errno;
     const int dfd = dirfd(dir);
     struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
+    for (;;) {
+        errno = 0;
+        entry = readdir(dir);
+        if (entry == nullptr) {
+            if (errno != 0) {   // a read error, not the end of the directory
+                const int e = errno;
+                closedir(dir);
+                return -e;
+            }
+            break;
+        }
         const char* name = entry->d_name;
         if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) continue;
         int kind = 0;
@@ -455,14 +475,24 @@ int read_directory_entries(const std::string& dir_path, Visit&& visit) {
 #endif
         if (kind == 0) {
             // Type unknown: lstat semantics, so a link is never resolved to its target.
-            if (fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+            if (fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+                if (errno == ENOENT) continue;   // removed since readdir: not a loss
+                const int e = errno;
+                closedir(dir);
+                return -e;
+            }
             if (S_ISDIR(st.st_mode)) kind = 1;
             else if (S_ISREG(st.st_mode)) { kind = 2; have_stat = true; }
             else continue;
         }
         WalkEntry e{name, kind, 0, 0};
         if (kind == 2) {
-            if (!have_stat && fstatat(dfd, name, &st, 0) != 0) continue;
+            if (!have_stat && fstatat(dfd, name, &st, 0) != 0) {
+                if (errno == ENOENT) continue;   // removed since readdir: not a loss
+                const int e = errno;
+                closedir(dir);
+                return -e;
+            }
             e.size = (int64_t)st.st_size;
             e.mtime_ns = stat_mtime_ns(&st);
         }
@@ -532,12 +562,12 @@ int list_files_with_info(const char* base_path, const char** extensions, size_t 
                 out_list.push_back(info);
             }
         });
-        if (rc != 0) {
-            // The root must open; a subdirectory that cannot is skipped, as before.
-            if (root) {
-                for (auto& info : out_list) free(info.name);
-                return rc;
-            }
+        // Any directory that cannot be read fails the listing: skipping an
+        // unreadable partition returned a short dataset with no error. One that
+        // vanished mid-walk (ENOENT below the root) held nothing to miss.
+        if (rc != 0 && !(rc == -ENOENT && !root)) {
+            for (auto& info : out_list) free(info.name);
+            return rc;
         }
         root = false;
     }

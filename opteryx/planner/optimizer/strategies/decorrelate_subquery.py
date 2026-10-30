@@ -2433,7 +2433,44 @@ def _materialize_inner_key(inner_plan: LogicalPlan, inner_key):
     return reference
 
 
-def _lift_correlations(inner_plan: LogicalPlan):
+def _limit_above_correlation(inner_plan: LogicalPlan):
+    """
+    The nid of a Limit that consumes (directly or not) a filter referencing the
+    outer query, else None.
+
+    Lifting that filter into a join key moves the correlation ABOVE the Limit, so
+    the Limit would count rows over every binding at once instead of per outer
+    row (`EXISTS (... WHERE s.k = o.k LIMIT 1)` kept one outer row). A Limit
+    below the correlated filter is unaffected and not reported.
+    """
+    frontier = [
+        nid
+        for nid, node in inner_plan.nodes(True)
+        if node.node_type == LogicalPlanStepType.Filter
+        and _find_outer_reference(node.condition) is not None
+    ]
+    seen = set()
+    while frontier:
+        nid = frontier.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        for _source, consumer_nid, _relation in inner_plan.outgoing_edges(nid):
+            if inner_plan[consumer_nid].node_type == LogicalPlanStepType.Limit:
+                return consumer_nid
+            frontier.append(consumer_nid)
+    return None
+
+
+_CORRELATED_LIMIT_REFUSAL = (
+    "A correlated subquery with **LIMIT** or **OFFSET** above its correlation is not "
+    "supported: the limit would apply across all outer rows instead of per outer row. "
+    "Remove the **LIMIT**/**OFFSET** (it does not change **EXISTS**/**IN** with "
+    "**LIMIT** 1 or more), or for a scalar subquery use **ORDER BY** ... **LIMIT** 1."
+)
+
+
+def _lift_correlations(inner_plan: LogicalPlan, *, per_binding_limit_handled: bool = False):
     """
     Pull correlated equalities out of a subquery's own filters.
 
@@ -2443,7 +2480,14 @@ def _lift_correlations(inner_plan: LogicalPlan):
 
     Orientation comes from the binder's resolution, not from the query text — see
     the module docstring.
+
+    Refuses a Limit above a correlated filter (`_limit_above_correlation`) unless
+    the caller sets `per_binding_limit_handled` — the scalar path, which rewrites
+    `ORDER BY ... LIMIT 1` per binding and refuses any other Limit itself.
     """
+    if not per_binding_limit_handled and _limit_above_correlation(inner_plan) is not None:
+        raise UnsupportedSyntaxError(_CORRELATED_LIMIT_REFUSAL)
+
     correlations: list = []
     for inner_nid, inner_node in list(inner_plan.nodes(True)):
         if inner_node.node_type != LogicalPlanStepType.Filter:
@@ -3335,7 +3379,8 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     inner_plan = _consumable(subquery.value)
 
     # --- pull the correlation out of the subquery -----------------------------
-    key_pairs, residual = _lift_correlations(inner_plan)
+    correlated_limit = _limit_above_correlation(inner_plan)
+    key_pairs, residual = _lift_correlations(inner_plan, per_binding_limit_handled=True)
 
     # A scalar subquery yields a VALUE, so a correlated non-equality has nowhere to
     # go: unlike SEMI/ANTI there is no per-pair existence test to fold it into.
@@ -3371,6 +3416,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
             window_rewritten = _rewrite_order_limit_to_row_number(
                 inner_plan, key_pairs, plan_context=plan_context
             )
+    # Only the per-binding top-1 rewrite consumes a Limit above the correlation.
+    if correlated_limit is not None and not window_rewritten:
+        raise UnsupportedSyntaxError(_CORRELATED_LIMIT_REFUSAL)
 
     # Read the subquery's value column before the key widens the projection.
     value_column = _output_column(inner_plan)

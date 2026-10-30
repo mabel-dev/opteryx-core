@@ -50,6 +50,8 @@ def test_on_prints_one_billing_line(monkeypatch, capsys):
     assert record["severity"] == "BILLING"
     assert record["billing_event"] == "QUERY_EXECUTION"
     assert record["billing_account"] == "acct"
+    # RFC 3339 UTC: one zone designator, "Z" - not "+00:00Z".
+    assert record["timestamp"].endswith("Z") and "+00:00" not in record["timestamp"]
 
 
 def test_off_still_validates(monkeypatch):

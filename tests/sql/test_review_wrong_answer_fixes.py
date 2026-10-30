@@ -62,5 +62,19 @@ def test_rounding_to_zero_groups_with_zero():
     assert _scalar("SELECT COUNT(DISTINCT c) FROM (SELECT ROUND(x) AS c FROM UNNEST([-0.4, 0.0]) AS x)") == 1
 
 
+def test_statistics_only_answer_needs_the_scan_column_itself():
+    # The file statistics describe testdata.planets.id; a subquery that redefines
+    # `id` shares the name but not the values.
+    assert _scalar("SELECT MAX(id) FROM testdata.planets") == 9
+    assert _scalar("SELECT MAX(id) FROM (SELECT -id AS id FROM testdata.planets) AS s") == -1
+    assert _scalar("SELECT MIN(id) FROM (SELECT id + 100 AS id FROM testdata.planets) AS s") == 101
+
+
+def test_position_counts_characters_for_nvarchar():
+    # NVARCHAR counts characters (as SUBSTRING does); VARCHAR stays byte-based.
+    assert _scalar("SELECT POSITION('b' IN CAST('éb' AS NVARCHAR))") == 2
+    assert _scalar("SELECT POSITION('b' IN 'xb')") == 2
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

@@ -307,6 +307,16 @@ class FirestoreConnector(BaseConnector):
             or not all(isinstance(name, str) and name for name in collections)
         ):
             raise ValueError("FirestoreConnector: 'collections' must be a list of collection ids")
+        from opteryx import config
+
+        # Ambient mode reads with the SERVER's identity, so the deployment - not the
+        # binding - decides which projects that identity may be pointed at.
+        if credentials is None and project not in config.FIRESTORE_AMBIENT_PROJECTS:
+            raise PermissionError(
+                f"FirestoreConnector: project '{project}' is not allowed to use this "
+                "server's own credentials. Store a service-account key on the binding "
+                "('credentials'), or add the project to FIRESTORE_AMBIENT_PROJECTS."
+            )
         self.project = project
         # None exposes every top-level collection; a list exposes only those.
         self.collections = None if collections is None else frozenset(collections)

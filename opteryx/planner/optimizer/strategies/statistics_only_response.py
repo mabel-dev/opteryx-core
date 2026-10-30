@@ -686,6 +686,23 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         if not agg_metadata:
             return plan
 
+        # The statistics describe the SCAN's columns, looked up by name below. An
+        # aggregate over anything else - `MAX(id)` where a subquery or view made
+        # `id` mean `-id`, or `COUNT(id)` where it means NULL - shares the name
+        # but not the values, and answering it from the scan's stats is wrong.
+        # Only a bare reference to a scan column, by identity, qualifies.
+        scan_identities = {c.identity for c in scan_node.schema.columns}
+        for _agg_func, _column_name, agg in agg_metadata:
+            for param in agg.parameters or ():
+                if param.node_type == NodeType.WILDCARD:
+                    continue
+                if (
+                    param.node_type != NodeType.IDENTIFIER
+                    or param.schema_column is None
+                    or param.schema_column.identity not in scan_identities
+                ):
+                    return plan
+
         # Extract aliases for all aggregates, ALIGNED to agg_metadata by schema
         # identity. The Exit node's column order is NOT guaranteed to match
         # aggregate_node.aggregates order, so positional pairing silently mislabels

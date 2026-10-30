@@ -29,6 +29,15 @@ from opteryx.exceptions import UnsupportedSyntaxError
 ROOT = "projects/p/databases/(default)/documents/"
 
 
+@pytest.fixture(autouse=True)
+def _ambient_project_allowed(monkeypatch):
+    """These tests bind project "p" without stored credentials (ambient mode),
+    which the deployment must allow-list (config.FIRESTORE_AMBIENT_PROJECTS)."""
+    from opteryx import config
+
+    monkeypatch.setattr(config, "FIRESTORE_AMBIENT_PROJECTS", frozenset({"p"}))
+
+
 def _doc(collection, doc_id, **fields):
     return {
         "name": f"{ROOT}{collection}/{doc_id}",
@@ -229,6 +238,14 @@ def test_unknown_config_and_bad_credentials_are_refused():
         FirestoreConnector(project="p", host="x")
     with pytest.raises(ValueError, match="service-account key"):
         FirestoreConnector(project="p", credentials={"project_id": "p"})
+
+
+def test_ambient_credentials_refused_for_a_project_not_allowed():
+    # Without stored credentials the binding reads as the SERVER; any project
+    # the deployment has not allow-listed (another tenant's) is refused.
+    with pytest.raises(PermissionError, match="FIRESTORE_AMBIENT_PROJECTS"):
+        FirestoreConnector(project="someone-elses-project")
+    FirestoreConnector(project="someone-elses-project", credentials='{"k": "v"}')
 
 
 def test_repr_never_shows_the_credential():

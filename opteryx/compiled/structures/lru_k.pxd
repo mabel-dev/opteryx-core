@@ -1,11 +1,11 @@
-# Cython declaration file for LRU_K (backed by C++ LRU2, K=2 fixed)
+# Cython declaration file for LRU_K (backed by C++ LRU2, K = 1 or 2)
 
 from libc.stdint cimport int64_t
 from libcpp.string cimport string
 
 cdef extern from "lru2.hpp" namespace "opteryx" nogil:
     cdef cppclass CppLRU2 "opteryx::LRU2":
-        CppLRU2(int64_t max_size, int64_t max_memory) except +
+        CppLRU2(int64_t max_size, int64_t max_memory, int64_t k) except +
         void set(const char* key, int64_t key_len,
                  const char* value, int64_t val_len,
                  bint evict)

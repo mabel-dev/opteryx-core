@@ -8,10 +8,16 @@
 #include <vector>
 #include <utility>
 #include <functional>
+#include <stdexcept>
 
-// LRU-2 cache: K=2 fixed.
+// LRU-K cache, K = 1 or 2 (default 2).
 //
-// Eviction policy (standard LRU-K with K=2):
+// K=1 is plain LRU: the entry whose most recent access is oldest is evicted. Every
+// access goes to the mature heap at its last-access time; the young heap stays empty.
+// The parquet footer caches use it: under K=2 a long-lived process fills them with
+// footers read twice or more, and a new table's footers only evict each other.
+//
+// Eviction policy for K=2 (standard LRU-K):
 //   - Entries with fewer than 2 accesses ("young") are always evicted before
 //     entries with 2+ accesses ("mature").  Among young entries, the one with
 //     the oldest first-access time is chosen (FIFO).
@@ -28,7 +34,8 @@ namespace opteryx {
 
 class LRU2 {
 public:
-    LRU2(int64_t max_size = 0, int64_t max_memory = 0);
+    // Throws std::invalid_argument unless k is 1 or 2.
+    LRU2(int64_t max_size = 0, int64_t max_memory = 0, int64_t k = 2);
 
     // Returns evicted (key, value); empty strings if no eviction occurred.
     std::pair<std::string, std::string> set(
@@ -93,6 +100,7 @@ private:
 
     int64_t max_size_;
     int64_t max_memory_;
+    int64_t k_;
     int64_t size_;
     int64_t current_memory_;
     uint64_t clock_;
@@ -112,16 +120,24 @@ private:
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
-inline LRU2::LRU2(int64_t max_size, int64_t max_memory)
-    : max_size_(max_size), max_memory_(max_memory),
+inline LRU2::LRU2(int64_t max_size, int64_t max_memory, int64_t k)
+    : max_size_(max_size), max_memory_(max_memory), k_(k),
       size_(0), current_memory_(0), clock_(0), generation_(0),
-      hits_(0), misses_(0), evictions_(0), inserts_(0) {}
+      hits_(0), misses_(0), evictions_(0), inserts_(0) {
+    if (k != 1 && k != 2)
+        throw std::invalid_argument("LRU-K supports K = 1 or 2, got " + std::to_string(k));
+}
 
 inline void LRU2::record_access(Entry& entry, const std::string& key) {
     ++clock_;
     entry.generation = ++generation_;   // invalidates any older heap item for this key
 
-    if (entry.last_access == 0) {
+    if (k_ == 1) {
+        // Plain LRU: one heap, ordered by most recent access.
+        entry.prev_access = entry.last_access;
+        entry.last_access = clock_;
+        mature_heap_.push({clock_, entry.generation, key});
+    } else if (entry.last_access == 0) {
         // First access ever
         entry.last_access = clock_;
         young_heap_.push({clock_, entry.generation, key});

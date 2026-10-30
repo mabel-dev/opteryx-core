@@ -93,6 +93,16 @@ DNS tricks are covered too). Off by default, because on a shared deployment thos
 reads expose the server's own files, environment and internal services. Set it
 for local development and tests."""
 
+FIRESTORE_AMBIENT_PROJECTS: frozenset = frozenset(
+    project.strip()
+    for project in str(get("FIRESTORE_AMBIENT_PROJECTS", "")).split(",")
+    if project.strip()
+)
+"""Comma-separated GCP projects a Firestore binding may read WITHOUT stored
+credentials, using this process's own Google credentials. Empty by default: a
+binding that names no credentials is refused, because the server's identity could
+otherwise read any project that granted it access - another tenant's included."""
+
 EMIT_BILLING_EVENTS: bool = get_bool("EMIT_BILLING_EVENTS", False)
 """Print each billing event (opteryx/managers/billing) to stdout as one JSON line
 with `severity` BILLING, for the log pipeline to ingest. Off by default, so local

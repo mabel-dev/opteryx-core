@@ -107,6 +107,15 @@ VecResult fse_dense_int64(int64_t* out, uint8_t* validity, uint32_t n) {
 // → 1. Bytewise: for NVARCHAR the result is a BYTE position, not a codepoint
 // position (matching the nanobind kernel this is ported from — a codepoint-aware
 // variant is deferred there too).
+// 1-based byte position -> 1-based codepoint position (NVARCHAR counts
+// characters, as SUBSTRING does): one plus the UTF-8 lead bytes before the match.
+static inline int64_t fse_byte_to_codepoint_pos(const uint8_t* hay, int64_t byte_pos) {
+    if (byte_pos <= 0) return byte_pos;
+    int64_t cp = 1;
+    for (int64_t b = 0; b < byte_pos - 1; ++b) cp += (hay[b] & 0xC0u) != 0x80u;
+    return cp;
+}
+
 int64_t fse_substring_position(const uint8_t* hay, uint32_t hay_len,
                                const uint8_t* ndl, uint32_t ndl_len) {
     if (ndl_len == 0u) return 1;             // empty needle → position 1
@@ -427,8 +436,8 @@ VecResult draken_octet_length(void* /*ctx*/, const DrakenVector* const* args, ui
     return fse_dense_int64(out, validity, n);
 }
 
-// POSITION(sub IN string) -> INT64. 1-based byte position of `sub` within
-// `string`, 0 when not found, 1 for an empty needle, null when either input row
+// POSITION(sub IN string) -> INT64. 1-based position of `sub` within `string`
+// (bytes for VARCHAR, characters for NVARCHAR), 0 when not found, 1 for an empty needle, null when either input row
 // is null.
 //
 // ARGUMENT ORDER: the registrar declares POSITION_2 as (sub, string) — the SQL
@@ -449,6 +458,7 @@ VecResult draken_position(void* /*ctx*/, const DrakenVector* const* args, uint32
     const uint32_t n = hay->length;
     const auto* sh = static_cast<const DrakenStringArena*>(hay->data);
     const auto* sn = static_cast<const DrakenStringArena*>(ndl->data);
+    const bool chars = hay->type == DRAKEN_NVARCHAR;
 
     // One non-null constant needle over a compressed haystack: search each
     // haystack value once; the result keeps the haystack's encoding.
@@ -456,9 +466,11 @@ VecResult draken_position(void* /*ctx*/, const DrakenVector* const* args, uint32
         const DrakenStringSlot* ns = &sn->slots[0];
         const uint8_t* nd = str_data(ns, sn->arena);
         const uint32_t nl = str_length(ns);
-        return kernel_map_compressed<int64_t>(hay, DRAKEN_INT64, [sh, nd, nl](uint32_t j) {
+        return kernel_map_compressed<int64_t>(hay, DRAKEN_INT64, [sh, nd, nl, chars](uint32_t j) {
             const DrakenStringSlot* hs = &sh->slots[j];
-            return fse_substring_position(str_data(hs, sh->arena), str_length(hs), nd, nl);
+            const uint8_t* hd = str_data(hs, sh->arena);
+            const int64_t p = fse_substring_position(hd, str_length(hs), nd, nl);
+            return chars ? fse_byte_to_codepoint_pos(hd, p) : p;
         });
     }
 
@@ -483,8 +495,10 @@ VecResult draken_position(void* /*ctx*/, const DrakenVector* const* args, uint32
         }
         const DrakenStringSlot* hs = &sh->slots[hay->selection[i]];
         const DrakenStringSlot* ns = &sn->slots[ndl->selection[i]];
-        out[i] = fse_substring_position(str_data(hs, sh->arena), str_length(hs),
-                                        str_data(ns, sn->arena), str_length(ns));
+        const uint8_t* hd = str_data(hs, sh->arena);
+        const int64_t p = fse_substring_position(hd, str_length(hs),
+                                                 str_data(ns, sn->arena), str_length(ns));
+        out[i] = chars ? fse_byte_to_codepoint_pos(hd, p) : p;
     }
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
     return fse_dense_int64(out, validity, n);

@@ -41,7 +41,7 @@ def write_billing_event(
                        knows the one workspace involved.
     """
     structured_log = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "logName": "projects/opteryx/logs/billing_events",
         "severity": "BILLING",
         "billing_account": billing_account,

@@ -45,13 +45,24 @@ from opteryx.managers.kvstores import gcs_kv_store
 _CTX = {"query_id": "q1", "operator_id": "op1"}
 
 
+class FakeNotFound(Exception):
+    """Stands in for google.api_core.exceptions.NotFound."""
+
+
+class FakeForbidden(Exception):
+    """Any other API failure: must not be read as a cache miss."""
+
+
 class FakeBlob:
     def __init__(self, data: bytes = b""):
         self._data = data
+        self.fail_with = None
 
     def download_as_bytes(self):
+        if self.fail_with is not None:
+            raise self.fail_with
         if self._data is None:
-            raise KeyError("NotFound")
+            raise FakeNotFound("NotFound")
         return self._data
 
     def upload_from_string(self, value: bytes):
@@ -67,10 +78,12 @@ class FakeBlob:
 class FakeBucket:
     def __init__(self):
         self._blobs: Dict[str, FakeBlob] = {}
+        self.fail_with = None   # every read raises this, e.g. a 403
 
     def blob(self, name: str):
         if name not in self._blobs:
             self._blobs[name] = FakeBlob(None)
+        self._blobs[name].fail_with = self.fail_with
         return self._blobs[name]
 
 
@@ -85,22 +98,23 @@ class FakeGCSClient:
 
 
 @contextmanager
-def fake_client(error_class=None):
+def fake_client():
     """Point the store at a fake client, and put back what was there.
 
     Saving and restoring, never deleting: what was replaced is what goes back.
+    `_gcs_client()` binds the module-level `NotFound`, so the fake binds its own.
     """
     original_client = gcs_kv_store._gcs_client
-    original_error = gcs_kv_store.GoogleAPIError
+    original_not_found = gcs_kv_store.NotFound
 
-    gcs_kv_store._gcs_client = lambda: FakeGCSClient()
-    if error_class is not None:
-        gcs_kv_store.GoogleAPIError = error_class
+    client = FakeGCSClient()
+    gcs_kv_store._gcs_client = lambda: client
+    gcs_kv_store.NotFound = FakeNotFound
     try:
-        yield
+        yield client
     finally:
         gcs_kv_store._gcs_client = original_client
-        gcs_kv_store.GoogleAPIError = original_error
+        gcs_kv_store.NotFound = original_not_found
 
 
 def test_gcs_kv_store_with_fake_client():
@@ -116,21 +130,16 @@ def test_gcs_kv_store_with_fake_client():
         assert store.get(key, **_CTX) is None
 
 
-def test_gcs_kv_store_with_fake_client_and_googleapierror_class():
-    """A missing object reads as not-found whether the client raises KeyError or
-    the real `google.api_core.exceptions.GoogleAPIError`.
+def test_gcs_kv_store_raises_api_errors_other_than_not_found():
+    """Only a missing object is a miss. A 403/5xx used to read as a permanently
+    cold cache, hiding an IAM misconfiguration."""
+    import pytest
 
-    `_gcs_client()` sets the module-level `GoogleAPIError` when it can import the
-    real one, so that is what gets replaced - the previous version faked the
-    `google.api_core.exceptions` module to make it happen.
-    """
-
-    class GoogleErr(Exception):
-        pass
-
-    with fake_client(error_class=GoogleErr):
+    with fake_client() as client:
         store = create_kv_store("gs://bucket/pfx")
-        assert store.get(b"0x1", **_CTX) is None
+        client.bucket("bucket").fail_with = FakeForbidden("403")
+        with pytest.raises(FakeForbidden):
+            store.get(b"0x1", **_CTX)
 
 
 def test_the_store_is_real_even_though_the_client_is_not():

@@ -149,23 +149,26 @@ class ValkeyCache(BaseKeyValueStore):
         if self._consecutive_failures < config.MAX_CONSECUTIVE_CACHE_FAILURES:
             try:
                 self._server.set(key, value)
+                self._consecutive_failures = 0
                 self.sets += 1
             except Exception as err:  # pragma: no cover
-                self._consecutive_failures = config.MAX_CONSECUTIVE_CACHE_FAILURES
+                # Counted like get(): one slow write must not disable the cache.
+                self._consecutive_failures += 1
                 self.errors += 1
-                import datetime
+                if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
+                    import datetime
 
-                print(
-                    f"{datetime.datetime.now()} [CACHE] Disabling remote Valkey cache due to persistent errors ({err}) [SET]."
-                )
+                    print(
+                        f"{datetime.datetime.now()} [CACHE] Disabling remote Valkey cache due to persistent errors ({err}) [SET]."
+                    )
         else:
             self.skips += 1
 
     def set_many(self, items) -> None:
         """One ``MSET`` for many key/value pairs — the write-side twin of ``get_many``.
 
-        A single round trip regardless of pair count. Failures trip the same disable as
-        ``set`` and are swallowed; a cache outage slows queries, never fails them.
+        A single round trip regardless of pair count. Failures count toward the same
+        consecutive-failure disable as ``get``/``set`` and are swallowed; a cache outage slows queries, never fails them.
         """
         items = dict(items)
         if not items:
@@ -176,15 +179,17 @@ class ValkeyCache(BaseKeyValueStore):
         normalized = {self._normalize_key(k): v for k, v in items.items()}
         try:
             self._server.mset(normalized)
+            self._consecutive_failures = 0
             self.sets += len(normalized)
         except Exception as err:  # pragma: no cover
-            self._consecutive_failures = config.MAX_CONSECUTIVE_CACHE_FAILURES
+            self._consecutive_failures += 1
             self.errors += 1
-            import datetime
+            if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
+                import datetime
 
-            print(
-                f"{datetime.datetime.now()} [CACHE] Disabling remote Valkey cache due to persistent errors ({err}) [MSET]."
-            )
+                print(
+                    f"{datetime.datetime.now()} [CACHE] Disabling remote Valkey cache due to persistent errors ({err}) [MSET]."
+                )
 
     def delete(self, key):
         key = self._normalize_key(key)

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 namespace skene_test {
@@ -19,6 +20,18 @@ inline void report(const char* file, int line, const char* expr,
     ++g_failures;
     std::fprintf(stderr, "FAIL %s:%d\n  %s\n", file, line, expr);
     if (!detail.empty()) std::fprintf(stderr, "  %s\n", detail.c_str());
+}
+
+// True if a writer's temporary for `path` ("<name>.skene-partial-XXXXXX",
+// a unique mkstemp name) is still beside it.
+inline bool partial_left_for(const std::string& path) {
+    namespace fs = std::filesystem;
+    const fs::path p(path);
+    const fs::path dir = p.has_parent_path() ? p.parent_path() : fs::path(".");
+    const std::string prefix = p.filename().string() + ".skene-partial";
+    for (const auto& entry : fs::directory_iterator(dir))
+        if (entry.path().filename().string().rfind(prefix, 0) == 0) return true;
+    return false;
 }
 
 inline int summary(const char* suite) {

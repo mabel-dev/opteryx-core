@@ -44,24 +44,20 @@ cdef struct ParsedDateTime:
     uint8_t offset_hour
     uint8_t offset_minute
 
-cdef inline int parse_2digit(const char* s):
-    return (s[0] - CHAR_0) * 10 + (s[1] - CHAR_0)
-
-cdef inline int parse_4digit(const char* s):
-    return (s[0] - CHAR_0) * 1000 + (s[1] - CHAR_0) * 100 + (s[2] - CHAR_0) * 10 + (s[3] - CHAR_0)
-
 cdef inline bint is_digit(char c):
     return CHAR_0 <= c <= CHAR_9
 
-cdef inline bint is_digit_range(const char* s, Py_ssize_t start, Py_ssize_t end) nogil:
-    cdef const char* ptr = s + start
-    cdef Py_ssize_t i = end - start
-    while i > 0:
-        if ptr[0] < CHAR_0 or ptr[0] > CHAR_9:
-            return False
-        ptr += 1
-        i -= 1
-    return True
+# Every field goes through these, so a non-digit ('2024-0:-05' read ':' as 10)
+# is refused here rather than turned into a plausible wrong date.
+cdef inline int parse_2digit(const char* s) except -1:
+    if not (is_digit(s[0]) and is_digit(s[1])):
+        raise ValueError("Invalid ISO timestamp: expected digits")
+    return (s[0] - CHAR_0) * 10 + (s[1] - CHAR_0)
+
+cdef inline int parse_4digit(const char* s) except -1:
+    if not (is_digit(s[0]) and is_digit(s[1]) and is_digit(s[2]) and is_digit(s[3])):
+        raise ValueError("Invalid ISO timestamp: expected digits")
+    return (s[0] - CHAR_0) * 1000 + (s[1] - CHAR_0) * 100 + (s[2] - CHAR_0) * 10 + (s[3] - CHAR_0)
 
 cdef inline int days_in_month(int year, int month):
     if month == 2:
@@ -106,7 +102,7 @@ cdef inline ParsedDateTime _parse_iso_parts(bytes bts):
             raise ValueError("Invalid day for given month/year")
         return out
 
-    if n >= 16 and (s[10] == CHAR_T or s[10] == CHAR_SPACE):
+    if n >= 16 and (s[10] == CHAR_T or s[10] == CHAR_SPACE) and s[13] == CHAR_COLON:
         out.hour = parse_2digit(s + 11)
         out.minute = parse_2digit(s + 14)
         i = 16
@@ -128,7 +124,7 @@ cdef inline ParsedDateTime _parse_iso_parts(bytes bts):
         if i < n:
             if s[i] == CHAR_Z:
                 i += 1
-            elif (s[i] == CHAR_PLUS or s[i] == CHAR_MINUS) and (i + 6 <= n):
+            elif (s[i] == CHAR_PLUS or s[i] == CHAR_MINUS) and (i + 6 <= n) and s[i + 3] == CHAR_COLON:
                 out.offset_sign = 1 if s[i] == CHAR_PLUS else -1
                 out.offset_hour = parse_2digit(s + i + 1)
                 out.offset_minute = parse_2digit(s + i + 4)

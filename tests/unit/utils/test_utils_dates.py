@@ -50,6 +50,10 @@ DATE_TESTS = [
         ("2021-02-21T12:60", None),  # Invalid minute
         ("2021-02-21T12:00:60", None),  # Invalid second
         ("2021-02-21T1200:00", None),  # No separator between date and time
+        ("2024-0:-05", None),  # Non-digit month (':' - '0' used to read as 10)
+        ("2024-01-0a", None),  # Non-digit day
+        ("2024-01-05T12x30", None),  # Wrong time separator
+        ("2024-01-05T12:30+05x30", None),  # Wrong offset separator
     ]
 # fmt:on
 

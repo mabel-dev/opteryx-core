@@ -267,8 +267,8 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
 //   POSITION('' IN 'foobar')     → 1   (empty needle always found at 1)
 //   null input                   → null output (null TVL)
 //
-// Bytewise substring search. For NVARCHAR inputs, result is byte-position not
-// codepoint-position (codepoint-aware variant is deferred).
+// Bytewise substring search; for NVARCHAR the byte position is converted to a
+// codepoint position, matching SUBSTRING's character counting.
 //
 // Two strategies, picked per call: a memchr-anchored scan (SIMD first-byte
 // search + memcmp verify) avoids the 256-entry skip table, which is pure
@@ -276,6 +276,15 @@ static nb::object impl_levenshtein(nb::object a_obj, nb::object b_obj) {
 // (e.g. equal-length needle/haystack — exactly one position to test).
 // Boyer-Moore-Horspool's skip table only pays off for a longer needle scanning
 // a much longer haystack, so it's reserved for that case.
+
+// 1-based byte position -> 1-based codepoint position (NVARCHAR counts
+// characters, as SUBSTRING does): one plus the UTF-8 lead bytes before the match.
+static inline int64_t byte_to_codepoint_pos(const uint8_t* hay, int64_t byte_pos) {
+    if (byte_pos <= 0) return byte_pos;
+    int64_t cp = 1;
+    for (int64_t b = 0; b < byte_pos - 1; ++b) cp += (hay[b] & 0xC0u) != 0x80u;
+    return cp;
+}
 
 static int64_t substring_position(
     const uint8_t* hay, uint32_t hay_len,
@@ -343,6 +352,7 @@ static nb::object impl_position(nb::object hay_obj, nb::object ndl_obj) {
 
     const DrakenStringArena* sh = static_cast<const DrakenStringArena*>(hay->data);
     const DrakenStringArena* sn = static_cast<const DrakenStringArena*>(ndl->data);
+    const bool chars = hay->type == DRAKEN_NVARCHAR;
 
     uint8_t* validity = nullptr;
     bool     any_null = false;
@@ -359,9 +369,10 @@ static nb::object impl_position(nb::object hay_obj, nb::object ndl_obj) {
         // Uniform access via selection — works for dense, dict, and constant.
         const DrakenStringSlot* hs = &sh->slots[hay->selection[i]];
         const DrakenStringSlot* ns = &sn->slots[ndl->selection[i]];
-        out_data[i] = substring_position(
-            str_data(hs, sh->arena), str_length(hs),
-            str_data(ns, sn->arena), str_length(ns));
+        const uint8_t* hd = str_data(hs, sh->arena);
+        const int64_t p = substring_position(
+            hd, str_length(hs), str_data(ns, sn->arena), str_length(ns));
+        out_data[i] = chars ? byte_to_codepoint_pos(hd, p) : p;
     }
 
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }

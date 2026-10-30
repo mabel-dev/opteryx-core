@@ -1559,10 +1559,14 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         If found, returns (True, dataset_object).
         If not found, returns (False, error_message) for diagnostics.
         """
+        from opteryx_catalog.exceptions import DatasetNotFound
+
+        # Only "it is not there" means not-a-dataset; an outage or a corrupt entry
+        # must surface, or CREATE VIEW would shadow a table it could not see.
         try:
             dataset = catalog.load_dataset(identifier)
             return True, dataset
-        except Exception as err:
+        except DatasetNotFound as err:
             logger.debug(f"Not a dataset '{identifier}': {err}")
             return False, str(err)
 
@@ -1574,10 +1578,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         If found, returns (True, view_object).
         If not found, returns (False, error_message) for diagnostics.
         """
+        from opteryx_catalog.exceptions import ViewNotFound
+
         try:
             view = catalog.load_view(identifier)
             return True, view
-        except Exception as err:
+        except ViewNotFound as err:
             logger.debug(f"Not a view '{identifier}': {err}")
             return False, str(err)
 

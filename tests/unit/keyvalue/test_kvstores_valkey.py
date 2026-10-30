@@ -119,3 +119,23 @@ def test_client_is_given_bounded_timeouts(monkeypatch):
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+def test_one_failed_write_does_not_disable_the_cache(fake_valkey):
+    # A single slow SET used to switch the shared cache off for the process's life.
+    from opteryx import config
+
+    store = ValkeyCache(server=CONNECTION)
+    real_set = store._server.set
+
+    def failing_set(key, value):
+        raise TimeoutError("slow write")
+
+    store._server.set = failing_set
+    store.set(b"big", b"x")
+    store._server.set = real_set
+
+    store.set(b"k", b"v")
+    assert store.get(b"k") == b"v"
+    assert store._consecutive_failures < config.MAX_CONSECUTIVE_CACHE_FAILURES
+

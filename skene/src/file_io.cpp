@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "skene/format.h"
 
 namespace skene {
@@ -23,10 +26,19 @@ Status write_file(const std::string& path, const std::vector<uint8_t>& bytes) {
     // carries the footer's location and checksum — so a reader that opens a
     // partially written file sees a truncated object rather than a valid one.
     // Renaming into place means it either exists complete or does not exist.
-    const std::string temporary = path + ".skene-partial";
-
-    std::FILE* handle = std::fopen(temporary.c_str(), "wb");
-    if (handle == nullptr) return io_error("cannot create", temporary);
+    // Unique per writer (mkstemp: O_EXCL), so two writers to one path never
+    // truncate each other's temporary; synced before the rename so the
+    // published name never points at a file the disk does not yet hold.
+    std::string temporary = path + ".skene-partial-XXXXXX";
+    const int fd = ::mkstemp(temporary.data());
+    if (fd < 0) return io_error("cannot create", temporary);
+    ::fchmod(fd, 0644);   // mkstemp creates 0600; the file is published as before
+    std::FILE* handle = ::fdopen(fd, "wb");
+    if (handle == nullptr) {
+        ::close(fd);
+        std::remove(temporary.c_str());
+        return io_error("cannot open", temporary);
+    }
 
     if (!bytes.empty()) {
         const size_t written = std::fwrite(bytes.data(), 1, bytes.size(), handle);
@@ -37,6 +49,11 @@ Status write_file(const std::string& path, const std::vector<uint8_t>& bytes) {
         }
     }
 
+    if (std::fflush(handle) != 0 || ::fsync(::fileno(handle)) != 0) {
+        std::fclose(handle);
+        std::remove(temporary.c_str());
+        return io_error("cannot sync", temporary);
+    }
     if (std::fclose(handle) != 0) {
         std::remove(temporary.c_str());
         return io_error("cannot close", temporary);

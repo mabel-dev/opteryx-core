@@ -11,11 +11,10 @@
 # distutils: language = c++
 
 """
-LRU-2 cache backed by a C++ implementation (K=2 fixed).
+LRU-K cache backed by a C++ implementation (src/cpp/lru2.hpp), K = 1 or 2.
 
-API is identical to the old Python-based LRU_K so callers need no changes.
-The k parameter is accepted for compatibility but ignored; behaviour is always
-K=2.
+k=2 (default) is LRU-2: entries accessed once are evicted before entries accessed
+twice or more. k=1 is plain LRU. Any other k raises ValueError.
 """
 
 from libc.stdint cimport int64_t
@@ -25,10 +24,10 @@ from libcpp.string cimport string
 cdef class LRU_K:
 
     def __cinit__(self, int64_t k=2, int64_t max_size=0, int64_t max_memory=0):
-        self.k          = k        # stored for compatibility; C++ always uses K=2
+        self.k          = k
         self.max_size   = max_size
         self.max_memory = max_memory
-        self._lru = new CppLRU2(max_size, max_memory)
+        self._lru = new CppLRU2(max_size, max_memory, k)
 
     def __dealloc__(self):
         if self._lru is not NULL:

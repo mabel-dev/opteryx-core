@@ -719,10 +719,10 @@ static void test_file_on_disk_round_trips() {
     CHECK_EQ(out.num_columns(), size_t{2});
     check_values(out.columns[0].view, std::vector<int64_t>{3, 1, 2});
 
-    // write_file renames into place, so no ".skene-partial" may survive a
+    // write_file renames into place, so no ".skene-partial-*" may survive a
     // successful write — a reader that found one would see a truncated object.
     std::vector<uint8_t> leftover;
-    CHECK(!read_file(path + ".skene-partial", &leftover).is_ok());
+    CHECK(!partial_left_for(path));
 
     // A missing file, and a file too small to be one, both fail loud rather
     // than producing an empty morsel.

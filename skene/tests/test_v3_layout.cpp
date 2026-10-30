@@ -88,7 +88,7 @@ void test_path_output_matches_buffer_output() {
     CHECK(on_disk == in_memory);
     // The scratch file is the writer's, and it is gone.
     CHECK(access(scratch.c_str(), F_OK) != 0);
-    CHECK(access((path + ".skene-partial").c_str(), F_OK) != 0);
+    CHECK(!partial_left_for(path));
 
     std::remove(path.c_str());
     rmdir(dir.c_str());
@@ -119,7 +119,7 @@ void test_scratch_path_rules() {
         FileWriter writer;
         CHECK(!writer.begin(options, dir + "/out.skene").is_ok());
         std::remove(taken.c_str());
-        std::remove((dir + "/out.skene.skene-partial").c_str());
+        CHECK(!partial_left_for(dir + "/out.skene"));   // a refused begin stages nothing
         rmdir(dir.c_str());
     }
 }

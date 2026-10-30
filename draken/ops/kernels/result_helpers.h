@@ -155,7 +155,10 @@ static inline uint8_t* kernel_copy_validity(const DrakenVector* dv) {
     const size_t   vbytes = padded > 0u ? padded : 8u;
     uint8_t* out = static_cast<uint8_t*>(draken_malloc(vbytes));
     if (!out) throw std::bad_alloc();
-    std::memcpy(out, dv->validity, vbytes);
+    // Producers may allocate exactly bm bytes (no padding promise in buffers.h):
+    // read only those, and pad the copy ourselves.
+    std::memcpy(out, dv->validity, bm);
+    std::memset(out + bm, 0, vbytes - bm);
     return out;
 }
 

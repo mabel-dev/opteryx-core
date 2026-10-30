@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from opteryx.exceptions import MissingDependencyError
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 
-GoogleAPIError = Exception
+NotFound = None  # google.api_core NotFound, bound by _gcs_client() before any store exists
 
 
 @functools.lru_cache(maxsize=1)
@@ -29,11 +29,10 @@ def _gcs_client():
         storage = importlib.import_module("google.cloud.storage")
     except ImportError as err:  # pragma: no cover - optional dependency
         raise MissingDependencyError("google-cloud-storage") from err
-    try:
-        global GoogleAPIError
-        GoogleAPIError = importlib.import_module("google.api_core.exceptions").GoogleAPIError
-    except Exception:
-        GoogleAPIError = Exception
+    global NotFound
+    # Only "no such object" is a miss; a 403 or a 5xx must surface, not look like
+    # a permanently cold cache. google.api_core ships with google-cloud-storage.
+    NotFound = importlib.import_module("google.api_core.exceptions").NotFound
     return storage.Client()
 
 
@@ -64,7 +63,7 @@ class GCSKeyValueStore(BaseKeyValueStore):
         blob = self._bucket.blob(name)
         try:
             return blob.download_as_bytes()
-        except (GoogleAPIError, KeyError):
+        except NotFound:
             return None
 
     def set(self, key: bytes, value: bytes) -> None:
@@ -75,17 +74,15 @@ class GCSKeyValueStore(BaseKeyValueStore):
     def contains(self, keys: Iterable) -> Iterable:
         result = []
         for k in keys:
-            blob = self._bucket.blob(self._object_name(k))
-            try:
-                if blob.exists():
-                    result.append(k)
-            except (GoogleAPIError, KeyError):
-                continue
+            # exists() already answers False for a missing object; anything it
+            # raises is a real failure.
+            if self._bucket.blob(self._object_name(k)).exists():
+                result.append(k)
         return result
 
     def delete(self, key: bytes) -> None:
         blob = self._bucket.blob(self._object_name(key))
         try:
             blob.delete()
-        except (GoogleAPIError, KeyError):
+        except NotFound:
             pass

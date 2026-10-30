@@ -14,6 +14,8 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+import pytest
+
 from opteryx.compiled.structures.lru_k import LRU_K
 from tests import is_windows, skip_if
 
@@ -248,6 +250,29 @@ def test_lruk_reinserted_key_is_not_evicted_by_its_stale_item():
     lru.delete(b"a")
     lru.set(b"a", b"1", False)
     assert lru.evict(False) == (b"b", None)
+
+
+@skip_if(is_windows())
+def test_k1_is_plain_lru_recency_beats_access_count():
+    # The parquet footer caches ask for k=1. Under LRU-2 a long-lived process filled
+    # them with footers read twice or more, and a new table's footers (read once) could
+    # only evict each other: re-fetched on every query, hot 2.0 s -> 8.0 s (2026-10-30).
+    lru = LRU_K(k=1)
+    lru.set(b"a", b"v", False)
+    lru.set(b"b", b"v", False)
+    lru.get(b"a")
+    lru.get(b"b")
+    lru.set(b"c", b"v", False)  # newest, one access
+    assert lru.evict(False) == (b"a", None)
+    assert lru.evict(False) == (b"b", None)
+    assert lru.evict(False) == (b"c", None)
+
+
+@skip_if(is_windows())
+def test_k_outside_1_or_2_is_refused():
+    for k in (0, 3):
+        with pytest.raises(ValueError):
+            LRU_K(k=k)
 
 
 if __name__ == "__main__":  # pragma: no cover

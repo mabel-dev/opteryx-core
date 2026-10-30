@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace skene {
@@ -155,9 +156,13 @@ void Sink::open_memory(std::vector<uint8_t>* out) {
 
 Status Sink::open_file(const std::string& path) {
     path_ = path;
-    partial_ = path + ".skene-partial";
-    fd_ = ::open(partial_.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd_ < 0) return io_error("cannot create", partial_);
+    // A unique temporary (mkstemp: O_EXCL): two writers to one path each stage
+    // their own file instead of truncating each other's mid-write.
+    std::string tmpl = path + ".skene-partial-XXXXXX";
+    fd_ = ::mkstemp(tmpl.data());
+    if (fd_ < 0) return io_error("cannot create", tmpl);
+    partial_ = tmpl;
+    ::fchmod(fd_, 0644);   // mkstemp creates 0600; the file is published as before
     buffer_.reserve(kSinkBufferBytes);
     position_ = 0;
     return Status::ok();
@@ -205,6 +210,9 @@ Status Sink::commit() {
     if (memory_ != nullptr) return Status::ok();
     if (stream_ != nullptr) return flush();   // the stream is the caller's to finish
     SKENE_RETURN_IF_ERROR(flush());
+    // Durable before it is visible: without this a crash after the rename can
+    // leave the published name pointing at an empty or partial file.
+    if (::fsync(fd_) != 0) return io_error("cannot sync", partial_);
     if (::close(fd_) != 0) {
         fd_ = -1;
         return io_error("cannot close", partial_);
