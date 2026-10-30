@@ -2366,14 +2366,17 @@ inline uint64_t gb_mix2(uint64_t a, uint64_t b) {
     return h;
 }
 
-// BATCHED COUNT(DISTINCT) dedup at the MERGE only. The merge's re-key of worker pairs
-// into the merged partition's set (combine_into, cd_repartition pass 2) probes sets
-// that miss cache, and feeding them through CarcharSet::mark_new (two-phase probe:
-// a block's first-probe loads issued together, then consumed) measured Q08 -13%
-// (2026-10-17 leave-one-out A/B). The per-row ingest sets — grouped (per flush
-// window) and ungrouped — stay one insert per key: they are cache-resident at
-// ClickBench cardinalities, and the batched form, which needs a partition scatter
-// per morsel, measured a LOSS there (Q09 +5%, Q05 +23%) and was deleted.
+// BATCHED COUNT(DISTINCT) dedup. The grouped merge's re-key of worker pairs into the
+// merged partition's set (combine_into, cd_repartition pass 2) probes sets that miss
+// cache, and feeding them through CarcharSet::mark_new (two-phase probe: a block's
+// first-probe loads issued together, then consumed) measured Q08 -13% (2026-10-17
+// leave-one-out A/B). The UNGROUPED ingest on the dict path is batched too: a morsel's
+// referenced unique hashes are scattered by partition, then each partition's run goes
+// through UCDPartition::insert_run. Those per-worker sets miss cache on x86: Q04 0.77x,
+// Q05 0.92x on x86, neutral on the Mac (Q04 0.98x) (2026-10-30 A/B). The per-ROW forms
+// stay one insert per key: grouped ingest (per flush window) and the ungrouped non-dict
+// path. A per-row scatter measured a LOSS (Q09 +5%, Q05 +23%, 2026-10-17). The
+// ungrouped finalize absorb also stays per key — batching it measured flat (x86 1.01x).
 // Keys per mark_new call: bounds the per-call verdict buffer that lives on the stack.
 constexpr size_t kCDChunk = 2048;
 
@@ -2434,6 +2437,12 @@ struct UCDPartition {
     bool insert(uint64_t h) {
         if (seen.insert_or_ignore(h)) { distinct.push_back(h); return true; }
         return false;
+    }
+    // Batched insert of a key run (CarcharSet::mark_new); verdicts in nb[0, n).
+    void insert_run(const uint64_t* keys, uint8_t* nb, size_t n) {
+        seen.mark_new(keys, nb, n);
+        for (size_t k = 0; k < n; ++k)
+            if (nb[k]) distinct.push_back(keys[k]);
     }
     bool insert_raw(uint64_t h, int64_t r) {
         if (!insert(h)) return false;
@@ -2795,9 +2804,23 @@ struct UngroupedAggSink : Sink {
                     for (uint32_t i = 0; i < v.length; ++i) {
                         if (sort_row_valid(v, i)) ref[skh.codes[i]] = 1;
                     }
+                    std::array<uint32_t, kGBParts + 1> off{};
+                    for (uint32_t j = 0; j < skh.data_length; ++j) {
+                        if (ref[j] != 0) off[gb_part(skh.hashes[j]) + 1] += 1;
+                    }
+                    for (size_t p = 0; p < kGBParts; ++p) off[p + 1] += off[p];
+                    const uint32_t nm = off[kGBParts];
+                    std::vector<uint64_t> sc(nm);
+                    std::vector<uint8_t> nb(nm);
+                    std::array<uint32_t, kGBParts> pos;
+                    for (size_t p = 0; p < kGBParts; ++p) pos[p] = off[p];
                     for (uint32_t j = 0; j < skh.data_length; ++j) {
                         if (ref[j] == 0) continue;
-                        DP[gb_part(skh.hashes[j])].insert(skh.hashes[j]);
+                        sc[pos[gb_part(skh.hashes[j])]++] = skh.hashes[j];
+                    }
+                    for (size_t p = 0; p < kGBParts; ++p) {
+                        const uint32_t n = off[p + 1] - off[p];
+                        if (n != 0) DP[p].insert_run(sc.data() + off[p], nb.data() + off[p], n);
                     }
                 } else {
                     for (uint32_t i = 0; i < v.length; ++i) {

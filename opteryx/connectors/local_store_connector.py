@@ -327,7 +327,11 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         return 0 if rows is None else len(rows)
 
     def create_relation(
-        self, relation_name: str, schema: RelationDescriptor, author: Optional[str] = None
+        self,
+        relation_name: str,
+        schema: RelationDescriptor,
+        author: Optional[str] = None,
+        location: Optional[str] = None,
     ) -> None:
         """Create a new relation.
 
@@ -338,6 +342,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             relation_name: Fully-qualified relation name
             schema: RelationDescriptor for the table
             author: session user, unused by this store
+            location: unused - a relation's directory follows from its name, and
+                this store's writers report no location, so it is never passed
 
         Raises:
             ValueError: If relation already exists or name is invalid
@@ -1220,6 +1226,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         sorted_descending: bool = False,
         write_profile: str = "fast",
         pending_schema=None,
+        pending_location: Optional[str] = None,
     ):
         """Open one streaming parquet file in the relation's directory.
 

@@ -37,6 +37,7 @@ sys.path.insert(0, str(_REPO_ROOT / "tests" / "performance"))
 from _common import (  # noqa: E402
     AISTOR_WORKSPACE,
     aistor_network_path,
+    check_network_path_unchanged,
     load_duckdb_baseline,
     open_results_csv,
     print_banner,
@@ -336,6 +337,7 @@ def main() -> int:
     )
     print(f"  network: {network}")
     print(f"  results: {os.path.relpath(csv_path, _REPO_ROOT)}")
+    check_network_path_unchanged(network)
     return 1 if counts["error"] else 0
 
 

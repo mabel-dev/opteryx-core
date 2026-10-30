@@ -359,6 +359,20 @@ def aistor_network_path() -> str:
     raise RuntimeError(f"no network path detection for platform {sys.platform!r}")
 
 
+def check_network_path_unchanged(network: str) -> None:
+    """Raise if the link to AIStor is not the one `network` recorded at the start.
+
+    Every row of a run carries the label read before the first query; a link
+    that changed mid-run (the 2026-10-29 wired -> Wi-Fi fallback) would leave
+    those rows mislabelled, so the run fails instead.
+    """
+    if network == "local":
+        return
+    now = aistor_network_path()
+    if now != network:
+        raise RuntimeError(f"network path changed during the run: started on {network}, ended on {now}")
+
+
 def register_aistor_workspace() -> None:
     """Bind workspace `aistor` to the AIStor Iceberg REST catalog.
 

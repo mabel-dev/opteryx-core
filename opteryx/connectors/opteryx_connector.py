@@ -1774,6 +1774,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         sorted_descending: bool = False,
         write_profile: str = "fast",
         pending_schema=None,
+        pending_location: Optional[str] = None,
     ):
         """Open one streaming data file - see Writable.open_data_file_writer.
 
@@ -1792,6 +1793,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         a second copy of either formula in the engine drifts from the catalog's
         silently, and a file keyed by stale field-ids describes its columns
         under ids the finished dataset gives to other columns.
+
+        The catalog chooses the location (a fresh one nothing can derive from
+        the name) and the handle reports it as `.location`; `pending_location`
+        hands it back for each later file of the same statement. It is only
+        sent when there is one, so a catalog without the parameter still works.
         """
         from opteryx_catalog.iops.fileio import COMPACTION_WRITE_PARQUET_OPTIONS
         from opteryx_catalog.iops.fileio import WRITE_PARQUET_OPTIONS
@@ -1811,6 +1817,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         # statistics=False: the engine describes its own files natively
         # (_DataFileWriterHandle) and commits them as a manifest.
         if pending_schema is not None:
+            located = {} if pending_location is None else {"location": pending_location}
             handle = catalog.open_pending_data_file_writer(
                 relative_id,
                 pending_schema,
@@ -1818,6 +1825,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 sorted_descending=sorted_descending,
                 write_options=options,
                 statistics=False,
+                **located,
             )
         else:
             dataset = catalog.load_dataset(relative_id)
@@ -1869,11 +1877,24 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         with self._written_lock:
             self._written_field_ids.pop(file_path, None)
 
-    def create_relation(self, relation_name: str, schema, author: Optional[str] = None) -> None:
-        """Create a new dataset in the catalog."""
+    def create_relation(
+        self,
+        relation_name: str,
+        schema,
+        author: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> None:
+        """Create a new dataset in the catalog.
+
+        `location` is the one a CTAS's pending writers were given (their
+        `.location`), so the dataset is created where its files already are. It
+        is only sent when there is one: a plain CREATE TABLE has none, and the
+        catalog mints a fresh location itself.
+        """
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        catalog.create_dataset(relative_id, schema, author=author)
+        located = {} if location is None else {"location": location}
+        catalog.create_dataset(relative_id, schema, author=author, **located)
 
     def drop_relation(
         self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
@@ -2075,16 +2096,10 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     ) -> None:
         """Rename a dataset in the catalog, optionally moving it between collections.
 
-        The catalog moves everything - data files, every snapshot's manifest,
-        and the catalog entry - so the storage prefix keeps matching the
-        relation name and no two datasets can ever share a location. Snapshot
-        history survives the rename.
-
-        That makes this O(all bytes), not a metadata edit: the catalog copies
-        every file the dataset references (server-side, but still per-object),
-        so renaming a large dataset is a long-running operation behind a
-        statement that reads as instant. The vacated prefix is handed to the
-        existing 24h reclamation sweep rather than deleted inline.
+        A metadata edit: the catalog moves the dataset's documents to the new
+        name in one Firestore transaction and no data file moves. The dataset
+        keeps its storage location, which is never derived from a name, so the
+        vacated name cannot be bound to it again. Snapshot history survives.
         """
         workspace, relative_id = self._parse_identifier(relation_name)
         new_workspace, new_relative_id = self._parse_identifier(new_relation_name)
@@ -4075,6 +4090,12 @@ class _DataFileWriterHandle:
     @property
     def file_path(self) -> str:
         return self._inner.data_path
+
+    @property
+    def location(self) -> Optional[str]:
+        """The dataset location the catalog put this file under, or None from a
+        catalog that does not report one."""
+        return getattr(self._inner, "location", None)
 
     @property
     def uncompressed_size_in_bytes(self) -> int:

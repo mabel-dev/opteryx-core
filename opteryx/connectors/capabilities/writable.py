@@ -52,7 +52,11 @@ class Writable:
     vacuums_on_optimize: bool = False
 
     def create_relation(
-        self, relation_name: str, schema: "RelationDescriptor", author: Optional[str] = None
+        self,
+        relation_name: str,
+        schema: "RelationDescriptor",
+        author: Optional[str] = None,
+        location: Optional[str] = None,
     ) -> None:
         """Create a new relation (table) with the given schema.
 
@@ -62,6 +66,10 @@ class Writable:
             author: session user this creation is attributed to. A store with no
                 attribution concept ignores it; a store that requires one rejects
                 None rather than inventing an identity.
+            location: where a CTAS's data files were already written - the
+                `.location` its pending writers reported. Only ever passed when a
+                writer reported one, so a store whose writers report none never
+                receives it.
 
         Raises:
             ValueError: If relation already exists
@@ -114,6 +122,7 @@ class Writable:
         sorted_descending: bool = False,
         write_profile: str = "fast",
         pending_schema=None,
+        pending_location: Optional[str] = None,
     ):
         """Open ONE new data file for `relation_name`, to be written a row
         group at a time and registered by a later commit.
@@ -135,6 +144,13 @@ class Writable:
         REPLACE over an existing relation), and a store with nothing to derive
         - one whose layout follows from the name, like a directory on disk -
         ignores it.
+
+        A store that chooses a not-yet-created relation's location itself (the
+        catalog mints one per dataset) reports it on the handle as `.location`.
+        The sink hands it back as `pending_location` for every later file of the
+        statement and to `create_relation(location=...)`, so all of them agree
+        without the store having to remember. It is only passed when a handle
+        reported one.
 
         `write_profile` is "fast" (ingest and CTAS: the caller is waiting on
         the write) or "storage" (a rewrite that is read many times, so it may

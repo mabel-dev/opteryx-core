@@ -61,6 +61,11 @@ class DataFileStream:
         # does. Passed straight through to each writer this stream opens; see
         # Writable.open_data_file_writer for what a store does with it.
         self.pending_schema = pending_schema
+        # Where a store that chooses a pending relation's location put the first
+        # file (its writer's `.location`), handed back for every later file and
+        # to `create_relation` - so they agree without the store remembering.
+        # None until a file is opened, and for a store that reports none.
+        self.pending_location = None
         # The ordering claim written into every row group - the caller's
         # assertion that the rows it pushes are ordered on that column. None
         # unless the rows really are (a sort-aware OPTIMIZE); never verified.
@@ -133,13 +138,22 @@ class DataFileStream:
                 self._recorder = RowOriginRecorder(COMPACTION_ORIGIN_FILE, COMPACTION_ORIGIN_ORDINAL)
             batch = self._recorder.take(batch)
         if self._writer is None:
+            # Only sent once a writer has reported one: a connector written
+            # before the parameter existed never sees it.
+            located = (
+                {} if self.pending_location is None
+                else {"pending_location": self.pending_location}
+            )
             self._writer = self.connector.open_data_file_writer(
                 self.relation_name,
                 sorted_by=self.sorted_by,
                 sorted_descending=False,
                 write_profile=self.write_profile,
                 pending_schema=self.pending_schema,
+                **located,
             )
+            if self.pending_schema is not None and self.pending_location is None:
+                self.pending_location = getattr(self._writer, "location", None)
         self._writer.write_row_group(batch)
         if self._writer.uncompressed_size_in_bytes >= self.target_file_bytes:
             self._close_writer()

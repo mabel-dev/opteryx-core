@@ -287,6 +287,7 @@ if __name__ == "__main__":  # pragma: no cover
     sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
     from _common import AISTOR_WAREHOUSE
     from _common import aistor_network_path
+    from _common import check_network_path_unchanged
     from _common import open_results_csv
     from _common import register_aistor_workspace
 
@@ -353,8 +354,6 @@ if __name__ == "__main__":  # pragma: no cover
         # Remote: the catalog answers whether the table exists - a missing one
         # fails every query, it is never swapped for a local copy.
         register_aistor_workspace()
-        network = aistor_network_path()
-        print(f"Network: {network}")
         dataset_path = f"iceberg {os.environ['AISTOR_ENDPOINT']} warehouse {AISTOR_WAREHOUSE}"
         dataset_entries = "remote"
     else:
@@ -362,7 +361,6 @@ if __name__ == "__main__":  # pragma: no cover
         # silently ran against parquet for as long as the mapping was wrong; the only
         # defence against the next mis-wiring is refusing to run on a dataset we
         # cannot locate.
-        network = "local"
         dataset_path = resolve_dataset_path(DATASET)
         dataset_entries = len(os.listdir(dataset_path))
     RELATION = relation_sql(DATASET, dataset_path)
@@ -519,6 +517,8 @@ if __name__ == "__main__":  # pragma: no cover
     # flags they were built with, so this is NOT proof of how they were built.
     git_sha = git_fact("rev-parse", "--short", "HEAD")
     git_dirty = git_fact("status", "--porcelain")
+    # Read in the parent only: the per-query children never use it.
+    network = aistor_network_path() if DATASET in REMOTE_DATASETS else "local"
     provenance = {
         "opteryx_version": opteryx.__version__,
         "opteryx_build": opteryx.__build__,
@@ -531,6 +531,7 @@ if __name__ == "__main__":  # pragma: no cover
         "dataset_relation": RELATION,
         "dataset_path": dataset_path,
         "dataset_entries": dataset_entries,
+        "network": network,
         "battery": f"{'extended (ClickBench#1489)' if args.extended else 'standard'}, {len(STATEMENTS)} queries",
         "rounds": args.iterations,
         "process": "one per query",
@@ -904,6 +905,7 @@ if __name__ == "__main__":  # pragma: no cover
         )
     summary += f"\n  network: {network}"
     print(summary)
+    check_network_path_unchanged(network)
 
     if args.json:
         payload = {
