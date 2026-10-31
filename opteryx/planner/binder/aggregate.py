@@ -224,7 +224,9 @@ def visit_aggregate_and_group(
     columns_to_keep = columns_to_keep.union(context.retained_columns)
 
     for name, schema in list(context.schemas.items()):
-        schema_columns = [column for column in schema.columns if column.identity in columns_to_keep]
+        # Only a minted column can be kept (it was referenced), so a lazily bound
+        # scan is trimmed without minting the rest of it.
+        schema_columns = [column for column in schema.minted_columns() if column.identity in columns_to_keep]
         if schema_columns:
             context.rebind_schema(schema, schema.with_columns(schema_columns))
         else:

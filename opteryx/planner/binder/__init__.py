@@ -89,6 +89,34 @@ def _check_recursive_leg_types(name: str, anchor_schema, term_schema) -> None:
             )
 
 
+def _finish_lazy_scans(steps, plan_context) -> None:
+    """Binding is over: each lazily bound scan carries exactly the columns the query
+    referenced. Freeze them (a later first reference raises), re-mirror the step's
+    native row and manifest over them, and write the scan's column list."""
+    from opteryx.compiled.structures.expressions import LogicalColumn
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+    from opteryx.expression import NodeType
+
+    for step in steps:
+        if step.node_type != LogicalPlanStepType.Scan or step.schema is None or step.columns is not None:
+            continue
+        if step.schema.is_lazy:
+            step.schema.freeze()
+            step.schema = step.schema
+            if step.manifest is not None:
+                step.manifest = step.manifest
+        step.columns = [
+            LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=column.name,
+                source=(column.origin[0] if column.origin else None),
+                schema_column=column,
+                arena=plan_context.expressions,
+            )
+            for column in step.schema.columns
+        ]
+
+
 def do_bind_phase(
     plan: LogicalPlan,
     execution_context=None,
@@ -147,6 +175,7 @@ def do_bind_phase(
     # One registry dict, shared BY REFERENCE into every context (including the
     # child scopes expression subqueries bind under — see BindingContext).
     shared_cte_schemas: dict = {}
+    bound_steps: list = []
     for cte_key, body in shared_ctes.items():
         if visibility_filters:
             body = apply_visibility_filters(body, visibility_filters, telemetry, plan_context=plan_context)
@@ -159,6 +188,7 @@ def do_bind_phase(
         )
         body_context.shared_cte_schemas = shared_cte_schemas
         body, _ = binder_visitor.traverse(body, body_head, context=body_context)
+        bound_steps.extend(body_context.schema_steps)
         shared_ctes[cte_key] = body
         shared_cte_schemas[cte_key] = body[body_head].schema
         rkey = anchor_key_to_rcte.get(cte_key)
@@ -185,6 +215,8 @@ def do_bind_phase(
     context.shared_cte_schemas = shared_cte_schemas
 
     plan, _ = binder_visitor.traverse(plan, root_node, context=context)
+    bound_steps.extend(context.schema_steps)
+    _finish_lazy_scans(bound_steps, plan_context)
 
     # Binding is done: every expression now in the query's plans is immutable, and a
     # later change is a new expression (native plan graph P3, architect ruling

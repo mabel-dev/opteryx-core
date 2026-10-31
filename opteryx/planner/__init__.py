@@ -36,6 +36,34 @@
                                            └───────────┘
 """
 
+import os
+from importlib.machinery import EXTENSION_SUFFIXES
+
+
+def _refuse_stale_compiled_planner() -> None:
+    """The planner is compiled by Cython (setup.py) and Python loads a module's build
+    over its .py, so a .py edited after the last build would silently not run.
+    Refuse to import until rebuilt. Wheels ship no planner .py, so there it finds
+    nothing; a .py with no build beside it (data_processed.py) runs as Python."""
+    stale = []
+    for directory, _subdirectories, names in os.walk(os.path.dirname(__file__)):
+        for name in names:
+            if not name.endswith(".py"):
+                continue
+            source = os.path.join(directory, name)
+            built = source[:-3] + EXTENSION_SUFFIXES[0]
+            if os.path.exists(built) and os.stat(source).st_mtime_ns > os.stat(built).st_mtime_ns:
+                stale.append(os.path.relpath(source, os.path.dirname(__file__)))
+    if stale:
+        raise ImportError(
+            f"opteryx.planner: {len(stale)} source file(s) are newer than their compiled "
+            f"build ({', '.join(sorted(stale)[:5])}{', ...' if len(stale) > 5 else ''}) "
+            "— the edits would not run. Rebuild with `make c`."
+        )
+
+
+_refuse_stale_compiled_planner()
+
 import datetime
 import decimal
 import time

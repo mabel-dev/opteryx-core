@@ -135,14 +135,21 @@ def merge_schemas(*schemas):
                         "Internal Error - merge_schemas expects schemas"
                     )
                 value = <RelationSchema>raw
+                merged = merged_dict[key]
+                # A clone of the schema already held adds nothing - and reading its
+                # columns would mint every column of a lazily bound scan.
+                if merged.shares_columns(value):
+                    continue
                 seen = identities[key]
+                if seen is None:
+                    seen = {column.identity for column in merged.columns}
+                    identities[key] = seen
                 new_columns = []
                 for column in value.columns:
                     if column.identity not in seen:
                         new_columns.append(column)
                 for column in new_columns:
                     seen.add(column.identity)
-                merged = merged_dict[key]
                 merged_dict[key] = merged.with_columns(merged.columns + tuple(new_columns))
             else:
                 # a distinct schema object of the same value, for branch isolation:
@@ -151,10 +158,7 @@ def merge_schemas(*schemas):
                 # shared - a column is a row of the query's ColumnTable.
                 merged = (<RelationSchema?>raw).clone()
                 merged_dict[key] = merged
-                seen = set()
-                for column in merged.columns:
-                    seen.add(column.identity)
-                identities[key] = seen
+                identities[key] = None  # collected only if `key` comes round again
     return merged_dict
 
 
@@ -180,7 +184,7 @@ cpdef tuple locate_identifier_in_loaded_schemas(str value, dict schemas):
 
     for name, raw in schemas.items():
         schema = <RelationSchema?>raw
-        found = schema._lowercase_index().get(lowered)
+        found = schema.find_lower(lowered)
         if found is None:
             continue
         if name == "$derived" or name == "$project":
@@ -255,7 +259,7 @@ cdef bint _shared_holds_it_for_this_qualifier(
     # `a JOIN b USING (id)` - c's own `id` and the merged a/b `id` both matched - so
     # `... JOIN c ON a.id = c.id`, and every USING chain, could not bind.
     cdef str o
-    cdef SchemaColumn column = schema._lowercase_index().get(source_column.lower())
+    cdef SchemaColumn column = schema.find_lower(source_column.lower())
     if column is None:
         return False
     for o in column.origin or ():
@@ -551,7 +555,7 @@ cpdef tuple inner_binder(
     lowered = column_name.lower()
     for schema_name, raw in context.schemas.items():
         schema = <RelationSchema?>raw
-        found_column = schema._lowercase_index().get(lowered)
+        found_column = schema.find_lower(lowered)
         if found_column is not None and node_type == _LITERAL:
             # A literal's column_name is its own textual form, so the case-insensitive
             # lookup (correct for identifiers) would otherwise collapse two case-distinct

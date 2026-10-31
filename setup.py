@@ -9,6 +9,7 @@ import sys
 
 from Cython.Build import cythonize
 from setuptools import Extension, find_packages, setup
+from setuptools.command.build_py import build_py as build_py_orig
 from setuptools_rust import RustExtension
 
 # Shared build machinery + the single-source draken/rugo extension definitions,
@@ -1737,6 +1738,31 @@ def discover_packages():
 print(f"draken ABI stamp: {write_draken_abi_modules('opteryx', 'rugo', 'skene')}")
 
 
+# The planner is Python by contract, compiled unchanged by Cython: ~10% faster
+# planning on TPC-DS/TPC-H/ClickBench with identical plans (A/B 2026-10-31).
+# annotation_typing is off so annotations stay hints, exactly as under CPython.
+# data_processed.py crashes Cython 3.3 (AnalyseExpressionsTransform) and stays Python.
+PLANNER_SOURCES = sorted(
+    path
+    for path in glob.glob("opteryx/planner/**/*.py", recursive=True)
+    if path != os.path.join("opteryx", "planner", "data_processed.py")
+)
+planner_extensions = [Extension(path[:-3].replace(os.sep, "."), [path]) for path in PLANNER_SOURCES]
+
+
+class build_py(build_py_orig):
+    """Compiled planner modules ship as their extension only. A .py beside the .so
+    would never run, and opteryx/planner/__init__ refuses to import over a .py
+    newer than its build — wheel install timestamps must not trip that."""
+
+    def find_package_modules(self, package, package_dir):
+        return [
+            module
+            for module in super().find_package_modules(package, package_dir)
+            if os.path.normpath(module[2]) not in PLANNER_SOURCES
+        ]
+
+
 # Setup configuration
 setup(
     name=LIBRARY,
@@ -1775,6 +1801,15 @@ setup(
             # free-threaded so GIL builds are unaffected.
             "freethreading_compatible": FREE_THREADED_BUILD,
         },
+    )
+    + cythonize(
+        planner_extensions,
+        compiler_directives={
+            "language_level": "3",
+            "annotation_typing": False,
+            "binding": True,
+            "freethreading_compatible": FREE_THREADED_BUILD,
+        },
     ),
     rust_extensions=[]
     if _DRAKEN_BUILD
@@ -1785,6 +1820,6 @@ setup(
         # draken.preload_library_path); ships in the wheel, linked into nothing.
         "draken": ["libmimalloc.so", "libmimalloc.dylib"],
     },
-    cmdclass={"build_ext": build_ext},
+    cmdclass={"build_ext": build_ext, "build_py": build_py},
     zip_safe=False,
 )

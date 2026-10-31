@@ -234,6 +234,9 @@ opteryx/third_party/ulfjack/*.c*
 opteryx/third_party/yyjson/*.c*
 opteryx/third_party/mbleven.c
 !**/_*.c*
+# After the `_` re-include above: the planner has no hand-written C, and Cython's
+# __init__.c (one per compiled planner package) would otherwise be re-included.
+opteryx/planner/**/*.c
 
 # Claude Code temporary files and worktrees
 .claude/

@@ -382,8 +382,10 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
     keep_identities = all_top_level_identity_set | context.retained_columns
     columns = []
     for relation, schema in list(context.schemas.items()):
+        # Only a minted column can be kept (it was referenced), so a lazily bound
+        # scan is trimmed without minting the rest of it.
         schema_columns = [
-            column for column in schema.columns if column.identity in keep_identities
+            column for column in schema.minted_columns() if column.identity in keep_identities
         ]
         if len(schema_columns) == 0:
             context.schemas.pop(relation)

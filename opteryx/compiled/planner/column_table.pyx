@@ -366,3 +366,19 @@ cdef class ColumnTable:
             data_size_metric=descriptor.data_size_metric,
             data_size_estimate=descriptor.data_size_estimate,
         )
+
+    def bind_relation_lazily(self, descriptor, str alias):
+        """`bind_relation`, each column minted on its first reference. For the
+        binder's scans only: `do_bind_phase` freezes them when binding finishes and
+        writes each scan's columns from what was referenced (binder
+        `_finish_lazy_scans`) - a relation bound anywhere else would never be frozen."""
+        from opteryx.types.schema import RelationDescriptor
+        from opteryx.types.schema import RelationSchema
+
+        if type(descriptor) is not RelationDescriptor:
+            raise InvalidInternalStateError(
+                f"Relation '{alias}' was described by a {type(descriptor).__name__}; "
+                "sources describe relations with a RelationDescriptor and only the "
+                "binder makes bound columns."
+            )
+        return RelationSchema.lazy(self, alias, descriptor)

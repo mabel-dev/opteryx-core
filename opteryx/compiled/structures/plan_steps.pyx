@@ -347,7 +347,7 @@ cdef inline void _row_schema_slots(object schema, vector[uint32_t]& out) except 
     out.clear()
     if schema is None:
         return
-    for column in schema.columns:
+    for column in (schema.minted_columns() if type(schema).__name__ == "RelationSchema" else schema.columns):
         if type(column) is _SchemaColumn:
             out.push_back(<uint32_t>column.slot)
 

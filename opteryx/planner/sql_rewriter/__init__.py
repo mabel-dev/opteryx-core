@@ -284,12 +284,23 @@ _VERSION_AS_OF_TAG = re.compile(
 )
 
 
+# Each pass below can only fire on a token its pattern spells out; these find that
+# token without the quoted-span alternative every full pattern scans at each position,
+# with the same flags, so a skip is never a different answer (2026-10-31: 30 ms of
+# TPC-DS planning was these scans finding nothing).
+_PREFIXED_TRIGGER = re.compile(r"[bBrR][\"']")
+_FORMAT_TRIGGER = re.compile(r"FORMAT", re.IGNORECASE)
+_VERSION_TRIGGER = re.compile(r"VERSION", re.IGNORECASE)
+
+
 def _rewrite_escaped_breaks(text: str) -> Tuple[str, List[Edit]]:
     def replace(match):
         if match.group("quoted") is not None:
             return None
         return " "
 
+    if "\\" not in text:
+        return text, []
     return _substitute(text, _ESCAPED_BREAKS, replace)
 
 
@@ -310,11 +321,15 @@ def _rewrite_temporal_units(text: str) -> Tuple[str, List[Edit]]:
             )
         return _TEMPORAL_INTERNAL[match.group("name").lower()]
 
+    if "[" not in text:
+        return text, []
     return _substitute(text, _TEMPORAL_UNITS, replace)
 
 
 def _rewrite_prefixed_strings(text: str) -> Tuple[str, List[Edit]]:
     """b'...' -> CAST('...' AS VARBINARY), r'...' -> BASE64_DECODE('...')."""
+    if _PREFIXED_TRIGGER.search(text) is None:
+        return text, []
     from opteryx.third_party.mabel import base64
 
     def replace(match):
@@ -352,6 +367,8 @@ def _refuse_explain_formats(text: str) -> Tuple[str, List[Edit]]:
     `SET @a = 'FORMAT JSON'; SELECT @a;` the literal sits in the head, and reading it as
     a directive rejected a statement whose author was merely storing the value.
     """
+    if _FORMAT_TRIGGER.search(text) is None:
+        return text, []
     body_at = len(text)
     for match in _QUERY_BODY.finditer(text):
         if match.group("quoted") is None:
@@ -424,6 +441,8 @@ def _rewrite_version_as_of_previous(text: str) -> Tuple[str, List[Edit]]:
             "for the version of the data before the current one, or a specific snapshot id."
         )
 
+    if _VERSION_TRIGGER.search(text) is None:
+        return text, []
     return _substitute(text, _VERSION_AS_OF, replace)
 
 
@@ -453,6 +472,8 @@ def _reject_reversed_version_as_of(text: str) -> Tuple[str, List[Edit]]:
     order. What was wrong before was not that the order was refused, it was that
     the refusal blamed the wrong token and named neither order.
     """
+    if _VERSION_TRIGGER.search(text) is None:
+        return text, []
     head = _STATEMENT_HEAD.match(text)
     if head is None or head.group("word").upper() not in ("SELECT", "WITH", "EXPLAIN"):
         return text, []
@@ -514,6 +535,8 @@ def _rewrite_version_as_of_tag(text: str) -> Tuple[str, List[Edit]]:
         literal = tag if tag.startswith("'") else f"'{tag}'"
         return f"AT(TAG => {literal})"
 
+    if _VERSION_TRIGGER.search(text) is None:
+        return text, []
     return _substitute(text, _VERSION_AS_OF_TAG, replace)
 
 

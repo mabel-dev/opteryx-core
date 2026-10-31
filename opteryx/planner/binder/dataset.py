@@ -1748,7 +1748,7 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             # A reader with no manifest returns (schema, None) - see
             # BaseTable.get_dataset_metadata.
             described, node.manifest = node.connector.get_dataset_metadata()
-            node.schema = context.plan_context.columns.bind_relation(described, node.alias)
+            node.schema = context.plan_context.columns.bind_relation_lazily(described, node.alias)
             if node.manifest is not None:
                 # The manifest was built over the source's DESCRIPTION; its
                 # statistics are keyed by BOUND column identity and projection
@@ -1872,6 +1872,10 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
     # Every other node type the pushdown pass writes `.columns` onto (Subquery, Union,
     # Join, the READ_* FunctionDatasets) already arrives here carrying a column list, so
     # Scan was the only hole.
+    # A lazily bound scan learns its columns as the query references them; its
+    # column list is written when binding finishes (binder.finish_lazy_scans).
+    if node.schema is not None and node.schema.is_lazy:
+        return node, context
     node.columns = [
         LogicalColumn(
             node_type=NodeType.IDENTIFIER,

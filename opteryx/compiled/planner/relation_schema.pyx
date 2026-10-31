@@ -47,6 +47,56 @@ cdef inline int64_t _count(object value, str field) except? -1:
     return <int64_t>value
 
 
+cdef class LazyColumns:
+    """A scan's columns, minted on first use. ONE holder per bound relation, shared by
+    every clone of its schema, so a column is minted once whichever clone asks."""
+
+    def __cinit__(self, table, str alias, tuple descriptor):
+        cdef Py_ssize_t i
+        cdef str name
+        self.table = table
+        self.alias = alias
+        self.descriptor = descriptor
+        self.minted = [None] * len(descriptor)
+        self.pending = len(descriptor)
+        self.exact = {}
+        self.lower = {}
+        for i in range(len(descriptor)):
+            name = descriptor[i].name
+            self.exact.setdefault(name, i)
+            self.lower.setdefault(name.lower(), i)
+
+    cdef object mint(self, Py_ssize_t position):
+        column = self.minted[position]
+        if column is None:
+            if self.frozen:
+                from opteryx.exceptions import InvalidInternalStateError
+
+                raise InvalidInternalStateError(
+                    f"Column {self.descriptor[position].name!r} of {self.alias!r} was first referenced "
+                    "after binding finished - its scan no longer carries it."
+                )
+            source = self.descriptor[position]
+            column = self.table.relation_column(
+                self.alias,
+                source.name,
+                column_type=source.column_type,
+                nullable=source.nullable,
+                field_id=source.field_id,
+                origin=(self.alias,),
+            )
+            self.minted[position] = column
+            self.pending -= 1
+        return column
+
+    cdef tuple all(self):
+        cdef Py_ssize_t i
+        if self.pending:
+            for i in range(len(self.descriptor)):
+                self.mint(i)
+        return tuple(self.minted)
+
+
 cdef class RelationSchema:
     """Table/relation schema definition.
 
@@ -74,9 +124,10 @@ cdef class RelationSchema:
     ):
         cdef SchemaColumn column
         self.name = name
-        self.columns = tuple(columns)
+        self._columns = tuple(columns)
+        self._lazy = None
         # every column is a bound column: the typed assignment refuses anything else
-        for column in self.columns:
+        for column in self._columns:
             pass
         self.aliases = tuple(aliases)
         self.primary_key = primary_key
@@ -94,6 +145,66 @@ cdef class RelationSchema:
             self._data_size_estimate = _count(data_size_estimate, "data_size_estimate")
             self._present |= DATA_SIZE_ESTIMATE
         self._lowercase = None
+
+    @staticmethod
+    def lazy(table, str alias, descriptor):
+        """`descriptor` bound as relation `alias`, each column minted on first use."""
+        cdef RelationSchema new = RelationSchema(
+            descriptor.name,
+            (),
+            list(descriptor.aliases),
+            descriptor.primary_key,
+            descriptor.row_count_metric,
+            descriptor.row_count_estimate,
+            descriptor.data_size_metric,
+            descriptor.data_size_estimate,
+        )
+        new._lazy = LazyColumns(table, alias, tuple(descriptor.columns))
+        return new
+
+    @property
+    def columns(self):
+        if self._lazy is not None:
+            if self._lazy.frozen:
+                self._columns = self.minted_columns()
+                self._lazy = None
+            else:
+                self._force()
+        return self._columns
+
+    @property
+    def is_lazy(self):
+        return self._lazy is not None
+
+    def freeze(self):
+        """Binding is over: this scan carries the columns minted so far, and no more."""
+        if self._lazy is not None:
+            self._lazy.frozen = True
+
+    cdef void _force(self) except *:
+        self._columns = self._lazy.all()
+        self._lazy = None
+        self._lowercase = None
+
+    def minted_columns(self):
+        """The columns minted so far - all of them on an eager schema."""
+        if self._lazy is not None:
+            return tuple(c for c in self._lazy.minted if c is not None)
+        return self._columns
+
+    cdef bint shares_columns(self, RelationSchema other):
+        """Whether `other` holds this schema's columns by construction (a clone)."""
+        if self._lazy is not None or other._lazy is not None:
+            return self._lazy is other._lazy
+        return self._columns is other._columns
+
+    cpdef object find_lower(self, str lowered):
+        """The first column whose lowercased name (or alias) is `lowered`, or None -
+        minting only that column on a lazy schema."""
+        if self._lazy is not None:
+            position = self._lazy.lower.get(lowered)
+            return None if position is None else self._lazy.mint(position)
+        return self._lowercase_index().get(lowered)
 
     @property
     def row_count_metric(self):
@@ -114,7 +225,8 @@ cdef class RelationSchema:
     cdef RelationSchema _clone(self):
         cdef RelationSchema new = RelationSchema.__new__(RelationSchema)
         new.name = self.name
-        new.columns = self.columns
+        new._columns = self._columns
+        new._lazy = self._lazy
         new.aliases = self.aliases
         new.primary_key = self.primary_key
         new._row_count_metric = self._row_count_metric
@@ -134,8 +246,9 @@ cdef class RelationSchema:
         """This schema with `columns` in place of its own - a new schema."""
         cdef SchemaColumn column
         cdef RelationSchema new = self._clone()
-        new.columns = tuple(columns)
-        for column in new.columns:
+        new._columns = tuple(columns)
+        new._lazy = None
+        for column in new._columns:
             pass
         new._lowercase = None
         return new
@@ -148,7 +261,8 @@ cdef class RelationSchema:
         cdef str alias
         cdef dict index
         cdef RelationSchema new = self._clone()
-        new.columns = self.columns + (column,)
+        new._columns = self.columns + (column,)
+        new._lazy = None
         if self._lowercase is not None:
             index = dict(self._lowercase)
             index.setdefault(column.name.lower(), column)
@@ -223,12 +337,14 @@ cdef class RelationSchema:
         return f"{self.name}({col_list})"
 
     def __repr__(self) -> str:
-        return f"RelationSchema(name={self.name!r}, num_columns={len(self.columns)})"
+        return f"RelationSchema(name={self.name!r}, num_columns={self.num_columns})"
 
     @property
     def column_names(self) -> list:
         """Get list of all column names."""
         cdef SchemaColumn col
+        if self._lazy is not None:
+            return [source.name for source in self._lazy.descriptor]
         return [col.name for col in self.columns]
 
     @property
@@ -242,7 +358,9 @@ cdef class RelationSchema:
 
     @property
     def num_columns(self) -> int:
-        return len(self.columns)
+        if self._lazy is not None:
+            return len(self._lazy.descriptor)
+        return len(self._columns)
 
     cdef dict _lowercase_index(self):
         """Lowercased column name or alias -> the FIRST column carrying it (column
@@ -266,7 +384,10 @@ cdef class RelationSchema:
         """The column named `name` (by name, then aliases), or None."""
         cdef SchemaColumn col
         if case_insensitive:
-            return self._lowercase_index().get(name.lower())
+            return self.find_lower(name.lower())
+        if self._lazy is not None:
+            position = self._lazy.exact.get(name)
+            return None if position is None else self._lazy.mint(position)
         for col in self.columns:
             if col.name == name or (col.aliases and name in col.aliases):
                 return col
