@@ -229,11 +229,11 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
                 # sketch for those, everything else works (mirrors the
                 # catalog's own _compute_column_stats). Asked up front rather
                 # than caught: the type is known before the call, and a throw
-                # from hash() now means a MALFORMED column (an fp16 vector
+                # from the sketch's hash now means a MALFORMED column (an fp16 vector
                 # missing its descriptor), which must fail ANALYZE rather than
                 # silently cost it a sketch.
                 if name not in array_targets:
-                    sketches[name].update(col.hash())
+                    sketches[name].update(col._nb)
                 null_counts[name] += col.null_count()
                 if name in integer_targets and sums[name] is not None:
                     summed = col.exact_sum()

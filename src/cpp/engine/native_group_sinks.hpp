@@ -91,6 +91,8 @@
 #include "medius.hpp"            // opteryx::medius::MediusMap — bounded middle tier
 #include "parvi.hpp"             // opteryx::parvi::ParviMap — 64-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
+#include "ops/exact_sum.h"       // draken::ops::exact_sum — ungrouped integer SUM/AVG per morsel
+#include "ops/float_ops.h"       // draken::ops::f64_sum/f32_sum — ungrouped float SUM/AVG per morsel
 #include "_agg_kernels.hpp"      // opteryx::ungrouped::QuantileState — MEDIAN's per-group
                                  // value buffer, and the global byte budget that bounds it
 #include "hllpp.h"               // HllppSketch — APPROX_COUNT_DISTINCT, global namespace
@@ -749,6 +751,27 @@ inline double agg2_raw_as_double(int64_t raw, bool is_float, bool is_u64) noexce
 inline bool agg2_sum_i64_add(int64_t& lane, int64_t raw, bool is_u64) noexcept {
     if (is_u64 && raw < 0) return false;
     return !__builtin_add_overflow(lane, raw, &lane);
+}
+
+// SUM/AVG of a whole morsel through draken's column reductions — the same
+// float_sum Vector.sum() runs, and exact_sum (int128, isum's domain) — instead
+// of agg2_update per row. False for a type neither covers (DECIMAL128, UUID,
+// BOOL, temporal): those stay on the per-row path.
+inline bool agg2_sum_morsel(AggCell& c, const DrakenVector& v, bool is_float) noexcept {
+    if (is_float) {
+        double s;
+        const uint32_t n = (v.type == DRAKEN_FLOAT32) ? draken::ops::f32_sum(v, &s)
+                                                      : draken::ops::f64_sum(v, &s);
+        c.fsum += s;
+        c.valid += n;
+        return true;
+    }
+    __int128 s;
+    uint64_t n;
+    if (!draken::ops::exact_sum(v, &s, &n)) return false;
+    c.isum += s;
+    c.valid += static_cast<int64_t>(n);
+    return true;
 }
 
 inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is_float,
@@ -2911,6 +2934,9 @@ struct UngroupedAggSink : Sink {
                 }
             } else {
                 bool is_f = l.meta[s].is_float;
+                if ((specs[s].fn == AggFn::Sum || specs[s].fn == AggFn::Avg)
+                        && agg2_sum_morsel(c, v, is_f))
+                    continue;
                 bool nm = specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
                     || specs[s].fn == AggFn::AnyValue;
                 for (uint32_t i = 0; i < v.length; ++i) {

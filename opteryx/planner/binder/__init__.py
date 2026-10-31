@@ -102,9 +102,11 @@ def _finish_lazy_scans(steps, plan_context) -> None:
             continue
         if step.schema.is_lazy:
             step.schema.freeze()
-            step.schema = step.schema
-            if step.manifest is not None:
-                step.manifest = step.manifest
+        # Re-mirror even when no longer lazy: a wildcard forces every column in place,
+        # after the row was mirrored over the (then empty) minted set.
+        step.schema = step.schema
+        if step.manifest is not None:
+            step.manifest = step.manifest
         step.columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,

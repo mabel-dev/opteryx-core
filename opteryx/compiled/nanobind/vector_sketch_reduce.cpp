@@ -24,11 +24,14 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 #include "core/buffers.h"
+#include "core/draken_capi.h"
+#include "core/vector_owner.h"
 #include "vectors/_vector_bridge.h"
 #include "core/kmv_sketch.h"
 #include "planner/manifest_sketch.hpp"
@@ -217,7 +220,9 @@ static nb::object char_class_field_totals(nb::object column, int64_t field_id,
 
 // ── Write side: the sketch opteryx/utils/kmv.py used to implement in Python ──
 //
-// ANALYZE feeds this one morsel of Vector.hash() output at a time; `min_k`
+// ANALYZE feeds this one morsel's column at a time; it is hashed natively by
+// draken_hash_rows (Vector.hash() family, the same call src/cpp/planner/
+// file_stats.hpp sketches with) and never boxed into Python. `min_k`
 // returns the sorted K smallest distinct hashes, which is the per-file sketch
 // the manifest stores and estimate_cardinality merges across files. It is the
 // SAME ManifestSketch the read side above merges with, so write and read cannot
@@ -225,16 +230,25 @@ static nb::object char_class_field_totals(nb::object column, int64_t field_id,
 // heapq.nsmallest and the other a C++ std::set.
 class ColumnSketch {
   public:
-    void update(const std::vector<uint64_t>& hashes) {
-        // Pure C++ over the batch — the caller's list is already converted.
-        nb::gil_scoped_release _gil;
-        for (const uint64_t hash : hashes) sketch_.add(hash);
+    void update(nb::object column) {
+        const VectorOwner* owner = draken_owner_unwrap(column.ptr());
+        if (!owner) throw nb::python_error();
+        hashes_.resize(owner->vec.length);
+        char error[256] = {0};
+        int rc;
+        {
+            nb::gil_scoped_release _gil;
+            rc = draken_hash_rows(owner, hashes_.data(), error, sizeof(error));
+            if (rc == 0) for (const uint64_t hash : hashes_) sketch_.add(hash);
+        }
+        if (rc != 0) throw std::invalid_argument(error);
     }
 
     std::vector<uint64_t> min_k() const { return sketch_.min_k(ManifestSketch::kK); }
 
   private:
     ManifestSketch sketch_;
+    std::vector<uint64_t> hashes_;   // per-morsel scratch, reused across updates
 };
 
 // Union of KMV sketches: the K smallest DISTINCT hashes across all of them.
@@ -284,8 +298,8 @@ static nb::object estimate_from_min_k(const std::vector<uint64_t>& min_k) {
 void register_vector_sketch_reduce(nb::module_ &m) {
     nb::class_<ColumnSketch>(m, "ColumnSketch")
         .def(nb::init<>())
-        .def("update", &ColumnSketch::update, nb::arg("hashes"),
-            "Fold one batch of native per-row hashes (Vector.hash()) into the sketch.")
+        .def("update", &ColumnSketch::update, nb::arg("column"),
+            "Hash one column Vector natively (Vector.hash() family) and fold it into the sketch.")
         .def("min_k", &ColumnSketch::min_k,
             "The sorted K smallest distinct hashes — the per-file sketch the manifest stores.");
 

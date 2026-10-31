@@ -442,37 +442,76 @@ static inline VecResult float_compare_vector(
 // Output is double for both float32 and float64.
 // ===========================================================================
 
+// Rows [lo, hi) into eight independent partial sums. One running total is a
+// single add-latency chain; eight let the adds overlap (and pack into SIMD
+// lanes). Summation order differs from a left fold in the low bits only.
+template<typename T, bool Identity>
+static inline double fp_sum_rows(const T* data, const uint32_t* sel,
+                                 uint32_t lo, uint32_t hi) noexcept {
+    auto at = [&](uint32_t i) -> double {
+        if constexpr (Identity) return static_cast<double>(data[i]);
+        else                    return static_cast<double>(data[sel[i]]);
+    };
+    double s[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    uint32_t i = lo;
+    for (; i + 8u <= hi; i += 8u)
+        for (uint32_t k = 0; k < 8u; ++k) s[k] += at(i + k);
+    for (; i < hi; ++i) s[0] += at(i);
+    return ((s[0] + s[1]) + (s[2] + s[3])) + ((s[4] + s[5]) + (s[6] + s[7]));
+}
+
+// Validity a 64-row word at a time: all-valid words take the unrolled sum,
+// all-null words are skipped, mixed words walk their set bits.
+template<typename T, bool Identity>
+static inline double fp_sum_masked(const T* data, const uint32_t* sel,
+                                   const uint8_t* validity, uint32_t n,
+                                   uint32_t* count) noexcept {
+    double total = 0.0;
+    uint32_t c = 0;
+    const uint32_t words = n >> 6;
+    for (uint32_t w = 0; w < words; ++w) {
+        uint64_t m;
+        std::memcpy(&m, validity + (static_cast<size_t>(w) << 3), sizeof(m));
+        const uint32_t base = w << 6;
+        if (m == ~0ULL) {
+            total += fp_sum_rows<T, Identity>(data, sel, base, base + 64u);
+            c += 64u;
+        } else if (m != 0) {
+            c += static_cast<uint32_t>(__builtin_popcountll(m));
+            double part = 0.0;
+            while (m) {
+                const uint32_t j = base + static_cast<uint32_t>(__builtin_ctzll(m));
+                part += Identity ? static_cast<double>(data[j]) : static_cast<double>(data[sel[j]]);
+                m &= m - 1;
+            }
+            total += part;
+        }
+    }
+    for (uint32_t i = words << 6; i < n; ++i) {
+        if ((validity[i >> 3] >> (i & 7)) & 1u) {
+            total += Identity ? static_cast<double>(data[i]) : static_cast<double>(data[sel[i]]);
+            ++c;
+        }
+    }
+    *count = c;
+    return total;
+}
+
 template<typename T>
 static inline uint32_t float_sum(const DrakenVector& v, double* out_value) noexcept {
     const uint32_t n        = v.length;
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* validity = v.validity;
-    double total = 0.0;
-    uint32_t count = 0;
+    const bool     identity = (v.flags & DRAKEN_SEL_IDENTITY) != 0;
+    double total;
+    uint32_t count = n;
 
     if (validity == nullptr) {
-        count = n;
-        if (v.flags & DRAKEN_SEL_IDENTITY) {
-            for (uint32_t i = 0; i < n; ++i) total += static_cast<double>(data[i]);
-        } else {
-            for (uint32_t i = 0; i < n; ++i) total += static_cast<double>(data[v.selection[i]]);
-        }
+        total = identity ? fp_sum_rows<T, true>(data, v.selection, 0, n)
+                         : fp_sum_rows<T, false>(data, v.selection, 0, n);
     } else {
-        if (v.flags & DRAKEN_SEL_IDENTITY) {
-            for (uint32_t i = 0; i < n; ++i) {
-                if ((validity[i >> 3] >> (i & 7)) & 1u) {
-                    total += static_cast<double>(data[i]);
-                    ++count;
-                }
-            }
-        } else {
-            for (uint32_t i = 0; i < n; ++i) {
-                if ((validity[i >> 3] >> (i & 7)) & 1u) {
-                    total += static_cast<double>(data[v.selection[i]]);
-                    ++count;
-                }
-            }
-        }
+        total = identity ? fp_sum_masked<T, true>(data, v.selection, validity, n, &count)
+                         : fp_sum_masked<T, false>(data, v.selection, validity, n, &count);
     }
     *out_value = fp_canon(total);
     return count;
