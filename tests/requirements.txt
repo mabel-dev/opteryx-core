@@ -2,6 +2,7 @@ types-orjson
 types-PyYAML
 
 coverage
+cython  # Cython.Coverage plugin: measures the compiled planner (pyproject [tool.coverage.run])
 hypothesis
 mypy
 pytest

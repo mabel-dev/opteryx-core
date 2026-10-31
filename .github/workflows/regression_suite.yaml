@@ -77,8 +77,12 @@ jobs:
           rustc --version
           python -m uv pip freeze
 
+      # Line-traces the compiled planner so the coverage gate measures it (setup.py).
+      # Every job below runs this traced tree; release builds never set it.
       - name: Compile
         run: make compile
+        env:
+          OPTERYX_ENABLE_COVERAGE: 1
 
       # Assert OpenSSL is linked into the extension that actually CALLS it:
       # http_client statically links vendored libcurl, which needs -lssl

@@ -75,6 +75,10 @@ ignore = ["SIM105"]
 
 [tool.coverage.run]
 branch = true
+# The planner ships Cython-compiled; under OPTERYX_ENABLE_COVERAGE it is line-traced
+# via settrace, which only the ctrace core + Cython plugin can measure (lines, no branches).
+core = "ctrace"
+plugins = ["Cython.Coverage"]
 source = ["opteryx", "opteryx/**"]
 omit = ["**/third_party/**"]
 
