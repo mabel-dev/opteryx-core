@@ -501,10 +501,10 @@ jobs:
 
   # No `needs:` — see build-manylinux. `upload` is the gate.
   build-macos:
-    # macos-14 = Apple Silicon (arm64) only, Python 3.13 + 3.14 GIL builds.
+    # macos-15 = Apple Silicon (arm64) only, Python 3.13 + 3.14 GIL builds.
     # Mirrors rugo's macOS build (release-rugo.yaml) but opteryx_core
     # additionally needs Rust (opteryx.compute) and libcurl.
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -522,16 +522,18 @@ jobs:
       - name: Make build script executable
         run: chmod +x dev/build-wheels-macos.sh
 
-      - name: Build wheel (macos-14, py ${{ matrix.pybuild }})
+      - name: Build wheel (macos-15, py ${{ matrix.pybuild }})
         env:
-          # 14.0, not 11.0: the native Postgres client links OpenSSL directly
+          # 15.0, not 11.0: the native Postgres client links OpenSSL directly
           # (setup.py resolve_openssl), which on a macOS runner is Homebrew's
-          # openssl@3 — an arm64 bottle whose own minimum target is 14.0. A
-          # wheel tagged macosx_11_0 that bundles those dylibs cannot run on
-          # 11.0, and delocate hard-fails rather than publish that claim.
+          # openssl@3 — an arm64 bottle whose own minimum target is the
+          # runner's macOS (15.0 on macos-15). A wheel tagged macosx_11_0
+          # that bundles those dylibs cannot run on 11.0, and delocate
+          # hard-fails rather than publish that claim.
           # Holding an 11.0 floor would mean vendoring an OpenSSL built for
-          # 11.0; we deliberately take the higher floor instead.
-          MACOSX_DEPLOYMENT_TARGET: "14.0"
+          # 11.0; we deliberately take the higher floor instead. macos-14
+          # runners retired 2026-11-02, which raised the floor 14.0 → 15.0.
+          MACOSX_DEPLOYMENT_TARGET: "15.0"
           OPTERYX_ENABLE_LTO: "1"
         run: ./dev/build-wheels-macos.sh
 

@@ -160,9 +160,9 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        # macos-14 = Apple Silicon (arm64) only. macos-13 (Intel x86_64) was
+        # macos-15 = Apple Silicon (arm64) only. macos-13 (Intel x86_64) was
         # dropped — rugo publishes macOS arm64 wheels, not Intel.
-        os: [macos-14]
+        os: [macos-15]
         pybuild: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
