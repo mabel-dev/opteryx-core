@@ -3305,12 +3305,10 @@ struct UngroupedAggSink : Sink {
 //   • collectors are per-spec COLUMNAR LANES (8B each), allocated only for what
 //     the spec's GBKind needs — update, merge, and emit are per-COLUMN passes
 //     that dispatch on the kind once, never per row.
-//   • all-fixed-width keys pack into a constant-stride buffer (null byte + raw
-//     bytes, zeros when NULL): serialization is one columnar pass per key
-//     column, identity is one memcmp against ONE contiguous array, and emit
-//     reads the packed bytes in place. Any string key falls back to the v2
-//     arena format. Identity stays hash + full byte compare — never hash-only.
-//   • sink: rows hash-partition (gb_part: bits 32..37 of one XXH3 over the key bytes)
+//   • keys live in per-column row stores (GroupKeyColumn), appended once per NEW
+//     group and read in place at emit. Identity is 64-bit hash identity
+//     (CarcharIndex) — no key bytes are compared, string keys included.
+//   • sink: rows hash-partition (gb_part over the 64-bit draken row hash)
 //     into kGBParts flat open-addressing tables per worker; the 64-bit hash is
 //     STORED so no later phase re-hashes.
 //   • combine: O(kGBParts) std::move's under the mutex — queued, never merged
@@ -3610,6 +3608,11 @@ inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const Drake
 // the worker's first morsel. A key value outside the layout is never "handled" — the
 // worker spills what it has into the hash partitions and hashes from then on.
 // OPTERYX_GB_DA=0 disables (read per query, for A/B from one binary).
+// Few-groups pass C (pass_c_few): at most this many groups per worker, summed into
+// this many interleaved local copies per group (a power of two).
+constexpr size_t   kGBFewGroups = 64;
+constexpr uint32_t kGBFewLanes = 4;
+
 constexpr size_t   kGBDAMaxKeys = 8;
 constexpr uint64_t kGBDAMinSlots = 262144;               // Rayforce: max(n/8, 262144)
 // Per-WORKER cap (architect, 2026-10-09). Rayforce's n/8 is a whole-column budget;
@@ -4093,6 +4096,16 @@ struct GroupByLocal : LocalSinkState {
     // per-morsel ingest scratch
     std::vector<uint64_t> mk_hash;    // per row: draken key hash
     std::vector<uint32_t> mk_ent;     // per row: group id within its partition
+    // Few-groups pass C (this morsel only, few_n == 0 when off): a dense id over the
+    // worker's groups per row, the (partition, entry) behind each id, and the
+    // kGBFewLanes interleaved local accumulators the updates sum into.
+    uint32_t              few_n = 0;
+    std::vector<uint8_t>  few_gid;
+    std::vector<uint8_t>  few_p;
+    std::vector<uint32_t> few_e;
+    std::vector<uint32_t> few_cnt;
+    std::vector<double>   few_f64;
+    std::vector<__int128> few_i128;
     // H20 compressed-key path: one entry per DISTINCT hash, not per row.
     std::vector<uint32_t> dict_rep;   // per code: first row using it (representative)
     std::vector<uint8_t>  dict_part;  // per code: partition index
@@ -4751,9 +4764,106 @@ struct GroupBySink : Sink {
     // are written once and instantiated for both; a member function with explicit
     // parameters, not a capturing lambda, so nothing in a row loop is reloaded through a
     // capture (BYREFCAP: -fno-strict-aliasing).
+    // Pass C for SUM/AVG/COUNT(col) when the worker has few groups (l.few_n != 0):
+    // each row adds into one of kGBFewLanes local copies of its group's cells, chosen
+    // by row index, so consecutive rows of one group no longer chain through the same
+    // memory cell; the copies fold into the lanes once per group per morsel. Integer
+    // and decimal sums are exact either way; float sums change order (low bits only).
+    // A SUM over INT64 checks overflow at the fold, on the morsel's exact partial.
+    template <class RD, class LanesOf>
+    bool pass_c_few(GroupByLocal& l, const MorselPtr& in, size_t s, GBKind kind,
+                    uint32_t rows, LanesOf lanes_of, ErrCtx& err) {
+        constexpr uint32_t R = kGBFewLanes;
+        const uint32_t     G = l.few_n;
+        const uint8_t*     gid = l.few_gid.data();
+        const DrakenVector& v = in->columns[static_cast<size_t>(specs[s].col_idx)].view;
+        const void*        vdata  = v.data;
+        const uint32_t*    vsel   = v.selection;
+        const uint8_t*     vvalid = v.validity;
+        const bool         is_u64 = v.type == DRAKEN_UINT64;
+        auto row_ok = [vvalid](uint32_t i) -> bool {
+            return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
+        };
+        l.few_cnt.assign(static_cast<size_t>(G) * R, 0);
+        uint32_t* cnt = l.few_cnt.data();
+        auto folded_count = [cnt](uint32_t g) {
+            uint32_t c = 0;
+            for (uint32_t k = 0; k < R; ++k) c += cnt[g * R + k];
+            return c;
+        };
+        if (kind == GBKind::SumF || kind == GBKind::AvgF) {
+            l.few_f64.assign(static_cast<size_t>(G) * R, 0.0);
+            double* acc = l.few_f64.data();
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                int64_t bits = RD::at(vdata, vsel[i]);
+                double d;
+                std::memcpy(&d, &bits, sizeof(d));
+                const uint32_t k = gid[i] * R + (i & (R - 1));
+                acc[k] += d;
+                cnt[k] += 1;
+            }
+            for (uint32_t g = 0; g < G; ++g) {
+                const uint32_t c = folded_count(g);
+                if (c == 0) continue;
+                auto& L = lanes_of(l.few_p[g]);
+                const uint32_t e = l.few_e[g];
+                L.f64[e] += (acc[g * R] + acc[g * R + 1]) + (acc[g * R + 2] + acc[g * R + 3]);
+                L.valid[e] += c;
+            }
+            return true;
+        }
+        if (kind == GBKind::Valid) {
+            for (uint32_t i = 0; i < rows; ++i)
+                if (row_ok(i)) cnt[gid[i] * R + (i & (R - 1))] += 1;
+            for (uint32_t g = 0; g < G; ++g) {
+                const uint32_t c = folded_count(g);
+                if (c != 0) lanes_of(l.few_p[g]).valid[l.few_e[g]] += c;
+            }
+            return true;
+        }
+        // SumI / AvgI / SumD128 / AvgD128: exact int128 partials.
+        l.few_i128.assign(static_cast<size_t>(G) * R, 0);
+        __int128* acc = l.few_i128.data();
+        const bool d128 = kind == GBKind::SumD128 || kind == GBKind::AvgD128;
+        for (uint32_t i = 0; i < rows; ++i) {
+            if (!row_ok(i)) continue;
+            const uint32_t k = gid[i] * R + (i & (R - 1));
+            acc[k] += d128 ? agg2_read_i128(v, i)
+                           : agg2_raw_as_i128(RD::at(vdata, vsel[i]), is_u64);
+            cnt[k] += 1;
+        }
+        for (uint32_t g = 0; g < G; ++g) {
+            const uint32_t c = folded_count(g);
+            if (c == 0) continue;   // its partition may have no lanes this morsel
+            auto& L = lanes_of(l.few_p[g]);
+            const uint32_t e = l.few_e[g];
+            const __int128 part = (acc[g * R] + acc[g * R + 1]) + (acc[g * R + 2] + acc[g * R + 3]);
+            if (kind == GBKind::SumI) {
+                const __int128 t = static_cast<__int128>(L.i64[e]) + part;
+                if (t > INT64_MAX || t < INT64_MIN) {
+                    err.code = 1;
+                    err.msg = "SUM overflow: exact integer sum exceeds INT64 "
+                              "— fail loud, never a wrapped answer";
+                    return false;
+                }
+                L.i64[e] = static_cast<int64_t>(t);
+            } else {
+                L.i128[e] += part;
+            }
+            L.valid[e] += c;
+        }
+        return true;
+    }
+
     template <class RD, class LanesOf>
     bool pass_c_spec(GroupByLocal& l, const MorselPtr& in, size_t s, GBKind kind,
                      uint32_t rows, LanesOf lanes_of, ErrCtx& err) {
+        if (l.few_n != 0
+                && (kind == GBKind::Valid || kind == GBKind::SumI || kind == GBKind::AvgI
+                    || kind == GBKind::SumF || kind == GBKind::AvgF
+                    || kind == GBKind::SumD128 || kind == GBKind::AvgD128))
+            return pass_c_few<RD>(l, in, s, kind, rows, lanes_of, err);
         using LT = std::remove_reference_t<decltype(lanes_of(size_t{0}))>;
         const DrakenVector& v = in->columns[static_cast<size_t>(specs[s].col_idx)].view;
         const bool         want_max = specs[s].fn == AggFn::Max;
@@ -5302,7 +5412,42 @@ struct GroupBySink : Sink {
 
         // Pass C: columnar updates — kind dispatched ONCE per spec, tight row loops.
         GROUPBY_TEL_START(_gbC_t0);
-        if (l.has_rows) {
+        // Few groups: with a handful of groups consecutive rows hit the same cell, and
+        // every `+=` waits on the previous one through memory. Give each row a dense
+        // id over the worker's groups so pass C can sum into interleaved local copies
+        // and fold once per group (pass_c_few).
+        l.few_n = 0;
+        {
+            size_t G = 0;
+            for (size_t p = 0; p < kGBParts; ++p) G += l.parts[p].size();
+            if (G > 0 && G <= kGBFewGroups) {
+                uint8_t off[kGBParts];
+                l.few_p.resize(G);
+                l.few_e.resize(G);
+                uint32_t g = 0;
+                for (size_t p = 0; p < kGBParts; ++p) {
+                    off[p] = static_cast<uint8_t>(g);
+                    for (size_t e = 0; e < l.parts[p].size(); ++e, ++g) {
+                        l.few_p[g] = static_cast<uint8_t>(p);
+                        l.few_e[g] = static_cast<uint32_t>(e);
+                    }
+                }
+                l.few_gid.resize(rows);
+                for (uint32_t i = 0; i < rows; ++i)
+                    l.few_gid[i] = static_cast<uint8_t>(off[gb_part(l.mk_hash[i])] + l.mk_ent[i]);
+                l.few_n = static_cast<uint32_t>(G);
+            }
+        }
+        if (l.has_rows && l.few_n != 0) {
+            l.few_cnt.assign(static_cast<size_t>(l.few_n) * kGBFewLanes, 0);
+            for (uint32_t i = 0; i < rows; ++i)
+                l.few_cnt[l.few_gid[i] * kGBFewLanes + (i & (kGBFewLanes - 1))] += 1;
+            for (uint32_t g = 0; g < l.few_n; ++g) {
+                uint32_t c = 0;
+                for (uint32_t k = 0; k < kGBFewLanes; ++k) c += l.few_cnt[g * kGBFewLanes + k];
+                if (c != 0) l.parts[l.few_p[g]].grows[l.few_e[g]] += c;
+            }
+        } else if (l.has_rows) {
             int64_t* gp[kGBParts];
             bool gflat = true;
             for (size_t p = 0; p < kGBParts && gflat; ++p) {

@@ -682,6 +682,13 @@ static inline VecResult dec128_mul(
     for (uint32_t i = 0; i < n; ++i) {
         const __int128 av = ad[a.selection[i]];
         const __int128 bv = bd[b.selection[i]];
+        // Both in int64 range (the common case: declared precision promotes, values
+        // stay small): one 64×64→128 multiply, which cannot leave int128 since
+        // |a|,|b| <= 2^63 ⇒ |a·b| <= 2^126. Same value as the wide path below.
+        if (av == static_cast<int64_t>(av) && bv == static_cast<int64_t>(bv)) {
+            dst[i] = static_cast<__int128>(static_cast<int64_t>(av)) * static_cast<int64_t>(bv);
+            continue;
+        }
         const bool neg = (av < 0) ^ (bv < 0);
         // |operand| < 10^38 < 2^127, so negation never hits INT128_MIN.
         const unsigned __int128 ua = (av < 0) ? (unsigned __int128)(-av) : (unsigned __int128)av;

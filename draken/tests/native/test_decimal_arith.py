@@ -275,6 +275,23 @@ class TestDecimalMul:
         r = a.mul(b)
         assert r.type == dn.DrakenType.DECIMAL128
 
+    def test_decimal128_mul_int64_fast_path_and_wide_path(self):
+        # Rows whose operands fit int64 take the 64x64->128 multiply; rows with a
+        # wider operand take the 128x128->256 path. Both must give exact products,
+        # including signs and the int64 boundary values.
+        big = Decimal(2**63 - 1)
+        vals_a = [Decimal(3), Decimal(-7), big, Decimal(-(2**63)), Decimal(10**25), Decimal(-(10**20)), Decimal(0)]
+        vals_b = [Decimal(5), Decimal(11), big, Decimal(-(2**63)), Decimal(-3), Decimal(10**15), Decimal(-9)]
+        a = dn.vector_decimal128_from_sequence(vals_a, precision=38, scale=0)
+        b = dn.vector_decimal128_from_sequence(vals_b, precision=38, scale=0)
+        assert pylist(a.mul(b)) == [x * y for x, y in zip(vals_a, vals_b)]
+
+    def test_decimal128_mul_overflow_still_raises(self):
+        a = dn.vector_decimal128_from_sequence([Decimal(1), Decimal(10**20)], precision=38, scale=0)
+        b = dn.vector_decimal128_from_sequence([Decimal(1), Decimal(10**20)], precision=38, scale=0)
+        with pytest.raises(OverflowError):
+            a.mul(b)
+
     def test_scale_overflow_raises(self):
         # sa + sb > 38 raises in the DECIMAL128 tier.
         # Use DECIMAL128(38,20) * DECIMAL128(38,19) → sa+sb = 39 > 38.

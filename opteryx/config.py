@@ -85,13 +85,13 @@ DISABLE_OPTIMIZER: bool = get_bool("DISABLE_OPTIMIZER", False)
 OPTERYX_DEBUG: bool = get_bool("OPTERYX_DEBUG", False)
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
 
-ALLOW_LOCAL_READS: bool = get_bool("ALLOW_LOCAL_READS", False)
+ALLOW_LOCAL_READS: bool = get_bool("ALLOW_LOCAL_READS", True)
 """Let READ_* table functions reach this machine and its private network: a local
 path (no scheme), and http(s) hosts that resolve to loopback, private, link-local
 or other non-public addresses (checked natively at connect time, so redirects and
-DNS tricks are covered too). Off by default, because on a shared deployment those
-reads expose the server's own files, environment and internal services. Set it
-for local development and tests."""
+DNS tricks are covered too). On by default for local use; a shared deployment MUST
+set ALLOW_LOCAL_READS=0, because there those reads expose the server's own files,
+environment and internal services."""
 
 FIRESTORE_AMBIENT_PROJECTS: frozenset = frozenset(
     project.strip()
