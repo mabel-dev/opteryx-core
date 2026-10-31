@@ -202,6 +202,18 @@ class TestReductions:
         v = f64([None, None])
         assert v.sum() == 0.0
 
+    @pytest.mark.parametrize("n", [63, 64, 65, 200, 4099])
+    def test_sum_validity_words_and_selection(self, n):
+        # Covers all-valid, all-null and mixed 64-row validity words, the tail,
+        # and the non-identity selection path (take).
+        vals = [None if (i // 64) % 3 == 1 or i % 7 == 0 else i * 0.5 for i in range(n)]
+        vals[:64] = [i * 0.25 for i in range(min(64, n))]
+        v = f64(vals)
+        assert v.sum() == pytest.approx(math.fsum(x for x in vals if x is not None))
+        idx = list(range(n - 1, -1, -3))
+        taken = [vals[i] for i in idx]
+        assert v.take(idx).sum() == pytest.approx(math.fsum(x for x in taken if x is not None))
+
     def test_min_finite(self):
         v = f64([3.0, 1.0, 2.0])
         assert v.min() == 1.0

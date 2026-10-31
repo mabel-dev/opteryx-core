@@ -31,10 +31,9 @@ def test_the_halves_are_distinct():
 def test_binder_wraps_a_failed_dataset_description_as_metadata():
     """The binder's catch-all around reading a relation's description raises the
     metadata half - nothing has been planned, so no data file was touched."""
-    import inspect
-
     from opteryx.planner.binder import dataset
 
-    source = inspect.getsource(dataset)
+    # the planner is compiled, so inspect cannot reach its source - read the .py
+    source = open(os.path.join(os.path.dirname(dataset.__file__), "dataset.py")).read()
     assert 'raise DatasetMetadataReadError(f"Cannot read information for dataset' in source
 

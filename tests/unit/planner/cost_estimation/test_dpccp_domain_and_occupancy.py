@@ -126,13 +126,13 @@ def test_tdom_fallback_uses_pre_filter_rows_so_a_filter_stays_selective():
         JoinVertex(id=0, name="part", row_count=200_000, base_row_count=2_000_000),
         JoinVertex(id=1, name="lineitem", row_count=59_986_052),
     ]
-    classes = [[(0, "p_partkey"), (1, "l_partkey")]]
+    classes = [[(0, b"p_partkey"), (1, b"l_partkey")]]
 
     tdoms = _build_equiv_tdoms(classes, per_leaf_scans, vertices, PlanContext())
 
     # Pre-filter part, NOT the 200,000 rows that survived the LIKE.
-    assert tdoms[(0, "p_partkey")] == 2_000_000
-    assert tdoms[(1, "l_partkey")] == 2_000_000
+    assert tdoms[(0, b"p_partkey")] == 2_000_000
+    assert tdoms[(1, b"l_partkey")] == 2_000_000
 
 
 def test_join_subtree_domain_composes_as_max_of_its_sides():

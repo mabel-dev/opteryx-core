@@ -450,11 +450,19 @@ def test_checking_does_not_execute():
 def test_the_check_path_and_the_planner_path_are_the_same_front_half():
     """`query_planner` calls `bind_statement`; a second parse-and-bind would drift,
     and a checker that drifts is a checker that lies."""
-    import inspect
+    import ast
 
-    from opteryx.planner import query_planner
+    import opteryx.planner as planner
 
-    assert "bind_statement(" in inspect.getsource(query_planner)
+    # the planner is compiled, so inspect cannot reach its source - read the .py
+    path = os.path.join(os.path.dirname(planner.__file__), "__init__.py")
+    source = open(path).read()
+    function = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "query_planner"
+    )
+    assert "bind_statement(" in ast.get_source_segment(source, function)
 
 
 def test_a_schema_only_bind_reads_no_manifest():

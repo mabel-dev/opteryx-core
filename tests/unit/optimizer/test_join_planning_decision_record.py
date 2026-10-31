@@ -182,11 +182,22 @@ def test_the_enumerator_is_not_wrapped_in_a_try_except():
     enforces every precondition the enumerator refuses on (>= 1 vertex,
     connected), so a raise here is an invariant violation that must surface,
     not a shape the strategy may silently decline."""
-    import inspect
+    import ast
 
-    from opteryx.planner.optimizer.strategies.join_planning import JoinPlanningStrategy
+    from opteryx.planner.optimizer.strategies import join_planning
 
-    source = inspect.getsource(JoinPlanningStrategy.complete)
+    # the planner is compiled, so inspect cannot reach its source - read the .py
+    path = os.path.join(os.path.dirname(join_planning.__file__), "join_planning.py")
+    module_source = open(path).read()
+    strategy = next(
+        node
+        for node in ast.parse(module_source).body
+        if isinstance(node, ast.ClassDef) and node.name == "JoinPlanningStrategy"
+    )
+    complete = next(
+        node for node in strategy.body if isinstance(node, ast.FunctionDef) and node.name == "complete"
+    )
+    source = ast.get_source_segment(module_source, complete)
     assert "except" not in source
     assert "enumerate_join_tree(graph)" in source
 

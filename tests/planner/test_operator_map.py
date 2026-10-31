@@ -21,7 +21,8 @@ def _documented_entry_count() -> int:
     """The count claimed by the header comment, read from the source."""
     import opteryx.planner.binder.operator_map as module
 
-    source = open(module.__file__).read()
+    # module.__file__ is the compiled .so; the comment lives in the .py beside it
+    source = open(os.path.join(os.path.dirname(module.__file__), "operator_map.py")).read()
     match = re.search(r"the map carries (\d+) entries", source)
     assert match, "the OPERATOR_MAP header no longer states an entry count"
     return int(match.group(1))
