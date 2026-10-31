@@ -124,7 +124,7 @@ cdef extern from "metadata.hpp":
         long long num_row_groups
 
     FileStats ReadParquetMetadataC(const char* path) except +
-    FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size) except +
+    FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size) except + nogil
     FileStats ReadParquetMetadataC(const char* path, const MetadataParseOptions& options) except +
     FileStats ReadParquetMetadata(const string& path, const MetadataParseOptions& options) except +
     FileStats ReadParquetMetadata(const string& path) except +

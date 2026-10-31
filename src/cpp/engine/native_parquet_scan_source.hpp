@@ -1440,6 +1440,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         arm_key_filters();
         apply_row_admission(*g);
         g->submit_cap = limit_submit_cap(*g);
+        if (pipeline != nullptr) pipeline->set_scan_row_groups(g->submit_cap);
         assign_fetch_blocks(*g);
         // Each scanned file's whole PageIndex region, so the pipeline reads it once.
         if (footer_map != nullptr && pipeline != nullptr) {

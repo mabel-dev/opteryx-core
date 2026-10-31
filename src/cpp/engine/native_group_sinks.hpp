@@ -93,6 +93,7 @@
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "ops/exact_sum.h"       // draken::ops::exact_sum — ungrouped integer SUM/AVG per morsel
 #include "ops/float_ops.h"       // draken::ops::f64_sum/f32_sum — ungrouped float SUM/AVG per morsel
+#include "ops/hash.h"            // draken_min/draken_max — ungrouped integer MIN/MAX per morsel
 #include "_agg_kernels.hpp"      // opteryx::ungrouped::QuantileState — MEDIAN's per-group
                                  // value buffer, and the global byte budget that bounds it
 #include "hllpp.h"               // HllppSketch — APPROX_COUNT_DISTINCT, global namespace
@@ -771,6 +772,70 @@ inline bool agg2_sum_morsel(AggCell& c, const DrakenVector& v, bool is_float) no
     if (!draken::ops::exact_sum(v, &s, &n)) return false;
     c.isum += s;
     c.valid += static_cast<int64_t>(n);
+    return true;
+}
+
+// STDDEV/VAR moments (Σx, Σx²) of a whole morsel through draken's fold instead of
+// agg2_update_stddev per row. False for a type it doesn't cover: per-row path.
+inline bool agg2_moments_morsel(AggCell& c, const DrakenVector& v) noexcept {
+    double s, q;
+    uint32_t n;
+    switch (v.type) {
+        case DRAKEN_FLOAT64: n = draken::ops::numeric_moments<double>(v, &s, &q);   break;
+        case DRAKEN_FLOAT32: n = draken::ops::numeric_moments<float>(v, &s, &q);    break;
+        case DRAKEN_INT8:    n = draken::ops::numeric_moments<int8_t>(v, &s, &q);   break;
+        case DRAKEN_INT16:   n = draken::ops::numeric_moments<int16_t>(v, &s, &q);  break;
+        case DRAKEN_INT32:   n = draken::ops::numeric_moments<int32_t>(v, &s, &q);  break;
+        case DRAKEN_INT64:   n = draken::ops::numeric_moments<int64_t>(v, &s, &q);  break;
+        case DRAKEN_UINT8:   n = draken::ops::numeric_moments<uint8_t>(v, &s, &q);  break;
+        case DRAKEN_UINT16:  n = draken::ops::numeric_moments<uint16_t>(v, &s, &q); break;
+        case DRAKEN_UINT32:  n = draken::ops::numeric_moments<uint32_t>(v, &s, &q); break;
+        case DRAKEN_UINT64:  n = draken::ops::numeric_moments<uint64_t>(v, &s, &q); break;
+        default: return false;
+    }
+    c.fsum += s;
+    c.fsumsq += q;
+    c.valid += n;
+    return true;
+}
+
+// MIN or MAX of a whole morsel through draken's column reductions, folded into
+// the one order-key lane the aggregate reads (emission takes max_raw for MAX,
+// min_raw otherwise). Float: total order, NaN highest, same as sort_num_key.
+// False for a type the reductions don't cover (temporal, DECIMAL, BOOL, ...):
+// those stay on the per-row path.
+inline bool agg2_minmax_morsel(AggCell& c, const DrakenVector& v, bool is_float, bool want_max) {
+    constexpr uint64_t SIGN = 0x8000000000000000ULL;
+    uint32_t n;
+    int64_t raw = 0;
+    uint64_t key;
+    if (is_float) {
+        double d;
+        const bool f32 = v.type == DRAKEN_FLOAT32;
+        n = want_max ? (f32 ? draken::ops::f32_max(v, &d) : draken::ops::f64_max(v, &d))
+                     : (f32 ? draken::ops::f32_min(v, &d) : draken::ops::f64_min(v, &d));
+        std::memcpy(&raw, &d, sizeof(raw));
+        key = sort_float_key(d);
+    } else {
+        bool is_signed;
+        switch (v.type) {
+            case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+                is_signed = true; break;
+            case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+                is_signed = false; break;
+            default:
+                return false;
+        }
+        n = want_max ? draken_max(v, &raw) : draken_min(v, &raw);
+        key = is_signed ? (static_cast<uint64_t>(raw) ^ SIGN) : static_cast<uint64_t>(raw);
+    }
+    if (n == 0) return true;
+    if (want_max) {
+        if (c.valid == 0 || key > c.max_key) { c.max_key = key; c.max_raw = raw; }
+    } else {
+        if (c.valid == 0 || key < c.min_key) { c.min_key = key; c.min_raw = raw; }
+    }
+    c.valid += n;
     return true;
 }
 
@@ -2807,9 +2872,7 @@ struct UngroupedAggSink : Sink {
                 continue;
             }
             if (specs[s].fn == AggFn::Count) {
-                for (uint32_t i = 0; i < v.length; ++i) {
-                    if (sort_row_valid(v, i)) c.valid += 1;
-                }
+                c.valid += draken::ops::red_valid_count(v.validity, v.length);
             } else if (specs[s].fn == AggFn::CountDistinct) {
                 // Draken hashes the operand value per row; dedup distinct value
                 // hashes, hash-partitioned for the parallel union at finalize.
@@ -2871,6 +2934,7 @@ struct UngroupedAggSink : Sink {
                 }
             } else if (agg_fn_is_stddev_family(specs[s].fn)) {
                 bool is_f = l.meta[s].is_float;
+                if (agg2_moments_morsel(c, v)) continue;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) agg2_update_stddev(c, v, i, is_f);
                 }
@@ -2908,6 +2972,13 @@ struct UngroupedAggSink : Sink {
                     in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
                 const bool is_ux = v.type == DRAKEN_UINT64;
                 const bool is_uy = v2.type == DRAKEN_UINT64;
+                draken::ops::PairMoments pm;
+                if (draken::ops::numeric_pair_moments(v, v2, &pm)) {
+                    c.fsum += pm.sx;  c.fsumsq += pm.sxx;
+                    c.fsumy += pm.sy; c.fsumyy += pm.syy; c.fsumxy += pm.sxy;
+                    c.valid += static_cast<int64_t>(pm.n);
+                    continue;
+                }
                 for (uint32_t i = 0; i < v.length; ++i) {
                     // Pairwise: skip the row unless BOTH operands are non-NULL.
                     if (!sort_row_valid(v, i) || !sort_row_valid(v2, i)) continue;
@@ -2939,6 +3010,8 @@ struct UngroupedAggSink : Sink {
                     continue;
                 bool nm = specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
                     || specs[s].fn == AggFn::AnyValue;
+                if (nm && agg2_minmax_morsel(c, v, is_f, specs[s].fn == AggFn::Max))
+                    continue;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) agg2_update(c, v, i, is_f, nm);
                 }

@@ -1870,6 +1870,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     }
 
     StringInternTable unified_dict_map;
+    // Early-abandon probe for the PLAIN re-derive: entries the table held when
+    // interning began, and PLAIN values interned since.
+    size_t rederive_seed = 0;
+    size_t rederive_seen = 0;
 
     // ── RLE skip-dense path gate ────────────────────────────────────────────
     // For non-nullable dict columns (max_definition_level == 0) we bypass the
@@ -3895,6 +3899,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   result.string_dict_arena,
                   result.string_dict_offsets,
                   result.string_dict_lens);
+              rederive_seed = result.string_dict_lens.size();
               // H12b TRIED AND DROPPED 2026-08-14. A single reserve per chunk to the
               // chunk's uncompressed size (the only form the arena rule permits — the
               // banned form is `reserve(size()+page_span)` inside the page loop, which
@@ -3983,6 +3988,18 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                     result.string_dict_lens);
                 result.dict_indices.push_back(code);
                 ++_interned_here;
+                // Probe: once kRederiveProbe PLAIN values are in, a chunk whose new
+                // entries exceed 90% of them is near-unique — the dictionary would be
+                // as large as the data, so stop now rather than at dict_cap. Measured
+                // 2026-10-31: never fires on ClickBench canon (identical telemetry);
+                // a 50% threshold did fire there and lost as often as it won.
+                static const size_t kRederiveProbe = 16384;
+                if (++rederive_seen == kRederiveProbe &&
+                    (result.string_dict_lens.size() - rederive_seed) * 10 > kRederiveProbe * 9) {
+                  rugo_tel::ba_drop_probe.fetch_add(1, std::memory_order_relaxed);
+                  drop_dictionary_to_dense();
+                  interning = false;
+                } else
                 if (result.string_dict_lens.size() > dict_cap) {
                   // Outgrew our own gate: this column is genuinely high-cardinality.
                   // Abandon the re-derivation, flush what was interned (including

@@ -8,6 +8,9 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 #include "cpu_features.h"
 #include "simd_dispatch.h"
@@ -118,12 +121,43 @@ static inline void build_validity_bitmap_avx2(
 }
 #endif
 
+#ifdef __ARM_NEON
+// NEON: 8 levels → compare → narrow to 8 byte lanes (0xFF/0) → weight and
+// horizontal-add into one bitmap byte.
+static inline void build_validity_bitmap_neon(
+    const int32_t* def_levels,
+    size_t total_rows,
+    int32_t max_def,
+    draken::AppendBuffer<uint8_t>& bitmap)
+{
+    const size_t bitmap_bytes = (total_rows + 7) / 8;
+    bitmap.resize_fill(bitmap_bytes, 0);
+    uint8_t* out = bitmap.data();
+    const int32x4_t m = vdupq_n_s32(max_def);
+    static const uint8_t kWeights[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+    const uint8x8_t w = vld1_u8(kWeights);
+    const size_t full_groups = total_rows / 8;
+    for (size_t g = 0; g < full_groups; ++g) {
+        const int32_t* p = def_levels + g * 8;
+        const uint16x8_t c = vcombine_u16(vmovn_u32(vceqq_s32(vld1q_s32(p), m)),
+                                          vmovn_u32(vceqq_s32(vld1q_s32(p + 4), m)));
+        out[g] = vaddv_u8(vand_u8(vmovn_u16(c), w));
+    }
+    for (size_t i = full_groups * 8; i < total_rows; ++i)
+        if (def_levels[i] == max_def) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+}
+#endif
+
 // Dispatch
 using build_validity_bitmap_fn_t = void(*)(const int32_t*, size_t, int32_t, draken::AppendBuffer<uint8_t>&);
 
 static inline build_validity_bitmap_fn_t get_build_validity_bitmap_fn()
 {
+#ifdef __ARM_NEON
+    return SIMD_STATIC_SELECT(build_validity_bitmap_avx2, build_validity_bitmap_neon, build_validity_bitmap_scalar, build_validity_bitmap_scalar);
+#else
     return SIMD_STATIC_SELECT(build_validity_bitmap_avx2, build_validity_bitmap_scalar, build_validity_bitmap_scalar, build_validity_bitmap_scalar);
+#endif
 }
 
 static inline void build_validity_bitmap(

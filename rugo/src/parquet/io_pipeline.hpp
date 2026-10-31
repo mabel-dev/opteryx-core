@@ -52,6 +52,7 @@
 #include "http_client.hpp"
 #endif
 #include "decode.hpp"
+#include "thread_pool.hpp"
 #include "telemetry.hpp"   // rugo_tel::mm_reap_* (MappingReaper)
 #include "page_index.hpp"
 #include "ipc_serialize.hpp"
@@ -2005,6 +2006,9 @@ static inline void parse_decimal_ps(const std::string& lt, uint8_t& precision, u
     }
 }
 
+// The DecodedColumn a column fan-out thread decodes into (decode_row_group).
+inline thread_local DecodedColumn* colfan_tl_scratch = nullptr;
+
 class ParquetIOPipeline {
  private:
     // PageIndex page pruning (compute_page_prune). The footer's per-page
@@ -2225,6 +2229,7 @@ class ParquetIOPipeline {
 #endif
 
     std::atomic<int> pending_work_{0};
+    std::atomic<int> scan_row_groups_{-1};
     std::atomic<bool> shutdown_{false};
     // Cancellation (WP-8): set by cancel() when the consumer abandons the scan
     // early (e.g. LIMIT satisfied, or the result generator is dropped). Queued
@@ -3365,8 +3370,11 @@ class ParquetIOPipeline {
         result.success = true;
         result.charged_bytes = item.charged_decoded;   // released by the consumer's pop
 
-        uint64_t total_read_ns = 0;
-        uint64_t total_decode_ns = 0;
+        std::atomic<uint64_t> total_read_ns{0};
+        std::atomic<uint64_t> total_decode_ns{0};
+        // Shared by concurrent decode_col calls under the column fan-out.
+        std::atomic<int64_t> fetched_acc{0};
+        std::mutex res_mu;
 
         // For local files, slice this row group's column chunks out of the
         // file's whole-file mapping in the process table (LocalFileTable — one
@@ -3688,7 +3696,7 @@ class ParquetIOPipeline {
                 // stubs when the footer proves no nulls, so reaching here means the footer
                 // lied (nulls on a page whose null_count was 0): refuse, never serialize.
                 if (decoded.payloads_stubbed && dk != DK_VARCHAR && dk != DK_VARCHAR_DICT) {
-                    result.success = false;
+                    std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                     result.error = "length-only decode of column '" + col_stats.name +
                                    "' cannot take the pool path (footer null_count=0 contradicted by the data)";
                     return false;
@@ -3738,7 +3746,7 @@ class ParquetIOPipeline {
                         ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout,
                                                 pool_sink_.adopts_decoded_buffers);
                     if (!ok) {
-                        result.success = false;
+                        std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = "draken_alloc failed for column: " + col_stats.name;
                         return false;
                     }
@@ -3771,7 +3779,7 @@ class ParquetIOPipeline {
                         ? pool_sink_.reserve(pool_sink_.ctx, static_cast<int64_t>(sz), &dst)
                         : -1;
                     if (ref_id < 0 || dst == nullptr) {
-                        result.success = false;
+                        std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = "MemoryPool exhausted serializing column: " + col_stats.name;
                         return false;
                     }
@@ -3918,7 +3926,7 @@ class ParquetIOPipeline {
                 }
                 PageSearchOut* search_ptr = (skip_ptr != nullptr) ? search_out : nullptr;
 
-                DecodedColumn& decoded = scratch;   // reused; reset at decode entry
+                DecodedColumn& decoded = colfan_tl_scratch != nullptr ? *colfan_tl_scratch : scratch;   // reused; reset at decode entry
                 // H15 (2026-08-14, unratified): a SMALL column chunk is cheaper to
                 // pread than to fault in. MEASURED (x86 cold, `SUM(AdvEngineID)` over
                 // 100 files, column = 0.96 MB total): bytes requested via syscalls are
@@ -3944,12 +3952,12 @@ class ParquetIOPipeline {
                     const uint8_t* chunk_ptr =
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
-                    DecodeColumnFromChunk(scratch,
+                    DecodeColumnFromChunk(decoded,
                         chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     // A jumped-over page is never faulted in from the mapping.
-                    result.bytes_fetched += chunk_size -
+                    fetched_acc += chunk_size -
                         (jump_ptr != nullptr ? pruned_bytes_of(*jump_ptr) : 0);
                 } else if (remote) {
                     // Fetched with the block: decode straight from the buffer.
@@ -3958,7 +3966,7 @@ class ParquetIOPipeline {
                     // [D-6]: the remote bloom decode-skip was dropped with it;
                     // bloom pruning is a plan-time, local-footer concern).
                     if (cc_pinned == nullptr && (i >= col_ptr.size() || col_ptr[i] == nullptr)) {
-                        result.success = false;
+                        std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = "coalesced range fetch did not cover column " +
                                        std::to_string(i);
                         return false;
@@ -3967,9 +3975,9 @@ class ParquetIOPipeline {
                     const uint8_t* raw_data = cc_pinned != nullptr ? nullptr : col_ptr[i];
                     const size_t   raw_size = cc_pinned != nullptr ? 0 : col_len[i];
                     if (cc_pinned == nullptr)
-                        result.bytes_fetched += col_fetched[i];   // what was actually transferred
+                        fetched_acc += col_fetched[i];   // what was actually transferred
                     auto t_dec = std::chrono::steady_clock::now();
-                    DecodeColumnFromChunk(scratch,
+                    DecodeColumnFromChunk(decoded,
                         raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
@@ -3990,17 +3998,17 @@ class ParquetIOPipeline {
                         ChunkCacheRequest pinned_req = cc_req;
                         pinned_req.pinned = local_pin.p;
                         auto t_dec = std::chrono::steady_clock::now();
-                        DecodeColumnFromChunk(scratch,
+                        DecodeColumnFromChunk(decoded,
                             nullptr, 0, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &pinned_req);
                         total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - t_dec).count();
                     } else {
                     auto [raw_bytes, read_ns] =
                         read_local_range(file->fd(), item.path, base_offset, chunk_size);
-                    result.bytes_fetched += chunk_size;
+                    fetched_acc += chunk_size;
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
-                    DecodeColumnFromChunk(scratch,
+                    DecodeColumnFromChunk(decoded,
                         raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
@@ -4008,7 +4016,7 @@ class ParquetIOPipeline {
                 }
 
                 if (!decoded.success) {
-                    result.success = false;
+                    std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                     // Surface the specific reason (e.g. a decompression error)
                     // verbatim when the decoder captured one; otherwise fall back
                     // to the generic message for honest "unsupported shape"
@@ -4027,7 +4035,7 @@ class ParquetIOPipeline {
                 // zero rows. Flag it and stop decoding the remaining columns — the
                 // consumer skips this row group entirely (no wrap/filter/morsel).
                 if (decoded.dict_all_filtered) {
-                    result.empty_filtered = true;
+                    std::lock_guard<std::mutex> _rl(res_mu); result.empty_filtered = true;
                     result.empty_rows = decoded.num_rows;
                     return false;
                 }
@@ -4036,13 +4044,13 @@ class ParquetIOPipeline {
                     // A leaf of a STRUCT/MAP: keep it (with its levels) until the group's last
                     // leaf arrives, then fold them all into one JSON-text column.
                     const size_t gi = static_cast<size_t>(ng - item.nested->groups.data());
-                    group_leaves[gi][ng_leaf] = std::move(scratch);
+                    group_leaves[gi][ng_leaf] = std::move(decoded);
                     if (ng_leaf + 1 < ng->count) return true;
                     DecodedColumn folded;
                     try {
                         rugo::nested::assemble(*ng->plan, group_leaves[gi], col_mask, folded);
                     } catch (const std::exception& e) {
-                        result.success = false;
+                        std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = e.what();
                         return false;
                     }
@@ -4142,6 +4150,45 @@ class ParquetIOPipeline {
                 const uint8_t* m = mask_ptr;
                 bool ok = !result.empty_filtered;
                 if (ok && search_i != SIZE_MAX) ok = decode_search_col(mask_ptr, m);
+                // Column fan-out: a scan with fewer row groups than workers leaves
+                // workers idle, so decode this row group's columns on several threads.
+                // The caller claims columns too, so it never waits on an idle pool.
+                // Nested groups and the page-search column stay serial. Measured
+                // 2026-10-31: 1 file SELECT * 0.36x, 4 files 0.66x; fanning out on
+                // every scan cost TPC-H ~2%, so it is gated on the scan, not the queue.
+                const int scan_rgs = scan_row_groups_.load(std::memory_order_relaxed);
+                const bool colfan = ok && !item.nested && search_i == SIZE_MAX &&
+                                    ncols_total >= 2 && scan_rgs >= 0 &&
+                                    scan_rgs < static_cast<int>(decode_pool_->get_thread_count()) &&
+                                    (!is_local || ensure_mapping());
+                if (colfan) {
+                    std::atomic<size_t> next{0};
+                    std::atomic<bool> stop{false};
+                    auto claim_loop = [&]() {
+                        DecodedColumn local;
+                        colfan_tl_scratch = &local;
+                        for (size_t i; !stop.load(std::memory_order_relaxed) &&
+                                       (i = next.fetch_add(1)) < ncols_total;) {
+                            if (!decode_col(i, m)) stop.store(true);
+                        }
+                        colfan_tl_scratch = nullptr;
+                    };
+                    PageDecodePool& cpool = rugo_pool::get_column_fan_pool();
+                    const size_t helpers = std::min(ncols_total - 1, cpool.num_workers());
+                    std::atomic<size_t> remaining{helpers};
+                    std::mutex done_mu;
+                    std::condition_variable done_cv;
+                    for (size_t h = 0; h < helpers; ++h) {
+                        cpool.push_task([&]() {
+                            claim_loop();
+                            std::lock_guard<std::mutex> lk(done_mu);
+                            if (remaining.fetch_sub(1) == 1) done_cv.notify_one();
+                        });
+                    }
+                    claim_loop();
+                    std::unique_lock<std::mutex> lk(done_mu);
+                    done_cv.wait(lk, [&]() { return remaining.load() == 0; });
+                } else
                 for (size_t i = 0; ok && i < ncols_total && !result.empty_filtered; ++i)
                     if (i != search_i && !decode_col(i, m)) break;
                 record_kept(m, m == search_out.row_mask.data() ? search_out.row_mask.size()
@@ -4490,8 +4537,9 @@ class ParquetIOPipeline {
         ledger_release(held_prefetch_, item.charged_compressed);
         item.charged_compressed = 0;
 
-        result.read_ns = total_read_ns;
-        result.decode_ns = total_decode_ns;
+        result.read_ns = total_read_ns.load();
+        result.decode_ns = total_decode_ns.load();
+        result.bytes_fetched += fetched_acc.load();
         // Accrue this row group's transferred bytes onto the pipeline. Done here,
         // not by the consumer, because the native scan Source drops MorselRef's
         // telemetry fields on the floor — accumulating at the producer keeps both
@@ -5031,6 +5079,8 @@ class ParquetIOPipeline {
     // Row identity: report which row-group rows each result holds (MorselRef::kept_rows).
     // Set once before submit.
     void set_report_kept_rows(bool on) { report_kept_rows_ = on; }
+    // The scan's row-group count after pruning (gates the column fan-out).
+    void set_scan_row_groups(int n) { scan_row_groups_.store(n, std::memory_order_relaxed); }
     uint64_t prefilter_rows_in() const { return prefilter_rows_in_.load(std::memory_order_relaxed); }
     uint64_t prefilter_rows_out() const { return prefilter_rows_out_.load(std::memory_order_relaxed); }
 

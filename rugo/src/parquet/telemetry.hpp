@@ -59,6 +59,7 @@ inline std::atomic<long long> mm_reap_ns            {0};  // ns the reaper spent
 inline std::atomic<long long> ba_intern_values     {0};  // values pushed through InternByteArrayToDictionary
 inline std::atomic<long long> ba_drop_no_rederive  {0};  // rederive gate off (rugo writer / DELTA_BYTE_ARRAY)
 inline std::atomic<long long> ba_drop_cap          {0};  // intern table outgrew dict_cap mid-page
+inline std::atomic<long long> ba_drop_probe        {0};  // early probe judged the PLAIN values near-unique
 inline std::atomic<long long> ba_drop_rle_dense    {0};  // RLE skip-dense materialisation (bypasses drop_to_dense)
 inline std::atomic<long long> ba_emit_dict         {0};  // chunk emitted dict-shaped (matches DK_VARCHAR_DICT)
 inline std::atomic<long long> ba_emit_dense        {0};  // chunk emitted dense
@@ -107,6 +108,7 @@ inline void reset() {
     ba_intern_values.store(0, std::memory_order_relaxed);
     ba_drop_no_rederive.store(0, std::memory_order_relaxed);
     ba_drop_cap.store(0, std::memory_order_relaxed);
+    ba_drop_probe.store(0, std::memory_order_relaxed);
     ba_drop_rle_dense.store(0, std::memory_order_relaxed);
     ba_emit_dict.store(0, std::memory_order_relaxed);
     ba_emit_dense.store(0, std::memory_order_relaxed);
@@ -158,6 +160,7 @@ inline long long mm_reap_ns_count()           { return mm_reap_ns.load(std::memo
 inline long long ba_intern_values_count()     { return ba_intern_values.load(std::memory_order_relaxed); }
 inline long long ba_drop_no_rederive_count()  { return ba_drop_no_rederive.load(std::memory_order_relaxed); }
 inline long long ba_drop_cap_count()          { return ba_drop_cap.load(std::memory_order_relaxed); }
+inline long long ba_drop_probe_count()        { return ba_drop_probe.load(std::memory_order_relaxed); }
 inline long long ba_drop_rle_dense_count()    { return ba_drop_rle_dense.load(std::memory_order_relaxed); }
 inline long long ba_emit_dict_count()         { return ba_emit_dict.load(std::memory_order_relaxed); }
 inline long long ba_emit_dense_count()        { return ba_emit_dense.load(std::memory_order_relaxed); }

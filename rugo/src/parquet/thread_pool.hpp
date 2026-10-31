@@ -132,4 +132,16 @@ inline PageDecodePool& get_read_pool() {
     return *pool;
 }
 
+// The engine pipeline's per-row-group column fan-out (io_pipeline.hpp). Its own pool for the same reason as get_read_pool: a column task
+// may dispatch page tasks to PageDecodePool and wait on them.
+inline PageDecodePool& get_column_fan_pool() {
+    static std::once_flag init_flag;
+    static PageDecodePool* pool = nullptr;
+    std::call_once(init_flag, []() {
+        int hw = (int)std::thread::hardware_concurrency();
+        pool = new PageDecodePool((size_t)((hw > 0) ? hw : 4));
+    });
+    return *pool;
+}
+
 } // namespace rugo_pool

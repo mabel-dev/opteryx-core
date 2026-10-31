@@ -106,6 +106,7 @@ cdef extern from "telemetry.hpp" namespace "rugo_tel":
     long long ba_intern_values_count()
     long long ba_drop_no_rederive_count()
     long long ba_drop_cap_count()
+    long long ba_drop_probe_count()
     long long ba_drop_rle_dense_count()
     long long ba_emit_dict_count()
     long long ba_emit_dense_count()
@@ -158,6 +159,7 @@ def get_cpp_telemetry():
         "ba_intern_values":     ba_intern_values_count(),
         "ba_drop_no_rederive":  ba_drop_no_rederive_count(),
         "ba_drop_cap":          ba_drop_cap_count(),
+        "ba_drop_probe":        ba_drop_probe_count(),
         "ba_drop_rle_dense":    ba_drop_rle_dense_count(),
         "ba_emit_dict":         ba_emit_dict_count(),
         "ba_emit_dense":        ba_emit_dense_count(),

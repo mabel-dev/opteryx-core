@@ -128,6 +128,15 @@ inline bool sort_key_type_supported(DrakenType t) {
 // exactly the bug that made the retired Vector.compress()-based key path sort small
 // negatives above large positives; see tests/compiled/morsel_ops/test_sort.py's
 // float sign-order regression case.
+inline uint64_t sort_float_key(double d) {
+    constexpr uint64_t SIGN = 0x8000000000000000ULL;
+    if (d != d) return UINT64_MAX;   // NaN sorts highest (draken rule)
+    if (d == 0.0) d = 0.0;           // canonicalize -0.0
+    uint64_t bits;
+    std::memcpy(&bits, &d, sizeof(bits));
+    return (bits & SIGN) ? ~bits : (bits | SIGN);
+}
+
 inline uint64_t sort_num_key(const DrakenVector& v, uint32_t row) {
     constexpr uint64_t SIGN = 0x8000000000000000ULL;
     uint32_t phys = v.selection[row];
@@ -154,16 +163,10 @@ inline uint64_t sort_num_key(const DrakenVector& v, uint32_t row) {
         case DRAKEN_UINT32: return static_cast<uint64_t>(static_cast<const uint32_t*>(v.data)[phys]);
         case DRAKEN_UINT64: return static_cast<const uint64_t*>(v.data)[phys];
         case DRAKEN_FLOAT32:
-        case DRAKEN_FLOAT64: {
-            double d = (v.type == DRAKEN_FLOAT32)
+        case DRAKEN_FLOAT64:
+            return sort_float_key((v.type == DRAKEN_FLOAT32)
                 ? static_cast<double>(static_cast<const float*>(v.data)[phys])
-                : static_cast<const double*>(v.data)[phys];
-            if (d != d) return UINT64_MAX;   // NaN sorts highest (draken rule)
-            if (d == 0.0) d = 0.0;           // canonicalize -0.0
-            uint64_t bits;
-            std::memcpy(&bits, &d, sizeof(bits));
-            return (bits & SIGN) ? ~bits : (bits | SIGN);
-        }
+                : static_cast<const double*>(v.data)[phys]);
         default: return 0;   // unreachable — sort_key_type_supported checked first
     }
     return static_cast<uint64_t>(sv) ^ SIGN;

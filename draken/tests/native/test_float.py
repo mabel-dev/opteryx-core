@@ -214,6 +214,18 @@ class TestReductions:
         taken = [vals[i] for i in idx]
         assert v.take(idx).sum() == pytest.approx(math.fsum(x for x in taken if x is not None))
 
+    @pytest.mark.parametrize("n", [9, 64, 130])
+    def test_min_max_total_order_across_lanes(self, n):
+        # NaN is highest: MAX is NaN if any NaN, MIN skips NaN; nulls never count.
+        vals = [None if i % 5 == 0 else float(i % 17) - 8.0 for i in range(n)]
+        vals[n // 2] = float("-inf")
+        assert f64(vals).min() == float("-inf")
+        assert f64(vals).max() == max(x for x in vals if x is not None)
+        vals[n - 1] = float("nan")
+        assert math.isnan(f64(vals).max())
+        assert f64(vals).min() == float("-inf")
+        assert math.isnan(f64([float("nan")] * n).min())
+
     def test_min_finite(self):
         v = f64([3.0, 1.0, 2.0])
         assert v.min() == 1.0

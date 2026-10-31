@@ -174,6 +174,7 @@ cdef extern from "vectors/_vector_bridge.h":
         uint32_t* codes, uint32_t length, uint8_t* validity, DrakenType vec_type)
 
 from rugo.parquet import decode_value as _decode_value_c, _make_scan_row_group
+from libcpp.utility cimport move
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport TestBloomFilter, TestBloomFilterBytes
 from posix.fcntl cimport open as posix_open, O_RDONLY
@@ -1211,6 +1212,14 @@ cdef extern from *:
         const string& auth_header) except + nogil
 
 
+cdef FileStats _parse_footer_nogil(const uint8_t* buf, size_t size) except *:
+    """Parse a footer envelope with the GIL released — the thrift walk is pure C++."""
+    cdef FileStats fs
+    with nogil:
+        fs = ReadParquetMetadataFromBuffer(buf, size)
+    return move(fs)
+
+
 cdef int _raise_footer_read_error(const FooterFetchOutcome& outcome) except -1:
     """Raise the typed storage error for a footer fetch that failed over HTTP.
 
@@ -1260,6 +1269,7 @@ cdef tuple _read_footer_payload(
     cdef vector[string] cpp_paths
     cdef vector[int64_t] cpp_sizes
     cdef string cpp_auth
+    cdef string cpp_path
 
     if footer_cache is not None:
         cached = footer_cache.get(path)
@@ -1273,7 +1283,9 @@ cdef tuple _read_footer_payload(
         with nogil:
             outcome = _fetch_footers_many_outcome(cpp_paths, cpp_sizes, cpp_auth)
     else:
-        outcome = _fetch_footer_outcome(path.encode("utf-8"), file_size)
+        cpp_path = path.encode("utf-8")
+        with nogil:
+            outcome = _fetch_footer_outcome(cpp_path, file_size)
     if outcome.http_failed:
         _raise_footer_read_error(outcome)
     result = outcome.results[0]
@@ -1355,7 +1367,7 @@ cpdef dict fetch_column_chunk_info(
         envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
         buf_ptr = <const uint8_t*>envelope
         buf_size = <size_t>len(envelope)
-        footer = _PARSED_FOOTER_CACHE.put(path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+        footer = _PARSED_FOOTER_CACHE.put(path, _parse_footer_nogil(buf_ptr, buf_size))
     fsp = footer.get()
 
     rg_count = fsp.row_groups.size()
@@ -2777,7 +2789,7 @@ cdef void _parse_and_cache_footer(
     cdef const uint8_t* buf_ptr = <const uint8_t*>envelope
     cdef size_t buf_size = len(envelope)
     cdef ParquetFooterRef footer = _PARSED_FOOTER_CACHE.put(
-        path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+        path, _parse_footer_nogil(buf_ptr, buf_size))
     if footer_map != NULL:
         footer_map[0][path.encode('utf-8')] = footer
 
@@ -2816,7 +2828,7 @@ cdef ParquetFooterRef _footer_after_acquire(
         buf_ptr = <const uint8_t*>envelope
         buf_size = <size_t>len(envelope)
         footer = _PARSED_FOOTER_CACHE.put(
-            path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+            path, _parse_footer_nogil(buf_ptr, buf_size))
     return footer
 
 
@@ -3117,7 +3129,7 @@ cpdef IpcRowGroupSource open_ipc_source(
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)
                     footer = _PARSED_FOOTER_CACHE.put(
-                        path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
+                        path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
                 src.footer_map[0][path_bytes_cpp] = footer
             fsp = src.footer_map[0][path_bytes_cpp].get()
             # Local file path for bloom probing (None for remote — blooms are read
@@ -3296,7 +3308,7 @@ cpdef IpcRowGroupSource open_pass2_source(
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
                 footer = _PARSED_FOOTER_CACHE.put(
-                    path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
+                    path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
             src.footer_map[0][path_bytes_cpp] = footer
     src.work_items = wi
     src.masks = masks
@@ -3801,7 +3813,7 @@ cpdef NativeScanPlan open_native_scan_plan(
             footer_buf_ptr = <const uint8_t*>envelope
             footer_buf_size = len(envelope)
             plan.footer_map[0][path_bytes_cpp] = _PARSED_FOOTER_CACHE.put(
-                path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
+                path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
         plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
     cdef _CoverageRequest request = None if coverage is None else _CoverageRequest(coverage)
@@ -3867,7 +3879,7 @@ cpdef NativeScanPlan open_native_scan_plan(
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
                 footer = _PARSED_FOOTER_CACHE.put(
-                    path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
+                    path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
                 plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
             plan.footer_map[0][path_bytes_cpp] = footer
         fsp = plan.footer_map[0][path_bytes_cpp].get()
@@ -4347,7 +4359,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
             _PARSED_FOOTER_CACHE.put(_local_miss_paths[_lm_i],
-                                     ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+                                     _parse_footer_nogil(buf_ptr, buf_size))
 
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
@@ -4362,7 +4374,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             )
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
-            footer = _PARSED_FOOTER_CACHE.put(path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+            footer = _PARSED_FOOTER_CACHE.put(path, _parse_footer_nogil(buf_ptr, buf_size))
         fsp = footer.get()
         # A file already proven against THIS parsed footer for THIS request is
         # admitted without the walk. `lock()` yields NULL once the footer is freed,

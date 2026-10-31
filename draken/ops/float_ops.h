@@ -442,31 +442,34 @@ static inline VecResult float_compare_vector(
 // Output is double for both float32 and float64.
 // ===========================================================================
 
-// Rows [lo, hi) into eight independent partial sums. One running total is a
-// single add-latency chain; eight let the adds overlap (and pack into SIMD
-// lanes). Summation order differs from a left fold in the low bits only.
-template<typename T, bool Identity>
-static inline double fp_sum_rows(const T* data, const uint32_t* sel,
-                                 uint32_t lo, uint32_t hi) noexcept {
-    auto at = [&](uint32_t i) -> double {
-        if constexpr (Identity) return static_cast<double>(data[i]);
-        else                    return static_cast<double>(data[sel[i]]);
+// One fold over a vector's valid rows into an accumulator with eight
+// independent lanes. A single running value is one dependency chain; eight let
+// the steps overlap (and pack into SIMD lanes). Validity is read a 64-row word at
+// a time: all-valid words take the unrolled loop, all-null words are skipped,
+// mixed words walk their set bits. Returns the valid-row count.
+template<typename T, bool Identity, typename Acc>
+static inline void fp_fold_rows(const T* data, const uint32_t* sel,
+                                uint32_t lo, uint32_t hi, Acc& acc) noexcept {
+    auto at = [&](uint32_t i) -> T {
+        if constexpr (Identity) return data[i];
+        else                    return data[sel[i]];
     };
-    double s[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     uint32_t i = lo;
     for (; i + 8u <= hi; i += 8u)
-        for (uint32_t k = 0; k < 8u; ++k) s[k] += at(i + k);
-    for (; i < hi; ++i) s[0] += at(i);
-    return ((s[0] + s[1]) + (s[2] + s[3])) + ((s[4] + s[5]) + (s[6] + s[7]));
+        for (uint32_t k = 0; k < 8u; ++k) acc.step(k, at(i + k));
+    for (; i < hi; ++i) acc.step(0, at(i));
 }
 
-// Validity a 64-row word at a time: all-valid words take the unrolled sum,
-// all-null words are skipped, mixed words walk their set bits.
-template<typename T, bool Identity>
-static inline double fp_sum_masked(const T* data, const uint32_t* sel,
-                                   const uint8_t* validity, uint32_t n,
-                                   uint32_t* count) noexcept {
-    double total = 0.0;
+template<typename T, bool Identity, typename Acc>
+static inline uint32_t fp_fold_valid(const DrakenVector& v, Acc& acc) noexcept {
+    const uint32_t n        = v.length;
+    const T*       data     = static_cast<const T*>(v.data);
+    const uint32_t* sel     = v.selection;
+    const uint8_t* validity = v.validity;
+    if (validity == nullptr) {
+        fp_fold_rows<T, Identity>(data, sel, 0, n, acc);
+        return n;
+    }
     uint32_t c = 0;
     const uint32_t words = n >> 6;
     for (uint32_t w = 0; w < words; ++w) {
@@ -474,140 +477,220 @@ static inline double fp_sum_masked(const T* data, const uint32_t* sel,
         std::memcpy(&m, validity + (static_cast<size_t>(w) << 3), sizeof(m));
         const uint32_t base = w << 6;
         if (m == ~0ULL) {
-            total += fp_sum_rows<T, Identity>(data, sel, base, base + 64u);
+            fp_fold_rows<T, Identity>(data, sel, base, base + 64u, acc);
             c += 64u;
         } else if (m != 0) {
             c += static_cast<uint32_t>(__builtin_popcountll(m));
-            double part = 0.0;
             while (m) {
                 const uint32_t j = base + static_cast<uint32_t>(__builtin_ctzll(m));
-                part += Identity ? static_cast<double>(data[j]) : static_cast<double>(data[sel[j]]);
+                acc.step(0, Identity ? data[j] : data[sel[j]]);
                 m &= m - 1;
             }
-            total += part;
         }
     }
     for (uint32_t i = words << 6; i < n; ++i) {
         if ((validity[i >> 3] >> (i & 7)) & 1u) {
-            total += Identity ? static_cast<double>(data[i]) : static_cast<double>(data[sel[i]]);
+            acc.step(0, Identity ? data[i] : data[sel[i]]);
             ++c;
         }
     }
-    *count = c;
-    return total;
+    return c;
+}
+
+template<typename T, typename Acc>
+static inline uint32_t fp_fold(const DrakenVector& v, Acc& acc) noexcept {
+    return (v.flags & DRAKEN_SEL_IDENTITY) ? fp_fold_valid<T, true>(v, acc)
+                                           : fp_fold_valid<T, false>(v, acc);
+}
+
+// sum: summation order differs from a left fold in the low bits only.
+struct FpSumAcc {
+    double s[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    template<typename T> void step(uint32_t k, T x) noexcept { s[k] += static_cast<double>(x); }
+    double result() const noexcept {
+        return ((s[0] + s[1]) + (s[2] + s[3])) + ((s[4] + s[5]) + (s[6] + s[7]));
+    }
+};
+
+// min in total order (NaN highest): a NaN never wins `x < m`, so the lanes hold
+// the smallest non-NaN; no non-NaN value at all (all-NaN or empty) → NaN.
+template<typename T>
+struct FpMinAcc {
+    T m[8];
+    bool real[8] = {false, false, false, false, false, false, false, false};
+    FpMinAcc() noexcept { for (T& x : m) x = std::numeric_limits<T>::infinity(); }
+    void step(uint32_t k, T x) noexcept { m[k] = (x < m[k]) ? x : m[k]; real[k] |= (x == x); }
+    double result() const noexcept {
+        T r = m[0];
+        bool any = real[0];
+        for (uint32_t k = 1; k < 8u; ++k) { r = (m[k] < r) ? m[k] : r; any |= real[k]; }
+        return any ? static_cast<double>(r) : std::numeric_limits<double>::quiet_NaN();
+    }
+};
+
+// max in total order (NaN highest): any NaN wins; otherwise the largest value,
+// -inf when there are no values.
+template<typename T>
+struct FpMaxAcc {
+    T m[8];
+    bool nan[8] = {false, false, false, false, false, false, false, false};
+    FpMaxAcc() noexcept { for (T& x : m) x = -std::numeric_limits<T>::infinity(); }
+    void step(uint32_t k, T x) noexcept { m[k] = (x > m[k]) ? x : m[k]; nan[k] |= (x != x); }
+    double result() const noexcept {
+        T r = m[0];
+        bool any = nan[0];
+        for (uint32_t k = 1; k < 8u; ++k) { r = (m[k] > r) ? m[k] : r; any |= nan[k]; }
+        return any ? std::numeric_limits<double>::quiet_NaN() : static_cast<double>(r);
+    }
+};
+
+// Σx and Σx² as doubles (the STDDEV/VARIANCE moments). The fold is generic over
+// the element type, so this serves integer columns too.
+struct FpMomentsAcc {
+    double s[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double q[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    template<typename T> void step(uint32_t k, T x) noexcept {
+        const double d = static_cast<double>(x);
+        s[k] += d;
+        q[k] += d * d;
+    }
+};
+
+template<typename T>
+static inline uint32_t numeric_moments(const DrakenVector& v, double* sum, double* sumsq) noexcept {
+    FpMomentsAcc acc;
+    const uint32_t count = fp_fold<T>(v, acc);
+    *sum   = ((acc.s[0] + acc.s[1]) + (acc.s[2] + acc.s[3])) + ((acc.s[4] + acc.s[5]) + (acc.s[6] + acc.s[7]));
+    *sumsq = ((acc.q[0] + acc.q[1]) + (acc.q[2] + acc.q[3])) + ((acc.q[4] + acc.q[5]) + (acc.q[6] + acc.q[7]));
+    return count;
+}
+
+// Logical rows [lo, lo + n) of a numeric vector, widened to double.
+template<typename T>
+static inline void fp_load_rows(const DrakenVector& v, uint32_t lo, uint32_t n, double* out) noexcept {
+    const T* data = static_cast<const T*>(v.data);
+    if (v.flags & DRAKEN_SEL_IDENTITY) {
+        for (uint32_t i = 0; i < n; ++i) out[i] = static_cast<double>(data[lo + i]);
+    } else {
+        for (uint32_t i = 0; i < n; ++i) out[i] = static_cast<double>(data[v.selection[lo + i]]);
+    }
+}
+
+// False for a type with no plain numeric storage (temporal, DECIMAL, BOOL, ...).
+static inline bool fp_load_numeric(const DrakenVector& v, uint32_t lo, uint32_t n, double* out) noexcept {
+    switch (v.type) {
+        case DRAKEN_FLOAT64: fp_load_rows<double>(v, lo, n, out);   return true;
+        case DRAKEN_FLOAT32: fp_load_rows<float>(v, lo, n, out);    return true;
+        case DRAKEN_INT8:    fp_load_rows<int8_t>(v, lo, n, out);   return true;
+        case DRAKEN_INT16:   fp_load_rows<int16_t>(v, lo, n, out);  return true;
+        case DRAKEN_INT32:   fp_load_rows<int32_t>(v, lo, n, out);  return true;
+        case DRAKEN_INT64:   fp_load_rows<int64_t>(v, lo, n, out);  return true;
+        case DRAKEN_UINT8:   fp_load_rows<uint8_t>(v, lo, n, out);  return true;
+        case DRAKEN_UINT16:  fp_load_rows<uint16_t>(v, lo, n, out); return true;
+        case DRAKEN_UINT32:  fp_load_rows<uint32_t>(v, lo, n, out); return true;
+        case DRAKEN_UINT64:  fp_load_rows<uint64_t>(v, lo, n, out); return true;
+        default:             return false;
+    }
+}
+
+// Σx, Σx², Σy, Σy², Σxy and the pair count over rows where BOTH operands are
+// valid (the CORR moments). Both vectors are read in 1024-row blocks widened to
+// double, so each column type is dispatched once per block, not per pair.
+struct PairMoments {
+    double sx = 0.0, sxx = 0.0, sy = 0.0, syy = 0.0, sxy = 0.0;
+    uint64_t n = 0;
+};
+
+struct FpPairAcc {
+    double sx[8] = {}, sxx[8] = {}, sy[8] = {}, syy[8] = {}, sxy[8] = {};
+    void step(uint32_t k, double a, double b) noexcept {
+        sx[k] += a; sxx[k] += a * a; sy[k] += b; syy[k] += b * b; sxy[k] += a * b;
+    }
+    static double fold(const double* s) noexcept {
+        return ((s[0] + s[1]) + (s[2] + s[3])) + ((s[4] + s[5]) + (s[6] + s[7]));
+    }
+};
+
+static inline bool numeric_pair_moments(const DrakenVector& x, const DrakenVector& y,
+                                        PairMoments* out) noexcept {
+    constexpr uint32_t B = 1024;
+    double bx[B], by[B];
+    FpPairAcc acc;
+    uint64_t count = 0;
+    const uint32_t n = x.length;
+    const bool all_valid = x.validity == nullptr && y.validity == nullptr;
+    auto word = [](const uint8_t* bits, uint32_t w) noexcept -> uint64_t {
+        if (bits == nullptr) return ~0ULL;
+        uint64_t m;
+        std::memcpy(&m, bits + (static_cast<size_t>(w) << 3), sizeof(m));
+        return m;
+    };
+    for (uint32_t lo = 0; lo < n; lo += B) {
+        const uint32_t m = (n - lo < B) ? (n - lo) : B;
+        if (!fp_load_numeric(x, lo, m, bx) || !fp_load_numeric(y, lo, m, by)) return false;
+        uint32_t i = 0;
+        if (all_valid) {
+            for (; i + 8u <= m; i += 8u)
+                for (uint32_t k = 0; k < 8u; ++k) acc.step(k, bx[i + k], by[i + k]);
+            for (; i < m; ++i) acc.step(0, bx[i], by[i]);
+            count += m;
+            continue;
+        }
+        // lo is a multiple of 64, so block row i is bit (i & 63) of word (lo + i) >> 6.
+        for (; i + 64u <= m; i += 64u) {
+            const uint32_t w = (lo + i) >> 6;
+            uint64_t bits = word(x.validity, w) & word(y.validity, w);
+            if (bits == ~0ULL) {
+                for (uint32_t j = 0; j < 64u; j += 8u)
+                    for (uint32_t k = 0; k < 8u; ++k) acc.step(k, bx[i + j + k], by[i + j + k]);
+                count += 64u;
+            } else {
+                count += static_cast<uint64_t>(__builtin_popcountll(bits));
+                while (bits) {
+                    const uint32_t j = i + static_cast<uint32_t>(__builtin_ctzll(bits));
+                    acc.step(0, bx[j], by[j]);
+                    bits &= bits - 1;
+                }
+            }
+        }
+        for (; i < m; ++i) {
+            const uint32_t r = lo + i;
+            if (fp_row_valid(x.validity, r) && fp_row_valid(y.validity, r)) {
+                acc.step(0, bx[i], by[i]);
+                ++count;
+            }
+        }
+    }
+    out->sx  = FpPairAcc::fold(acc.sx);
+    out->sxx = FpPairAcc::fold(acc.sxx);
+    out->sy  = FpPairAcc::fold(acc.sy);
+    out->syy = FpPairAcc::fold(acc.syy);
+    out->sxy = FpPairAcc::fold(acc.sxy);
+    out->n   = count;
+    return true;
 }
 
 template<typename T>
 static inline uint32_t float_sum(const DrakenVector& v, double* out_value) noexcept {
-    const uint32_t n        = v.length;
-    const T*       data     = static_cast<const T*>(v.data);
-    const uint8_t* validity = v.validity;
-    const bool     identity = (v.flags & DRAKEN_SEL_IDENTITY) != 0;
-    double total;
-    uint32_t count = n;
-
-    if (validity == nullptr) {
-        total = identity ? fp_sum_rows<T, true>(data, v.selection, 0, n)
-                         : fp_sum_rows<T, false>(data, v.selection, 0, n);
-    } else {
-        total = identity ? fp_sum_masked<T, true>(data, v.selection, validity, n, &count)
-                         : fp_sum_masked<T, false>(data, v.selection, validity, n, &count);
-    }
-    *out_value = fp_canon(total);
+    FpSumAcc acc;
+    const uint32_t count = fp_fold<T>(v, acc);
+    *out_value = fp_canon(acc.result());
     return count;
 }
 
-// min: smallest in total order. Initialize to canonical NaN (highest); any
-// non-NaN finite or inf replaces it via fp_total_lt.
-// all-NaN input → stays NaN. mixed → min non-NaN value.
 template<typename T>
 static inline uint32_t float_min(const DrakenVector& v, double* out_value) noexcept {
-    const uint32_t n        = v.length;
-    const T*       data     = static_cast<const T*>(v.data);
-    const uint8_t* validity = v.validity;
-    // Canonical NaN is the highest value; it will be replaced by any non-NaN.
-    T m = std::numeric_limits<T>::quiet_NaN();
-    uint32_t count = 0;
-
-    if (validity == nullptr) {
-        count = n;
-        if (v.flags & DRAKEN_SEL_IDENTITY) {
-            for (uint32_t i = 0; i < n; ++i) {
-                const T val = data[i];
-                if (fp_total_lt(val, m)) m = val;
-            }
-        } else {
-            for (uint32_t i = 0; i < n; ++i) {
-                const T val = data[v.selection[i]];
-                if (fp_total_lt(val, m)) m = val;
-            }
-        }
-    } else {
-        if (v.flags & DRAKEN_SEL_IDENTITY) {
-            for (uint32_t i = 0; i < n; ++i) {
-                if ((validity[i >> 3] >> (i & 7)) & 1u) {
-                    const T val = data[i];
-                    if (fp_total_lt(val, m)) m = val;
-                    ++count;
-                }
-            }
-        } else {
-            for (uint32_t i = 0; i < n; ++i) {
-                if ((validity[i >> 3] >> (i & 7)) & 1u) {
-                    const T val = data[v.selection[i]];
-                    if (fp_total_lt(val, m)) m = val;
-                    ++count;
-                }
-            }
-        }
-    }
-    *out_value = fp_canon(static_cast<double>(m));
+    FpMinAcc<T> acc;
+    const uint32_t count = fp_fold<T>(v, acc);
+    *out_value = fp_canon(acc.result());
     return count;
 }
 
-// max: largest in total order. Initialize to -inf; NaN is highest so it wins
-// over any finite or inf value via fp_total_lt.
 template<typename T>
 static inline uint32_t float_max(const DrakenVector& v, double* out_value) noexcept {
-    const uint32_t n        = v.length;
-    const T*       data     = static_cast<const T*>(v.data);
-    const uint8_t* validity = v.validity;
-    T m = -std::numeric_limits<T>::infinity();
-    uint32_t count = 0;
-
-    if (validity == nullptr) {
-        count = n;
-        if (v.flags & DRAKEN_SEL_IDENTITY) {
-            for (uint32_t i = 0; i < n; ++i) {
-                const T val = data[i];
-                if (fp_total_lt(m, val)) m = val;
-            }
-        } else {
-            for (uint32_t i = 0; i < n; ++i) {
-                const T val = data[v.selection[i]];
-                if (fp_total_lt(m, val)) m = val;
-            }
-        }
-    } else {
-        if (v.flags & DRAKEN_SEL_IDENTITY) {
-            for (uint32_t i = 0; i < n; ++i) {
-                if ((validity[i >> 3] >> (i & 7)) & 1u) {
-                    const T val = data[i];
-                    if (fp_total_lt(m, val)) m = val;
-                    ++count;
-                }
-            }
-        } else {
-            for (uint32_t i = 0; i < n; ++i) {
-                if ((validity[i >> 3] >> (i & 7)) & 1u) {
-                    const T val = data[v.selection[i]];
-                    if (fp_total_lt(m, val)) m = val;
-                    ++count;
-                }
-            }
-        }
-    }
-    *out_value = fp_canon(static_cast<double>(m));
+    FpMaxAcc<T> acc;
+    const uint32_t count = fp_fold<T>(v, acc);
+    *out_value = fp_canon(acc.result());
     return count;
 }
 

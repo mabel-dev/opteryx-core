@@ -81,6 +81,22 @@ def test_corr_pairwise_null_exclusion():
     assert abs(got - expected) < 1e-12, (got, expected)
 
 
+def test_corr_nulls_on_both_sides_across_validity_words():
+    # 177 rows span three 64-row validity words; NULLs on BOTH operands, on
+    # different rows, exercise the combined-mask path of the per-morsel kernel.
+    sql = (
+        "SELECT CASE WHEN id % 3 = 0 THEN NULL ELSE gm END, "
+        "CASE WHEN id % 5 = 0 THEN NULL ELSE radius END FROM testdata.satellites"
+    )
+    pairs = [(float(x), float(y)) for x, y in _rows(sql) if x is not None and y is not None]
+    expected = _pearson(pairs)
+    (got,) = _rows(
+        "SELECT CORR(CASE WHEN id % 3 = 0 THEN NULL ELSE gm END, "
+        "CASE WHEN id % 5 = 0 THEN NULL ELSE radius END) FROM testdata.satellites"
+    )[0]
+    assert abs(got - expected) < 1e-9, (got, expected)
+
+
 def test_corr_perfect_correlation_is_clamped():
     assert _rows("SELECT CORR(id, id) FROM $planets")[0][0] == 1.0
     assert _rows("SELECT CORR(id, 0 - id) FROM $planets")[0][0] == -1.0
