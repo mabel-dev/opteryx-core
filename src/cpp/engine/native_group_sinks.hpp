@@ -3614,9 +3614,10 @@ constexpr size_t   kGBDAMaxKeys = 8;
 constexpr uint64_t kGBDAMinSlots = 262144;               // Rayforce: max(n/8, 262144)
 // Per-WORKER cap (architect, 2026-10-09). Rayforce's n/8 is a whole-column budget;
 // here every worker holds its own arrays, so n/8 alone grows with the table and the
-// DOP (100M rows x 16 workers ≈ GBs per aggregate). 2^20 bounds a worker at 8 MB of
-// occupancy plus 16-24 MB per aggregate lane, independent of n.
-constexpr uint64_t kGBDAMaxSlots = uint64_t(1) << 20;
+// DOP (100M rows x 16 workers ≈ GBs per aggregate). 2^19 (lowered from 2^20,
+// architect 2026-10-31): a 1M-slot layout lost to hashing, h2o GROUP BY id6 911 ms
+// DA vs 545 ms hashed; 2^17..2^20 were flat on every smaller layout measured.
+constexpr uint64_t kGBDAMaxSlots = uint64_t(1) << 19;
 
 inline bool gb_da_key_type_ok(DrakenType t) {
     switch (t) {
