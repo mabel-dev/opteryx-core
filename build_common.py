@@ -245,7 +245,9 @@ class build_ext(build_ext_orig):
         prev = getattr(_build_temp_local, "value", None)
         _build_temp_local.value = per_ext_build_temp
         try:
-            if is_linux() and getattr(ext, "language", "") == "c++":
+            # Every language, not just C++: a C extension left without LD_EXTRA links
+            # without -s and ships full DWARF (0.9.180's planner modules: 124 MiB).
+            if is_linux():
                 # Append only what is not already present. Most extensions set
                 # extra_link_args=LD_EXTRA at definition time, so a blind append
                 # passed every flag twice. That was merely redundant for

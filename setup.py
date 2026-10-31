@@ -1828,6 +1828,9 @@ setup(
         # draken.preload_library_path); ships in the wheel, linked into nothing.
         "draken": ["libmimalloc.so", "libmimalloc.dylib"],
     },
+    # Extension sources ride into the sdist manifest and from there into the wheel
+    # as package data; generated .c/.cpp were 26.6 MiB of the 0.9.180 wheel.
+    exclude_package_data={"": ["*.c", "*.cpp"]},
     cmdclass={"build_ext": build_ext, "build_py": build_py},
     zip_safe=False,
 )
