@@ -1030,8 +1030,9 @@ VecResult draken_if_then_else(void* /*ctx*/, const DrakenVector* const* args, ui
                    (a_eff == DRAKEN_NVARCHAR && b_eff == DRAKEN_VARCHAR)) {
             s_t = DRAKEN_NVARCHAR;
         } else {
-            return draken_error_sentinel(
-                "draken_if_then_else: VARBINARY branch paired with a text branch");
+            return draken_error_sentinel_fmt(
+                "draken_if_then_else: VARBINARY branch paired with a text branch "
+                "(THEN type %d, ELSE type %d)", (int)a->type, (int)b->type);
         }
         if (const uint32_t total = kernel_blend_bases(ite_br, 2u, m->length, ite_base))
             return kernel_blend_string(ite_br, 2u, m->length, ite_base, total, s_t, ite_pick,

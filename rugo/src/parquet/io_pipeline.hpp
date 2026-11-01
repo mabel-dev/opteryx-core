@@ -50,6 +50,7 @@
 // never included and remote paths fail loud in read_range / decode_row_group.
 #ifdef RUGO_ENABLE_HTTP
 #include "http_client.hpp"
+#include "gcs_grpc/directpath_fetch.hpp"  // GCS_TRANSPORT=grpc; defined in pool_reader.so only
 #endif
 #include "decode.hpp"
 #include "thread_pool.hpp"
@@ -2935,23 +2936,35 @@ class ParquetIOPipeline {
     // decode stage (coupled, default) and by the fetch-ahead stage (decoupled).
     std::vector<std::vector<uint8_t>> fetch_remote_groups(
             const std::string& path, const RemotePlan& plan, uint64_t* out_ns) {
-        const std::string url = fetch_url_for(path);
-        std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
-        reqs.reserve(plan.groups.size());
-        for (const auto& g : plan.groups) {
-            reqs.emplace_back(url, http_headers_(
-                "bytes=" + std::to_string(g.start) +
-                "-" + std::to_string(g.end - 1)));
-        }
+        std::vector<std::pair<int64_t, int64_t>> ranges;
+        ranges.reserve(plan.groups.size());
+        for (const auto& g : plan.groups) ranges.emplace_back(g.start, g.end - g.start);
         auto t_fetch = std::chrono::steady_clock::now();
-        auto bufs = tl_http_client().get_many(
-            reqs, http_tuning_set_ ? &http_tuning_ : nullptr);
+        auto bufs = remote_get_many(path, ranges);
         const uint64_t batch_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t_fetch).count();
         if (out_ns != nullptr) *out_ns += batch_ns;
-        // One fetch operation covering reqs.size() concurrent ranges.
-        record_http_fetch(batch_ns, reqs.size());
+        // One fetch operation covering ranges.size() concurrent ranges.
+        record_http_fetch(batch_ns, ranges.size());
         return bufs;
+    }
+
+    // Every remote range read of one object goes through here: gs:// takes the
+    // scan's transport (DirectPath when set_gcs_transport_grpc armed it, design
+    // §3/§5 — chosen once per scan, never a fallback); everything else is REST.
+    std::vector<std::vector<uint8_t>> remote_get_many(
+            const std::string& path, const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+        if (gcs_grpc_connections_ > 0 && path.compare(0, 5, "gs://") == 0)
+            return gcs_grpc::directpath_get_many(
+                path, ranges, auth_header_set_ ? auth_header_ : std::string(), gcs_grpc_connections_,
+                http_tuning_set_ ? http_tuning_ : HttpClient::default_tuning());
+        const std::string url = fetch_url_for(path);
+        std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
+        reqs.reserve(ranges.size());
+        for (const auto& r : ranges)
+            reqs.emplace_back(url, http_headers_(
+                "bytes=" + std::to_string(r.first) + "-" + std::to_string(r.first + r.second - 1)));
+        return tl_http_client().get_many(reqs, http_tuning_set_ ? &http_tuning_ : nullptr);
     }
 #endif
 
@@ -2996,7 +3009,11 @@ class ParquetIOPipeline {
         bool is_remote = false;
 
 #ifdef RUGO_ENABLE_HTTP
-        if (path.substr(0, 5) == "gs://") {
+        if (path.substr(0, 5) == "gs://" && gcs_grpc_connections_ > 0) {
+            is_remote = true;
+            bytes = std::move(remote_get_many(path, {{offset, size}}).front());
+
+        } else if (path.substr(0, 5) == "gs://") {
             is_remote = true;
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
@@ -4728,15 +4745,12 @@ class ParquetIOPipeline {
                          ix = std::move(idx)]() {
                 const std::vector<RangeRequest>& rq = *shared_reqs;
                 try {
-                    std::vector<std::pair<std::string, std::map<std::string, std::string>>> http;
-                    http.reserve(ix.size());
-                    for (size_t i : ix)
-                        http.emplace_back(fetch_url_for(rq[i].path), http_headers_(
-                            "bytes=" + std::to_string(rq[i].start) + "-" +
-                            std::to_string(rq[i].end - 1)));
+                    // A part is one file's requests (see `parts` above).
+                    std::vector<std::pair<int64_t, int64_t>> ranges;
+                    ranges.reserve(ix.size());
+                    for (size_t i : ix) ranges.emplace_back(rq[i].start, rq[i].end - rq[i].start);
                     const auto t0 = std::chrono::steady_clock::now();
-                    std::vector<std::vector<uint8_t>> bufs =
-                        tl_http_client().get_many(http, http_tuning_set_ ? &http_tuning_ : nullptr);
+                    std::vector<std::vector<uint8_t>> bufs = remote_get_many(rq[ix.front()].path, ranges);
                     record_http_fetch(static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - t0).count()), ix.size());
@@ -4825,6 +4839,19 @@ class ParquetIOPipeline {
     std::string auth_header_;
     bool auth_header_set_ = false;
     void set_auth_header(const std::string& v) { auth_header_ = v; auth_header_set_ = true; }
+
+    // GCS_TRANSPORT=grpc (design §5): gs:// range reads go over DirectPath through
+    // the process-wide client with `connections` ALTS connections; 0 (the default)
+    // = REST. Set once at plan time, before any submit, like set_fetch_ahead.
+    int gcs_grpc_connections_ = 0;
+    void set_gcs_transport_grpc(int connections) {
+        if (connections <= 0) throw std::invalid_argument(
+            "set_gcs_transport_grpc: connections must be positive (got " + std::to_string(connections) + ")");
+        if (pending_work_.load(std::memory_order_relaxed) != 0 ||
+            enqueue_count_.load(std::memory_order_relaxed) != 0)
+            throw std::logic_error("set_gcs_transport_grpc: called after work was submitted");
+        gcs_grpc_connections_ = connections;
+    }
 
     // All three remote-GET sites build their header map here so they cannot drift
     // apart: a site that silently omitted the credential would 401, and only on

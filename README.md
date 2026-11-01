@@ -36,6 +36,17 @@ Wheels are built against a fixed instruction-set floor. A CPU below the floor wi
 
 On Linux you can check a machine with `grep -m1 -o -w aes /proc/cpuinfo` — no output means the CPU is below the floor.
 
+### Building from source on a Raspberry Pi 5
+
+Any Raspberry Pi 5 runs the published wheels. Building from source needs more:
+
+- **8 GB RAM or more.** The largest translation unit peaks at 5.3 GB on its own, so 2 GB and 4 GB boards cannot build. On 8 GB, build with `make compile JOBS=2`; the default (one job per core, 4) runs out of memory.
+- **GCC 14: Debian 13 (trixie) / Raspberry Pi OS trixie.** GCC 12 (bookworm) rejects `vmull_p64` under `-march=armv8-a+crc+aes`, because its `arm_neon.h` gates PMULL behind `+crypto`.
+- **NVMe storage recommended.** The source tree, without the large benchmark datasets, is about 4.2 GB.
+- **Toolchain:** Python 3.14, Rust (rustup), `build-essential`, `pkg-config`, `libssl-dev`, `libnghttp2-dev`, and `clang` (the native tests in `make q` call `clang++` directly).
+
+A full `make compile JOBS=2` takes about an hour on a Pi 5 (8 GB, NVMe).
+
 ## Install
 
 ```bash

@@ -363,6 +363,24 @@ with throughput flat across range counts where a wide cap degraded. See
 HttpTuning::use_multiplexing in src/cpp/http_client.hpp for the full numbers.
 Set True only to A/B against the old behaviour."""
 
+GCS_TRANSPORT: str = str(get("GCS_TRANSPORT", "rest")).lower()
+"""How gs:// object ranges are read: `rest` (default, the JSON/XML API through
+Google's front end) or `grpc` (DirectPath: gRPC over ALTS straight to the storage
+backends, docs/GCS_DIRECTPATH_READS_DESIGN.md). Per process, read when each scan is
+planned. `grpc` works only on GCE in the bucket's region with an attached service
+account; when DirectPath cannot be reached the scan RAISES - it never falls back
+to REST. Footers and READ_* (anonymous) reads stay on REST."""
+if GCS_TRANSPORT not in ("rest", "grpc"):
+    raise ValueError(f"GCS_TRANSPORT must be 'rest' or 'grpc', not {GCS_TRANSPORT!r}")
+
+GCS_GRPC_CONNECTIONS: int = int(get("GCS_GRPC_CONNECTIONS", 8))
+"""ALTS connections in the process-wide DirectPath pool (GCS_TRANSPORT=grpc). Each
+has one native I/O thread that decrypts and parses, measured at ~550 MB/s; on a
+16 vCPU VM, 4/8/16 connections moved 2.3/5.5/7.0 GB/s at 64 ranges in flight
+(2026-11-01). The default is set from the engine ladder."""
+if GCS_GRPC_CONNECTIONS < 1:
+    raise ValueError(f"GCS_GRPC_CONNECTIONS must be >= 1, not {GCS_GRPC_CONNECTIONS}")
+
 HTTP_PIPEWAIT: bool = get_bool("OPTERYX_HTTP_PIPEWAIT", False)
 """Enable CURLOPT_PIPEWAIT on get_many() handles.
 

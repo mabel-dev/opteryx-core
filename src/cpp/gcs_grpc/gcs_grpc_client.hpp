@@ -9,17 +9,20 @@
 // goes to the live connection with the fewest open calls, and a dead
 // connection is replaced on next use.
 //
-// Phase 1 connects over TLS to storage.googleapis.com (through Google's front
-// end) — a test-only transport (design R5). Phase 2 adds ALTS + xDS discovery.
+// Two transports. `direct_path` = DirectPath: endpoints from xDS + RLS
+// discovery (directpath.hpp), ALTS connections (alts.hpp) — GCE only. Otherwise
+// TLS to `host` through Google's front end, which is test-only (design R5).
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "directpath.hpp"
 #include "grpc_conn.hpp"
 
 namespace gcs_grpc {
@@ -50,6 +53,10 @@ public:
         int port = 443;
         int connections = 8;
         std::string ca_file;  // empty = OpenSSL default verify paths
+        bool direct_path = false;
+        // Called on an I/O thread with each chunk of object bytes as it arrives
+        // (the engine feeds its byte gate's link estimate from it); null = none.
+        void (*on_received)(size_t bytes) = nullptr;
     };
 
     explicit GcsGrpcClient(Options options);
@@ -65,11 +72,17 @@ public:
                                                 int64_t generation = 0, int64_t* out_generation = nullptr);
 
 private:
-    std::shared_ptr<GrpcConnection> pick_connection();
+    std::shared_ptr<GrpcConnection> pick_connection(const std::string& bucket);
+    std::shared_ptr<GrpcConnection> new_connection(const std::vector<Endpoint>& endpoints, size_t ordinal);
 
     Options options_;
     std::mutex mu_;
-    std::vector<std::shared_ptr<GrpcConnection>> pool_;
+    // Pools by endpoint set: one pool for the front end, one per DirectPath
+    // endpoint set (buckets that route to the same cluster share it).
+    std::map<std::string, std::vector<std::shared_ptr<GrpcConnection>>> pools_;
+    std::map<std::string, size_t> opened_;  // connections ever opened per pool, for round-robin
+    std::unique_ptr<DirectPathResolver> resolver_;
+    std::shared_ptr<GrpcConnection> handshaker_;
 };
 
 }  // namespace gcs_grpc

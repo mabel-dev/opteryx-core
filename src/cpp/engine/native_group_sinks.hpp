@@ -447,9 +447,13 @@ struct AggCell {
     // line; SUM/AVG/COUNT/MIN/MAX never touch it.
     __int128 isum = 0;   // EXACT integer-domain sum (int64 family AND DECIMAL128 raws)
     double   fsum = 0.0;
-    double   fsumsq = 0.0;                // STDDEV: Σx², always double (no exactness need)
+    double   fsumsq = 0.0;                // STDDEV: Σ(x-K)² about fshift, always double
     int64_t  valid = 0;                  // non-NULL operand rows
     int64_t  rows = 0;                   // ALL rows — COUNT(*)
+    // STDDEV family/CORR: the shift K the moments are taken about (fsum = Σ(x-K),
+    // fsumsq = Σ(x-K)²) — the cell's first value. 0 for every other aggregate, which
+    // makes agg2_merge's re-basing a plain add for them. See agg2_merge_moments.
+    double   fshift = 0.0;
     __int128 min128 = 0, max128 = 0;   // DECIMAL128 order extremes (raw == value order)
     uint64_t min_key = 0, max_key = 0;   // normalized order keys (sort_num_key)
     int64_t  min_raw = 0, max_raw = 0;   // raw value container (widened / bit-stored)
@@ -457,6 +461,7 @@ struct AggCell {
     // the MIN/MAX lanes so every other aggregation's cache footprint is
     // untouched. `valid` counts pairs where BOTH operands are non-NULL.
     double   fsumy = 0.0, fsumyy = 0.0, fsumxy = 0.0;
+    double   fshifty = 0.0;   // CORR: y's shift (fsumy = Σ(y-Ky), fsumxy = Σ(x-Kx)(y-Ky))
 };
 
 // Captured once from the first morsel a worker sees; merged into the global.
@@ -775,23 +780,47 @@ inline bool agg2_sum_morsel(AggCell& c, const DrakenVector& v, bool is_float) no
     return true;
 }
 
-// STDDEV/VAR moments (Σx, Σx²) of a whole morsel through draken's fold instead of
-// agg2_update_stddev per row. False for a type it doesn't cover: per-row path.
-inline bool agg2_moments_morsel(AggCell& c, const DrakenVector& v) noexcept {
-    double s, q;
-    uint32_t n;
+// The first non-NULL value of `v` as a double, false when every row is NULL. The
+// shift an empty STDDEV/CORR cell adopts.
+inline bool agg2_first_valid(const DrakenVector& v, bool is_float, double& out) {
+    for (uint32_t i = 0; i < v.length; ++i) {
+        if (!sort_row_valid(v, i)) continue;
+        out = agg2_raw_as_double(agg2_read_raw(v, i, is_float), is_float,
+                                 v.type == DRAKEN_UINT64);
+        return true;
+    }
+    return false;
+}
+
+// STDDEV/VAR moments (Σ(x-K), Σ(x-K)²) of a whole morsel through draken's fold instead
+// of agg2_update_stddev per row. False for a type it doesn't cover: per-row path.
+inline bool agg2_moments_morsel(AggCell& c, const DrakenVector& v) {
     switch (v.type) {
-        case DRAKEN_FLOAT64: n = draken::ops::numeric_moments<double>(v, &s, &q);   break;
-        case DRAKEN_FLOAT32: n = draken::ops::numeric_moments<float>(v, &s, &q);    break;
-        case DRAKEN_INT8:    n = draken::ops::numeric_moments<int8_t>(v, &s, &q);   break;
-        case DRAKEN_INT16:   n = draken::ops::numeric_moments<int16_t>(v, &s, &q);  break;
-        case DRAKEN_INT32:   n = draken::ops::numeric_moments<int32_t>(v, &s, &q);  break;
-        case DRAKEN_INT64:   n = draken::ops::numeric_moments<int64_t>(v, &s, &q);  break;
-        case DRAKEN_UINT8:   n = draken::ops::numeric_moments<uint8_t>(v, &s, &q);  break;
-        case DRAKEN_UINT16:  n = draken::ops::numeric_moments<uint16_t>(v, &s, &q); break;
-        case DRAKEN_UINT32:  n = draken::ops::numeric_moments<uint32_t>(v, &s, &q); break;
-        case DRAKEN_UINT64:  n = draken::ops::numeric_moments<uint64_t>(v, &s, &q); break;
-        default: return false;
+        case DRAKEN_FLOAT64: case DRAKEN_FLOAT32:
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+            break;
+        default:
+            return false;
+    }
+    if (c.valid == 0) {
+        const bool is_float = v.type == DRAKEN_FLOAT64 || v.type == DRAKEN_FLOAT32;
+        if (!agg2_first_valid(v, is_float, c.fshift)) return true;   // all NULL: nothing to fold
+    }
+    const double k = c.fshift;
+    double s = 0.0, q = 0.0;
+    uint32_t n = 0;
+    switch (v.type) {
+        case DRAKEN_FLOAT64: n = draken::ops::numeric_moments<double>(v, k, &s, &q);   break;
+        case DRAKEN_FLOAT32: n = draken::ops::numeric_moments<float>(v, k, &s, &q);    break;
+        case DRAKEN_INT8:    n = draken::ops::numeric_moments<int8_t>(v, k, &s, &q);   break;
+        case DRAKEN_INT16:   n = draken::ops::numeric_moments<int16_t>(v, k, &s, &q);  break;
+        case DRAKEN_INT32:   n = draken::ops::numeric_moments<int32_t>(v, k, &s, &q);  break;
+        case DRAKEN_INT64:   n = draken::ops::numeric_moments<int64_t>(v, k, &s, &q);  break;
+        case DRAKEN_UINT8:   n = draken::ops::numeric_moments<uint8_t>(v, k, &s, &q);  break;
+        case DRAKEN_UINT16:  n = draken::ops::numeric_moments<uint16_t>(v, k, &s, &q); break;
+        case DRAKEN_UINT32:  n = draken::ops::numeric_moments<uint32_t>(v, k, &s, &q); break;
+        default:             n = draken::ops::numeric_moments<uint64_t>(v, k, &s, &q); break;
     }
     c.fsum += s;
     c.fsumsq += q;
@@ -883,7 +912,7 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
     c.valid += 1;
 }
 
-// STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP all accumulate the identical Σx/Σx²/count
+// STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP all accumulate the identical Σ(x-K)/Σ(x-K)²/count
 // lanes (agg2_update_stddev/agg2_merge below) — only their finalize formula
 // differs (emit_lane_column). Every dispatch site that only cares "is this the
 // STDDEV family" (accumulation, DECIMAL rejection) checks this instead of
@@ -910,6 +939,8 @@ inline void agg2_update_stddev(AggCell& c, const DrakenVector& v, uint32_t row,
                                bool is_float) noexcept {
     double d = agg2_raw_as_double(agg2_read_raw(v, row, is_float), is_float,
                                   v.type == DRAKEN_UINT64);
+    if (c.valid == 0) c.fshift = d;
+    d -= c.fshift;
     c.fsum += d;
     c.fsumsq += d * d;
     c.valid += 1;
@@ -918,6 +949,9 @@ inline void agg2_update_stddev(AggCell& c, const DrakenVector& v, uint32_t row,
 // CORR accumulation: one (x, y) pair, both already known non-NULL. Same
 // always-double posture as STDDEV (correlation is inherently non-exact).
 inline void agg2_update_corr(AggCell& c, double x, double y) noexcept {
+    if (c.valid == 0) { c.fshift = x; c.fshifty = y; }
+    x -= c.fshift;
+    y -= c.fshifty;
     c.fsum   += x;
     c.fsumsq += x * x;
     c.fsumy  += y;
@@ -948,13 +982,28 @@ inline bool corr_finalize(double n, double sx, double sxx, double sy, double syy
     return true;
 }
 
+// Fold `from`'s moments into `into`, re-basing them from from's shift onto into's
+// (an empty `into` adopts from's): with d = Kfrom - Kinto,
+//   Σ(x-Kinto) = Σ(x-Kfrom) + n·d,   Σ(x-Kinto)² = Σ(x-Kfrom)² + 2d·Σ(x-Kfrom) + n·d²,
+//   Σ(x-Kx)(y-Ky) gains dx·Σ(y-Ky) + dy·Σ(x-Kx) + n·dx·dy.
+// Every non-moment aggregate keeps both shifts at 0, so d is 0 and this is the plain
+// add it always was (fsum is also SUM/AVG's float lane).
+inline void agg2_merge_moments(AggCell& into, const AggCell& from) noexcept {
+    if (from.valid == 0) return;
+    if (into.valid == 0) { into.fshift = from.fshift; into.fshifty = from.fshifty; }
+    const double n = static_cast<double>(from.valid);
+    const double dx = from.fshift - into.fshift;
+    const double dy = from.fshifty - into.fshifty;
+    into.fsumxy += from.fsumxy + dx * from.fsumy + dy * from.fsum + n * dx * dy;
+    into.fsumsq += from.fsumsq + 2.0 * dx * from.fsum + n * dx * dx;
+    into.fsumyy += from.fsumyy + 2.0 * dy * from.fsumy + n * dy * dy;
+    into.fsum   += from.fsum + n * dx;
+    into.fsumy  += from.fsumy + n * dy;
+}
+
 inline void agg2_merge(AggCell& into, const AggCell& from) {
     into.isum += from.isum;
-    into.fsum += from.fsum;
-    into.fsumsq += from.fsumsq;
-    into.fsumy += from.fsumy;
-    into.fsumyy += from.fsumyy;
-    into.fsumxy += from.fsumxy;
+    agg2_merge_moments(into, from);
     if (from.valid > 0) {
         if (into.valid == 0 || from.min128 < into.min128) into.min128 = from.min128;
         if (into.valid == 0 || from.max128 > into.max128) into.max128 = from.max128;
@@ -2572,6 +2621,7 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::QuantileState& me
         return true;
     }
     const bool stddev = agg_fn_is_stddev_family(fn);
+    bool shifted = c.valid != 0;   // c.valid is only advanced after the loop
     for (int64_t r : d.raw) {
         double x = agg2_raw_as_double(r, is_float, is_u64);
         if (fn == AggFn::Quantile) {
@@ -2583,6 +2633,8 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::QuantileState& me
             continue;
         }
         if (stddev) {
+            if (!shifted) { c.fshift = x; shifted = true; }
+            x -= c.fshift;
             c.fsum += x;
             c.fsumsq += x * x;
         } else if (is_float) {
@@ -2972,8 +3024,16 @@ struct UngroupedAggSink : Sink {
                     in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
                 const bool is_ux = v.type == DRAKEN_UINT64;
                 const bool is_uy = v2.type == DRAKEN_UINT64;
+                if (c.valid == 0) {
+                    // The empty cell adopts the first non-NULL PAIR as its shifts.
+                    uint32_t i = 0;
+                    while (i < v.length && !(sort_row_valid(v, i) && sort_row_valid(v2, i))) ++i;
+                    if (i == v.length) continue;   // no pair in this morsel
+                    c.fshift  = agg2_raw_as_double(agg2_read_raw(v, i, is_fx), is_fx, is_ux);
+                    c.fshifty = agg2_raw_as_double(agg2_read_raw(v2, i, is_fy), is_fy, is_uy);
+                }
                 draken::ops::PairMoments pm;
-                if (draken::ops::numeric_pair_moments(v, v2, &pm)) {
+                if (draken::ops::numeric_pair_moments(v, v2, c.fshift, c.fshifty, &pm)) {
                     c.fsum += pm.sx;  c.fsumsq += pm.sxx;
                     c.fsumy += pm.sy; c.fsumyy += pm.syy; c.fsumxy += pm.sxy;
                     c.valid += static_cast<int64_t>(pm.n);
@@ -3325,11 +3385,15 @@ struct UngroupedAggSink : Sink {
 struct GBLanes {
     GBSegVec<int64_t>  valid;   // non-NULL operand rows (every kind but Rows)
     GBSegVec<int64_t>  i64;     // SumI/AvgI exact sums; MinMaxNum raw containers
-    GBSegVec<double>   f64;     // SumF/AvgF sums; Stddev family/Corr Σx
-    GBSegVec<double>   f64sq;   // Stddev family/Corr Σx²
+    GBSegVec<double>   f64;     // SumF/AvgF sums; Stddev family/Corr Σ(x-K)
+    GBSegVec<double>   f64sq;   // Stddev family/Corr Σ(x-K)²
     GBSegVec<double>   f64y;    // Corr Σy
     GBSegVec<double>   f64yy;   // Corr Σy²
     GBSegVec<double>   f64xy;   // Corr Σxy
+    // Stddev family/Corr: the group's shift K — f64/f64sq/f64xy are moments about it
+    // (see agg2_merge_moments). f64ky is Corr's y shift.
+    GBSegVec<double>   f64k;
+    GBSegVec<double>   f64ky;
     GBSegVec<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
     GBSegVec<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     GBSegVec<GBStrExt> sext;    // MinMaxStr extremes (records)
@@ -3347,6 +3411,7 @@ struct GBLanes {
     void hint(size_t rows) noexcept {
         valid.hint(rows); i64.hint(rows); f64.hint(rows); f64sq.hint(rows);
         f64y.hint(rows); f64yy.hint(rows); f64xy.hint(rows); mkey.hint(rows);
+        f64k.hint(rows); f64ky.hint(rows);
         i128.hint(rows); sext.hint(rows);
     }
 };
@@ -3359,7 +3424,7 @@ struct GBLanes {
 inline void gb_lanes_swap(GBLanes& L, size_t a, size_t b) {
     auto sw = [a, b](auto& lane) { if (!lane.empty()) std::swap(lane[a], lane[b]); };
     sw(L.valid); sw(L.i64); sw(L.f64); sw(L.f64sq); sw(L.f64y); sw(L.f64yy);
-    sw(L.f64xy); sw(L.mkey); sw(L.i128); sw(L.sext); sw(L.aa); sw(L.cidr);
+    sw(L.f64xy); sw(L.f64k); sw(L.f64ky); sw(L.mkey); sw(L.i128); sw(L.sext); sw(L.aa); sw(L.cidr);
     sw(L.quantile); sw(L.hll); sw(L.td);
 }
 
@@ -3381,11 +3446,12 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
         case GBKind::StddevSamp:
         case GBKind::VarPop:
         case GBKind::VarSamp:
-            L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n);
+            L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n); L.f64k.resize(n);
             return;
         case GBKind::Corr:
             L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n);
             L.f64y.resize(n); L.f64yy.resize(n); L.f64xy.resize(n);
+            L.f64k.resize(n); L.f64ky.resize(n);
             return;
         // AvgI sums exact int128 (overflow-proof); SUM's OUTPUT is INT64 so its
         // int64 lane + loud overflow trap loses nothing.
@@ -3475,6 +3541,8 @@ struct GBFlatLanes {
     double*   f64y  = nullptr;
     double*   f64yy = nullptr;
     double*   f64xy = nullptr;
+    double*   f64k  = nullptr;
+    double*   f64ky = nullptr;
     uint64_t* mkey  = nullptr;
     __int128* i128  = nullptr;
     GBStrExt* sext  = nullptr;
@@ -3497,6 +3565,7 @@ inline bool gb_flat_lanes(GBLanes& L, size_t n, GBFlatLanes& f) {
     };
     take(L.valid, f.valid); take(L.i64, f.i64); take(L.f64, f.f64); take(L.f64sq, f.f64sq);
     take(L.f64y, f.f64y); take(L.f64yy, f.f64yy); take(L.f64xy, f.f64xy);
+    take(L.f64k, f.f64k); take(L.f64ky, f.f64ky);
     take(L.mkey, f.mkey); take(L.i128, f.i128); take(L.sext, f.sext);
     f.sbytes = L.sbytes.get(); f.aa = L.aa.data(); f.cidr = L.cidr.data();
     f.quantile = L.quantile.data(); f.hll = L.hll.data(); f.td = L.td.data();
@@ -3759,6 +3828,8 @@ inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float, bool is_u64
             for (size_t k = 0; k < n; ++k) {
                 uint32_t e = D.pair_gid[k];
                 double x = as_double(D.pair_raw[k]);
+                if (L.valid[e] == 0) L.f64k[e] = x;
+                x -= L.f64k[e];
                 L.f64[e] += x;
                 L.f64sq[e] += x * x;
                 L.valid[e] += 1;
@@ -3927,8 +3998,11 @@ inline void gb_corr_rows(LanesOf lanes_of, uint32_t rows, const uint64_t* mkh,
         if (vy != nullptr && ((vy[i >> 3] >> (i & 7)) & 1u) == 0) continue;
         auto& L = lanes_of(gb_part(mkh[i]));
         const uint32_t e = mke[i];
-        const double x = agg2_raw_as_double(RX::at(dx, sx[i]), fx, ux);
-        const double y = agg2_raw_as_double(RY::at(dy, sy[i]), fy, uy);
+        double x = agg2_raw_as_double(RX::at(dx, sx[i]), fx, ux);
+        double y = agg2_raw_as_double(RY::at(dy, sy[i]), fy, uy);
+        if (L.valid[e] == 0) { L.f64k[e] = x; L.f64ky[e] = y; }
+        x -= L.f64k[e];
+        y -= L.f64ky[e];
         L.f64[e]   += x;
         L.f64sq[e] += x * x;
         L.f64y[e]  += y;
@@ -4896,14 +4970,16 @@ struct GroupBySink : Sink {
             case GBKind::StddevSamp:
             case GBKind::VarPop:
             case GBKind::VarSamp:
-                // Same Σx/Σx²/count accumulation for all four — only
-                // emit_lane_column's finalize formula differs.
+                // Same shifted Σ(x-K)/Σ(x-K)²/count accumulation for all four —
+                // only emit_lane_column's finalize formula differs.
                 for (uint32_t i = 0; i < rows; ++i) {
                     if (!row_ok(i)) continue;
                     auto& L = lanes_of(gb_part(mkh[i]));
                     uint32_t e = l.mk_ent[i];
                     double d = agg2_raw_as_double(
                         RD::at(vdata, vsel[i]), is_f, is_u64);
+                    if (L.valid[e] == 0) L.f64k[e] = d;
+                    d -= L.f64k[e];
                     L.f64[e] += d;
                     L.f64sq[e] += d * d;
                     L.valid[e] += 1;
@@ -5872,19 +5948,28 @@ struct GroupBySink : Sink {
                 case GBKind::VarSamp:
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
                         uint32_t m = ge[e];
-                        D.f64[m] += S.f64[e];
-                        D.f64sq[m] += S.f64sq[e];
+                        // Re-base onto the destination's shift — agg2_merge_moments.
+                        if (D.valid[m] == 0) D.f64k[m] = S.f64k[e];
+                        const double nb = static_cast<double>(S.valid[e]);
+                        const double d = S.f64k[e] - D.f64k[m];
+                        D.f64sq[m] += S.f64sq[e] + 2.0 * d * S.f64[e] + nb * d * d;
+                        D.f64[m] += S.f64[e] + nb * d;
                         D.valid[m] += S.valid[e];
                     }
                     break;
                 case GBKind::Corr:
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
                         uint32_t m = ge[e];
-                        D.f64[m]   += S.f64[e];
-                        D.f64sq[m] += S.f64sq[e];
-                        D.f64y[m]  += S.f64y[e];
-                        D.f64yy[m] += S.f64yy[e];
-                        D.f64xy[m] += S.f64xy[e];
+                        // Re-base onto the destination's shifts — agg2_merge_moments.
+                        if (D.valid[m] == 0) { D.f64k[m] = S.f64k[e]; D.f64ky[m] = S.f64ky[e]; }
+                        const double nb = static_cast<double>(S.valid[e]);
+                        const double dx = S.f64k[e] - D.f64k[m];
+                        const double dy = S.f64ky[e] - D.f64ky[m];
+                        D.f64xy[m] += S.f64xy[e] + dx * S.f64y[e] + dy * S.f64[e] + nb * dx * dy;
+                        D.f64sq[m] += S.f64sq[e] + 2.0 * dx * S.f64[e] + nb * dx * dx;
+                        D.f64yy[m] += S.f64yy[e] + 2.0 * dy * S.f64y[e] + nb * dy * dy;
+                        D.f64[m]   += S.f64[e] + nb * dx;
+                        D.f64y[m]  += S.f64y[e] + nb * dy;
                         D.valid[m] += S.valid[e];
                     }
                     break;

@@ -102,6 +102,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # object — one credential for the caller instead of one IAM signBlob RPC
         # per file. Same set-once-at-plan-time lifecycle as set_http_tuning above.
         void set_auth_header(const string& v)
+        # GCS_TRANSPORT=grpc: gs:// ranges over DirectPath with `connections` ALTS
+        # connections. Plan-time, once, before any submit.
+        void set_gcs_transport_grpc(int connections) except +
         void submit_row_group(
             const string& path, int rg_idx,
             const vector[string]& column_names,

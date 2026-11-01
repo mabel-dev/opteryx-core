@@ -6,14 +6,17 @@
 #include <condition_variable>
 #include <cstring>
 
+#include "alts.hpp"
 #include "crc32c.hpp"
 #include "pb_wire.hpp"
+#include "transport.hpp"
 
 namespace gcs_grpc {
 
 namespace {
 
 const std::string kReadObjectPath = "/google.storage.v2.Storage/ReadObject";
+constexpr const char* kStorageHost = "storage.googleapis.com";
 
 // Percent-encodes a routing value for x-goog-request-params.
 std::string url_encode(const std::string& s) {
@@ -58,7 +61,8 @@ struct Batch {
 // Every other field is skipped by its wire type.
 class RangeStream : public CallHandler {
 public:
-    RangeStream(Batch* batch, uint8_t* dest, int64_t length) : batch_(batch), dest_(dest), length_(length) {}
+    RangeStream(Batch* batch, uint8_t* dest, int64_t length, void (*on_received)(size_t) = nullptr)
+        : batch_(batch), dest_(dest), length_(length), on_received_(on_received) {}
 
     bool on_body(const uint8_t* p, size_t n) override {
         try {
@@ -227,6 +231,7 @@ private:
                     advance(k);
                     std::memcpy(dest_ + pos_, p, k);
                     crc_run_ = crc32c_extend(crc_run_, p, k);
+                    if (on_received_) on_received_(k);
                     pos_ += static_cast<int64_t>(k);
                     p += k;
                     n -= k;
@@ -255,6 +260,7 @@ private:
     Batch* batch_;
     uint8_t* dest_;
     const int64_t length_;
+    void (*on_received_)(size_t);
     int64_t pos_ = 0;
 
     St st_ = St::Prefix;
@@ -313,14 +319,37 @@ GcsGrpcClient::GcsGrpcClient(Options options) : options_(std::move(options)) {
     if (options_.connections < 1) throw std::invalid_argument("GcsGrpcClient: connections must be >= 1");
 }
 
-std::shared_ptr<GrpcConnection> GcsGrpcClient::pick_connection() {
+std::shared_ptr<GrpcConnection> GcsGrpcClient::new_connection(const std::vector<Endpoint>& endpoints,
+                                                             size_t ordinal) {
+    if (!options_.direct_path)
+        return std::make_shared<GrpcConnection>(
+            std::make_unique<TlsTransport>(options_.host, options_.port, options_.ca_file), options_.host);
+    if (!handshaker_ || !handshaker_->alive())
+        handshaker_ = std::make_shared<GrpcConnection>(
+            std::make_unique<PlainTransport>(kAltsHandshakerHost, kAltsHandshakerPort),
+            std::string(kAltsHandshakerHost) + ":" + std::to_string(kAltsHandshakerPort));
+    const Endpoint& ep = endpoints[ordinal % endpoints.size()];
+    return std::make_shared<GrpcConnection>(std::make_unique<AltsTransport>(ep.ip, ep.port, *handshaker_, kStorageHost),
+                                            kStorageHost);
+}
+
+std::shared_ptr<GrpcConnection> GcsGrpcClient::pick_connection(const std::string& bucket) {
     std::lock_guard<std::mutex> g(mu_);
-    pool_.erase(std::remove_if(pool_.begin(), pool_.end(), [](const auto& c) { return !c->alive(); }), pool_.end());
-    if (static_cast<int>(pool_.size()) < options_.connections) {
-        pool_.push_back(std::make_shared<GrpcConnection>(options_.host, options_.port, options_.ca_file));
-        return pool_.back();
+    std::vector<Endpoint> endpoints;
+    std::string key = "front-end";
+    if (options_.direct_path) {
+        if (!resolver_) resolver_ = std::make_unique<DirectPathResolver>(options_.ca_file);
+        endpoints = resolver_->endpoints(bucket, 10000);
+        key.clear();
+        for (const Endpoint& ep : endpoints) key += ep.ip + ":" + std::to_string(ep.port) + ",";
     }
-    return *std::min_element(pool_.begin(), pool_.end(),
+    auto& pool = pools_[key];
+    pool.erase(std::remove_if(pool.begin(), pool.end(), [](const auto& c) { return !c->alive(); }), pool.end());
+    if (static_cast<int>(pool.size()) < options_.connections) {
+        pool.push_back(new_connection(endpoints, opened_[key]++));
+        return pool.back();
+    }
+    return *std::min_element(pool.begin(), pool.end(),
                              [](const auto& a, const auto& b) { return a->open_calls() < b->open_calls(); });
 }
 
@@ -350,10 +379,10 @@ std::vector<std::vector<uint8_t>> GcsGrpcClient::read_many(const std::string& bu
     calls.reserve(ranges.size());
     std::string connect_error;
     for (size_t i = 0; i < ranges.size(); ++i) {
-        streams.push_back(std::make_unique<RangeStream>(&batch, out[i].data(), ranges[i].length));
+        streams.push_back(std::make_unique<RangeStream>(&batch, out[i].data(), ranges[i].length, options_.on_received));
         std::shared_ptr<GrpcConnection> conn;
         try {
-            conn = pick_connection();
+            conn = pick_connection(bucket);
         } catch (const std::exception& e) {
             connect_error = e.what();
             // This stream and every later one never start; account for them.

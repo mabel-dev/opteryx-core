@@ -740,6 +740,8 @@ cdef class CppIOPipeline:
         # which case the URL carries its own credential and no header is wanted.
         if auth_header:
             self.pipeline.set_auth_header(auth_header.encode("utf-8"))
+        if _config.GCS_TRANSPORT == "grpc":
+            self.pipeline.set_gcs_transport_grpc(_config.GCS_GRPC_CONNECTIONS)
 
     def __dealloc__(self):
         if self.pipeline:
@@ -4029,6 +4031,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     _auth = _native_auth_header(filesystem)
     if _auth:
         plan.pipeline_ptr.set_auth_header(_auth.encode("utf-8"))
+    if _config.GCS_TRANSPORT == "grpc":
+        plan.pipeline_ptr.set_gcs_transport_grpc(_config.GCS_GRPC_CONNECTIONS)
     # Armed only when something is remote (see _any_remote_path); the window
     # above was validated either way.
     if fetch_ahead > 0 and _remote_scan:

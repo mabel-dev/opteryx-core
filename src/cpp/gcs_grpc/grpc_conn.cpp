@@ -1,85 +1,23 @@
 #include "grpc_conn.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <poll.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <nghttp2/nghttp2.h>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-#include <openssl/x509v3.h>
 
 namespace gcs_grpc {
 
 namespace {
 
-constexpr int kConnectTimeoutMs = 10000;
 constexpr size_t kReadChunk = 256 * 1024;
 // Flow-control windows: the defaults (64 KiB) cap one stream at window/RTT,
 // a few MB/s at GCS latencies — far below what a range read needs.
 constexpr int32_t kStreamWindow = 16 * 1024 * 1024;
 constexpr int32_t kConnectionWindow = 256 * 1024 * 1024;
-
-std::string ssl_error_string() {
-    char buf[256];
-    unsigned long e = ERR_get_error();
-    if (e == 0) return "unknown TLS error";
-    ERR_error_string_n(e, buf, sizeof(buf));
-    ERR_clear_error();
-    return buf;
-}
-
-void set_nonblocking(int fd, bool on) {
-    int fl = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, on ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK));
-}
-
-int connect_tcp(const std::string& host, int port) {
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    const std::string service = std::to_string(port);
-    int rc = getaddrinfo(host.c_str(), service.c_str(), &hints, &res);
-    if (rc != 0) throw std::runtime_error("gRPC: cannot resolve " + host + ": " + gai_strerror(rc));
-    std::string last = "no addresses";
-    for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-        int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) { last = std::strerror(errno); continue; }
-        set_nonblocking(fd, true);
-        int c = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
-        if (c != 0 && errno == EINPROGRESS) {
-            pollfd p{fd, POLLOUT, 0};
-            c = poll(&p, 1, kConnectTimeoutMs) == 1 ? 0 : -1;
-            int err = 0;
-            socklen_t len = sizeof(err);
-            if (c == 0 && (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0)) {
-                errno = err;
-                c = -1;
-            } else if (c != 0) {
-                errno = ETIMEDOUT;
-            }
-        }
-        if (c == 0) {
-            set_nonblocking(fd, false);
-            int one = 1;
-            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-            freeaddrinfo(res);
-            return fd;
-        }
-        last = std::strerror(errno);
-        ::close(fd);
-    }
-    freeaddrinfo(res);
-    throw std::runtime_error("gRPC: cannot connect to " + host + ":" + service + ": " + last);
-}
 
 // HTTP status → gRPC status, per the gRPC HTTP/2 protocol mapping.
 int grpc_status_from_http(int http) {
@@ -102,6 +40,9 @@ struct GrpcConnection::Call {
     Metadata metadata;
     std::string body;
     size_t body_sent = 0;
+    bool half_closed = true;  // no more body after `body`
+    bool deferred = false;    // nghttp2 is waiting for send() to resume the stream
+    int32_t stream_id = 0;
     int http_status = 0;
     int grpc_status = -1;
     std::string grpc_message;
@@ -145,43 +86,16 @@ void GrpcConnection::frame_message(std::string& out, const std::string& message)
     out.append(message);
 }
 
-GrpcConnection::GrpcConnection(const std::string& host, int port, const std::string& ca_file) : host_(host) {
-    fd_ = connect_tcp(host, port);
+GrpcConnection::GrpcConnection(std::unique_ptr<Transport> transport, std::string authority)
+    : transport_(std::move(transport)), host_(std::move(authority)) {
     // Constructor failures below must release what was acquired so far.
     auto fail = [this](const std::string& why) {
-        if (ssl_) SSL_free(ssl_);
-        if (ctx_) SSL_CTX_free(ctx_);
         if (session_) nghttp2_session_del(session_);
         if (wake_r_ >= 0) ::close(wake_r_);
         if (wake_w_ >= 0) ::close(wake_w_);
-        ::close(fd_);
-        ssl_ = nullptr; ctx_ = nullptr; session_ = nullptr;
+        session_ = nullptr;
         throw std::runtime_error("gRPC: " + host_ + ": " + why);
     };
-
-    ctx_ = SSL_CTX_new(TLS_client_method());
-    if (!ctx_) fail("SSL_CTX_new: " + ssl_error_string());
-    SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
-    SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
-    if (!ca_file.empty() ? SSL_CTX_load_verify_locations(ctx_, ca_file.c_str(), nullptr) != 1
-                         : SSL_CTX_set_default_verify_paths(ctx_) != 1)
-        fail("loading CA certificates: " + ssl_error_string());
-    static const unsigned char kAlpn[] = {2, 'h', '2'};
-    if (SSL_CTX_set_alpn_protos(ctx_, kAlpn, sizeof(kAlpn)) != 0) fail("ALPN setup failed");
-
-    ssl_ = SSL_new(ctx_);
-    if (!ssl_) fail("SSL_new: " + ssl_error_string());
-    SSL_set_fd(ssl_, fd_);
-    SSL_set_tlsext_host_name(ssl_, host_.c_str());
-    if (SSL_set1_host(ssl_, host_.c_str()) != 1) fail("SSL_set1_host failed");
-    // nghttp2 retries a short write from a possibly moved buffer.
-    SSL_set_mode(ssl_, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
-    if (SSL_connect(ssl_) != 1) fail("TLS handshake: " + ssl_error_string());
-    const unsigned char* proto = nullptr;
-    unsigned int proto_len = 0;
-    SSL_get0_alpn_selected(ssl_, &proto, &proto_len);
-    if (proto_len != 2 || std::memcmp(proto, "h2", 2) != 0) fail("server did not negotiate HTTP/2 (ALPN)");
-    set_nonblocking(fd_, true);
 
     int pipefd[2];
     if (pipe(pipefd) != 0) fail(std::string("pipe: ") + std::strerror(errno));
@@ -217,9 +131,6 @@ GrpcConnection::~GrpcConnection() {
     wake();
     if (io_.joinable()) io_.join();
     nghttp2_session_del(session_);
-    SSL_free(ssl_);
-    SSL_CTX_free(ctx_);
-    ::close(fd_);
     ::close(wake_r_);
     ::close(wake_w_);
 }
@@ -230,8 +141,10 @@ void GrpcConnection::wake() {
     (void)!::write(wake_w_, &b, 1);
 }
 
-uint64_t GrpcConnection::start_call(const std::string& path, Metadata metadata, std::string body, CallHandler* handler) {
+uint64_t GrpcConnection::start_call(const std::string& path, Metadata metadata, std::string body, CallHandler* handler,
+                                    bool half_close) {
     auto call = std::make_unique<Call>();
+    call->half_closed = half_close;
     call->id = next_call_id_.fetch_add(1, std::memory_order_relaxed);
     call->handler = handler;
     call->path = path;
@@ -241,7 +154,7 @@ uint64_t GrpcConnection::start_call(const std::string& path, Metadata metadata, 
     {
         std::lock_guard<std::mutex> g(ops_mu_);
         if (alive_.load(std::memory_order_acquire)) {
-            ops_.push_back(Op{Op::kStart, id, std::move(call)});
+            ops_.push_back(Op{Op::kStart, id, std::move(call), {}, false});
         }
     }
     if (call) {  // connection is dead: the I/O thread will never see this call
@@ -255,7 +168,18 @@ uint64_t GrpcConnection::start_call(const std::string& path, Metadata metadata, 
 void GrpcConnection::cancel(uint64_t call_id) {
     {
         std::lock_guard<std::mutex> g(ops_mu_);
-        ops_.push_back(Op{Op::kCancel, call_id, nullptr});
+        ops_.push_back(Op{Op::kCancel, call_id, nullptr, {}, false});
+    }
+    wake();
+}
+
+void GrpcConnection::send(uint64_t call_id, std::string body, bool half_close) {
+    {
+        std::lock_guard<std::mutex> g(ops_mu_);
+        Op op{Op::kSend, call_id, nullptr, {}, false};
+        op.body = std::move(body);
+        op.half_close = half_close;
+        ops_.push_back(std::move(op));
     }
     wake();
 }
@@ -274,6 +198,19 @@ void GrpcConnection::submit_pending() {
             nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE, it->second, NGHTTP2_CANCEL);
             continue;
         }
+        if (op.kind == Op::kSend) {
+            auto it = stream_of_call_.find(op.call_id);
+            if (it == stream_of_call_.end()) continue;  // already closed
+            Call& c = *by_stream_[it->second];
+            if (c.half_closed) continue;  // a send after half-close is the caller's bug; the call is done sending
+            c.body.append(op.body);
+            c.half_closed = op.half_close;
+            if (c.deferred) {
+                c.deferred = false;
+                nghttp2_session_resume_data(session_, c.stream_id);
+            }
+            continue;
+        }
         Call& c = *op.call;
         std::vector<nghttp2_nv> nva;
         auto add = [&nva](const std::string& k, const std::string& v) {
@@ -281,12 +218,13 @@ void GrpcConnection::submit_pending() {
                                      reinterpret_cast<uint8_t*>(const_cast<char*>(v.data())),
                                      k.size(), v.size(), NGHTTP2_NV_FLAG_NONE});
         };
-        static const std::string kMethod = ":method", kPost = "POST", kScheme = ":scheme", kHttps = "https",
+        const std::string scheme = transport_->scheme();
+        static const std::string kMethod = ":method", kPost = "POST", kScheme = ":scheme",
                                  kPath = ":path", kAuthority = ":authority", kCt = "content-type",
                                  kGrpc = "application/grpc", kTe = "te", kTrailers = "trailers",
                                  kUa = "user-agent", kUaVal = "opteryx-gcs-grpc/1";
         add(kMethod, kPost);
-        add(kScheme, kHttps);
+        add(kScheme, scheme);
         add(kPath, c.path);
         add(kAuthority, host_);
         add(kCt, kGrpc);
@@ -301,6 +239,7 @@ void GrpcConnection::submit_pending() {
             c.handler->on_close(kUnavailable, std::string("nghttp2_submit_request: ") + nghttp2_strerror(sid));
             continue;
         }
+        c.stream_id = sid;
         stream_of_call_[c.id] = sid;
         by_stream_[sid] = std::move(op.call);
         open_calls_.fetch_add(1, std::memory_order_relaxed);
@@ -312,21 +251,24 @@ long GrpcConnection::read_body(int32_t stream_id, uint8_t* buf, size_t len, uint
     if (it == by_stream_.end()) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
     Call& c = *it->second;
     const size_t n = std::min(len, c.body.size() - c.body_sent);
+    if (n == 0 && !c.half_closed) {
+        c.deferred = true;
+        return NGHTTP2_ERR_DEFERRED;
+    }
     std::memcpy(buf, c.body.data() + c.body_sent, n);
     c.body_sent += n;
-    if (c.body_sent == c.body.size()) *flags |= NGHTTP2_DATA_FLAG_EOF;
+    if (c.body_sent == c.body.size()) {
+        if (c.half_closed) *flags |= NGHTTP2_DATA_FLAG_EOF;
+        c.body.clear();  // a long-lived stream must not keep everything it ever sent
+        c.body_sent = 0;
+    }
     return static_cast<long>(n);
 }
 
 long GrpcConnection::send_bytes(const uint8_t* data, size_t n) {
-    const int w = SSL_write(ssl_, data, static_cast<int>(std::min<size_t>(n, 1 << 30)));
+    const long w = transport_->write(data, n, want_write_);
     if (w > 0) return w;
-    const int e = SSL_get_error(ssl_, w);
-    if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
-        want_write_ = (e == SSL_ERROR_WANT_WRITE);
-        return NGHTTP2_ERR_WOULDBLOCK;
-    }
-    return NGHTTP2_ERR_CALLBACK_FAILURE;
+    return w == 0 ? NGHTTP2_ERR_WOULDBLOCK : NGHTTP2_ERR_CALLBACK_FAILURE;
 }
 
 int GrpcConnection::on_header(int32_t stream_id, const std::string& name, const std::string& value) {
@@ -402,21 +344,24 @@ void GrpcConnection::drain_ops_failing(const std::string& why) {
 void GrpcConnection::io_loop() {
     std::vector<uint8_t> rbuf(kReadChunk);
     std::string why = "gRPC connection to " + host_ + " closed";
+    const int fd = transport_->fd();
     while (!stop_.load(std::memory_order_acquire)) {
         submit_pending();
         want_write_ = false;
         int rc = nghttp2_session_send(session_);
         if (rc != 0) {
-            why = std::string("gRPC send failed: ") + nghttp2_strerror(rc);
+            why = rc == NGHTTP2_ERR_CALLBACK_FAILURE && !transport_->error().empty()
+                      ? transport_->error()
+                      : std::string("gRPC send failed: ") + nghttp2_strerror(rc);
             break;
         }
         if (!nghttp2_session_want_read(session_) && !nghttp2_session_want_write(session_)) {
             why = "gRPC connection to " + host_ + " finished (GOAWAY)";
             break;
         }
-        pollfd fds[2] = {{fd_, static_cast<short>(POLLIN | (want_write_ ? POLLOUT : 0)), 0}, {wake_r_, POLLIN, 0}};
-        // SSL may already hold decrypted bytes the socket will never signal.
-        const int timeout = SSL_pending(ssl_) > 0 ? 0 : 1000;
+        pollfd fds[2] = {{fd, static_cast<short>(POLLIN | (want_write_ ? POLLOUT : 0)), 0}, {wake_r_, POLLIN, 0}};
+        // The transport may already hold decrypted bytes the socket will never signal.
+        const int timeout = transport_->pending() ? 0 : 1000;
         if (poll(fds, 2, timeout) < 0 && errno != EINTR) {
             why = std::string("gRPC poll: ") + std::strerror(errno);
             break;
@@ -425,10 +370,10 @@ void GrpcConnection::io_loop() {
             char sink[64];
             while (::read(wake_r_, sink, sizeof(sink)) > 0) {}
         }
-        if (!(fds[0].revents & (POLLIN | POLLHUP | POLLERR)) && SSL_pending(ssl_) == 0) continue;
+        if (!(fds[0].revents & (POLLIN | POLLHUP | POLLERR)) && !transport_->pending()) continue;
         bool broken = false;
         for (;;) {
-            const int r = SSL_read(ssl_, rbuf.data(), static_cast<int>(rbuf.size()));
+            const long r = transport_->read(rbuf.data(), rbuf.size(), want_write_);
             if (r > 0) {
                 const ssize_t used = nghttp2_session_mem_recv(session_, rbuf.data(), static_cast<size_t>(r));
                 if (used < 0) {
@@ -438,13 +383,8 @@ void GrpcConnection::io_loop() {
                 }
                 continue;
             }
-            const int e = SSL_get_error(ssl_, r);
-            if (e == SSL_ERROR_WANT_READ) break;
-            if (e == SSL_ERROR_WANT_WRITE) {
-                want_write_ = true;
-                break;
-            }
-            why = e == SSL_ERROR_ZERO_RETURN ? "gRPC peer closed the connection" : "gRPC TLS read: " + ssl_error_string();
+            if (r == 0) break;
+            why = transport_->error();
             broken = true;
             break;
         }
@@ -452,6 +392,75 @@ void GrpcConnection::io_loop() {
     }
     fail_all(stop_.load() ? "gRPC connection shut down" : why);
     drain_ops_failing(why);
+}
+
+// ── MessageQueue ────────────────────────────────────────────────────────────
+
+bool MessageQueue::on_body(const uint8_t* p, size_t n) {
+    partial_.append(reinterpret_cast<const char*>(p), n);
+    size_t at = 0;
+    std::deque<std::string> whole;
+    while (partial_.size() - at >= 5) {
+        const auto* h = reinterpret_cast<const uint8_t*>(partial_.data() + at);
+        if (h[0] != 0) {
+            std::lock_guard<std::mutex> g(mu_);
+            message_ = "gRPC: unexpected compressed message";
+            return false;
+        }
+        const size_t len = (size_t(h[1]) << 24) | (size_t(h[2]) << 16) | (size_t(h[3]) << 8) | size_t(h[4]);
+        if (partial_.size() - at - 5 < len) break;
+        whole.push_back(partial_.substr(at + 5, len));
+        at += 5 + len;
+    }
+    partial_.erase(0, at);
+    if (!whole.empty()) {
+        std::lock_guard<std::mutex> g(mu_);
+        for (auto& m : whole) ready_.push_back(std::move(m));
+        cv_.notify_all();
+    }
+    return true;
+}
+
+void MessageQueue::on_close(int status, const std::string& message) {
+    std::lock_guard<std::mutex> g(mu_);
+    status_ = status;
+    // A parse failure recorded by on_body explains a kCancelled better than "cancelled".
+    if (message_.empty() || status != kCancelled) message_ = message;
+    if (status_ == kOk && !partial_.empty()) {
+        status_ = kInternal;
+        message_ = "gRPC: stream ended inside a message";
+    }
+    closed_ = true;
+    cv_.notify_all();
+}
+
+bool MessageQueue::next(std::string& out, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(mu_);
+    timed_out_ = !cv_.wait_for(lk, timeout, [this] { return !ready_.empty() || closed_; });
+    if (ready_.empty()) return false;
+    out = std::move(ready_.front());
+    ready_.pop_front();
+    return true;
+}
+
+void MessageQueue::wait_closed() {
+    std::unique_lock<std::mutex> lk(mu_);
+    cv_.wait(lk, [this] { return closed_; });
+}
+
+bool MessageQueue::closed() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return closed_;
+}
+
+int MessageQueue::status() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return status_;
+}
+
+std::string MessageQueue::message() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return message_;
 }
 
 }  // namespace gcs_grpc

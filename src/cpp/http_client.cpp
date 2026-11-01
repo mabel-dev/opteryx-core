@@ -586,6 +586,19 @@ void discard_thread_multi() {
 
 }  // namespace
 
+namespace http_link {
+
+Admission::Admission(long long bytes, const HttpTuning& tuning) : impl_(new ByteAdmission(bytes, tuning)) {}
+Admission::~Admission() { delete static_cast<ByteAdmission*>(impl_); }
+void note_received(size_t bytes) { byte_gate().note_received(bytes); }
+long timeout_ms(long bytes, const HttpTuning& tuning) {
+    return timeout_for_bytes_ms(bytes, tuning, 60000);  // fallback = HttpClient's default timeout_ms
+}
+unsigned backoff_ms(int attempt) { return ::backoff_ms(attempt); }
+void count_retries(uint64_t n) { g_http_retries.fetch_add(n, std::memory_order_relaxed); }
+
+}  // namespace http_link
+
 uint64_t HttpClient::total_retries() {
     return g_http_retries.load(std::memory_order_relaxed);
 }

@@ -4,12 +4,15 @@
 
 """Cython bindings for the native GCS gRPC reader (src/cpp/gcs_grpc).
 
-A translation layer for tests only (design R5): Phase 1 connects through
-Google's front end, which no engine path uses. The engine reaches this client
-natively in Phase 2, never through Python.
+A translation layer for tests only (design R5): the front-end transport is
+test-only, and the engine reaches the client natively, never through Python.
+`direct_path=True` runs DirectPath (xDS + RLS discovery, ALTS) and works on GCE only.
 """
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t
+from libcpp cimport bool as cbool
+from libcpp.map cimport map as cmap
+from libcpp.pair cimport pair
 from libcpp.memory cimport unique_ptr
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -69,6 +72,7 @@ cdef extern from "gcs_grpc/gcs_grpc_client.hpp" namespace "gcs_grpc":
         int port
         int connections
         string ca_file
+        cbool direct_path
 
     cdef cppclass CGcsGrpcClient "gcs_grpc::GcsGrpcClient":
         CGcsGrpcClient(Options) except +
@@ -76,6 +80,89 @@ cdef extern from "gcs_grpc/gcs_grpc_client.hpp" namespace "gcs_grpc":
                                           const vector[ByteRange]& ranges,
                                           const string& authorization, int64_t timeout_ms,
                                           int64_t generation, int64_t* out_generation) except +_raise_gcs_grpc_error nogil
+
+
+cdef extern from "gcs_grpc/alts.hpp" namespace "gcs_grpc":
+    string alts_client_start_request(const string& target_name) except +
+    string alts_gcm_rekey_encrypt_for_test(const string& key_data, const string& nonce,
+                                           const string& aad, const string& plaintext) except +
+    string alts_socketpair_roundtrip_for_test(const string& key_data, const string& payload,
+                                              size_t max_frame_size) except +
+
+
+cdef extern from "gcs_grpc/directpath.hpp" namespace "gcs_grpc":
+    cdef cppclass Endpoint:
+        string ip
+        int port
+
+    cdef cppclass RlsConfig:
+        string lookup_service
+        int64_t max_age_s
+        string default_target
+
+    cdef cppclass RouteDecision:
+        string cluster
+        cbool use_rls
+        RlsConfig rls
+
+    RouteDecision parse_listener_route(const string& listener, const string& authority,
+                                       const string& path) except +
+    string parse_cluster_eds_service(const string& cluster) except +
+    vector[Endpoint] parse_cluster_load_assignment(const string& cla) except +
+    cmap[string, string] rls_key_map(const RlsConfig& cfg, const string& authority, const string& service,
+                                     const string& method,
+                                     const vector[pair[string, string]]& request_headers) except +
+    string rls_request(const cmap[string, string]& key_map) except +
+    vector[string] parse_rls_response(const string& response) except +
+
+
+def alts_client_start_request_for_test(str target_name):
+    """The serialized HandshakerReq{client_start} the ALTS handshake sends first."""
+    return bytes(alts_client_start_request(target_name.encode()))
+
+
+def alts_gcm_rekey_encrypt_for_test_(bytes key, bytes nonce, bytes aad, bytes plaintext):
+    """Ciphertext + tag from the vendored AES-128-GCM rekeying crypter."""
+    return bytes(alts_gcm_rekey_encrypt_for_test(key, nonce, aad, plaintext))
+
+
+def alts_roundtrip_for_test(bytes key, bytes payload, size_t max_frame_size):
+    """Round-trips `payload` both ways through two ALTS transports on a socketpair; "" on success."""
+    return alts_socketpair_roundtrip_for_test(key, payload, max_frame_size).decode()
+
+
+def parse_listener_route_for_test(bytes listener, str authority, str path, str bucket):
+    """The route decision for `path`, and the RLS request for `bucket` when the route uses RLS."""
+    cdef RouteDecision d = parse_listener_route(listener, authority.encode(), path.encode())
+    cdef vector[pair[string, string]] headers
+    cdef cmap[string, string] keys
+    if not d.use_rls:
+        return {"cluster": d.cluster.decode(), "use_rls": False}
+    headers.push_back(pair[string, string](b"x-goog-request-params",
+                                           ("bucket=projects%2F_%2Fbuckets%2F" + bucket).encode()))
+    service, method = path.strip("/").split("/")
+    keys = rls_key_map(d.rls, authority.encode(), service.encode(), method.encode(), headers)
+    return {
+        "cluster": d.cluster.decode(),
+        "use_rls": True,
+        "lookup_service": d.rls.lookup_service.decode(),
+        "max_age_s": d.rls.max_age_s,
+        "default_target": d.rls.default_target.decode(),
+        "key_map": {k.first.decode(): k.second.decode() for k in keys},
+        "rls_request": bytes(rls_request(keys)),
+    }
+
+
+def parse_cluster_for_test(bytes cluster):
+    return parse_cluster_eds_service(cluster).decode()
+
+
+def parse_cla_for_test(bytes cla):
+    return [(e.ip.decode(), e.port) for e in parse_cluster_load_assignment(cla)]
+
+
+def parse_rls_response_for_test(bytes response):
+    return [t.decode() for t in parse_rls_response(response)]
 
 
 def crc32c_of(const uint8_t[::1] data):
@@ -96,12 +183,14 @@ def parse_read_object_body_for_test(bytes body, int64_t length, size_t chunk):
 cdef class GcsGrpcClient:
     cdef unique_ptr[CGcsGrpcClient] _client
 
-    def __cinit__(self, str host="storage.googleapis.com", int port=443, int connections=8, str ca_file=""):
+    def __cinit__(self, str host="storage.googleapis.com", int port=443, int connections=8, str ca_file="",
+                  bint direct_path=False):
         cdef Options o
         o.host = host.encode()
         o.port = port
         o.connections = connections
         o.ca_file = ca_file.encode()
+        o.direct_path = direct_path
         self._client.reset(new CGcsGrpcClient(o))
 
     def read_many(self, str bucket, str obj, list ranges, str authorization,

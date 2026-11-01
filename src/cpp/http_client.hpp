@@ -305,3 +305,32 @@ private:
     static void _share_lock(CURL*, curl_lock_data data, curl_lock_access, void* userp);
     static void _share_unlock(CURL*, curl_lock_data data, void* userp);
 };
+
+// The link policy get_many() applies, for another transport that moves the same
+// GCS bytes (DirectPath gRPC, src/cpp/gcs_grpc/directpath_fetch.cpp), so both obey
+// one contract: the byte gate, the bandwidth-derived timeout, the retry backoff and
+// the retry counter. Each is this extension's own copy, like everything here.
+namespace http_link {
+
+// Holds `bytes` of the byte gate for one transfer attempt (a no-op when the cap is
+// off or `bytes` <= 0), exactly as a get_many() batch does.
+class Admission {
+public:
+    Admission(long long bytes, const HttpTuning& tuning);
+    ~Admission();
+    Admission(const Admission&) = delete;
+    Admission& operator=(const Admission&) = delete;
+
+private:
+    void* impl_;
+};
+
+// Body bytes as they arrive, so the gate's link estimate sees this transport too.
+void note_received(size_t bytes);
+// get_many()'s batch timeout for `bytes`.
+long timeout_ms(long bytes, const HttpTuning& tuning);
+// get_many()'s retry backoff (full jitter) and retry counter.
+unsigned backoff_ms(int attempt);
+void count_retries(uint64_t n);
+
+}  // namespace http_link

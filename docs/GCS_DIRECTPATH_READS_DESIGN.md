@@ -1,6 +1,6 @@
 # GCS reads over gRPC Direct Connectivity (DirectPath)
 
-**Status:** PROPOSAL, rulings R1–R7 made 2026-11-01 (§9). Nothing is built. Phase 0 (§7) is a measurement gate: if it fails, everything after it is dropped.
+**Status (2026-11-01):** rulings R1–R7 made (§9). Phase 0 passed. Phase 1 is built. In Phase 2, C3 (ALTS) and C4 (discovery with RLS) are built and verified live; the engine wiring behind `GCS_TRANSPORT=grpc` and the ladder are still to do (§7).
 
 **Problem:** cold reads are still slow. On the fleet size ladder (2026-10-30, bastian's 31 statements, chunk cache flushed between queries):
 
@@ -171,7 +171,38 @@ Run on a 16 vCPU / 64 GB n4a bench VM from template v4 (the same shape as the la
 - Time to first byte (64 KiB range, reused connection, p50): REST 29–31 ms, gRPC via the GFE 36 ms, DirectPath 33–36 ms. **There is no latency win.** The ~30 ms is GCS's own backend, so small-range jobs gain nothing.
 - Checks: 40 random 8 MiB ranges were identical (sha256) on REST and DirectPath, and the NIC receive counter confirmed ~3.8 GB/s on the wire. Neither the REST arm nor the gRPC-via-GFE arm got past ~350 MB/s at any concurrency, so **the REST plateau is the GFE path, not the protocol**.
 - **The gate passes on throughput** (≥ 1.3x) and fails on time to first byte.
-- Still owed: arm (1), our engine with its caps raised. On 4 vCPU the engine ran ~95% CPU-busy at ~415 MB/s cold, so the engine's own decode, not the transport, will cap what a real query gets from 4 GB/s. A cold engine A/B is part of Phase 2.
+- Arm (1) was run on 2026-11-01; results below.
+
+**Arm (1) result (2026-11-01).**
+- **Setup:**
+  - Two VMs, n4a-standard-4 and n4a-standard-16, both from worker-fleet-v5, deleted after the run.
+  - The released wheel 0.9.181 reads `gs://opteryx_data/benchmarks/clickbench/hits/data/` (14.7 GB) over REST through a `FileSystemConnector` workspace.
+  - Every run is a fresh process, so every run is cold.
+  - Arm order rotates each rep; 3 reps. `ulimit -n` is raised for every arm (see the fd note below).
+  - MB/s is the NIC receive counter divided by wall time.
+- **The three arms:**
+  - **default:** the engine's own defaults.
+  - **raised16:** host connections 16, bytes in flight uncapped, fetch-ahead 128, 32 IO workers.
+  - **raised64:** host connections 64, bytes in flight uncapped, fetch-ahead 256, 64 IO workers.
+- Median results:
+
+| vCPU | query | default | raised16 | raised64 | CPU busy (default) |
+|---|---|---|---|---|---|
+| 4 | ClickBench Q21 (URL LIKE) | 3.75 s, 760 MB/s | 4.69 s | 6.26 s | 71% |
+| 4 | Q22 | 4.42 s, 734 MB/s | 5.41 s | 7.37 s | 72% |
+| 4 | Q23 (SELECT *) | 3.26 s | 5.41 s | 9.17 s | 61% |
+| 16 | Q21 | 2.03 s, 1409 MB/s | 2.82 s | 4.20 s | 33% |
+| 16 | Q22 | 2.53 s, 1287 MB/s | 3.33 s | 4.86 s | 32% |
+| 16 | Q23 | 2.00 s | 3.28 s | 5.72 s | 25% |
+
+- **Raising our caps never helps.** Every raise was slower, at every size; Q23 also fetched 1.6–2.7x more bytes, as prefetch the query threw away. **The plateau is not ours**, so the gate's condition (1) holds.
+- **Our REST path already beats the Go REST probe by 2.4–4.7x** (760 MB/s on 4 vCPU and ~1.4 GB/s on 16, against the probe's ~300 MB/s). The "14x" in the Phase 0 table compares DirectPath with the Go client's REST, not with ours. Against the engine, DirectPath's transport headroom is **~0.7x at 4 parallel reads** (the Go probe's 506 MB/s is below our 760), **~1.3x at 16** (1856 against 1409), and **~2.8x at 64** (4014).
+- **What decides the gain is CPU.**
+  - At 4 vCPU the engine is ~70% CPU-busy at 760 MB/s, so a faster transport gains no more than ~1.3x before decode saturates.
+  - At 16 vCPU it is only ~30% busy and IO-bound, so DirectPath could be worth up to ~2x on cold IO-bound scans there.
+  - Phase 2's value is therefore on the 16/64 and larger fleet shapes, not on today's 4/16 prod node.
+- **fd trap (not new):** with the default `ulimit -n 1024`, raised64 failed with `Couldn't resolve host name` / `Problem with the SSL CA cert`. That is the known fd ≥ 1024 failure.
+- Harness: session scratchpad `engab/` (q.py, run.py, results-4/16.jsonl).
 
 **Phase 1: C1 + C2 + C5 over TLS to `storage.googleapis.com` (gRPC through the GFE, no ALTS).**
 This runs anywhere, Mac included, and exercises the whole read path, CRC32C and ReadObject. It is not expected to beat REST. It is a step toward Phase 2, not a product. Per R5 it is test-only: it is not a `GCS_TRANSPORT` value.
@@ -180,6 +211,34 @@ This runs anywhere, Mac included, and exercises the whole read path, CRC32C and 
 **Phase 2: C3 + C4 → DirectPath on the VM.**
 Rerun the cold size ladder (4/16, 8/32, 16/64, 32/128) with REST and DirectPath alternating, interleaved per query (thermal, ordbias). Also run the pypi small-range job for time to first byte.
 - **Success:** cold total improves by at least 10% on 16/64 and nothing regresses on hot. Anything slower is deleted (SLOWDITCH).
+- **RULED 2026-11-01 (after arm 1):** Phase 2 goes ahead and is judged on 16/64, the likely paying-fleet shape. On today's 4/16 prod node the gain is expected to be small (≤ ~1.3x, CPU-capped), and that is accepted.
+
+**Phase 2 progress (2026-11-01).** C3 and C4 are built and live-verified on an n4a-standard-16 VM, which was deleted afterwards. Nothing is wired into the engine yet; the reader is reached only through the test binding.
+- **Code:**
+  - `src/cpp/gcs_grpc/transport.{hpp,cpp}`: TLS and plaintext transports.
+  - `alts.{hpp,cpp}`: the handshake through the metadata-server handshaker, and `AltsTransport` on top of the vendored record protocol.
+  - `directpath.{hpp,cpp}`: the metadata server, a persistent ADS watch (ACKs, resubscribe on reconnect), and RLS cached per bucket for maxAge. A route to the GFE default target raises an error.
+  - `GcsGrpcClient::Options::direct_path`, with one ALTS pool per endpoint set, spread round-robin.
+  - `third_party/grpc_alts/`: R1, pinned at grpc `df3dd4dc`, edits listed in its README.
+- **Offline tests:** 30 in `tests/unit/connectors/test_gcs_grpc.py`.
+  - gRPC's known-answer vectors for the rekeying crypter, including the KDF-boundary case.
+  - ALTS round trips in both directions at 16 KiB and 1 MiB frames.
+  - The handshake request.
+  - Listener, route, RLS key-map and refusal cases; cluster and endpoint parsing.
+- **Live results** (Linux aarch64, GCC, `-march=armv8-a+crc+aes`):
+  - **Speed:** the first read, including discovery and ALTS, took 0.14–0.16 s.
+  - **Correctness:** 50/50 random ranges were byte-identical to REST (sha256). A missing object gives status 5, not retryable.
+  - **Peers:** only `34.126.8.41:<many ports>`, plus one handshaker connection on `:8080`.
+- **Throughput:** 8 MiB ranges, MB/s at each number of reads in flight.
+
+| ALTS connections | 4 in flight | 16 in flight | 64 in flight |
+|---|---|---|---|
+| 4 | 1418 | 2181 | 2294 |
+| 8 (default) | 1328–1722 | 4260–4912 | 5104–5495 |
+| 16 | 1486 | 5327 | 7035 |
+
+- Each connection tops out at about 550 MB/s, because its one I/O thread both decrypts and parses. The best default for N is still for the engine ladder to decide (PERFNOTPOLICY). In the probe, 16 beats 8 by about 1.3x at 64 reads in flight.
+- **Still owed:** the engine wiring behind `GCS_TRANSPORT=grpc`, the cold ladder on 16/64, and how often endpoints change.
 
 **Phase 3: flip the fleet template to `grpc`.** Architect's call, with the numbers in front of them.
 
@@ -203,8 +262,65 @@ Rerun the cold size ladder (4/16, 8/32, 16/64, 32/128) with REST and DirectPath 
   - Operations: the read is `storage.*.get`, Class B ($0.0004 per 1,000, regional Standard), the same row for JSON and gRPC. "Except as noted in the footnotes, each request is considered one operation." No footnote covers `BidiReadObject`, so whether a 100-range stream is billed once or per range is undocumented. Either way it is no more than today's one GET per range.
   - Routes and MTU: no price listed. The MTU change has an operational cost instead: "before you change the VPC network MTU, you _must_ first stop each compute instance" (docs.cloud.google.com/vpc/docs/mtu), so every VM on the fleet network has to stop.
 
-## 10. Open unknowns (verify before Phase 2)
-- The handshaker service address and method, and the `handshaker.proto` field numbers. The proto 404'd at `src/proto/grpc/gcp/handshaker.proto`; try `src/core/tsi/alts/handshaker/proto/`.
-- The values of `ALTS_RECORD_PROTOCOL` and `ALTS_APPLICATION_PROTOCOL`, the ALTS frame header layout (`frame_handler.{h,cc}`), the counter size, and the min/max negotiated frame size.
-- Whether xDS discovery can be served by the LDS → RDS → CDS → EDS subset in C4, and how often the endpoints change.
-- What `grpc_alts_is_running_on_gcp()` checks. We need an equivalent, but only for the error message, because the config is explicit.
+## 10. Open unknowns: resolved 2026-11-01
+Sources:
+- the grpc/grpc master source, `src/core/tsi/alts/` and `src/core/resolver/google_c2p/`;
+- a live xDS capture from the Go client (v1.70, grpc-go 1.84) on a us-east1-b n4a VM, deleted afterwards.
+
+**ALTS handshake (C3)**
+- **Handshaker service:** `metadata.google.internal.:8080`, reached over **plaintext h2c** (gRPC creates it with `grpc_insecure_credentials_create`).
+  - Method: `/grpc.gcp.HandshakerService/DoHandshake`, a bidi stream.
+  - The proto lives at `src/core/tsi/alts/handshaker/proto/handshaker.proto`.
+- **Message fields we need:**
+  - `HandshakerReq`: client_start=1, next=3.
+  - `StartClientHandshakeReq`: handshake_security_protocol=1 (ALTS=2), application_protocols=2, record_protocols=3, target_identities=4, rpc_versions=9, target_name=8, max_frame_size=10.
+  - `NextHandshakeMessageReq`: in_bytes=1.
+  - `HandshakerResp`: out_frames=1, bytes_consumed=2, result=3, status=4.
+  - `HandshakerResult`: application_protocol=1, record_protocol=2, key_data=3, peer_identity=4, max_frame_size=8.
+  - `HandshakerStatus`: code=1, details=2.
+  - `RpcProtocolVersions`: max=1, min=2; each `{major=1, minor=2}`.
+- **Values:**
+  - application protocol `"grpc"`
+  - record protocol `"ALTSRP_GCM_AES128_REKEY"`
+  - RPC versions max 2.1 and min 2.1
+  - key_data is 44 bytes
+- **Handshake loop:**
+  1. Send `client_start` to the handshaker.
+  2. Write `out_frames` to the backend socket.
+  3. Pass the backend's bytes back to the handshaker as `next.in_bytes`.
+  4. Repeat until `result` arrives.
+  5. Any bytes after `bytes_consumed` in the last input are the first record-layer bytes.
+
+**ALTS record layer (C3)**
+- **Frame layout:** `len (u32 LE) | type = 6 (u32 LE) | ciphertext | 16-byte tag`. `len` counts everything after itself.
+- **Frame size:** 16 KiB is the minimum and 1 MiB the maximum. The value used is `min(peer's max_frame_size, ours)`, floored at 16 KiB.
+- **Nonce:** a 12-byte counter.
+  - It increments little-endian over the low 8 bytes, which is the overflow limit for the rekeying protocol.
+  - Byte 11 is 0x80 for frames the server seals and 0x00 for frames the client seals.
+- **Rekeying key:**
+  - key_data[0:32] is the KDF key and key_data[32:44] is the nonce mask.
+  - AEAD key = `HMAC-SHA256(kdf_key, nonce[2:8] ‖ 0x01)[0:16]`, re-derived whenever nonce bytes 2–7 change, so at most 2^16 frames use one key.
+  - The AEAD nonce is the counter XOR the nonce mask. The cipher is AES-128-GCM with a 16-byte tag.
+- **R1 vendor set:**
+  - `crypt/aes_gcm.cc`, `crypt/gsec.{h,cc}`, `frame_protector/{alts_counter,frame_handler}.*` and `zero_copy_frame_protector/alts_iovec_record_protocol.*`, about 2.8k lines with comments.
+  - Their non-OpenSSL dependencies are `absl::Span`, `absl/log`, `gpr_malloc`/`gpr_zalloc`, `grpc_core::Crash` and the `tsi` result types. R1 already strips all of these.
+
+**What `grpc_alts_is_running_on_gcp()` checks:** the BIOS product name file. It is only used for the error message; the config (R4) is explicit.
+
+**Discovery (C4): it needs one more RPC than the design assumed.**
+- **The real chain:**
+  1. The metadata server gives the zone.
+  2. One ADS stream (TLS + bearer) to `directpath-pa.googleapis.com:443`.
+     - Node: `id = C2P-<random u64>`, `locality.zone`, client features `envoy.lb.does_not_support_overprovisioning`, `xds.config.resource-in-sotw`.
+  3. LDS: `xdstp://traffic-director-c2p.xds.googleapis.com/envoy.config.listener.v3.Listener/storage.googleapis.com`.
+  4. That gives an `ApiListener` → `HttpConnectionManager` with an **inline** `RouteConfiguration`, so there is **no RDS**.
+  5. Its first route uses a **`clusterSpecifierPlugin` of type `grpc.lookup.v1.RouteLookupClusterSpecifier` (RLS)**:
+     - lookup service `dns:///storage.googleapis.com`;
+     - key builders for `google.storage.v2.Storage` with keys {host→`server`, service, method, header `x-goog-request-params`};
+     - `maxAge` 300 s, `staleAge` 290 s;
+     - default target `.../Cluster/google_cfe_storage.googleapis.com`, which is the GFE.
+  6. A second route falls back to `.../Cluster/storage.googleapis.com/eds_cluster`.
+  7. The client calls `/grpc.lookup.v1.RouteLookupService/RouteLookup` over TLS to `storage.googleapis.com`, with the key map {method, server, service, `x-goog-request-params: bucket=projects%2F_%2Fbuckets%2Fopteryx_data`}. For our bucket the answer was cluster `.../Cluster/gcs-grpc-prod-us-east1-default-default.googleapis.com/eds_cluster`.
+  8. CDS for that cluster, then EDS (`ClusterLoadAssignment`) gives the endpoints: a handful of `34.126.x.x` IPs, each on many ports (`:22032`–`:22253`).
+- **Load balancing:** Google's own policy is `weighted_round_robin` with ORCA backend-load weights (`blackoutPeriod` 10 s), wrapped in outlier detection.
+- **Still unknown:** how often the endpoints change. The capture covered only ~2 s.

@@ -544,21 +544,27 @@ struct FpMaxAcc {
     }
 };
 
-// Σx and Σx² as doubles (the STDDEV/VARIANCE moments). The fold is generic over
-// the element type, so this serves integer columns too.
+// Σ(x-K) and Σ(x-K)² as doubles (the STDDEV/VARIANCE moments, SHIFTED by K — the
+// caller's per-group shift, normally the group's first value). Raw Σx/Σx² lost every
+// significant digit to cancellation when the values were large against their spread:
+// STDDEV_SAMP(1e9 + {1..9}) answered 0.0. The variance formula is shift-invariant, so
+// only the accumulation changes. Generic over the element type (integer columns too).
 struct FpMomentsAcc {
+    double shift = 0.0;
     double s[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     double q[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     template<typename T> void step(uint32_t k, T x) noexcept {
-        const double d = static_cast<double>(x);
+        const double d = static_cast<double>(x) - shift;
         s[k] += d;
         q[k] += d * d;
     }
 };
 
 template<typename T>
-static inline uint32_t numeric_moments(const DrakenVector& v, double* sum, double* sumsq) noexcept {
+static inline uint32_t numeric_moments(const DrakenVector& v, double shift, double* sum,
+                                       double* sumsq) noexcept {
     FpMomentsAcc acc;
+    acc.shift = shift;
     const uint32_t count = fp_fold<T>(v, acc);
     *sum   = ((acc.s[0] + acc.s[1]) + (acc.s[2] + acc.s[3])) + ((acc.s[4] + acc.s[5]) + (acc.s[6] + acc.s[7]));
     *sumsq = ((acc.q[0] + acc.q[1]) + (acc.q[2] + acc.q[3])) + ((acc.q[4] + acc.q[5]) + (acc.q[6] + acc.q[7]));
@@ -601,9 +607,13 @@ struct PairMoments {
     uint64_t n = 0;
 };
 
+// CORR's moments, shifted by (kx, ky) exactly as FpMomentsAcc is by its K.
 struct FpPairAcc {
+    double kx = 0.0, ky = 0.0;
     double sx[8] = {}, sxx[8] = {}, sy[8] = {}, syy[8] = {}, sxy[8] = {};
     void step(uint32_t k, double a, double b) noexcept {
+        a -= kx;
+        b -= ky;
         sx[k] += a; sxx[k] += a * a; sy[k] += b; syy[k] += b * b; sxy[k] += a * b;
     }
     static double fold(const double* s) noexcept {
@@ -612,10 +622,12 @@ struct FpPairAcc {
 };
 
 static inline bool numeric_pair_moments(const DrakenVector& x, const DrakenVector& y,
-                                        PairMoments* out) noexcept {
+                                        double kx, double ky, PairMoments* out) noexcept {
     constexpr uint32_t B = 1024;
     double bx[B], by[B];
     FpPairAcc acc;
+    acc.kx = kx;
+    acc.ky = ky;
     uint64_t count = 0;
     const uint32_t n = x.length;
     const bool all_valid = x.validity == nullptr && y.validity == nullptr;

@@ -583,6 +583,22 @@ if not _skip_build and not _DRAKEN_BUILD:
     _openssl_include_dirs, _openssl_link_args = resolve_openssl()
     _nghttp2_include_dirs, _nghttp2_link_args = resolve_nghttp2()
 
+# The DirectPath GCS reader (src/cpp/gcs_grpc + the vendored ALTS record layer).
+# Compiled into pool_reader.so ONLY among the engine extensions, so the process
+# has one client (design R3); _operators resolves gcs_grpc::directpath_get_many
+# from pool_reader at load (RTLD_GLOBAL). Also the test-only compiled.gcs_grpc.
+GCS_GRPC_SOURCES = [
+    "src/cpp/gcs_grpc/transport.cpp",
+    "src/cpp/gcs_grpc/grpc_conn.cpp",
+    "src/cpp/gcs_grpc/alts.cpp",
+    "src/cpp/gcs_grpc/directpath.cpp",
+    "src/cpp/gcs_grpc/gcs_grpc_client.cpp",
+    "third_party/grpc_alts/aes_gcm.cc",
+    "third_party/grpc_alts/gsec.cc",
+    "third_party/grpc_alts/alts_counter.cc",
+    "third_party/grpc_alts/alts_iovec_record_protocol.cc",
+]
+
 
 # The `created_by` rugo stamps into every parquet footer from THIS wheel. Bound
 # once: the same string is compiled in (-DRUGO_PARQUET_CREATED_BY) and published
@@ -1394,23 +1410,26 @@ if not _skip_build and not _DRAKEN_BUILD:
             language="c++",
         )
     )
-    # GCS gRPC reader (design docs/GCS_DIRECTPATH_READS_DESIGN.md). Phase 1: a
-    # test-only entry point; the engine links the same sources natively in Phase 2.
+    # GCS gRPC reader (design docs/GCS_DIRECTPATH_READS_DESIGN.md): a test-only
+    # entry point. The engine's copy is compiled into pool_reader (below).
     extensions.append(
         Extension(
             name="opteryx.compiled.gcs_grpc",
-            sources=[
-                "opteryx/compiled/gcs_grpc.pyx",
-                "src/cpp/gcs_grpc/grpc_conn.cpp",
-                "src/cpp/gcs_grpc/gcs_grpc_client.cpp",
-            ],
-            include_dirs=include_dirs + ["src/cpp"] + _nghttp2_include_dirs + _openssl_include_dirs,
+            sources=["opteryx/compiled/gcs_grpc.pyx"] + GCS_GRPC_SOURCES,
+            include_dirs=include_dirs + ["src/cpp", "third_party"] + _nghttp2_include_dirs + _openssl_include_dirs,
             extra_compile_args=CPP_FLAGS,
             extra_link_args=_nghttp2_link_args + _openssl_link_args,
             language="c++",
             depends=[
+                "src/cpp/gcs_grpc/transport.hpp",
                 "src/cpp/gcs_grpc/grpc_conn.hpp",
+                "src/cpp/gcs_grpc/alts.hpp",
+                "src/cpp/gcs_grpc/directpath.hpp",
                 "src/cpp/gcs_grpc/gcs_grpc_client.hpp",
+                "third_party/grpc_alts/grpc_alts_shim.h",
+                "third_party/grpc_alts/gsec.h",
+                "third_party/grpc_alts/alts_counter.h",
+                "third_party/grpc_alts/alts_iovec_record_protocol.h",
                 "src/cpp/gcs_grpc/crc32c.hpp",
                 "src/cpp/gcs_grpc/pb_wire.hpp",
             ],
@@ -1706,7 +1725,9 @@ extensions.append(
                 "third_party/mabel/base64/_base64_rvv.c",
                 "draken/simd/cpu_features.cpp",
                 "src/cpp/http_client.cpp",
+                "src/cpp/gcs_grpc/directpath_fetch.cpp",
             ]
+            + GCS_GRPC_SOURCES
             + get_parquet_vendor_sources()
             + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
         ),
@@ -1723,15 +1744,18 @@ extensions.append(
                 "third_party/libdeflate",       # libdeflate.h (parquet GZIP codec)
                 "third_party/bshoshany",
                 "third_party/moodycamel",
+                "third_party",                  # grpc_alts/ (GCS_GRPC_SOURCES)
             ]
             + _curl_include_dirs
+            + _nghttp2_include_dirs
+            + _openssl_include_dirs
         ),
         # _GNU_SOURCE: libdeflate arm/cpu_features.c needs O_CLOEXEC under -std=c11 on glibc.
         define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1"), ("HAVE_CONFIG_H", "1"), ("RUGO_ENABLE_HTTP", "1"), ("_GNU_SOURCE", "1")]
         + _curl_define_macros,
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
+        extra_link_args=_curl_link_args + _nghttp2_link_args + _openssl_link_args + ([] if is_win() else ["-lm"]),
         depends=[
             "rugo/src/parquet/io_pipeline.hpp",
             "rugo/src/parquet/bloom_bytes_cache.hpp",
@@ -1740,6 +1764,8 @@ extensions.append(
             "rugo/src/parquet/decode.hpp",
             "rugo/src/parquet/metadata.hpp",
             "src/cpp/http_client.hpp",
+            "src/cpp/gcs_grpc/directpath_fetch.hpp",
+            "src/cpp/gcs_grpc/gcs_grpc_client.hpp",
             "src/cpp/pool_sink_adapter.hpp",
             "src/cpp/memory_pool.hpp",
             "draken/core/alloc.h",

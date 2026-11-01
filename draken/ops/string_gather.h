@@ -160,9 +160,15 @@ static inline StrBlock sg_alloc_str_block(uint32_t n_slots,
     return sb;
 }
 
-// Build a VecResult from a completed StrBlock.
+// Build a VecResult from a completed StrBlock, tagged `type` — the INPUT vector's
+// string-family type. These kernels are registered for VARCHAR, NVARCHAR, VARBINARY
+// and VARIANT alike (hash.h) and only move bytes, so the tag must carry through: it
+// was hard-wired to VARCHAR, and a lazy CASE branch (scattered through str_take)
+// turned a VARBINARY result into VARCHAR — "VARBINARY branch paired with a text
+// branch", or binary bytes surfacing as a text column.
 // validity must be a SEPARATE allocation (or nullptr).
 static inline VecResult sg_finalize(const StrBlock& sb,
+                                    DrakenType       type,
                                     uint8_t*         validity,
                                     const uint32_t*  selection,
                                     bool             owns_sel,
@@ -179,7 +185,7 @@ static inline VecResult sg_finalize(const StrBlock& sb,
     sb.sa->null_bitmap  = validity;  // for consistency; C++ ops use v.validity
     sb.sa->owns_buffers = 0;
     sb.sa->payloads_elided = payloads_elided;
-    sb.sa->type         = DRAKEN_VARCHAR;
+    sb.sa->type         = type;
 
     VecResult r;
     r.data           = sb.block;
@@ -188,7 +194,7 @@ static inline VecResult sg_finalize(const StrBlock& sb,
     r.owns_selection = owns_sel;
     r.data_length    = data_length;
     r.length         = length;
-    r.type           = DRAKEN_VARCHAR;
+    r.type           = type;
     r.flags          = flags;
     return r;
 }
@@ -286,7 +292,7 @@ static inline VecResult str_materialize(const DrakenVector& v) {
     uint8_t* out_v = sg_copy_validity(src_v, n);
 
     bg.release();
-    return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n, total_arena,
+    return sg_finalize(sb, v.type, out_v, draken_identity_sel(n), false, n, n, total_arena,
                        static_cast<uint8_t>(DRAKEN_SEL_IDENTITY |
                                             DRAKEN_SEL_PERMUTATION),
                        any_elided ? 1u : 0u);
@@ -412,7 +418,7 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
         else out_v = sg_normalize_validity(out_v, n);
 
         bg.release();
-        return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n,
+        return sg_finalize(sb, v.type, out_v, draken_identity_sel(n), false, n, n,
                            static_cast<uint32_t>(total_arena),
                            static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION));
     }
@@ -461,7 +467,7 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
 
         bg.release();
         cg.release();
-        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u,
+        return sg_finalize(sb, v.type, out_v, out_codes, true, k, n, sa->arena_used, 0u,
                            0u);
     }
 
@@ -550,7 +556,7 @@ static inline VecResult str_slice_compact(const DrakenVector& v, uint32_t start,
     else out_v = sg_normalize_validity(out_v, n);
 
     bg.release();
-    return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n, total_arena,
+    return sg_finalize(sb, v.type, out_v, draken_identity_sel(n), false, n, n, total_arena,
                        static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION));
 }
 
@@ -644,7 +650,7 @@ static inline VecResult str_take(const DrakenVector& v,
 
         bg.release();
         cg.release();
-        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u,
+        return sg_finalize(sb, v.type, out_v, out_codes, true, k, n, sa->arena_used, 0u,
                            0u);
     }
 
@@ -732,7 +738,7 @@ static inline VecResult str_take_compact(const DrakenVector& v, const int32_t* i
     else out_v = sg_normalize_validity(out_v, n);
 
     bg.release();
-    return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n, total_arena,
+    return sg_finalize(sb, v.type, out_v, draken_identity_sel(n), false, n, n, total_arena,
                        static_cast<uint8_t>(DRAKEN_SEL_IDENTITY |
                                             DRAKEN_SEL_PERMUTATION));
 }
@@ -889,7 +895,7 @@ static inline VecResult str_dictionary_encode(const DrakenVector& v) {
         StrBlock sb = sg_alloc_str_block(1u, 0u);
         SgOwned<void> bg(sb.block);
         bg.release();
-        return sg_finalize(sb, nullptr, draken_identity_sel(0u), false, 0u, 0u, 0u, 0u);
+        return sg_finalize(sb, v.type, nullptr, draken_identity_sel(0u), false, 0u, 0u, 0u, 0u);
     }
 
     // Phase 1: scan all non-null rows; collect unique slots in first-appearance order.
@@ -941,7 +947,7 @@ static inline VecResult str_dictionary_encode(const DrakenVector& v) {
         SgOwned<void> bg(sb.block);
         uint8_t* out_v = sg_copy_validity(src_v, n);
         bg.release();
-        return sg_finalize(sb, out_v, draken_zero_sel(n), false, 1u, n, 0u, 0u);
+        return sg_finalize(sb, v.type, out_v, draken_zero_sel(n), false, 1u, n, 0u, 0u);
     }
 
     const uint32_t dict_size = static_cast<uint32_t>(unique_src_codes.size());
@@ -996,7 +1002,7 @@ static inline VecResult str_dictionary_encode(const DrakenVector& v) {
 
     bg.release();
     cg.release();
-    return sg_finalize(sb, out_v, out_codes, true, dict_size, n, total_arena, 0u);
+    return sg_finalize(sb, v.type, out_v, out_codes, true, dict_size, n, total_arena, 0u);
 }
 
 }  // namespace ops
