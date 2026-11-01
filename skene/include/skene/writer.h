@@ -64,7 +64,7 @@ struct WriteOptions {
     //
     // Off by default: kNone is the neutral baseline; every caller with a read
     // or capacity posture sets a codec deliberately (for_storage, for_fast_reads,
-    // and the engine's spill buffer, which uses zstd-1 for disk-ceiling headroom).
+    // and the engine's spill buffer, which uses lz4 under as_is).
     SectionCodec codec = SectionCodec::kNone;
 
     // The zstd level, and ONLY meaningful when `codec == kZstd`. The two fields
@@ -159,10 +159,9 @@ struct WriteOptions {
     // Spill: written once, read once, in-process. The READ-ACCELERATION bundle
     // is off — nothing that trades write time for read time can pay on a file
     // read exactly once. The CODEC is a separate axis: the engine's spill
-    // buffer (opteryx pipeline_buffers.hpp) layers zstd-1 on top of this
-    // posture, because spill's binding constraint is the ~9GB disk ceiling and
-    // ratio converts directly to queries that survive (architect, 2026-08-27;
-    // bakeoff: zstd-1 0.30x in 58ms vs lz4 0.43x in 44ms, decode level-flat).
+    // buffer (opteryx pipeline_buffers.hpp) layers a codec on top of this
+    // posture: lz4 with as_is, the fastest end to end (architect 2026-11-01;
+    // it replaced zstd-1, chosen 2026-08-27 for Cloud Run's ~9GB RAM-backed disk).
     // This function stays codec-free as the acceleration-off BASELINE posture
     // (fixtures and tests build on it); it is not a statement that spill wants
     // raw bytes.

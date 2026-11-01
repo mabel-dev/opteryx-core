@@ -192,6 +192,8 @@ def _branch_column_domains(branch: Expression) -> Dict[str, tuple]:
         ident = entries[0][0]
 
         if kind == "points":
+            if not _one_literal_type(entries):
+                continue
             values: Set = set()
             element_type = None
             for _, _, (vals, et) in entries:
@@ -213,6 +215,14 @@ def _branch_column_domains(branch: Expression) -> Dict[str, tuple]:
     return result
 
 
+def _one_literal_type(entries) -> bool:
+    """Whether every point set in `entries` carries literals of one physical type.
+    A point set is built into one IN list, and the front door refuses a mixed-type
+    list (ArrayWithMixedTypesError): `id = 0.0 OR id = 3` built one and crashed on it."""
+    physicals = {None if et is None else et.physical for _, _, (_vals, et) in entries}
+    return len(physicals) <= 1
+
+
 def _domain_for_column(branch_domains: List[Dict[str, tuple]], identity: str) -> Optional[tuple]:
     """Union a column's per-branch domain across ALL branches into the hull
     that's implied by (but weaker than) the whole OR. None if branches
@@ -225,6 +235,8 @@ def _domain_for_column(branch_domains: List[Dict[str, tuple]], identity: str) ->
     ident = entries[0][0]
 
     if kind == "points":
+        if not _one_literal_type(entries):
+            return None
         values: Set = set()
         element_type = None
         for _, _, (vals, et) in entries:

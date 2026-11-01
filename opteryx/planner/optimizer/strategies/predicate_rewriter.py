@@ -678,7 +678,7 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry, *, plan_context):
     modified), and `_prune_false_or_branches` removes them once every OR rewrite
     has run.
     """
-    groups: dict = {}  # column identity -> {"values", "nodes", "column", "element_type"}
+    groups: dict = {}  # (column identity, literal type) -> {"values", "nodes", "column", "element_type"}
 
     def collect(node):
         branch = _point_membership_branch(node)
@@ -687,7 +687,7 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry, *, plan_context):
             if column.schema_column is None:
                 return
             group = groups.setdefault(
-                column.schema_column.identity,
+                (column.schema_column.identity, _literal_type_key(element_type)),
                 {"values": [], "nodes": [], "column": column, "element_type": None},
             )
             if any(member is node for member in group["nodes"]):
@@ -773,6 +773,15 @@ def _prune_false_or_branches(predicate):
     return result
 
 
+def _literal_type_key(element_type):
+    """The literal type a point test's values carry, as a grouping-key part. Point
+    tests on one column fuse only when their literals share a type: the front door
+    refuses a mixed-type IN list (ArrayWithMixedTypesError), and fusing `id = 0.0 OR
+    id = 3` built exactly that list and crashed on it (TypeError: "Literal of type
+    ARRAY<FLOAT64> holds a tuple")."""
+    return None if element_type is None else element_type.physical
+
+
 def _cnf_operand_key(operand):
     """Grouping key for a CNF point-test operand: its rendering PLUS the bound
     identity of every column it reads, or None when a column is unbound.
@@ -836,6 +845,7 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry, *, plan_context):
         if key is None:
             non_eq.append(branch)
             continue
+        key = (key, _literal_type_key(element_type))
         if key not in groups:
             groups[key] = {"values": [], "node": branch, "column": column, "element_type": None}
         groups[key]["values"].extend(values)
@@ -906,18 +916,21 @@ _FLIP_OP = {
 }
 
 
-def _build_emptiness_node(ident, op_name, *, plan_context):
-    new_node = UnaryOperator(
+def _build_emptiness_node(predicate, ident, op_name):
+    """IsEmpty / IsNotEmpty over `ident`: a NEW node that computes what `predicate`
+    computed, so it carries `predicate`'s identity (alias, query_column,
+    schema_column, relations). This rewrite also runs over SELECT lists, which
+    reference the projected comparison by that identity; a freshly minted column
+    left `SELECT ('' = name) AS f` with an output the engine could not resolve."""
+    return UnaryOperator(
         value=op_name,
         centre=ident,
-        arena=plan_context.expressions,
+        alias=predicate.alias,
+        query_column=predicate.query_column,
+        schema_column=predicate.schema_column,
+        relations=predicate.relations,
+        arena=predicate.arena,
     )
-    new_node.schema_column = plan_context.columns.computed(
-        ExpressionColumn,
-        format_expression(new_node, True),
-        column_type=_lt.BOOLEAN,
-    )
-    return new_node
 
 
 def rewrite_string_empty_compare(predicate, telemetry, *, plan_context):
@@ -969,7 +982,7 @@ def rewrite_string_empty_compare(predicate, telemetry, *, plan_context):
             ):
                 op_name = "IsEmpty" if predicate.value == "Eq" else "IsNotEmpty"
                 telemetry.optimization_predicate_rewriter_string_empty_compare += 1
-                return _build_emptiness_node(ident, op_name, plan_context=plan_context)
+                return _build_emptiness_node(predicate, ident, op_name)
 
     # ------------------------------------------------------------------
     # Form 2: LENGTH(col) <op> <int_literal>
@@ -1010,7 +1023,7 @@ def rewrite_string_empty_compare(predicate, telemetry, *, plan_context):
         return predicate
 
     telemetry.optimization_predicate_rewriter_string_empty_compare += 1
-    return _build_emptiness_node(inner, op_name, plan_context=plan_context)
+    return _build_emptiness_node(predicate, inner, op_name)
 
 
 _EPOCH = datetime.datetime(1970, 1, 1)

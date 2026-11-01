@@ -296,6 +296,12 @@ codec a corpus uses states where it is READ, not what it holds"** — local NVMe
 reads take `for_fast_reads()` (lz4), deployed data takes `for_storage()`
 (zstd-7). Spill is read locally, so that rule points at lz4.
 
+**⛔ SUPERSEDED 2026-11-01: spill writes `as_is` + lz4.** The architect's ruling is
+"spill, not persistence": no encoding decisions, and whatever codec is fastest.
+Measured on a 24.3M-row external sort (pypi, Mac): lz4 10.0 s / 1.06 GB written,
+zstd-1 13.7 s / 0.68 GB, none 27.6 s / 17.4 GB (disk-bound). The argument below,
+made for Cloud Run's RAM-backed disk, is kept as the record.
+
 **[D-10] I think spill is the exception, and wants zstd-1.** The posture rule
 optimises *read time*. Spill's binding constraint is neither read nor write time
 — it is the ~9GB ceiling, past which the query does not run at all. On that axis

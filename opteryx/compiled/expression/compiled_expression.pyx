@@ -754,6 +754,34 @@ def _build_in_list_blob(values, left_type, int negate):
     if phys in ("INT8", "INT16", "INT32", "INT64", "DATE32") and all(
             isinstance(v, int) and not isinstance(v, bool) for v in vals):
         return _pack_membership_blob(vals, 0, negate)
+    if phys in ("INT8", "INT16", "INT32", "INT64") and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        # Float literals against an integer column (`count_col NOT IN (2.5, 3.0)`),
+        # matching what `int_col = 3.0` does: the mixed compare reads both as doubles.
+        # Inside +/-2**53 a double holds every integer exactly, so 3.0 is the int 3 and
+        # a non-integral or non-finite literal can never be equal to a stored int -
+        # dropping it is exact, and so is dropping one beyond 2**63, which no int64
+        # reaches even as a double. Between 2**53 and 2**63 double equality is not
+        # int equality, so the list declines (as the FLOAT64 arm does for large ints).
+        ints = []
+        for v in vals:
+            if isinstance(v, float):
+                if v != v or not -(2 ** 63) <= v <= 2 ** 63:
+                    continue
+                if not -(2 ** 53) <= v <= 2 ** 53:
+                    return None
+                if v != int(v):
+                    continue
+                ints.append(int(v))
+            else:
+                ints.append(v)
+        return _pack_membership_blob(ints, 0, negate)
+    if phys == "BOOL" and all(isinstance(v, bool) for v in vals):
+        # The kind-0 arm reads a BOOL operand as its bit (0/1). Without this arm
+        # every multi-value BOOLEAN list declined — including the ones the
+        # optimizer makes itself (`b = FALSE OR b = TRUE` → `b IN [False, True]`),
+        # so a query that ran as written was refused after rewriting.
+        return _pack_membership_blob([int(v) for v in vals], 0, negate)
     if phys in ("UINT8", "UINT16", "UINT32", "UINT64") and all(
             isinstance(v, int) and not isinstance(v, bool) for v in vals):
         # An unsigned column can never hold a value outside [0, UINT64_MAX] —

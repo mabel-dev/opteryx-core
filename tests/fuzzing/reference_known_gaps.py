@@ -195,15 +195,16 @@ REGISTER: List[Gap] = [
         id="domain-error-on-rows-never-output",
         kind=SIGNATURE,
         outcome="opteryx_error",
-        signatures=("modulo by zero",),
+        signatures=("modulo by zero", "out of range for DECIMAL"),
         query=lambda: Query(
             tables=(Table("t0", (Column("c0", Ty.INT),), ()),),
             items=(Binary("%", Lit(Ty.INT, 1), Binary("%", Lit(Ty.INT, 2), Lit(Ty.INT, 1), Ty.INT), Ty.INT),),
         ),
         detail=(
             "EVALUATION ORDER, not a wrong answer. Opteryx constant-folds `1 % (2 % 1)` "
-            "and raises even over an empty table; DuckDB never evaluates it and answers 0 "
-            "rows. PostgreSQL constant-folds too and raises the same way. When DuckDB "
+            "(or `CAST(-Infinity AS DECIMAL(12,3))`) and raises even over an empty table; "
+            "DuckDB never evaluates it and answers 0 rows. PostgreSQL constant-folds too and "
+            "raises the same way. When DuckDB "
             "DOES evaluate a modulo by zero the reference text raises and the engines "
             "agree, so this signature only fires when the reference skipped the rows."
         ),

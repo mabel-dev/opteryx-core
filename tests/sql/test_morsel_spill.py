@@ -3,7 +3,7 @@
 MorselBuffer — the hand-off every breaker writes and every dependent pipeline
 reads — accumulates in memory and, once the pile reaches kSpillFlushBytes
 (512MB) WITH a spill root configured, flushes the pile to one .skene unit
-(spill profile, zstd-1) and reads it back row group by row group on the
+(spill profile, as_is + lz4) and reads it back row group by row group on the
 claiming workers. The thresholds live in src/cpp/engine/spill_budgets.hpp; the
 store (per-query q<pid>-* directory, startup sweep, loud disk errors) in
 src/cpp/engine/spill_store.hpp; the buffer in

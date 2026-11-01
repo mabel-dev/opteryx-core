@@ -366,6 +366,57 @@ static void test_contradictory_codec_and_level_are_rejected() {
     CHECK(write_morsel(in, WriteOptions::for_fast_reads(), &bytes).is_ok());
 }
 
+// as_is (spill, 2026-11-01): draken's form is stored unchanged — a dictionary
+// column keeps its codes and dictionary, a string column its slot lanes — with no
+// bit-packing, delta or lane search; the codec is the only transformation. The
+// file reads back to exactly what was written, shape included.
+static void test_as_is_makes_no_encoding_decision() {
+    std::vector<uint32_t> codes(20000);
+    for (size_t i = 0; i < codes.size(); ++i) codes[i] = static_cast<uint32_t>(i % 40);
+    std::vector<int64_t> dictionary(40);
+    for (size_t i = 0; i < dictionary.size(); ++i) dictionary[i] = static_cast<int64_t>(i * 1000);
+    auto in = morsel_of({
+        {"code", dict_column<int64_t>(dictionary, codes, DRAKEN_INT64)},
+        {"comment", string_column(comment_like(20000))},
+    });
+
+    WriteOptions options = WriteOptions::for_spill();
+    options.codec = SectionCodec::kZstd;
+    options.zstd_level = 1;
+    options.as_is = true;
+    std::vector<uint8_t> bytes;
+    CHECK(write_morsel(in, options, &bytes).is_ok());
+
+    for (uint32_t node = 0; node < 2; ++node) {
+        skene_test::DirectoryBlock dir;
+        CHECK(skene_test::directory_block(bytes, node, &dir));
+        for (const SectionEntry& entry : dir.sections)
+            CHECK_EQ(static_cast<int>(entry.encoding), static_cast<int>(Encoding::kPlain));
+    }
+
+    CxxMorsel out;
+    CHECK(read_morsel(bytes.data(), bytes.size(), 0, &out).is_ok());
+    const DrakenVector& v = out.columns[0].view;
+    CHECK_EQ(v.data_length, 40u);                     // still a dictionary
+    const int64_t* got = static_cast<const int64_t*>(v.data);
+    for (size_t i = 0; i < codes.size(); ++i) {
+        CHECK_EQ(v.selection[i], codes[i]);
+        CHECK_EQ(got[v.selection[i]], dictionary[codes[i]]);
+    }
+    const auto expected = comment_like(20000);
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(out.columns[1].view.data);
+    for (size_t i = 0; i < expected.size(); ++i) {
+        const DrakenStringSlot* slot = &sa->slots[out.columns[1].view.selection[i]];
+        CHECK(std::string(reinterpret_cast<const char*>(str_data(slot, sa->arena)),
+                          str_length(slot)) == expected[i]);
+    }
+
+    // Value ordering is itself an encoding decision: asking for both is refused.
+    WriteOptions both = options;
+    both.read_acceleration = true;
+    CHECK(!write_morsel(in, both, &bytes).is_ok());
+}
+
 int main() {
     for (const Posture& posture : kCodecs) {
         std::printf("-- codec %s\n", posture.name);
@@ -380,5 +431,6 @@ int main() {
     test_spill_profile_stays_raw();
     test_storage_profile_uses_a_measured_zstd_level();
     test_contradictory_codec_and_level_are_rejected();
+    test_as_is_makes_no_encoding_decision();
     return skene_test::summary("test_compression");
 }

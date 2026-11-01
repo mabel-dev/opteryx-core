@@ -13,7 +13,7 @@
 //
 // Residency policy (architect, 2026-08-27): accumulate in memory; once the
 // shared pile holds kSpillFlushBytes (512MB) AND a spill root is configured,
-// flush the pile — all of it — to ONE .skene file (spill profile + zstd-1)
+// flush the pile — all of it — to ONE .skene file (spill profile, as_is + lz4)
 // and release the memory. After the first flush the buffer is a sequence of
 // on-disk units and read-back decodes row groups on the claiming worker;
 // there is deliberately NO mixed resident/spilled read path (one path, one
@@ -87,10 +87,6 @@ struct SpillEnv {
 struct MorselBuffer {
     // ---- configuration (driver thread, plan build) ------------------------
     void configure(SpillEnv* env) { env_ = env; }
-    // A sort RUN's buffer: seal() writes the whole residue to disk even when the
-    // buffer never reached the flush trigger, so no part of a finished run stays
-    // resident beside the others while they merge.
-    void configure_run(SpillEnv* env) { env_ = env; spill_on_seal_ = true; }
     void set_label(const std::string& label) { if (label_.empty()) label_ = label; }
 
     // ---- write side -------------------------------------------------------
@@ -135,6 +131,35 @@ struct MorselBuffer {
     };
     Writer writer() { return Writer(this); }
 
+    // ---- pre-encoded units (the external sort) -----------------------------
+    // For a writer that encodes its chunks on a TEAM: encode_unit serializes a pile
+    // to one unit on the calling thread with no buffer lock held, and add_unit takes
+    // the units IN ORDER. Never mixed with appends — unit order is claim order, and
+    // a resident pile in front of them would be read out of place.
+    struct SpillUnit {
+        std::string path;
+        std::vector<uint32_t> rg_rows;                    // rows per row group
+        std::vector<std::vector<std::string>> rg_names;   // REAL names per row group
+        size_t claim_base = 0;
+    };
+    bool encode_unit(std::vector<MorselPtr>& pile, SpillUnit& unit, std::string& msg) {
+        if (env_ == nullptr || env_->root.empty()) {
+            msg = "encode_unit on a buffer with no spill root";
+            return false;
+        }
+        return encode_and_store_(pile, unit, msg);
+    }
+    bool add_unit(SpillUnit&& unit) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (failed_.load(std::memory_order_relaxed)) return false;
+        if (sealed_) return fail_locked_("add_unit after seal");
+        if (!resident_.empty())
+            return fail_locked_("add_unit behind resident appends — unit order is claim order");
+        units_.push_back(std::move(unit));
+        spilled_.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
     // ---- read side --------------------------------------------------------
     // Idempotent; the first reader seals. Once spilled, the residue (whatever
     // accumulated since the last flush) is flushed too, so the read path is
@@ -145,7 +170,7 @@ struct MorselBuffer {
         if (sealed_) return !failed_.load(std::memory_order_acquire);
         cv_.wait(lk, [this] { return !flush_active_; });
         sealed_ = true;
-        if ((!units_.empty() || spill_on_seal_) && !resident_.empty()) {
+        if (!units_.empty() && !resident_.empty()) {
             std::vector<MorselPtr> pile;
             pile.swap(resident_);
             const size_t nb = resident_bytes_;
@@ -280,12 +305,6 @@ struct MorselBuffer {
     }
 
   private:
-    struct SpillUnit {
-        std::string path;
-        std::vector<uint32_t> rg_rows;                    // rows per row group
-        std::vector<std::vector<std::string>> rg_names;   // REAL names per row group
-        size_t claim_base = 0;
-    };
 
     bool fail_(const std::string& msg) {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -363,8 +382,9 @@ struct MorselBuffer {
         if (store == nullptr) return false;
 
         skene::WriteOptions options = skene::WriteOptions::for_spill();
-        options.codec = skene::SectionCodec::kZstd;
-        options.zstd_level = 1;   // bakeoff: 0.30x in 58ms; decode is level-flat
+        // Fastest end to end (architect 2026-11-01, measured on a 24M-row spilling sort:
+        // lz4 10.0 s / 1.06 GB, zstd-1 13.7 s / 0.68 GB, none 27.6 s / 17.4 GB disk-bound).
+        options.codec = skene::SectionCodec::kLz4;
         options.as_is = true;     // spill, not persistence: no encoding decisions
 
         std::vector<uint8_t> bytes;
@@ -450,7 +470,6 @@ struct MorselBuffer {
     std::vector<std::weak_ptr<SpillUnitReader>> maps_;
     size_t claims_ = 0;
     bool sealed_ = false;
-    bool spill_on_seal_ = false;   // configure_run
     bool flush_active_ = false;
     std::atomic<bool> spilled_{false};
     std::atomic<bool> failed_{false};

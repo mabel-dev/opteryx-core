@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -208,8 +209,9 @@ struct SortSink : Sink, EmitSubset {
             g.pile_bytes = 0;
             g.run_active = true;
         }
-        // On an execution worker: sort single-threaded, the other workers are busy.
-        write_run_(g, pile, 1, err);
+        // The query's full width: the other workers fill the next pile and then wait
+        // here, so a single-threaded run is the phase's ceiling (profiled 2026-11-01).
+        write_run_(g, pile, static_cast<unsigned>(g.query_dop), err);
         {
             std::lock_guard<std::mutex> lk(g.mtx);
             g.run_active = false;
@@ -230,20 +232,53 @@ struct SortSink : Sink, EmitSubset {
             pile.swap(g.morsels);
             if (!write_run_(g, pile, dop, err)) return;
         }
+        // Each run's NEXT row group decodes in the background while the merge
+        // consumes the current one: read-back otherwise serializes on this thread.
+        using Fetched = std::pair<bool, MorselPtr>;
+        auto fetch = [](MorselBuffer* run, size_t rg) {
+            return std::async(std::launch::async, [run, rg]() {
+                MorselPtr m;
+                const bool ok = run->get(rg, m);
+                return Fetched(ok, std::move(m));
+            });
+        };
         std::vector<size_t> next_rg(g.runs.size(), 0);
+        std::vector<std::future<Fetched>> ahead(g.runs.size());
         auto next = [&](size_t r, MorselPtr& block) -> int {
             MorselBuffer& run = *g.runs[r];
-            if (next_rg[r] >= run.claim_count()) return 0;
-            if (run.get(next_rg[r]++, block)) return 1;
-            fail_(g, err, run.error());
-            return -1;
+            const size_t count = run.claim_count();
+            if (next_rg[r] >= count) return 0;
+            if (!ahead[r].valid()) ahead[r] = fetch(&run, next_rg[r]);
+            Fetched got = ahead[r].get();
+            if (++next_rg[r] < count) ahead[r] = fetch(&run, next_rg[r]);
+            if (!got.first) {
+                fail_(g, err, run.error());
+                return -1;
+            }
+            block = std::move(got.second);
+            return 1;
         };
-        auto emit = [&](MorselPtr&& m) -> bool {
-            if (out->append(m)) return true;
+        std::vector<MorselBuffer::SpillUnit> units(dop < 1 ? 1 : dop);
+        std::vector<std::string> unit_err(units.size());
+        auto stage = [&](MorselPtr&& m, unsigned slot) {
+            std::vector<MorselPtr> one{std::move(m)};
+            units[slot] = MorselBuffer::SpillUnit();
+            unit_err[slot].clear();
+            if (!out->encode_unit(one, units[slot], unit_err[slot]) && unit_err[slot].empty())
+                unit_err[slot] = "spill encode failed";
+        };
+        auto emit = [&](unsigned slot) -> bool {
+            if (!unit_err[slot].empty()) {
+                fail_(g, err, unit_err[slot]);
+                return false;
+            }
+            if (out->add_unit(std::move(units[slot]))) return true;
             fail_(g, err, out->error());
             return false;
         };
-        merge_sorted_runs(g.runs.size(), spec, chunk_rows, emit_ptr(), next, emit, err);
+        merge_sorted_runs(g.runs.size(), spec, chunk_rows, dop, emit_ptr(), next, stage,
+                          emit, err);
+        for (auto& f : ahead) if (f.valid()) f.wait();
         for (auto& run : g.runs) run->release();
     }
 
@@ -267,15 +302,31 @@ struct SortSink : Sink, EmitSubset {
             return false;
         }
         auto run = std::make_unique<MorselBuffer>();
-        run->configure_run(spill_env);
+        run->configure(spill_env);
         run->set_label("Sort run");
         MorselBuffer* r = run.get();
-        auto emit = [&](MorselPtr&& m) -> bool {
-            if (r->append(m)) return true;
+        // Each 64k-row chunk is encoded to its own unit on the team thread that
+        // gathered it, then added to the run in order.
+        std::vector<MorselBuffer::SpillUnit> units(nthreads < 1 ? 1 : nthreads);
+        std::vector<std::string> unit_err(units.size());
+        auto stage = [&](MorselPtr&& m, unsigned slot) {
+            std::vector<MorselPtr> one{std::move(m)};
+            units[slot] = MorselBuffer::SpillUnit();
+            unit_err[slot].clear();
+            if (!r->encode_unit(one, units[slot], unit_err[slot]) && unit_err[slot].empty())
+                unit_err[slot] = "spill encode failed";
+        };
+        auto emit = [&](unsigned slot) -> bool {
+            if (!unit_err[slot].empty()) {
+                fail_(g, err, unit_err[slot]);
+                return false;
+            }
+            if (r->add_unit(std::move(units[slot]))) return true;
             fail_(g, err, r->error());
             return false;
         };
-        if (!sort_morsels_streamed(pile, spec, kSortRunRowGroupRows, nthreads, emit, err))
+        if (!sort_morsels_streamed(pile, spec, kSortRunRowGroupRows, nthreads, stage, emit,
+                                   err))
             return false;
         pile.clear();
         if (!r->seal()) {

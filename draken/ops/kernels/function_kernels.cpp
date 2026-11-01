@@ -2493,6 +2493,15 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
             case DRAKEN_DECIMAL:
             case DRAKEN_TIMESTAMP64:
                 ok = run(static_cast<const int64_t*>(v->data)); break;
+            case DRAKEN_BOOL: {
+                // BOOL is bit-packed: value `phys` is bit `phys`; the set holds 0/1.
+                const auto* bits = static_cast<const uint8_t*>(v->data);
+                ok = fk_in_list_emit(v, negate, out, [&](uint32_t phys) {
+                    return std::binary_search(items, items_end,
+                                              static_cast<int64_t>((bits[phys >> 3] >> (phys & 7u)) & 1u));
+                });
+                break;
+            }
             default:
                 return fail("draken_in_list: integer-family operand required for kind-0 set");
         }

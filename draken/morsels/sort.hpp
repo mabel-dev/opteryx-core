@@ -2242,15 +2242,20 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
 // memory by the code above and written out in chunks, then the runs are merged. Both
 // halves are engine-agnostic like sort_morsels; where a run is kept is the caller's.
 
-// sort_morsels, but each chunk is handed to `emit` in sorted order as soon as its wave
-// of `nthreads` chunks is gathered, instead of every chunk being held until the end —
-// so a run's dense output is never resident whole. Every column is emitted: a run
-// carries its keys into the merge. `emit(MorselPtr)` returns false to stop, having
-// recorded its own error.
-template <class Emit>
+// Both halves hand chunks over in two steps, a wave of up to `nthreads` at a time:
+// `stage(MorselPtr&& chunk, unsigned slot)` runs ON THE TEAM thread that gathered the
+// chunk (where the caller does its per-chunk work — the engine encodes it to disk) and
+// records its own outcome in the slot; then `emit(unsigned slot)` runs on the calling
+// thread for every staged slot, in sorted order, and returns false to stop, having
+// reported whatever the stage recorded.
+
+// sort_morsels, but each chunk is staged and emitted as soon as its wave is gathered,
+// instead of every chunk being held until the end — so a run's dense output is never
+// resident whole. Every column is emitted: a run carries its keys into the merge.
+template <class Stage, class Emit>
 inline bool sort_morsels_streamed(const std::vector<MorselPtr>& ms,
                                   const std::vector<SortKeySpec>& spec, size_t chunk_rows,
-                                  unsigned nthreads, Emit emit, ErrCtx& err) {
+                                  unsigned nthreads, Stage stage, Emit emit, ErrCtx& err) {
     SortedRows s;
     if (!sort_rows(ms, spec, SIZE_MAX, nthreads, s, err)) return false;
     if (s.src.empty()) return true;
@@ -2259,7 +2264,6 @@ inline bool sort_morsels_streamed(const std::vector<MorselPtr>& ms,
     const size_t nchunks = (s.total + chunk_rows - 1) / chunk_rows;
     unsigned nt = sort_team_width(s.total, nthreads);
     if (nt > nchunks) nt = static_cast<unsigned>(nchunks);
-    std::vector<MorselPtr> wave(nt);
     std::vector<ErrCtx> wave_err(nt);
     for (size_t first = 0; first < nchunks; first += nt) {
         const unsigned width = static_cast<unsigned>(std::min<size_t>(nt, nchunks - first));
@@ -2267,14 +2271,15 @@ inline bool sort_morsels_streamed(const std::vector<MorselPtr>& ms,
             const size_t start = (first + t) * chunk_rows;
             const size_t count = std::min(chunk_rows, s.total - start);
             wave_err[t] = ErrCtx();
-            wave[t] = gather_rows(s.src, s.perm, start, count, s.row_m, s.row_r, names,
-                                  wave_err[t]);
-            if (wave_err[t].code == 0)
-                stamp_sorted_chunk(*wave[t], sorted_out_idx, spec[0].ascending);
+            MorselPtr chunk = gather_rows(s.src, s.perm, start, count, s.row_m, s.row_r,
+                                          names, wave_err[t]);
+            if (wave_err[t].code != 0) return;
+            stamp_sorted_chunk(*chunk, sorted_out_idx, spec[0].ascending);
+            stage(std::move(chunk), t);
         });
         for (unsigned t = 0; t < width; ++t) {
             if (wave_err[t].code != 0) { err = wave_err[t]; return false; }
-            if (!emit(std::move(wave[t]))) return false;
+            if (!emit(t)) return false;
         }
     }
     return true;
@@ -2282,24 +2287,34 @@ inline bool sort_morsels_streamed(const std::vector<MorselPtr>& ms,
 
 // K-way merge of sorted runs into chunks of `chunk_rows`, handed to `emit` in order.
 // `next(r, block)` yields run r's next block in its sorted order: 1 = a block, 0 = the
-// run is exhausted, -1 = failed (the caller has recorded why). Resident: each run's
-// current block and its key lanes, plus the blocks the chunk being built reads — never
-// a run's whole contents. Rows compare through sort_key_less, the one definition of the
-// order; ties go to the lower run index (runs are numbered in arrival order), matching
-// the stability sort_perm gives within a run.
-template <class Next, class Emit>
+// run is exhausted, -1 = failed (the caller has recorded why). Rows compare through
+// sort_key_less, the one definition of the order; ties go to the lower run index (runs
+// are numbered in arrival order), matching the stability sort_perm gives within a run.
+//
+// The ordering loop only decides WHICH rows make each chunk; the gathers — the cost —
+// run on a team of `nthreads`, a wave of chunks at a time, and are emitted in order.
+// Resident: each run's current block and key lanes, plus up to `nthreads` planned
+// chunks with the blocks they read — never a run's whole contents.
+template <class Next, class Stage, class Emit>
 inline bool merge_sorted_runs(size_t nruns, const std::vector<SortKeySpec>& spec,
-                              size_t chunk_rows, const std::vector<uint32_t>* emit_cols,
-                              Next next, Emit emit, ErrCtx& err) {
+                              size_t chunk_rows, unsigned nthreads,
+                              const std::vector<uint32_t>* emit_cols,
+                              Next next, Stage stage, Emit emit, ErrCtx& err) {
     struct Cursor {
         MorselPtr block;
         std::vector<SortKeyColumn> keys;
         uint32_t row = 0, rows = 0, slot = 0;   // slot: the block's index in `live`
     };
+    // One output chunk, decided but not yet gathered.
+    struct Plan {
+        std::vector<MorselPtr> live;
+        std::vector<uint32_t> row_m, row_r;
+    };
     std::vector<Cursor> cur(nruns);
     std::vector<MorselPtr> live;
     std::vector<std::string> names;
     const size_t sorted_out_idx = sorted_output_index(spec, emit_cols);
+    const unsigned width = nthreads < 1 ? 1u : nthreads;
 
     auto load = [&](size_t r, bool& got) -> bool {
         got = false;
@@ -2339,21 +2354,44 @@ inline bool merge_sorted_runs(size_t nruns, const std::vector<SortKeySpec>& spec
     }
     std::make_heap(heap.begin(), heap.end(), after);
 
-    std::vector<uint32_t> row_m, row_r, order;
-    row_m.reserve(chunk_rows);
-    row_r.reserve(chunk_rows);
-    auto flush = [&]() -> bool {
-        const size_t n = row_m.size();
+    std::vector<Plan> wave;
+    wave.reserve(width);
+    std::vector<uint32_t> order(chunk_rows);
+    for (size_t i = 0; i < chunk_rows; ++i) order[i] = static_cast<uint32_t>(i);
+    auto gather_wave = [&]() -> bool {
+        const unsigned n = static_cast<unsigned>(wave.size());
         if (n == 0) return true;
-        while (order.size() < n) order.push_back(static_cast<uint32_t>(order.size()));
-        ErrCtx e;
-        MorselPtr m = gather_rows(live, order, 0, n, row_m, row_r, names, e, emit_cols);
-        if (e.code != 0) { err = e; return false; }
-        stamp_sorted_chunk(*m, sorted_out_idx, spec[0].ascending);
-        row_m.clear();
-        row_r.clear();
-        // Drop every block no cursor still reads: an exhausted run's last block, and
-        // the blocks a cursor has moved past.
+        std::vector<ErrCtx> out_err(n);
+        sort_team_run(n, [&](unsigned t) {
+            Plan& plan = wave[t];
+            MorselPtr chunk = gather_rows(plan.live, order, 0, plan.row_m.size(),
+                                          plan.row_m, plan.row_r, names, out_err[t],
+                                          emit_cols);
+            plan = Plan();   // release this chunk's sources as soon as it is gathered
+            if (out_err[t].code != 0) return;
+            stamp_sorted_chunk(*chunk, sorted_out_idx, spec[0].ascending);
+            stage(std::move(chunk), t);
+        });
+        wave.clear();
+        for (unsigned t = 0; t < n; ++t) {
+            if (out_err[t].code != 0) { err = out_err[t]; return false; }
+            if (!emit(t)) return false;
+        }
+        return true;
+    };
+
+    Plan plan;
+    plan.row_m.reserve(chunk_rows);
+    plan.row_r.reserve(chunk_rows);
+    // Close the chunk being planned: it keeps the blocks it reads, and `live` restarts
+    // with only the blocks a cursor still reads.
+    auto close_plan = [&]() -> bool {
+        if (plan.row_m.empty()) return true;
+        plan.live = live;
+        wave.push_back(std::move(plan));
+        plan = Plan();
+        plan.row_m.reserve(chunk_rows);
+        plan.row_r.reserve(chunk_rows);
         std::vector<MorselPtr> kept;
         kept.reserve(heap.size());
         for (uint32_t r : heap) {
@@ -2361,15 +2399,15 @@ inline bool merge_sorted_runs(size_t nruns, const std::vector<SortKeySpec>& spec
             kept.push_back(cur[r].block);
         }
         live.swap(kept);
-        return emit(std::move(m));
+        return wave.size() < width || gather_wave();
     };
 
     while (!heap.empty()) {
         std::pop_heap(heap.begin(), heap.end(), after);
         const uint32_t r = heap.back();
         Cursor& c = cur[r];
-        row_m.push_back(c.slot);
-        row_r.push_back(c.row);
+        plan.row_m.push_back(c.slot);
+        plan.row_r.push_back(c.row);
         if (++c.row == c.rows) {
             bool got;
             if (!load(r, got)) return false;
@@ -2378,7 +2416,7 @@ inline bool merge_sorted_runs(size_t nruns, const std::vector<SortKeySpec>& spec
         } else {
             std::push_heap(heap.begin(), heap.end(), after);
         }
-        if (row_m.size() == chunk_rows && !flush()) return false;
+        if (plan.row_m.size() == chunk_rows && !close_plan()) return false;
     }
-    return flush();
+    return close_plan() && gather_wave();
 }
