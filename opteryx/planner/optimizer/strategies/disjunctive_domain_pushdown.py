@@ -129,6 +129,7 @@ def _classify_leaf(leaf: Expression) -> Optional[Tuple[str, Expression, str, tup
             or right is None
             or left.node_type != NodeType.IDENTIFIER
             or right.node_type != NodeType.LITERAL
+            or right.value is None  # `col = NULL` is never TRUE; it bounds nothing
             or left.schema_column is None
         ):
             return None
@@ -142,7 +143,7 @@ def _classify_leaf(leaf: Expression) -> Optional[Tuple[str, Expression, str, tup
 
     if leaf.value in ("Gt", "GtEq", "Lt", "LtEq"):
         ident, op, lit = _normalize_col_op_lit(leaf)
-        if ident is None or ident.schema_column is None:
+        if ident is None or ident.schema_column is None or lit.value is None:
             return None
         is_lower = op in ("Gt", "GtEq")
         inclusive = op in ("GtEq", "LtEq")

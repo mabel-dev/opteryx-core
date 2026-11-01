@@ -192,7 +192,7 @@ PROJECTIONS = [
     "CAST(m AS FLOAT32)", "CAST(m AS INT16)", "CAST(m AS INT8)", "TRY_CAST(m AS UINT8)",
     "TRY_CAST(m AS DECIMAL(4, 1))", "CAST(CAST(m AS DECIMAL(30, 4)) AS DECIMAL(9, 3))",
     "CAST(i AS DECIMAL(8, 2))", "CAST(j AS DECIMAL(20, 1))", "CAST(u AS DECIMAL(5, 1))",
-    "CAST(f AS DECIMAL(10, 3))", "CAST(b AS DECIMAL(3, 1))", "TRY_CAST(j AS DECIMAL(3, 1))",
+    "TRY_CAST(f AS DECIMAL(10, 3))", "CAST(b AS DECIMAL(3, 1))", "TRY_CAST(j AS DECIMAL(3, 1))",
     # misc casts
     "CAST(i AS FLOAT32)", "CAST(u AS FLOAT32)", "CAST(b AS VARCHAR)",
     # string functions
@@ -283,7 +283,7 @@ def test_branch_blend_against_oracle(workspaces, expr, expect):
 
 # A value that cannot convert raises on BOTH shapes (and is NULL under TRY_CAST,
 # covered by the projections above).
-FAILING = ["CAST(m AS UINT8)", "CAST(m AS DECIMAL(4, 1))", "CAST(j AS DECIMAL(3, 1))"]
+FAILING = ["CAST(m AS UINT8)", "CAST(m AS DECIMAL(4, 1))", "CAST(j AS DECIMAL(3, 1))", "CAST(f AS DECIMAL(10, 3))"]
 
 
 @pytest.mark.parametrize("expr", FAILING)

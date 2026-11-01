@@ -328,6 +328,11 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "parquet_gcs_io_workers": (INT64, FromConfig("PARQUET_GCS_IO_WORKERS"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "parquet_local_io_workers": (INT64, FromConfig("PARQUET_LOCAL_IO_WORKERS", via="resolve_parquet_local_io_workers"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "max_execution_workers": (INT64, FromConfig("MAX_EXECUTION_WORKERS", via="resolve_max_execution_workers"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # How gs:// ranges are read (rest | grpc = DirectPath) and the DirectPath pool
+    # size — process-wide by design (docs/GCS_DIRECTPATH_READS_DESIGN.md R4), so
+    # SERVER: shown, not SET-able.
+    "gcs_transport": (VARCHAR, FromConfig("GCS_TRANSPORT"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "gcs_grpc_connections": (INT64, FromConfig("GCS_GRPC_CONNECTIONS"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Same reasoning as the three above, for the HTTP client that services GCS
     # range reads (src/cpp/http_client.cpp / rugo/src/parquet/io_pipeline.hpp).
     # Named for what they DO, not for the env var they replace — the old env-only

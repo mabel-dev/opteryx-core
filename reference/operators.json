@@ -2066,7 +2066,7 @@
             },
             {
                 "name": "list",
-                "documentation": "The values to look in - a parenthesised list, or an array-valued expression. Every element must share one type; a mixed list, NULL included, is rejected at plan time rather than being silently skipped.",
+                "documentation": "The values to look in - a parenthesised list, or an array-valued expression. Every element must share one type; a mixed list is rejected at plan time rather than being silently skipped. A NULL element is allowed (see Notes).",
                 "constant_only": false,
                 "types": [
                     "array"
@@ -2085,6 +2085,12 @@
                 "sql": "SELECT 2 IN (1, 2, 3), 9 IN (1, 2, 3);",
                 "result": [
                     "true | false"
+                ]
+            },
+            {
+                "sql": "SELECT 1 IN (1, NULL), 2 IN (1, NULL), NULL IN (1, NULL);",
+                "result": [
+                    "true | NULL | NULL"
                 ]
             }
         ],
@@ -2192,7 +2198,7 @@
                 "IN"
             ]
         },
-        "notes": "IN is a shorthand for a chain of `=`, and inherits its rules: the comparison is exact and case-sensitive. A list mixing types - `IN (NULL, 2)` among them - is an error, not a match against the elements that do share a type."
+        "notes": "IN is a shorthand for a chain of `=` joined by OR, and inherits its rules: the comparison is exact and case-sensitive, and a list mixing types is an error, not a match against the elements that do share a type. A NULL element is the comparison `= NULL`, which is NULL: `x IN (1, NULL)` is `x = 1 OR x = NULL`, so it is true when `x` is 1 and NULL otherwise - never false. A NULL left operand gives NULL."
     },
     "Like": {
         "ast_symbol": "Like",
@@ -4140,7 +4146,7 @@
             },
             {
                 "name": "list",
-                "documentation": "The values to look in. Every element must share one type; a mixed list is rejected at plan time.",
+                "documentation": "The values to look in. Every element must share one type; a mixed list is rejected at plan time. A NULL element is allowed (see Notes).",
                 "constant_only": false,
                 "types": [
                     "array"
@@ -4154,6 +4160,12 @@
                     "Mercury",
                     "Venus",
                     "Jupiter"
+                ]
+            },
+            {
+                "sql": "SELECT 1 NOT IN (1, NULL), 2 NOT IN (1, NULL), NULL NOT IN (1, NULL);",
+                "result": [
+                    "false | NULL | NULL"
                 ]
             }
         ],
@@ -4261,7 +4273,7 @@
                 "NOT IN"
             ]
         },
-        "notes": "Like `!=`, a row whose value is NULL answers NULL rather than true, so it does not survive a WHERE clause."
+        "notes": "NOT IN is a chain of `!=` joined by AND. Like `!=`, a row whose value is NULL answers NULL rather than true, so it does not survive a WHERE clause. A NULL element is the comparison `!= NULL`, which is NULL: `x NOT IN (1, NULL)` is `x != 1 AND x != NULL`, so it is false when `x` is 1 and NULL otherwise - never true. A NOT IN list holding a NULL therefore keeps no rows in a WHERE clause."
     },
     "NotLike": {
         "ast_symbol": "NotLike",

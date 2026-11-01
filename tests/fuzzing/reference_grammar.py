@@ -202,6 +202,16 @@ class Lit(Node):
 
 
 @dataclass(frozen=True)
+class UntypedNull(Node):
+    """A bare `NULL` — an IN-list member only, where the list supplies its type."""
+
+    ty: Ty
+
+    def render(self, dialect: int) -> str:
+        return "NULL"
+
+
+@dataclass(frozen=True)
 class Col(Node):
     table: str
     name: str
@@ -383,10 +393,9 @@ class ExprGen:
         self.rng = rng
         self.scope = list(scope)
 
-    def literal(self, ty: Ty) -> Lit:
-        # No NULL literals: a typed NULL (`CAST(NULL AS DECIMAL(12,3))`) loses its
-        # type and is refused in many positions — reference_known_gaps
-        # "typed-null-literal-refused". NULLs still arrive through the data.
+    def literal(self, ty: Ty, null_rate: float = 0.05) -> Lit:
+        if self.rng.random() < null_rate:
+            return Lit(ty, None)
         excluded = _LITERAL_EXCLUDED.get(ty, set())
         return Lit(ty, self.rng.choice([v for v in VALUE_POOLS[ty] if v not in excluded]))
 
@@ -445,7 +454,10 @@ class ExprGen:
             return Between(self.expr(ty, depth - 1), self.leaf(ty), self.leaf(ty))
         if choice < 0.58:
             ty = self.rng.choice(ORDERED)
-            members = tuple(self.literal(ty) for _ in range(self.rng.randint(1, 3)))
+            members = tuple(
+                UntypedNull(ty) if self.rng.random() < 0.1 else self.literal(ty, null_rate=0.15)
+                for _ in range(self.rng.randint(1, 3))
+            )
             return InList(self.leaf(ty), members, self.rng.random() < 0.3)
         if choice < 0.65 and self.columns(Ty.BOOL):
             # `col = TRUE`, never the bare column: a bare (or negated) boolean

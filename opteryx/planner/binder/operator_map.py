@@ -461,6 +461,11 @@ def _is_internal_operator(operator: str) -> bool:
     }
 
 
+# shortcut: the comparisons known to return BOOLEAN; the operator catalog records no
+# result type — derive this from it if it ever does.
+_BOOLEAN_COMPARISONS = frozenset({"Eq", "NotEq", "Lt", "LtEq", "Gt", "GtEq", "InList", "NotInList"})
+
+
 def determine_type(node):
     """Return the ColumnType for the expression rooted at *node*, or None when unknown."""
     from opteryx.types.logical_type import BOOLEAN, INT64, FLOAT64
@@ -578,6 +583,11 @@ def determine_type(node):
                     f"{md_code('NULL::VARCHAR || NULL')}",
                 )
             )
+
+    # `x = NULL` is NULL for every row, but a BOOLEAN null: untyped it was refused as
+    # a CAST source, sort key or DISTINCT key. Which ops apply is checked elsewhere.
+    if operator in _BOOLEAN_COMPARISONS and OT.NULL in (left_lc, right_lc):
+        return BOOLEAN
 
     if left_lc is None or left_lc == OT.NULL:
         return None

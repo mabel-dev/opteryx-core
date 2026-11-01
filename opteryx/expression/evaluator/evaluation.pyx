@@ -186,6 +186,10 @@ cdef _validate_temporal_comparison(left_node, right_node, op):
 
     non_temporal_node = right_node if left_is_temporal else left_node
     non_temporal_side = "right" if left_is_temporal else "left"
+    # an untyped NULL is no ambiguous string: `date_col = NULL` is NULL
+    non_temporal_type = right_type if left_is_temporal else left_type
+    if non_temporal_type is not None and non_temporal_type.category == _LogicalCategory.NULL:
+        return
 
     if <int>non_temporal_node.node_type != NT_IDENTIFIER:
         raise IncompatibleTypesError(

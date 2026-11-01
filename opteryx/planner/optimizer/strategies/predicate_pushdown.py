@@ -2136,6 +2136,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 and alias_candidate.source_column in alias_expressions
                 and literal_candidate
                 and literal_candidate.node_type == NodeType.LITERAL
+                # `b = NULL` is NULL, neither `b` nor `NOT b`: leave it as written
+                and literal_candidate.value is not None
                 and (
                     (literal_candidate.type is not None and literal_candidate.type.category == LogicalCategory.BOOLEAN)
                     or str(literal_candidate.type).upper() == "BOOLEAN"

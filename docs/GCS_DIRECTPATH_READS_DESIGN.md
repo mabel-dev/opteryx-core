@@ -267,6 +267,11 @@ Rerun the cold size ladder (4/16, 8/32, 16/64, 32/128) with REST and DirectPath 
 - **Still owed:** how often endpoints change, and Phase 3 (the fleet template flip, the architect's call).
 
 **Phase 3: flip the fleet template to `grpc`.** Architect's call, with the numbers in front of them.
+- **RULED and SET 2026-11-01:** "set the setting now, the release will follow".
+  - Template `worker-fleet-v6` is v5 with `GCS_TRANSPORT=grpc` added to `worker-env`; it is otherwise identical, verified field by field.
+  - MIG `worker-fleet` now targets v6 with an OPPORTUNISTIC update, so nothing was recreated.
+  - The live node `worker-us-e1-nh43` had the same line added to its instance `worker-env`. `render-env.sh` reads that at every service start, so it applies when the release's image update restarts the container. Until then the running 0.9.181 image ignores the variable.
+  - **Not yet measured:** the engine path on the 4/16 prod node; the ladder ran only 16/64. If DirectPath is unreachable there, scans raise, by design.
 
 ## 8. Expected effect
 - **Phase 0 passes on throughput:** cold IO-bound queries gain up to the cold − hot gap. Realistically 10–20% of the cold total on 16/64 and larger, if a third to a half of the IO wait goes away.

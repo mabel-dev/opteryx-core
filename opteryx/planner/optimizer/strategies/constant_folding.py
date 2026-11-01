@@ -591,7 +591,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
             if (
                 root.left.node_type == NodeType.LITERAL
                 and root.left.type == BOOLEAN
-                and not root.left.value
+                and root.left.value is False  # a BOOL NULL is not FALSE
             ):
                 # False OR anything is anything (except NULL)
                 node = _build_transparent_node(
@@ -602,7 +602,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
             if (
                 root.right.node_type == NodeType.LITERAL
                 and root.right.type == BOOLEAN
-                and not root.right.value
+                and root.right.value is False  # a BOOL NULL is not FALSE
             ):
                 # anything OR False is anything (except NULL)
                 node = _build_transparent_node(
@@ -615,7 +615,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
             if (
                 root.left.node_type == NodeType.LITERAL
                 and root.left.type == BOOLEAN
-                and not root.left.value
+                and root.left.value is False  # a BOOL NULL is not FALSE
             ):
                 # False AND anything is False (including NULL)
                 node = _build_transparent_node(
@@ -626,7 +626,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
             if (
                 root.right.node_type == NodeType.LITERAL
                 and root.right.type == BOOLEAN
-                and not root.right.value
+                and root.right.value is False  # a BOOL NULL is not FALSE
             ):
                 # anything AND False is False (including NULL)
                 node = _build_transparent_node(

@@ -35,12 +35,15 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from tests.fuzzing.reference_grammar import Agg
+from tests.fuzzing.reference_grammar import Between
 from tests.fuzzing.reference_grammar import Binary
+from tests.fuzzing.reference_grammar import Case
 from tests.fuzzing.reference_grammar import Cast
 from tests.fuzzing.reference_grammar import Col
 from tests.fuzzing.reference_grammar import Column
 from tests.fuzzing.reference_grammar import INT64_MAX
 from tests.fuzzing.reference_grammar import INT64_MIN
+from tests.fuzzing.reference_grammar import IsNull
 from tests.fuzzing.reference_grammar import Join
 from tests.fuzzing.reference_grammar import Lit
 from tests.fuzzing.reference_grammar import Not
@@ -109,22 +112,6 @@ REGISTER: List[Gap] = [
     # ─────────────────────────────────────────────────────────────────────────
     # WITHHELD — refusals
     # ─────────────────────────────────────────────────────────────────────────
-    Gap(
-        id="typed-null-literal-refused",
-        kind=WITHHELD,
-        sql="SELECT AVG(CAST(NULL AS DECIMAL(12,3))) FROM $planets",
-        still_present=_raised("NotSupportedError", "null::DECIMAL(12,3)"),
-        detail=(
-            "REFUSAL. A typed NULL literal loses its type and is refused in many positions: "
-            "`CAST(NULL AS DECIMAL(12,3))` in SUM/AVG/CASE/arithmetic ('a CAST ... outside "
-            "the c-native kernel set'), MIN/MAX(CAST(NULL AS TIMESTAMP)) ('over a column of "
-            "type NULL'), ORDER BY on one, IN/NOT IN lists containing one (mixed-type "
-            "array, native scan refused), BETWEEN with one as a bound ('Temporal "
-            "comparison requires literals to be explicitly cast'). DuckDB answers all of "
-            "them. Withheld: the generator emits no NULL literals; NULLs arrive only "
-            "through the data."
-        ),
-    ),
     Gap(
         id="where-bare-boolean-column-refused",
         kind=WITHHELD,
@@ -274,6 +261,27 @@ REGISTER: List[Gap] = [
             "REFERENCE LIMITATION — Opteryx is right. INT64_MIN % -1 is 0 (Opteryx, and "
             "PostgreSQL, which special-cases it); DuckDB computes it through the "
             "overflowing division and raises."
+        ),
+    ),
+    Gap(
+        id="reference-null-case-between-bind-error",
+        kind=SIGNATURE,
+        outcome="reference_error",
+        signatures=("BindBuiltinScalarFunction did not return a BoundFunctionExpression",),
+        query=lambda: Query(
+            tables=(_one_row((Ty.DEC, decimal.Decimal("1.250"))),),
+            items=(Col("t0", "c0", Ty.DEC),),
+            where=Between(
+                Case(IsNull(Col("t0", "c0", Ty.DEC), True), Lit(Ty.STR, None), Lit(Ty.STR, "é"), Ty.STR),
+                Lit(Ty.STR, "_a"),
+                Lit(Ty.STR, "z"),
+            ),
+        ),
+        detail=(
+            "REFERENCE LIMITATION — Opteryx is right. `CASE WHEN c IS NOT NULL THEN "
+            "CAST(NULL AS VARCHAR) ELSE 'é' END BETWEEN '_a' AND 'z'` makes DuckDB 2.0.0 "
+            "raise an internal binder error; the CASE is NULL for the row, so Opteryx's 0 "
+            "rows is the answer."
         ),
     ),
     Gap(

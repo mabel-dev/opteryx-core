@@ -44,6 +44,7 @@ cdef object _IDENTIFIER = NodeType.IDENTIFIER
 cdef object _EVALUATED = NodeType.EVALUATED
 cdef object _SUBQUERY = NodeType.SUBQUERY
 cdef object _LITERAL = NodeType.LITERAL
+cdef object _NESTED = NodeType.NESTED
 
 # binder.py: the Python arms this core calls. Resolved on first use - binder.py
 # imports this module, so it cannot be imported here at load.
@@ -74,6 +75,19 @@ cdef bint _same_text_outside_case(object column, str column_name):
         if _fold_outside_quotes(alias) == folded:
             return True
     return False
+
+
+cdef bint _wrapped_literal_retyped(object node, object found_column):
+    """Whether `node`, a NESTED, is parentheses around a literal whose type differs
+    from `found_column`'s — the same type rule a bare literal's reuse follows."""
+    while node.node_type == _NESTED:
+        node = node.centre
+    return (
+        node.node_type == _LITERAL
+        and node.type is not None
+        and found_column.column_type is not None
+        and node.type != found_column.column_type
+    )
 
 
 cdef inline object _python_arms():
@@ -582,7 +596,11 @@ cpdef tuple inner_binder(
     for schema_name, raw in context.schemas.items():
         schema = <RelationSchema?>raw
         found_column = schema.find_lower(lowered)
-        if found_column is not None and node_type == _LITERAL:
+        if found_column is not None and node_type == _NESTED and _wrapped_literal_retyped(node, found_column):
+            # `(CAST(NULL AS TIMESTAMP))` renders as `null` — exactly like the
+            # NESTED around a DECIMAL null — so name alone reused the wrong type.
+            found_column = None
+        elif found_column is not None and node_type == _LITERAL:
             # A literal's column_name is its own textual form, so the case-insensitive
             # lookup (correct for identifiers) would otherwise collapse two case-distinct
             # string literals ('ss' and 'SS', REPLACE's needle and replacement) onto a

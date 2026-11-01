@@ -418,8 +418,9 @@ OPERATOR_DEFINITIONS = {
             OperandDefinition(
                 "list",
                 "The values to look in - a parenthesised list, or an array-valued "
-                "expression. Every element must share one type; a mixed list, NULL "
-                "included, is rejected at plan time rather than being silently skipped.",
+                "expression. Every element must share one type; a mixed list is rejected "
+                "at plan time rather than being silently skipped. A NULL element is "
+                "allowed (see Notes).",
             ),
         ),
         examples=(
@@ -431,12 +432,19 @@ OPERATOR_DEFINITIONS = {
                 "SELECT 2 IN (1, 2, 3), 9 IN (1, 2, 3);",
                 ("true | false",),
             ),
+            ExampleDefinition(
+                "SELECT 1 IN (1, NULL), 2 IN (1, NULL), NULL IN (1, NULL);",
+                ("true | NULL | NULL",),
+            ),
         ),
         see_also=("NotInList", "Eq"),
         notes=(
-            "IN is a shorthand for a chain of `=`, and inherits its rules: the comparison "
-            "is exact and case-sensitive. A list mixing types - `IN (NULL, 2)` among them - "
-            "is an error, not a match against the elements that do share a type."
+            "IN is a shorthand for a chain of `=` joined by OR, and inherits its rules: the "
+            "comparison is exact and case-sensitive, and a list mixing types is an error, "
+            "not a match against the elements that do share a type. A NULL element is the "
+            "comparison `= NULL`, which is NULL: `x IN (1, NULL)` is `x = 1 OR x = NULL`, so "
+            "it is true when `x` is 1 and NULL otherwise - never false. A NULL left operand "
+            "gives NULL."
         ),
     ),
     "NotInList": OperatorDefinition(
@@ -452,7 +460,7 @@ OPERATOR_DEFINITIONS = {
             OperandDefinition(
                 "list",
                 "The values to look in. Every element must share one type; a mixed list is "
-                "rejected at plan time.",
+                "rejected at plan time. A NULL element is allowed (see Notes).",
             ),
         ),
         examples=(
@@ -460,9 +468,19 @@ OPERATOR_DEFINITIONS = {
                 "SELECT name FROM $planets WHERE name NOT IN ('Earth', 'Mars') LIMIT 3;",
                 ("Mercury", "Venus", "Jupiter"),
             ),
+            ExampleDefinition(
+                "SELECT 1 NOT IN (1, NULL), 2 NOT IN (1, NULL), NULL NOT IN (1, NULL);",
+                ("false | NULL | NULL",),
+            ),
         ),
         see_also=("InList", "NotEq"),
-        notes="Like `!=`, a row whose value is NULL answers NULL rather than true, so it does not survive a WHERE clause.",
+        notes=(
+            "NOT IN is a chain of `!=` joined by AND. Like `!=`, a row whose value is NULL "
+            "answers NULL rather than true, so it does not survive a WHERE clause. A NULL "
+            "element is the comparison `!= NULL`, which is NULL: `x NOT IN (1, NULL)` is "
+            "`x != 1 AND x != NULL`, so it is false when `x` is 1 and NULL otherwise - never "
+            "true. A NOT IN list holding a NULL therefore keeps no rows in a WHERE clause."
+        ),
     ),
     "Like": OperatorDefinition(
         summary="Pattern match comparison.",

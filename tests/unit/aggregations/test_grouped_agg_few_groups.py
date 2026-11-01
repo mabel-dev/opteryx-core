@@ -8,15 +8,65 @@ group by the UNGROUPED path (a different sink), over a multi-file table so many
 morsels contribute and some groups are absent from some morsels. Integer and
 decimal sums must match exactly; float sums to rounding.
 """
+import decimal
 import math
+import os
+import random
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-import opteryx
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
 
-T = "testdata.tpch_1_rugo.lineitem"
+import opteryx
+from opteryx.connectors import DiskConnector
+
+T = "gbfew.lineitem"
+FLAG_STATUS = [("A", "F"), ("N", "F"), ("N", "O"), ("R", "F")]
+SHIPMODES = ["AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK"]
+FILES = 6
+ROWS_PER_FILE = 6000
+RG = 1000
+
+SCHEMA = pa.schema(
+    [
+        ("l_returnflag", pa.string()),
+        ("l_linestatus", pa.string()),
+        ("l_quantity", pa.decimal128(15, 2)),
+        ("l_linenumber", pa.int32()),
+        ("l_extendedprice", pa.decimal128(15, 2)),
+        ("l_discount", pa.decimal128(15, 2)),
+        ("l_tax", pa.decimal128(15, 2)),
+        ("l_shipmode", pa.string()),
+    ]
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def lineitem(tmp_path_factory):
+    # lineitem-shaped multi-file table; file k lacks group k % 4, so groups are absent from some morsels
+    root = tmp_path_factory.mktemp("gb_few_groups")
+    path = root / "gbfew" / "lineitem"
+    path.mkdir(parents=True)
+    rng = random.Random(42)
+    cents = lambda lo, hi: decimal.Decimal(rng.randint(lo, hi)) / 100
+    for k in range(FILES):
+        groups = [g for i, g in enumerate(FLAG_STATUS) if i != k % len(FLAG_STATUS)]
+        rows = [
+            (*rng.choice(groups), cents(100, 5000), rng.randint(1, 7), cents(90000, 10494950),
+             cents(0, 10), cents(0, 8), rng.choice(SHIPMODES))
+            for _ in range(ROWS_PER_FILE)
+        ]
+        table = pa.table({name: pa.array([r[i] for r in rows], SCHEMA.field(name).type) for i, name in enumerate(SCHEMA.names)})
+        pq.write_table(table, str(path / f"part-{k:03d}.parquet"), row_group_size=RG)
+    cwd = os.getcwd()
+    os.chdir(root)
+    opteryx.register_workspace("gbfew", DiskConnector)
+    yield
+    os.chdir(cwd)
 
 
 def _rows(sql):
@@ -33,7 +83,7 @@ def test_few_groups_match_ungrouped_per_group():
         f"AVG(l_extendedprice), COUNT(l_tax), COUNT(*), SUM(l_extendedprice * (1 - l_discount)) "
         f"FROM {T} GROUP BY l_returnflag, l_linestatus"
     )
-    assert 3 <= len(grouped) <= 6
+    assert len(grouped) == len(FLAG_STATUS)
     for flag, status, sq, sl, avgp, ct, cs, rev in grouped:
         (ref,) = _rows(
             f"SELECT SUM(l_quantity), SUM(l_linenumber), AVG(l_extendedprice), COUNT(l_tax), "
@@ -50,7 +100,7 @@ def test_few_groups_with_filter_and_nulls():
         f"SELECT l_shipmode, SUM(NULLIF(l_linenumber, 3)), COUNT(NULLIF(l_linenumber, 3)), COUNT(*) "
         f"FROM {T} WHERE l_quantity < 5 GROUP BY l_shipmode"
     )
-    assert len(grouped) == 7
+    assert len(grouped) == len(SHIPMODES)
     for mode, s, c, n in grouped:
         (ref,) = _rows(
             f"SELECT SUM(NULLIF(l_linenumber, 3)), COUNT(NULLIF(l_linenumber, 3)), COUNT(*) "

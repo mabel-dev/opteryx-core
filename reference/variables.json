@@ -273,6 +273,30 @@
         "default_source": "environment",
         "environment_key": "GCP_PROJECT_ID"
     },
+    "gcs_grpc_connections": {
+        "name": "gcs_grpc_connections",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "GCS_GRPC_CONNECTIONS"
+    },
+    "gcs_transport": {
+        "name": "gcs_transport",
+        "type": "VARCHAR",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "GCS_TRANSPORT"
+    },
     "http_max_bytes_in_flight": {
         "name": "http_max_bytes_in_flight",
         "type": "INT64",

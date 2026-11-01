@@ -502,6 +502,7 @@ DEF _NT_EXTRACTION_OPERATOR = 46
 cdef dict _OP_CODES = None
 cdef object _LogicalCategory_DATE = None
 cdef object _LogicalCategory_TIMESTAMP = None
+cdef object _LogicalCategory_NULL = None
 cdef object _LogicalCategory_BOOLEAN = None
 cdef object _LogicalCategory_VARCHAR = None
 cdef object _LogicalCategory_ARRAY = None
@@ -1210,7 +1211,7 @@ cdef inline _ensure_sql_types():
     global _LogicalCategory_DATE, _LogicalCategory_TIMESTAMP, _LogicalCategory_BOOLEAN
     global _LogicalCategory_VARCHAR, _LogicalCategory_ARRAY, _LogicalCategory_BLOB
     global _STRING_FAMILY
-    global _LogicalCategory_VARIANT
+    global _LogicalCategory_VARIANT, _LogicalCategory_NULL
     global _LogicalKind_IPV4
     if _LogicalCategory_DATE is None:
         from draken.draken_native import LogicalKind
@@ -1223,6 +1224,7 @@ cdef inline _ensure_sql_types():
         _LogicalCategory_ARRAY = LogicalCategory.ARRAY
         _LogicalCategory_BLOB = LogicalCategory.VARBINARY
         _LogicalCategory_VARIANT = LogicalCategory.VARIANT
+        _LogicalCategory_NULL = LogicalCategory.NULL
         # Types valid as the LEFT operand of an extraction operator (-> ->> [i]).
         # Includes VARIANT so JSON access chains (a -> b ->> c) with no user cast.
         # NOTE: MapAccess excludes VARIANT explicitly - see the guard in _linearize.
@@ -3982,6 +3984,9 @@ cdef _validate_temporal_at_bind(
 
     cdef int non_temporal_nt = right_nt if left_is_temporal else left_nt
     non_temporal_side = "right" if left_is_temporal else "left"
+    # an untyped NULL is no ambiguous string: `date_col = NULL` is NULL
+    if (_rcat if left_is_temporal else _lcat) is _LogicalCategory_NULL:
+        return
 
     if non_temporal_nt != _NT_IDENTIFIER:
         from opteryx.exceptions import IncompatibleTypesError

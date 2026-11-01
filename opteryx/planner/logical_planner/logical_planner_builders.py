@@ -996,6 +996,8 @@ def cast(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
         if source_expr.node_type == NodeType.LITERAL and source_expr.type is not None
         else None
     )
+    if source_expr.node_type == NodeType.LITERAL and source_expr.value is None:
+        _source_category = LogicalCategory.NULL  # a typed null is still a null
     if _base_target == "ARRAY":
         _fold_target = _source_category in (LogicalCategory.ARRAY, LogicalCategory.NULL)
     elif _base_target == "NVARCHAR":
@@ -1003,8 +1005,11 @@ def cast(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
         # node's NVARCHAR arm is string-sourced), so it folds to a typed null —
         # `_materialise_constant_literal` builds the NVARCHAR null constant.
         _fold_target = _source_category == LogicalCategory.NULL
+    elif _base_target == "DECIMAL":
+        # Same as NVARCHAR: a NULL source folds to a typed null, which needs no kernel.
+        _fold_target = _source_category == LogicalCategory.NULL
     else:
-        _fold_target = _base_target not in ("NVARCHAR", "DECIMAL")
+        _fold_target = _base_target != "NVARCHAR"
 
     if (
         source_expr.node_type == NodeType.LITERAL
@@ -1431,8 +1436,7 @@ def column_type_from_ast(branch, *, plan_context) -> "ColumnType":
     `branch` is the AST node holding a "data_type" key (a column definition).
     """
     from opteryx.planner import build_literal_node
-    from opteryx.types.logical_type import TIMESTAMP as _CT_TIMESTAMP_F
-    from opteryx.types.logical_type import parse_column_type, try_parse_column_type
+    from opteryx.types.logical_type import try_parse_column_type
 
     params: list = []
     raw_name = _extract_data_type(branch["data_type"], branch, params, build_literal_node, plan_context=plan_context)
@@ -1454,6 +1458,15 @@ def column_type_from_ast(branch, *, plan_context) -> "ColumnType":
         if _aliased is not None:
             return _aliased
         raise
+
+    return _column_type_for(normalized, params)
+
+
+def _column_type_for(normalized: str, params) -> "ColumnType":
+    """The ColumnType a normalised type name plus its parenthesised `params` names —
+    shared by declared column types and typed NULL casts, so both read a name alike."""
+    from opteryx.types.logical_type import TIMESTAMP as _CT_TIMESTAMP_F
+    from opteryx.types.logical_type import parse_column_type
 
     # TIMESTAMP[unit] — the unit is part of the type, not a parameter of it.
     _units = _timestamp_unit_forms()
@@ -1520,10 +1533,11 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     # vector (data==NULL, validity==NULL ⇒ all-valid) and read as a garbage
     # string arena by concat/LIKE, emitting non-null junk. Stamp the resolved
     # string-family ColumnType so the constant materialises as a typed null
-    # string. DECIMAL never reaches here (routed to the runtime CAST node), and
-    # NVARCHAR reaches here ONLY with a NULL source. NUMERIC targets are stamped too — see the branch below for why the
+    # string. DECIMAL and NVARCHAR reach here ONLY with a NULL source. NUMERIC targets are stamped too — see the branch below for why the
     # "kernels short-circuit on DRAKEN_NULL" reasoning did not hold for them.
-    if _node_cat == LogicalCategory.NULL:
+    # A TYPED null (`CAST(CAST(NULL AS DATE) AS TIMESTAMP)`) is NULL too: casting it
+    # yields NULL of the target type, never a value conversion of None.
+    if _node_cat == LogicalCategory.NULL or literal_node.value is None:
         if target_type.replace("TRY_", "") == "VARCHAR":
             return Literal(value=None, type=_CT_VARCHAR, alias=alias, arena=literal_node.arena)
         if target_type.replace("TRY_", "") == "NVARCHAR":
@@ -1578,14 +1592,22 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         # VARBINARY null reaching the string-concat closure would be stringified
         # (VARBINARY is not in its string allow-list). Those two are
         # the same shape as the BOOLEAN gap above and are still open.
-        from opteryx.types.logical_type import try_parse_column_type as _try_parse_ct
-
-        _null_ct = _try_parse_ct(target_type.replace("TRY_", ""))
+        #
+        # DECIMAL and DATE/TIMESTAMP/TIME pass the same test: `AVG(CAST(NULL AS
+        # DECIMAL(12,3)))`, `MIN(CAST(NULL AS TIMESTAMP))` and a CASE branch of one
+        # were refused while the column forms run. Their descriptor (precision/scale,
+        # unit) is in the stamped ColumnType, which `_materialise_constant_literal`
+        # reads. INTERVAL has no null constant there and stays untyped.
+        _null_ct = _column_type_for(target_type.replace("TRY_", ""), params)
         if (
-            _null_ct is not None
-            and _null_ct.logical is None
+            _null_ct.logical is None
             and _null_ct.category
             in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.BOOLEAN)
+        ) or _null_ct.category in (
+            LogicalCategory.DECIMAL,
+            LogicalCategory.DATE,
+            LogicalCategory.TIMESTAMP,
+            LogicalCategory.TIME,
         ):
             return Literal(value=None, type=_null_ct, alias=alias, arena=literal_node.arena)
         return Literal(type=_CT_NULL, alias=alias, arena=literal_node.arena)
@@ -2762,23 +2784,55 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None, *, plan_context
                 f"but `{format_expression(not_literal[0])}` does not."
             )
 
+    # A NULL member is the comparison IN expands to (ruled 2026-11-01): `x IN (a, NULL)`
+    # is `x = a OR x = NULL`, `x NOT IN (a, NULL)` is `x != a AND x != NULL`. So the
+    # NULLs leave the list and come back as ONE `x = NULL` / `x != NULL`, whose NULL
+    # turns every non-match into NULL through the ordinary three-valued OR / AND.
+    null_nodes = [v for v in value_nodes if v.value is None]
+    value_nodes = [v for v in value_nodes if v.value is not None]
+
     element_ct_set = {v.type for v in value_nodes}
     if len(element_ct_set) > 1:
         raise ArrayWithMixedTypesError("Array in IN condition has values with mixed types. Every element has to share one type; cast them so they match.")
     element_ct = element_ct_set.pop() if element_ct_set else _CT_VARIANT
-    operator = "NotInList" if branch["negated"] else "InList"
-    right_node = Literal(
-        type=_CT_ARRAY(element_ct),
-        value=tuple(v.value for v in value_nodes),
-        arena=plan_context.expressions,
-    )
-    return Comparison(
-        value=operator,
+    negated = branch["negated"]
+    # typed NULL members must share the members' type family too (untyped ones take
+    # any); by category, as a folded DECIMAL member's precision is its value's own
+    typed_null_set = {v.type.category for v in null_nodes if v.type is not None and v.type.category != LogicalCategory.NULL}
+    if len(typed_null_set) > 1 or (value_nodes and typed_null_set and typed_null_set != {element_ct.category}):
+        raise ArrayWithMixedTypesError("Array in IN condition has values with mixed types. Every element has to share one type; cast them so they match.")
+
+    null_test = None
+    if null_nodes:
+        null_test = Comparison(
+            value="NotEq" if negated else "Eq",
+            left=build(branch["expr"], plan_context=plan_context) if value_nodes else left_node,
+            # a typed NULL if there is one: it is the type-checked operand
+            right=next((v for v in null_nodes if v.type is not None and v.type.category != LogicalCategory.NULL), null_nodes[0]),
+            alias=None if value_nodes else alias,
+            arena=plan_context.expressions,
+        )
+        if not value_nodes:
+            return null_test
+
+    list_test = Comparison(
+        value="NotInList" if negated else "InList",
         left=left_node,
-        right=right_node,
-        alias=alias,
+        right=Literal(
+            type=_CT_ARRAY(element_ct),
+            value=tuple(v.value for v in value_nodes),
+            arena=plan_context.expressions,
+        ),
+        alias=None if null_test is not None else alias,
         arena=plan_context.expressions,
     )
+    if null_test is None:
+        return list_test
+    combined = (And if negated else Or)(arena=plan_context.expressions)
+    combined.left = list_test
+    combined.right = null_test
+    combined.alias = alias
+    return combined
 
 
 def in_subquery(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):

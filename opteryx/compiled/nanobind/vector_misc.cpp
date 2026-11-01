@@ -388,6 +388,24 @@ void register_vector_misc(nb::module_ &m) {
     m.def("vector_in_list",
         [](nb::object v_obj, nb::object literals, bool negate) -> nb::object {
             const DrakenVector* dv = unwrap(v_obj);
+            if (dv->type == DRAKEN_NULL) {
+                // An untyped NULL operand: `NULL IN (...)` is NULL on every row,
+                // and so is its negation.
+                const uint32_t n      = dv->length;
+                const uint32_t bm     = (n + 7u) >> 3;
+                const uint32_t padded = (bm + 7u) & ~7u;
+                const size_t   vbytes = padded > 0u ? padded : 8u;
+                uint8_t* dst = draken::ops::cmp_alloc_bool_buf(n);
+                uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+                if (!validity) { draken_free(dst); throw std::bad_alloc(); }
+                std::memset(validity, 0x00u, vbytes);
+                VecResult r;
+                r.data = dst; r.validity = validity;
+                r.selection = draken_identity_sel(n); r.owns_selection = false;
+                r.data_length = n; r.length = n; r.type = DRAKEN_BOOL;
+                r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+                return wrap(r);
+            }
             CarcharSet set = build_carchar_from_list(literals, dv->type);
             VecResult res = dispatch_in_list(*dv, set);
             if (negate)
