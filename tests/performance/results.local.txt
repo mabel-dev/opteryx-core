@@ -10,7 +10,7 @@ make clickbench-orc             6486ms (29-OCT)
 make tpch-sf1                  273.8ms (31-OCT) [0.79x]
 make tpch-sf10                1509.2ms (31-OCT) [0.41x]
 make tpch-sf100              20814.2ms (22-OCT) [0.68x]
-make tpcds-sf001               708.0ms (31-OCT) [1.24x]
+make tpcds-sf001               706.7ms (01-NOV) [1.23x]
 make tpcds-sf1                1962.9ms (31-OCT) [1.23x]
 make ssb-sf1                   104.1ms (31-OCT) [0.88x]
 make ssb-sf10                  570.8ms (32-OCT) [0.67x]
@@ -20,7 +20,7 @@ make job                      3709.9ms (18-OCT) [0.55x]
 make h2o                     11380.0ms (22-OCT) [0.43x] [MEDIUM]
 make jsonbench-10-jsonl        862.8ms (22-OCT) [0.33x] [? @ 909.0ms last JSONBench]
 make jsonbench-10-zstd        1624.0ms (27-OCT) [0.63x]
-make dash                       73.2ms (31-OCT) [0.84x]
+make dash                       71.6ms (01-NOV) [0.82x]
 make signals                   168.1ms (18-OCT)
 
 make tpch-sf10-aistor                      3104ms    (29-OCT) [0.84x]

@@ -288,7 +288,12 @@ REGISTER: List[Gap] = [
         id="reference-overflow-on-rows-never-output",
         kind=SIGNATURE,
         outcome="reference_error",
-        signatures=("Overflow in addition of INT64", "Overflow in subtraction of INT64", "Overflow in multiplication of INT64"),
+        signatures=(
+            "Overflow in addition of INT64",
+            "Overflow in subtraction of INT64",
+            "Overflow in multiplication of INT64",
+            "Could not cast value",
+        ),
         query=lambda: Query(
             tables=(
                 Table("t0", (Column("c0", Ty.STR),), ()),
@@ -302,7 +307,8 @@ REGISTER: List[Gap] = [
             "EVALUATION ORDER, the mirror of 'overflow-on-rows-never-output': DuckDB "
             "pushes a WHERE on the right side of a LEFT JOIN below the join and raises "
             "INT64 overflow on a row no output row can carry (the left side is empty); "
-            "Opteryx answers 0 rows. LIMITATION: this would also absorb Opteryx silently "
+            "Opteryx answers 0 rows. Same for a CAST it pushes below an INNER join (`CAST("
+            "BIGINT_MAX AS DECIMAL(12,3))` on a row whose key `Infinity` matches nothing). LIMITATION: this would also absorb Opteryx silently "
             "wrapping a value DuckDB overflowed on; Opteryx's ruled behaviour is to raise "
             "on INT64 overflow, which 'overflow-on-rows-never-output' shows it does."
         ),
