@@ -197,11 +197,6 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             arena=context.plan_context.expressions,
         )
     if node.on:
-        # All conditions have been mapped to 'on' conditions
-        comparisons = get_all_nodes_of_type(node.on, (NodeType.COMPARISON_OPERATOR,))
-        if not all(com.value in ("Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq") for com in comparisons):
-            raise UnsupportedSyntaxError("Only JOINs with equals comparisons supported.")
-
         if not node.left_relation_names and node.right_relation_names:
             # IN-subquery rewrites: both outer and inner may share a column name (e.g. "id").
             # Bind each side of the ON condition in a restricted context to avoid
@@ -254,6 +249,7 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
 
             raise IncompatibleTypesError(**mismatches)
 
+        comparisons = get_all_nodes_of_type(node.on, (NodeType.COMPARISON_OPERATOR,))
         if any(
             com.left.schema_column.category == LogicalCategory.DECIMAL and com.value not in ("Eq", "NotEq")
             for com in comparisons

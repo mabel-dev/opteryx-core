@@ -179,6 +179,7 @@ def test_null_member_scenarios(sql, expected):
     ],
 )
 def test_mistyped_lists_are_still_refused(condition):
+    assert issubclass(opteryx.exceptions.IncompatibleTypesError, opteryx.exceptions.SqlError)
     with pytest.raises(opteryx.exceptions.SqlError):
         _rows(f"SELECT id FROM testdata.planets WHERE {condition}")
 

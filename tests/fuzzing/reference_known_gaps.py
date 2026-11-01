@@ -38,7 +38,6 @@ from tests.fuzzing.reference_grammar import Agg
 from tests.fuzzing.reference_grammar import Between
 from tests.fuzzing.reference_grammar import Binary
 from tests.fuzzing.reference_grammar import Case
-from tests.fuzzing.reference_grammar import Cast
 from tests.fuzzing.reference_grammar import Col
 from tests.fuzzing.reference_grammar import Column
 from tests.fuzzing.reference_grammar import INT64_MAX
@@ -46,7 +45,6 @@ from tests.fuzzing.reference_grammar import INT64_MIN
 from tests.fuzzing.reference_grammar import IsNull
 from tests.fuzzing.reference_grammar import Join
 from tests.fuzzing.reference_grammar import Lit
-from tests.fuzzing.reference_grammar import Not
 from tests.fuzzing.reference_grammar import Query
 from tests.fuzzing.reference_grammar import Table
 from tests.fuzzing.reference_grammar import Ty
@@ -192,28 +190,6 @@ REGISTER: List[Gap] = [
             "('fail loud, never a wrapped answer'); DuckDB widens SUM(BIGINT) to HUGEINT "
             "and answers, PostgreSQL widens to numeric. Registered ahead of "
             "'overflow-on-rows-never-output' so the SUM message is not absorbed there."
-        ),
-    ),
-    Gap(
-        id="cast-of-compound-predicate-refused-in-filter",
-        kind=SIGNATURE,
-        outcome="opteryx_error",
-        signatures=("a CAST in a filter predicate",),
-        query=lambda: Query(
-            tables=(_one_row((Ty.INT, 1)),),
-            items=(Col("t0", "c0", Ty.INT),),
-            where=Binary(
-                "<",
-                Cast(Not(Binary(">", Col("t0", "c0", Ty.INT), Lit(Ty.INT, 3), Ty.BOOL)), Ty.INT),
-                Lit(Ty.INT, 5),
-                Ty.BOOL,
-            ),
-        ),
-        detail=(
-            "REFUSAL. In a WHERE, CAST(<AND / BETWEEN / NOT predicate> AS INT64) is refused "
-            "('outside the c-native kernel set'); the same cast over a plain comparison or "
-            "an OR runs, and every form runs in a projection. Note the refusal message "
-            "renders `CAST(NOT (id > 3) AS INT64) < 5` as `id <= 3::INT64 < 5`."
         ),
     ),
     Gap(

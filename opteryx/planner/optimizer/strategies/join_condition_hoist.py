@@ -78,6 +78,7 @@ from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanSt
 from opteryx.utils import random_string
 
 from .disjunction_simplification import _build_and, _split_and
+from .join_algorithm import _NON_EQUI_COMPARATORS
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
@@ -110,8 +111,13 @@ def _unwrap(node):
     return node
 
 
-def _is_comparison(conjunct) -> bool:
-    return _unwrap(conjunct).node_type == NodeType.COMPARISON_OPERATOR
+def _is_join_comparison(conjunct) -> bool:
+    # The join evaluates a key (`=`) or a theta residual per pair; any other
+    # comparison (IN, LIKE, ...) across both legs is a WHERE, or it is dropped.
+    unwrapped = _unwrap(conjunct)
+    return unwrapped.node_type == NodeType.COMPARISON_OPERATOR and (
+        unwrapped.value == "Eq" or unwrapped.value in _NON_EQUI_COMPARATORS
+    )
 
 
 def _is_equality(conjunct) -> bool:
@@ -168,7 +174,7 @@ class JoinConditionHoistStrategy(OptimizationStrategy):
 
             if node.type == "inner":
                 # key and theta comparisons stay; everything else is a WHERE
-                if two_sided and _is_comparison(conjunct):
+                if two_sided and _is_join_comparison(conjunct):
                     kept.append(conjunct)
                 elif single_leg or two_sided:
                     hoisted.append(conjunct)

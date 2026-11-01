@@ -53,10 +53,46 @@ def test_typed_null_runs(sql, expected):
     assert _rows(sql) == expected
 
 
-@pytest.mark.parametrize("target,type_name", [("DECIMAL(12,3)", "DECIMAL(12, 3)"), ("DATE", "DATE"), ("TIMESTAMP", "TIMESTAMP[us]"), ("TIME", "TIME[us]")])
+@pytest.mark.parametrize(
+    "target,type_name",
+    [
+        ("DECIMAL(12,3)", "DECIMAL(12, 3)"),
+        ("DATE", "DATE"),
+        ("TIMESTAMP", "TIMESTAMP[us]"),
+        ("TIME", "TIME[us]"),
+        ("VARBINARY", "VARBINARY"),
+        ("UUID", "UUID"),
+        ("IPV4", "IPV4"),
+        ("INTERVAL", "INTERVAL"),
+    ],
+)
 def test_typed_null_keeps_its_type(target, type_name):
     morsel = next(iter(opteryx.session().execute_to_morsels(f"SELECT CAST(NULL AS {target}) AS x")))
     assert morsel.column(morsel.column_names[0]).type_name == type_name
+
+
+@pytest.mark.parametrize(
+    "sql,expected",
+    [
+        # each was refused over "type `NULL`" while the column form runs
+        ("SELECT LENGTH(CAST(NULL AS VARBINARY)) AS x", [(None,)]),
+        ("SELECT MAX(CAST(NULL AS VARBINARY)) AS x FROM $planets", [(None,)]),
+        ("SELECT MIN(CAST(NULL AS UUID)) AS x FROM $planets", [(None,)]),
+        ("SELECT MAX(CAST(NULL AS IPV4)) AS x FROM $planets", [(None,)]),
+        ("SELECT COUNT(*) FROM $planets WHERE CAST(NULL AS IPV4) <<= '10.0.0.0/8'", [(0,)]),
+        ("SELECT COUNT(DISTINCT CAST(NULL AS VARBINARY)) AS x FROM $planets", [(0,)]),
+        ("SELECT CAST(NULL AS VARBINARY) = CAST('a' AS VARBINARY) AS x", [(None,)]),
+    ],
+)
+def test_more_typed_nulls_run(sql, expected):
+    assert _rows(sql) == expected
+
+
+def test_date_plus_null_interval_is_a_timestamp():
+    morsel = next(iter(opteryx.session().execute_to_morsels(
+        "SELECT CAST('2020-01-01' AS DATE) + CAST(NULL AS INTERVAL) AS x")))
+    assert morsel.column(morsel.column_names[0]).type_name == "TIMESTAMP[us]"
+    assert list(morsel.column(morsel.column_names[0])) == [None]
 
 
 def test_parenthesised_nulls_of_different_types_stay_apart():
