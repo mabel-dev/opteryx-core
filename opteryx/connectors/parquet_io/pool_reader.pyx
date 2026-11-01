@@ -1126,6 +1126,8 @@ cdef class CppIOPipeline:
             # and the compressed bytes it bought that a cancel then discarded.
             "fetch_ahead_depth": self.pipeline.fetch_ahead_depth(),
             "prefetch_discarded_bytes": self.pipeline.prefetch_discarded_bytes(),
+            # How this scan's gs:// ranges travel, read back from the pipeline.
+            "gcs_transport": "grpc" if self.pipeline.gcs_grpc_connections() > 0 else "rest",
             # Memory admission: the budget the pipeline actually runs (0 = off) —
             # the read-back that proves `parquet_io_memory_budget_bytes` bound —
             # the peak it held, and whether the gate ever bit.
@@ -3509,6 +3511,7 @@ cdef class NativeScanPlan:
             # the native path can prove the knob bound and see the waste.
             "fetch_ahead_depth": self.pipeline_ptr.fetch_ahead_depth(),
             "prefetch_discarded_bytes": self.pipeline_ptr.prefetch_discarded_bytes(),
+            "gcs_transport": "grpc" if self.pipeline_ptr.gcs_grpc_connections() > 0 else "rest",
             # Memory admission + PageIndex read-backs — see CppIOPipeline.diagnostics().
             "memory_budget_bytes": self.pipeline_ptr.memory_budget_bytes(),
             "memory_held_high_watermark": self.pipeline_ptr.memory_held_high_watermark(),

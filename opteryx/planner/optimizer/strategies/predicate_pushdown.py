@@ -1599,6 +1599,25 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     self.telemetry.optimization_predicate_pullup_implied += 1
                             on_clause_build_filters = on_clause_build_filters + derived
                     context.collected_predicates = on_clause_build_filters + other_predicates
+                elif node.type == "right outer":
+                    # The mirror of LEFT OUTER's first rule: an ON conjunct naming only
+                    # the LEFT (null-supplying) leg is a match-candidate pre-filter and
+                    # keeps flowing down to that leg. Dumped above the join it dropped
+                    # the unmatched right rows (`p.id = 4` answered 2 rows, not 177).
+                    on_clause_build_filters = [
+                        p
+                        for p in context.collected_predicates
+                        if p.from_join_on
+                        and all(
+                            i.source in node.left_relation_names
+                            for i in get_all_nodes_of_type(p.condition, (NodeType.IDENTIFIER,))
+                        )
+                    ]
+                    context.collected_predicates = on_clause_build_filters + [
+                        p
+                        for p in context.collected_predicates
+                        if p not in on_clause_build_filters and not _dump_above(p)
+                    ]
                 elif node.type not in ("cross join", "inner", "inner not-distinct"):
                     # dump all the predicates
                     # IMPROVE: push past SEMI and ANTI joins

@@ -5382,6 +5382,8 @@ class ParquetIOPipeline {
     // number of range GETs that can be in flight independent of decode. This
     // is the read-back that proves the knob reached the pipeline.
     int fetch_ahead_depth() const { return fetch_ahead_; }
+    // 0 = REST, else DirectPath's connection count — the read-back of GCS_TRANSPORT.
+    int gcs_grpc_connections() const { return gcs_grpc_connections_; }
     uint64_t prefetch_discarded_bytes() const {
         return prefetch_discarded_bytes_.load(std::memory_order_relaxed);
     }
