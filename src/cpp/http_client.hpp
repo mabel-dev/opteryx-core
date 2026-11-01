@@ -273,6 +273,13 @@ public:
     // (surfaced in the IO pipeline diagnostics); not reset per query.
     static uint64_t total_retries();
 
+    /**
+     * Probe common CA bundle locations and return the first readable one.
+     * Returns empty string if none found (curl uses its built-in default).
+     * Public so the DirectPath reader verifies against the same bundle.
+     */
+    static std::string find_ca_bundle();
+
 private:
     void*       share_handle_;                   // CURLSH* — shared connection/DNS cache
     std::mutex  share_mutexes_[CURL_LOCK_DATA_LAST]; // one mutex per curl_lock_data type
@@ -281,12 +288,6 @@ private:
     bool        deny_private_;                   // refuse non-public peers (see ctor)
     std::string user_agent_;
     std::string ca_bundle_;                      // Path to CA bundle found at init time
-
-    /**
-     * Probe common CA bundle locations and return the first readable one.
-     * Returns empty string if none found (curl uses its built-in default).
-     */
-    static std::string find_ca_bundle();
 
     /**
      * Apply CA bundle and SSL verification settings to a CURL easy handle.

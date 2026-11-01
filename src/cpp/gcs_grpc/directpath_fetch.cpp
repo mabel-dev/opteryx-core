@@ -22,6 +22,8 @@ GcsGrpcClient& process_client(int connections) {
         GcsGrpcClient::Options o;
         o.direct_path = true;
         o.connections = connections;
+        // The wheel's vendored OpenSSL has no usable default verify paths on the host.
+        o.ca_file = HttpClient::find_ca_bundle();
         o.on_received = &http_link::note_received;
         g_client = std::make_unique<GcsGrpcClient>(o);
         g_connections = connections;
