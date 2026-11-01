@@ -49,12 +49,9 @@ MIN_FILE_SIZE_BYTES = MIN_FILE_SIZE_MB * _MB
 # The catalog carried this as a flat 8704 MB, which is 2.073x the same max file
 # size — so this is the ratio already in use, expressed as one.
 #
-# ⛔ This bounds WORK PER PASS, not memory directly. But because the engine's
-# SortSink has no spill (docs/SORT_SPILL_DESIGN.md is design-only), a pass must
-# also FIT IN MEMORY, so the budget and the container size are coupled: at a
-# 16 GiB container the sort's peak multiplier must come in at or under 1.62x for
-# this budget to fit. See D-14 in the design doc. If it does not, this number is
-# what gives — that is an architect decision, not a silent adjustment.
+# This bounds WORK PER PASS, not memory: the sort-aware pass's ORDER BY spills
+# sorted runs of SORT_RUN_BYTES (config.py) and merges them, so its resident
+# memory is set by that budget, not by this one. A brute pass never sorts.
 PASS_BUDGET_RATIO = 2.1
 PASS_BUDGET_BYTES = int(MAX_FILE_SIZE_MB * PASS_BUDGET_RATIO) * _MB
 

@@ -432,6 +432,32 @@ def _vendored_curl_static_libs(curl_build):
     return result.stdout.split()
 
 
+def resolve_nghttp2():
+    """Return (include_dirs, link_args) for libnghttp2.
+
+    The native GCS gRPC reader (src/cpp/gcs_grpc) drives nghttp2 directly, not
+    through libcurl, so it needs the headers and -lnghttp2 in its own right.
+    nghttp2 is already a build requirement (the vendored curl is built
+    --with-nghttp2, and CI installs libnghttp2-dev), so this adds no new
+    dependency. Hard-fails when pkg-config does not know it.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("pkg-config"):
+        cflags = subprocess.run(
+            ["pkg-config", "--cflags-only-I", "libnghttp2"], capture_output=True, text=True
+        )
+        libs = subprocess.run(["pkg-config", "--libs", "libnghttp2"], capture_output=True, text=True)
+        if cflags.returncode == 0 and libs.returncode == 0:
+            include_dirs = [flag[2:] for flag in cflags.stdout.split() if flag.startswith("-I")]
+            return include_dirs, libs.stdout.split()
+    raise RuntimeError(
+        "libnghttp2 not found via pkg-config; the GCS gRPC reader needs it. Install the "
+        "nghttp2 development package (manylinux: libnghttp2-devel; macOS: brew install libnghttp2)."
+    )
+
+
 def resolve_libcurl():
     """Return (include_dirs, link_args, select_fd_limit) for libcurl.
 
@@ -549,10 +575,13 @@ _curl_link_args: list[str] = []
 _curl_define_macros: list[tuple[str, str]] = []
 _openssl_include_dirs: list[str] = []
 _openssl_link_args: list[str] = []
+_nghttp2_include_dirs: list[str] = []
+_nghttp2_link_args: list[str] = []
 if not _skip_build and not _DRAKEN_BUILD:
     _curl_include_dirs, _curl_link_args, _curl_select_fd_limit = resolve_libcurl()
     _curl_define_macros = [("OPTERYX_CURL_SELECT_FD_LIMIT", str(_curl_select_fd_limit))]
     _openssl_include_dirs, _openssl_link_args = resolve_openssl()
+    _nghttp2_include_dirs, _nghttp2_link_args = resolve_nghttp2()
 
 
 # The `created_by` rugo stamps into every parquet footer from THIS wheel. Bound
@@ -1363,6 +1392,28 @@ if not _skip_build and not _DRAKEN_BUILD:
             extra_compile_args=CPP_FLAGS,
             extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
             language="c++",
+        )
+    )
+    # GCS gRPC reader (design docs/GCS_DIRECTPATH_READS_DESIGN.md). Phase 1: a
+    # test-only entry point; the engine links the same sources natively in Phase 2.
+    extensions.append(
+        Extension(
+            name="opteryx.compiled.gcs_grpc",
+            sources=[
+                "opteryx/compiled/gcs_grpc.pyx",
+                "src/cpp/gcs_grpc/grpc_conn.cpp",
+                "src/cpp/gcs_grpc/gcs_grpc_client.cpp",
+            ],
+            include_dirs=include_dirs + ["src/cpp"] + _nghttp2_include_dirs + _openssl_include_dirs,
+            extra_compile_args=CPP_FLAGS,
+            extra_link_args=_nghttp2_link_args + _openssl_link_args,
+            language="c++",
+            depends=[
+                "src/cpp/gcs_grpc/grpc_conn.hpp",
+                "src/cpp/gcs_grpc/gcs_grpc_client.hpp",
+                "src/cpp/gcs_grpc/crc32c.hpp",
+                "src/cpp/gcs_grpc/pb_wire.hpp",
+            ],
         )
     )
 

@@ -82,12 +82,17 @@ enum class JoinMode : uint8_t {
     // The two prices are the planner's, not this file's, and are the same two the RIGHT
     // SEMI/ANTI exchange documents: it is BLOCKING (nothing emits until the streamed leg
     // is exhausted), and the tail's rows arrive in BUILD order.
-    RightOuter = 8
+    RightOuter = 8,
+    // Inner under IS NOT DISTINCT FROM: a NULL key matches a NULL key. The join an
+    // aggregate window (`agg(x) OVER (PARTITION BY c)`) is rewritten to, which joins
+    // each row back to its partition's aggregate — the NULL partition is a partition.
+    InnerNotDistinct = 9
 };
 
 // Does this mode compare keys with IS NOT DISTINCT FROM (NULL equals NULL)?
 inline bool join_mode_null_equal(JoinMode m) {
-    return m == JoinMode::SemiNotDistinct || m == JoinMode::AntiNotDistinct;
+    return m == JoinMode::SemiNotDistinct || m == JoinMode::AntiNotDistinct
+        || m == JoinMode::InnerNotDistinct;
 }
 
 // Is this an ARRAY column that cannot have NULL rows gathered against it?
@@ -3062,9 +3067,11 @@ struct DeferredJoin2Probe : Operator {
                 const bool build_preserved = mode == JoinMode::FullOuter
                                              || mode == JoinMode::RightOuter;
                 radix_inner = std::make_unique<RadixJoin2ProbeOperator>(
-                    key_idx, payload_idx, ref, probe_preserved, build_preserved);
+                    key_idx, payload_idx, ref, probe_preserved, build_preserved,
+                    join_mode_null_equal(mode));
                 inner = std::make_unique<Join2ProbeOperator>(
-                    key_idx, payload_idx, ref, probe_preserved, build_preserved);
+                    key_idx, payload_idx, ref, probe_preserved, build_preserved,
+                    join_mode_null_equal(mode));
             }
         });
         return active()->make_state();

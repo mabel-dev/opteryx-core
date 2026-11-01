@@ -494,6 +494,9 @@ def _inner_join_supported(join) -> bool:
 # The modes the planner names by the logical type itself are listed with None.
 _JOIN_OPERATORS = {
     "inner": ("Inner Join", "inner"),
+    # INNER under IS NOT DISTINCT FROM (NULL equals NULL): the join an aggregate
+    # window's partition is rewritten to (window_to_join).
+    "inner not-distinct": ("Inner Join", "inner not-distinct"),
     "nested loop": ("Nested Loop Join", "nested_loop"),
     "left outer": ("Outer Join", None),
     "full outer": ("Outer Join", None),
@@ -526,7 +529,7 @@ def _create_join_node(logical_node, query_properties, registry, output_rows_esti
         # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
         raise InvalidInternalStateError(f"Unsupported JOIN type '{join_type}'")
     name, mode = operator
-    if join_type == "inner" and not _inner_join_supported(logical_node):
+    if join_type in ("inner", "inner not-distinct") and not _inner_join_supported(logical_node):
         # NotSupportedError, not UnsupportedSyntaxError: the statement parsed and bound
         # fine, so nothing about the SQL is wrong - the engine's inner-join operator
         # simply has no plan for this shape. Naming Draken told the reader about a

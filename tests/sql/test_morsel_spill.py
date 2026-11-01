@@ -167,6 +167,86 @@ def test_startup_sweep_collects_dead_owners():
         assert got["live_kept"] == "True", out
 
 
+# A tie-free total order with NULLs and a string key: duplicates of `k` are broken by
+# `s`, so the spilled and in-memory answers must match row for row.
+_RUN_SOURCE = (
+    "(SELECT s, CASE WHEN s % 97 = 0 THEN NULL "
+    "ELSE CAST((s * 7919) % 100003 AS VARCHAR) END AS k "
+    "FROM generate_series(1, 2000000) AS s) AS t"
+)
+
+
+def test_external_sort_runs_match_the_in_memory_sort():
+    """Past SORT_RUN_BYTES an ORDER BY sorts its input in runs, spills each as
+    64k-row row groups, and merges them (docs/SORT_SPILL_DESIGN.md, ruled
+    2026-11-01). Forcing many runs with a 4MB budget must give exactly the rows,
+    in exactly the order, of the same sort held in memory, and leave nothing on disk."""
+    with tempfile.TemporaryDirectory() as root:
+        out = _run_in_subprocess(
+            f"""
+            import hashlib
+            from opteryx import config
+
+            def digest(sql):
+                h = hashlib.sha256()
+                rows = 0
+                for m in opteryx.session().execute_to_morsels(sql):
+                    for i in range(m.num_rows):
+                        h.update(repr(m[i]).encode())
+                    rows += m.num_rows
+                return rows, h.hexdigest()
+
+            queries = [
+                "SELECT s, k FROM {_RUN_SOURCE} ORDER BY k DESC, s",
+                "SELECT s FROM {_RUN_SOURCE} ORDER BY k, s DESC",
+            ]
+            for i, sql in enumerate(queries):
+                config.SORT_RUN_BYTES = 1 << 40
+                reset_spill_telemetry()
+                expected = digest(sql)
+                print("ref_units", i, get_spill_telemetry()["units_written"])
+                config.SORT_RUN_BYTES = 4 * 1024 * 1024
+                reset_spill_telemetry()
+                got = digest(sql)
+                print("units", i, get_spill_telemetry()["units_written"])
+                print("same", i, got == expected, got[0])
+            """,
+            root,
+        )
+        lines = [line.split(" ") for line in out.strip().splitlines()]
+        for kind, i, *rest in lines:
+            if kind == "ref_units":
+                assert rest == ["0"], out
+            elif kind == "units":
+                # The point of the test: the sort actually wrote runs.
+                assert int(rest[0]) >= 2, out
+            else:
+                assert rest == ["True", "2000000"], out
+        leftovers = [f for _, _, files in os.walk(root) for f in files]
+        assert leftovers == [], leftovers
+
+
+def test_external_sort_without_spill_fails_loud():
+    """A sort past SORT_RUN_BYTES with no spill root raises, naming the budget —
+    never holding on past it, which is the OOM the budget exists to stop."""
+    import opteryx
+    from opteryx import config
+
+    saved = config.SORT_RUN_BYTES
+    config.SORT_RUN_BYTES = 4 * 1024 * 1024
+    try:
+        sql = f"SELECT s, k FROM {_RUN_SOURCE} ORDER BY k"
+        raised = None
+        try:
+            for _ in opteryx.session().execute_to_morsels(sql):
+                pass
+        except Exception as err:  # the engine's error type is not the contract here
+            raised = str(err)
+        assert raised is not None and "SORT_RUN_BYTES" in raised, raised
+    finally:
+        config.SORT_RUN_BYTES = saved
+
+
 def test_unconfigured_is_the_pre_spill_engine():
     """No KVSTORE_LOCATION: the same >512MB sort runs entirely resident."""
     import opteryx
@@ -188,4 +268,6 @@ if __name__ == "__main__":
     test_small_query_never_touches_disk()
     test_startup_sweep_collects_dead_owners()
     test_unconfigured_is_the_pre_spill_engine()
+    test_external_sort_runs_match_the_in_memory_sort()
+    test_external_sort_without_spill_fails_loud()
     print("✅ okay")

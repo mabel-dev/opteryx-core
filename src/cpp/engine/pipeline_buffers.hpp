@@ -87,6 +87,10 @@ struct SpillEnv {
 struct MorselBuffer {
     // ---- configuration (driver thread, plan build) ------------------------
     void configure(SpillEnv* env) { env_ = env; }
+    // A sort RUN's buffer: seal() writes the whole residue to disk even when the
+    // buffer never reached the flush trigger, so no part of a finished run stays
+    // resident beside the others while they merge.
+    void configure_run(SpillEnv* env) { env_ = env; spill_on_seal_ = true; }
     void set_label(const std::string& label) { if (label_.empty()) label_ = label; }
 
     // ---- write side -------------------------------------------------------
@@ -141,7 +145,7 @@ struct MorselBuffer {
         if (sealed_) return !failed_.load(std::memory_order_acquire);
         cv_.wait(lk, [this] { return !flush_active_; });
         sealed_ = true;
-        if (!units_.empty() && !resident_.empty()) {
+        if ((!units_.empty() || spill_on_seal_) && !resident_.empty()) {
             std::vector<MorselPtr> pile;
             pile.swap(resident_);
             const size_t nb = resident_bytes_;
@@ -445,6 +449,7 @@ struct MorselBuffer {
     std::vector<std::weak_ptr<SpillUnitReader>> maps_;
     size_t claims_ = 0;
     bool sealed_ = false;
+    bool spill_on_seal_ = false;   // configure_run
     bool flush_active_ = false;
     std::atomic<bool> spilled_{false};
     std::atomic<bool> failed_{false};

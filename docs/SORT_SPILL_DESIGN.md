@@ -1,8 +1,22 @@
 # External Sort — Spill to Disk / GCS
 
-**Status: DESIGN — NOT APPROVED, NOT IMPLEMENTED.**
-Nothing in this document has been built. It exists to be argued with. Every
-section marked **[D-n]** is a decision the architect owns; §12 collects them.
+**Status: §3 BUILT 2026-11-01 (local-disk runs only) — see "Delivered" below; the
+rest of this document is the original, unbuilt design.**
+
+**Delivered (architect ruling 2026-11-01).** `SortSink` accumulates input to
+`SORT_RUN_BYTES` (default 1 GiB, counted as the sink receives it), sorts it in memory,
+and writes it as a run of 65,536-row row groups through a spill-configured
+`MorselBuffer` — the existing skene `SpillStore` behind `KVSTORE_LOCATION`, so §4–§6
+(custom format, GCS tier, write auth) are superseded. The run's gather is streamed
+(`sort_morsels_streamed`): its dense output is never resident whole. `finalize`
+merges the runs (`merge_sorted_runs`) one row group per run at a time, through the
+same comparator as the in-memory sort (`sort_key_less`), into the sink's output
+buffer, which spills on its own (D-2 resolved as the buffer hand-off, not a lazy
+`MergeSource`). One budget for every ORDER BY; a sort that reaches it with spill
+unconfigured fails loud. Below the budget the path is the in-memory one. Motivating
+failure: `OPTIMIZE TABLE opteryx.test.pypi`, 24.3M rows, 14 GB peak, OOM on a 16 GB node.
+
+Every section marked **[D-n]** below is a decision the architect owns; §12 collects them.
 
 Scope: the **SORT** breaker only (`SortSink` in
 [`native_sort.hpp`](../src/cpp/engine/native_sort.hpp)). Grouped/hashed

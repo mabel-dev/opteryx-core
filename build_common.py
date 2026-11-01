@@ -434,13 +434,16 @@ if arch == "x86_64":
     CPP_FLAGS.extend(["-march=haswell", "-mtune=generic"])
     C_FLAGS.extend(["-march=haswell", "-mtune=generic"])
 elif arch == "aarch64" and not is_mac():
-    # armv8-a+aes sets the AArch64 ISA floor. Plain armv8-a (GCC's default)
+    # armv8-a+crc+aes sets the AArch64 ISA floor. Plain armv8-a (GCC's default)
     # lacks the AES/PMULL extension, which the JSONL structural scan's
     # carry-less multiply (vmull_p64) requires. Raspberry Pi 3/4 (Cortex-A53/
     # A72 without the crypto extension) fall below this floor — see README
-    # "Hardware Support". Apple clang's default target already includes AES.
-    CPP_FLAGS.extend(["-march=armv8-a+aes", "-mtune=generic"])
-    C_FLAGS.extend(["-march=armv8-a+aes", "-mtune=generic"])
+    # "Hardware Support". +crc gives the GCS gRPC reader hardware CRC32C
+    # (src/cpp/gcs_grpc/crc32c.hpp); CRC32 is mandatory from ARMv8.1 and present
+    # on every ARMv8.0 core that also has AES. Apple clang's default target
+    # already includes both.
+    CPP_FLAGS.extend(["-march=armv8-a+crc+aes", "-mtune=generic"])
+    C_FLAGS.extend(["-march=armv8-a+crc+aes", "-mtune=generic"])
 elif arch == "arm" and not is_mac():
     # 32-bit ARM needs explicit NEON; AArch64 already guarantees it.
     CPP_FLAGS.append("-mfpu=neon")

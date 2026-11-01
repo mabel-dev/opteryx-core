@@ -356,32 +356,41 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
 // number of key columns, any supported key type. The AoS comparator below is a
 // faster route to the SAME ordering for the subset of cases it accepts; this one is
 // the definition both must agree with.
+//
+// Two-sided so the external sort's merge (rows of DIFFERENT runs, each with its own
+// key lanes) compares through this same definition; SortKeyCmp passes one set twice.
+// The lanes in `ka` and `kb` must come from the same `spec`.
+inline bool sort_key_less(const std::vector<SortKeyColumn>& ka, uint32_t a,
+                          const std::vector<SortKeyColumn>& kb, uint32_t b) {
+    for (size_t k = 0; k < ka.size(); ++k) {
+        const SortKeyColumn& c = ka[k];
+        const SortKeyColumn& d = kb[k];
+        int cmp;
+        uint8_t va = c.valid[a], vb = d.valid[b];
+        if (!va || !vb) {
+            if (va == vb) continue;                 // both NULL: equal on this key
+            // Null placement is NOT subject to direction: a precedes b exactly
+            // when a is the NULL and NULLs go first.
+            return (!va) == c.nulls_first;
+        } else if (c.is_str) {
+            uint32_t la = c.slen[a], lb = d.slen[b];
+            uint32_t common = la < lb ? la : lb;
+            int r = common ? std::memcmp(c.sptr[a], d.sptr[b], common) : 0;
+            cmp = r != 0 ? r : (la < lb ? -1 : (la > lb ? 1 : 0));
+        } else if (c.is_i128) {
+            cmp = c.num128[a] < d.num128[b] ? -1
+                : (c.num128[a] > d.num128[b] ? 1 : 0);
+        } else {
+            cmp = c.num[a] < d.num[b] ? -1 : (c.num[a] > d.num[b] ? 1 : 0);
+        }
+        if (cmp != 0) return c.asc ? (cmp < 0) : (cmp > 0);
+    }
+    return false;   // equal — stability preserves arrival order
+}
+
 struct SortKeyCmp {
     const std::vector<SortKeyColumn>& keys;
-    bool operator()(uint32_t a, uint32_t b) const {
-        for (const SortKeyColumn& c : keys) {
-            int cmp;
-            uint8_t va = c.valid[a], vb = c.valid[b];
-            if (!va || !vb) {
-                if (va == vb) continue;                 // both NULL: equal on this key
-                // Null placement is NOT subject to direction: a precedes b exactly
-                // when a is the NULL and NULLs go first.
-                return (!va) == c.nulls_first;
-            } else if (c.is_str) {
-                uint32_t la = c.slen[a], lb = c.slen[b];
-                uint32_t common = la < lb ? la : lb;
-                int r = common ? std::memcmp(c.sptr[a], c.sptr[b], common) : 0;
-                cmp = r != 0 ? r : (la < lb ? -1 : (la > lb ? 1 : 0));
-            } else if (c.is_i128) {
-                cmp = c.num128[a] < c.num128[b] ? -1
-                    : (c.num128[a] > c.num128[b] ? 1 : 0);
-            } else {
-                cmp = c.num[a] < c.num[b] ? -1 : (c.num[a] > c.num[b] ? 1 : 0);
-            }
-            if (cmp != 0) return c.asc ? (cmp < 0) : (cmp > 0);
-        }
-        return false;   // equal — stability preserves arrival order
-    }
+    bool operator()(uint32_t a, uint32_t b) const { return sort_key_less(keys, a, keys, b); }
 };
 
 // ---- AoS (row-contiguous) key layout — the fast comparator ------------------------
@@ -2103,66 +2112,84 @@ inline size_t flatten_rows(const std::vector<MorselPtr>& ms,
 // the whole call, so a key that is not emitted is still read normally. That also
 // means SortKeyColumn's raw `sptr`/`slen` into a string key's source arena stay
 // valid — nothing is released early here, only not copied out.
+// Output position of the PRIMARY sort key, for the DRAKEN_ROW_SORTED stamp.
+// Under an emit subset the input index `spec[0].col_idx` addresses a DIFFERENT
+// output column (or none at all), and stamping it would claim a column is sorted
+// when it is not — a silent wrong answer downstream, not a slowdown. SIZE_MAX =
+// the key is not emitted, so there is nothing to stamp.
+//
+// The flag's meaning pins null placement to the default (NULLS FIRST under ASC,
+// NULLS LAST under DESC — buffers.h). A key sorted with the other placement is
+// NOT what the flag claims, so it is left unstamped rather than mislabelled.
+inline size_t sorted_output_index(const std::vector<SortKeySpec>& spec,
+                                  const std::vector<uint32_t>* emit_cols) {
+    if (spec.empty() || spec[0].nulls_first != spec[0].ascending) return SIZE_MAX;
+    if (emit_cols == nullptr) return spec[0].col_idx;
+    for (size_t i = 0; i < emit_cols->size(); ++i)
+        if ((*emit_cols)[i] == spec[0].col_idx) return i;
+    return SIZE_MAX;
+}
+
+// Each chunk is a contiguous slice of a globally-sorted order, so the PRIMARY
+// (leading) sort key is PROVEN monotonic within it — not a hint, the sort just
+// produced the fact. Secondary keys are only ordered within ties of the primary key,
+// not globally, so they are not marked. Covers every sorted chunk (SortSink/TopNSink/
+// Window, the external sort's merge, and the standalone rugo wheel) uniformly.
+//
+// CxxColumn.view is a hot-path-only inline COPY of own->vec (see cxx_morsel.h) —
+// the Python-visible Vector reads own->vec via to_vectors(), so both copies must
+// be set or the flag is invisible outside this translation unit despite
+// compiling clean.
+inline void stamp_sorted_chunk(CxxMorsel& m, size_t sorted_out_idx, bool ascending) {
+    if (sorted_out_idx == SIZE_MAX || sorted_out_idx >= m.columns.size()) return;
+    CxxColumn& col = m.columns[sorted_out_idx];
+    uint8_t bits = DRAKEN_ROW_SORTED | (ascending ? 0 : DRAKEN_ROW_SORTED_DESC);
+    uint8_t clear = static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
+    col.view.flags = static_cast<uint8_t>((col.view.flags & clear) | bits);
+    if (col.own)
+        col.own->vec.flags = static_cast<uint8_t>((col.own->vec.flags & clear) | bits);
+}
+
+// The sorted permutation over `ms`, and the row maps the gather reads it through.
+// `src` keeps the non-empty inputs alive (string keys point into their arenas).
+struct SortedRows {
+    std::vector<MorselPtr> src;
+    std::vector<uint32_t> row_m, row_r, perm;
+    size_t total = 0;
+};
+
+inline bool sort_rows(const std::vector<MorselPtr>& ms, const std::vector<SortKeySpec>& spec,
+                      size_t take_first, unsigned nthreads, SortedRows& s, ErrCtx& err) {
+    s.src.reserve(ms.size());
+    for (const MorselPtr& m : ms) if (m->num_rows() > 0) s.src.push_back(m);
+    if (s.src.empty()) return true;
+    size_t n = flatten_rows(s.src, s.row_m, s.row_r);
+    std::vector<SortKeyColumn> keys;
+    if (!build_sort_keys(s.src, spec, keys, err)) return false;
+    s.perm.resize(n);
+    for (size_t i = 0; i < n; ++i) s.perm[i] = static_cast<uint32_t>(i);
+    sort_perm(keys, s.perm, take_first, nthreads);
+    s.total = n < take_first ? n : take_first;
+    return true;
+}
+
 inline bool sort_morsels(const std::vector<MorselPtr>& ms,
                          const std::vector<SortKeySpec>& spec,
                          size_t take_first, size_t chunk_rows, unsigned nthreads,
                          std::vector<MorselPtr>& out, ErrCtx& err,
                          const std::vector<uint32_t>* emit_cols = nullptr) {
-    std::vector<MorselPtr> src;
-    src.reserve(ms.size());
-    for (const MorselPtr& m : ms) if (m->num_rows() > 0) src.push_back(m);
-    if (src.empty()) return true;
-
-    std::vector<uint32_t> row_m, row_r;
-    size_t n = flatten_rows(src, row_m, row_r);
-    std::vector<SortKeyColumn> keys;
-    if (!build_sort_keys(src, spec, keys, err)) return false;
-    std::vector<uint32_t> perm(n);
-    for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
-    sort_perm(keys, perm, take_first, nthreads);
-
-    size_t total = n < take_first ? n : take_first;
+    SortedRows s;
+    if (!sort_rows(ms, spec, take_first, nthreads, s, err)) return false;
+    if (s.src.empty()) return true;
+    const std::vector<MorselPtr>& src = s.src;
+    const std::vector<uint32_t>& row_m = s.row_m;
+    const std::vector<uint32_t>& row_r = s.row_r;
+    const std::vector<uint32_t>& perm = s.perm;
+    const size_t total = s.total;
     const std::vector<std::string>& names = src.front()->names;
-
-    // Output position of the PRIMARY sort key, for the DRAKEN_ROW_SORTED stamp below.
-    // Under an emit subset the input index `spec[0].col_idx` addresses a DIFFERENT
-    // output column (or none at all), and stamping it would claim a column is sorted
-    // when it is not — a silent wrong answer downstream, not a slowdown. SIZE_MAX =
-    // the key is not emitted, so there is nothing to stamp.
-    //
-    // The flag's meaning pins null placement to the default (NULLS FIRST under ASC,
-    // NULLS LAST under DESC — buffers.h). A key sorted with the other placement is
-    // NOT what the flag claims, so it is left unstamped rather than mislabelled.
-    size_t sorted_out_idx = SIZE_MAX;
-    if (!spec.empty() && spec[0].nulls_first == spec[0].ascending) {
-        if (emit_cols == nullptr) {
-            sorted_out_idx = spec[0].col_idx;
-        } else {
-            for (size_t i = 0; i < emit_cols->size(); ++i) {
-                if ((*emit_cols)[i] == spec[0].col_idx) { sorted_out_idx = i; break; }
-            }
-        }
-    }
-
-    // Each chunk is a contiguous slice of the globally-sorted permutation, so the
-    // PRIMARY (leading) sort key is PROVEN monotonic within it — not a hint, this
-    // operator just produced the fact. Secondary keys are only ordered within ties of
-    // the primary key, not globally, so they are not marked. Covers every caller of
-    // sort_morsels (opteryx's SortSink/TopNSink/Window operators and the standalone
-    // rugo wheel) uniformly, for free.
-    //
-    // CxxColumn.view is a hot-path-only inline COPY of own->vec (see cxx_morsel.h) —
-    // the Python-visible Vector reads own->vec via to_vectors(), so both copies must
-    // be set or the flag is invisible outside this translation unit despite
-    // compiling clean.
+    const size_t sorted_out_idx = sorted_output_index(spec, emit_cols);
     auto stamp_sorted = [&](CxxMorsel& m) {
-        if (sorted_out_idx == SIZE_MAX || sorted_out_idx >= m.columns.size()) return;
-        CxxColumn& col = m.columns[sorted_out_idx];
-        uint8_t bits = DRAKEN_ROW_SORTED | (spec[0].ascending ? 0 : DRAKEN_ROW_SORTED_DESC);
-        uint8_t clear = static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
-        col.view.flags = static_cast<uint8_t>((col.view.flags & clear) | bits);
-        if (col.own)
-            col.own->vec.flags = static_cast<uint8_t>((col.own->vec.flags & clear) | bits);
+        stamp_sorted_chunk(m, sorted_out_idx, spec[0].ascending);
     };
 
     // The gather, PARALLEL over output chunks. Chunks are independent: each reads the
@@ -2207,4 +2234,151 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
     out.reserve(out.size() + nchunks);
     for (MorselPtr& m : chunks) out.push_back(std::move(m));
     return true;
+}
+
+// ---- the external sort's two halves ------------------------------------------------
+//
+// An ORDER BY whose input outgrows its budget is sorted in RUNS: each run is sorted in
+// memory by the code above and written out in chunks, then the runs are merged. Both
+// halves are engine-agnostic like sort_morsels; where a run is kept is the caller's.
+
+// sort_morsels, but each chunk is handed to `emit` in sorted order as soon as its wave
+// of `nthreads` chunks is gathered, instead of every chunk being held until the end —
+// so a run's dense output is never resident whole. Every column is emitted: a run
+// carries its keys into the merge. `emit(MorselPtr)` returns false to stop, having
+// recorded its own error.
+template <class Emit>
+inline bool sort_morsels_streamed(const std::vector<MorselPtr>& ms,
+                                  const std::vector<SortKeySpec>& spec, size_t chunk_rows,
+                                  unsigned nthreads, Emit emit, ErrCtx& err) {
+    SortedRows s;
+    if (!sort_rows(ms, spec, SIZE_MAX, nthreads, s, err)) return false;
+    if (s.src.empty()) return true;
+    const std::vector<std::string>& names = s.src.front()->names;
+    const size_t sorted_out_idx = sorted_output_index(spec, nullptr);
+    const size_t nchunks = (s.total + chunk_rows - 1) / chunk_rows;
+    unsigned nt = sort_team_width(s.total, nthreads);
+    if (nt > nchunks) nt = static_cast<unsigned>(nchunks);
+    std::vector<MorselPtr> wave(nt);
+    std::vector<ErrCtx> wave_err(nt);
+    for (size_t first = 0; first < nchunks; first += nt) {
+        const unsigned width = static_cast<unsigned>(std::min<size_t>(nt, nchunks - first));
+        sort_team_run(width, [&](unsigned t) {
+            const size_t start = (first + t) * chunk_rows;
+            const size_t count = std::min(chunk_rows, s.total - start);
+            wave_err[t] = ErrCtx();
+            wave[t] = gather_rows(s.src, s.perm, start, count, s.row_m, s.row_r, names,
+                                  wave_err[t]);
+            if (wave_err[t].code == 0)
+                stamp_sorted_chunk(*wave[t], sorted_out_idx, spec[0].ascending);
+        });
+        for (unsigned t = 0; t < width; ++t) {
+            if (wave_err[t].code != 0) { err = wave_err[t]; return false; }
+            if (!emit(std::move(wave[t]))) return false;
+        }
+    }
+    return true;
+}
+
+// K-way merge of sorted runs into chunks of `chunk_rows`, handed to `emit` in order.
+// `next(r, block)` yields run r's next block in its sorted order: 1 = a block, 0 = the
+// run is exhausted, -1 = failed (the caller has recorded why). Resident: each run's
+// current block and its key lanes, plus the blocks the chunk being built reads — never
+// a run's whole contents. Rows compare through sort_key_less, the one definition of the
+// order; ties go to the lower run index (runs are numbered in arrival order), matching
+// the stability sort_perm gives within a run.
+template <class Next, class Emit>
+inline bool merge_sorted_runs(size_t nruns, const std::vector<SortKeySpec>& spec,
+                              size_t chunk_rows, const std::vector<uint32_t>* emit_cols,
+                              Next next, Emit emit, ErrCtx& err) {
+    struct Cursor {
+        MorselPtr block;
+        std::vector<SortKeyColumn> keys;
+        uint32_t row = 0, rows = 0, slot = 0;   // slot: the block's index in `live`
+    };
+    std::vector<Cursor> cur(nruns);
+    std::vector<MorselPtr> live;
+    std::vector<std::string> names;
+    const size_t sorted_out_idx = sorted_output_index(spec, emit_cols);
+
+    auto load = [&](size_t r, bool& got) -> bool {
+        got = false;
+        for (;;) {
+            MorselPtr b;
+            const int rc = next(r, b);
+            if (rc < 0) return false;
+            if (rc == 0) return true;
+            if (b->num_rows() == 0) continue;
+            Cursor& c = cur[r];
+            const std::vector<MorselPtr> one{b};
+            if (!build_sort_keys(one, spec, c.keys, err)) return false;
+            if (names.empty()) names = b->names;
+            c.block = std::move(b);
+            c.row = 0;
+            c.rows = c.block->num_rows();
+            c.slot = static_cast<uint32_t>(live.size());
+            live.push_back(c.block);
+            got = true;
+            return true;
+        }
+    };
+    // Heap order: x's current row sorts AFTER y's (std heaps keep the "largest" on top).
+    auto after = [&cur](uint32_t x, uint32_t y) {
+        const Cursor& a = cur[x];
+        const Cursor& b = cur[y];
+        if (sort_key_less(b.keys, b.row, a.keys, a.row)) return true;
+        if (sort_key_less(a.keys, a.row, b.keys, b.row)) return false;
+        return x > y;
+    };
+
+    std::vector<uint32_t> heap;
+    for (size_t r = 0; r < nruns; ++r) {
+        bool got;
+        if (!load(r, got)) return false;
+        if (got) heap.push_back(static_cast<uint32_t>(r));
+    }
+    std::make_heap(heap.begin(), heap.end(), after);
+
+    std::vector<uint32_t> row_m, row_r, order;
+    row_m.reserve(chunk_rows);
+    row_r.reserve(chunk_rows);
+    auto flush = [&]() -> bool {
+        const size_t n = row_m.size();
+        if (n == 0) return true;
+        while (order.size() < n) order.push_back(static_cast<uint32_t>(order.size()));
+        ErrCtx e;
+        MorselPtr m = gather_rows(live, order, 0, n, row_m, row_r, names, e, emit_cols);
+        if (e.code != 0) { err = e; return false; }
+        stamp_sorted_chunk(*m, sorted_out_idx, spec[0].ascending);
+        row_m.clear();
+        row_r.clear();
+        // Drop every block no cursor still reads: an exhausted run's last block, and
+        // the blocks a cursor has moved past.
+        std::vector<MorselPtr> kept;
+        kept.reserve(heap.size());
+        for (uint32_t r : heap) {
+            cur[r].slot = static_cast<uint32_t>(kept.size());
+            kept.push_back(cur[r].block);
+        }
+        live.swap(kept);
+        return emit(std::move(m));
+    };
+
+    while (!heap.empty()) {
+        std::pop_heap(heap.begin(), heap.end(), after);
+        const uint32_t r = heap.back();
+        Cursor& c = cur[r];
+        row_m.push_back(c.slot);
+        row_r.push_back(c.row);
+        if (++c.row == c.rows) {
+            bool got;
+            if (!load(r, got)) return false;
+            if (got) std::push_heap(heap.begin(), heap.end(), after);
+            else heap.pop_back();
+        } else {
+            std::push_heap(heap.begin(), heap.end(), after);
+        }
+        if (row_m.size() == chunk_rows && !flush()) return false;
+    }
+    return flush();
 }

@@ -5369,8 +5369,10 @@ class _Compiler:
         #                                        comparison UNKNOWN, emptying the result.
         #   "left anti" / "left semi"          — NOT EXISTS / EXISTS: a NULL key simply
         #                                        matches nothing.
-        #   "* not-distinct"                   — INTERSECT / EXCEPT: NULL is a VALUE that
-        #                                        equals itself (IS NOT DISTINCT FROM).
+        #   "* not-distinct"                   — INTERSECT / EXCEPT, and the INNER join an
+        #                                        aggregate window is rewritten to: NULL is
+        #                                        a VALUE that equals itself (IS NOT
+        #                                        DISTINCT FROM).
         # Mapping the first two onto each other made NOT EXISTS emit nothing whenever
         # the inner key held a single NULL. Using either in place of the third made
         # `A EXCEPT A` non-empty on any nullable column. See native_join2.hpp's JoinMode.
@@ -5386,7 +5388,8 @@ class _Compiler:
                  "left anti null-aware": 3, "left anti": 4,
                  "cross": 0, "nested_loop": 0, "full outer": 5,
                  "left semi not-distinct": 6, "left anti not-distinct": 7,
-                 "left existence": 2, "left existence anti": 4}
+                 "left existence": 2, "left existence anti": 4,
+                 "inner not-distinct": 9}
         if join_type not in modes:
             _unsupported(f"a {join_type} join")
         mode = modes[join_type]
@@ -5544,7 +5547,7 @@ class _Compiler:
         if is_cross:
             build_id, probe_id = legs["right"], legs["left"]
             build_keys, probe_keys = [], []
-        elif mode == 0 or mode == 8:
+        elif mode in (0, 8, 9):
             build_id, probe_id = legs["left"], legs["right"]
             build_keys, probe_keys = left_cols, right_cols
         else:
@@ -5564,7 +5567,7 @@ class _Compiler:
         # key's own value, never a synthetic CAST.
         merged_specs = []   # (merged identity, build key identity, probe key identity)
         for merged_identity, key_a, key_b in (node.step.using_merged or []):
-            if mode not in (0, 1, 5, 8):
+            if mode not in (0, 1, 5, 8, 9):
                 _unsupported("a merged USING column on a join that does not emit rows "
                              "from both sides")
             match = [k for k in range(len(build_keys))
@@ -5674,7 +5677,7 @@ class _Compiler:
         # it here (rather than letting the sink default) is what keeps the two in step:
         # a build that drops NULL keys under a not-distinct probe would lose every NULL
         # row silently, which is the original bug wearing a different hat.
-        null_equal = mode in (6, 7)
+        null_equal = mode in (6, 7, 9)
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
                                         build_types, build_logical, build_element,
                                         mode in (5, 8),  # build side preserved: track matches
@@ -5815,7 +5818,7 @@ class _Compiler:
 
     def _wire_groupjoin(self, owner, join_node, build_id, stream_id, build_keys,
                         stream_keys, payload_ids, aggregates, per_key, multiply_d,
-                        unmatched, prefilter=True):
+                        unmatched, prefilter=True, null_equal=False):
         build_co, stream_co = self._join_key_coercions(join_node, build_keys, stream_keys)
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(owner.identity)
@@ -5837,9 +5840,12 @@ class _Compiler:
         types, logical, element = self._payload_types(build_id, list(payload_ids))
         ref = self.nplan.new_join2_ref()
         # track_matches retains the NULL-keyed build rows a LEFT form must still emit.
+        # `null_equal`: an "inner not-distinct" join (an aggregate window's partition
+        # join) — NULL keys enter the table and match; the stream sink and the SEMI
+        # prefilter below must use the same rule.
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
                                         types, logical, element,
-                                        unmatched != 0, -1, False)
+                                        unmatched != 0, -1, null_equal)
 
         sp, slayout = self.compile_node(stream_id)
         self.nplan.set_current_identity(owner.identity)
@@ -5859,7 +5865,7 @@ class _Compiler:
                              not in (NodeType.IDENTIFIER, NodeType.WILDCARD)
                              for agg in aggregates):
             self.nplan.add_join2_probe(sp, ref, stream_key_idx,
-                                       list(range(len(skeyout))), 2)
+                                       list(range(len(skeyout))), 6 if null_equal else 2)
         oplayout = self._project_agg_operands(sp, aggregates, skeyout)
         specs = self._parse_aggregates(aggregates, oplayout)
         if len(specs) != len(aggregates):
@@ -5877,7 +5883,7 @@ class _Compiler:
             operand_types.append(pt.value)
             operand_logical.append(_logical_tuple(psc.column_type))
         gj = self.nplan.new_groupjoin_state(ref, specs, operand_types, operand_logical)
-        self.nplan.set_groupjoin_accum_sink(sp, gj, stream_key_idx)
+        self.nplan.set_groupjoin_accum_sink(sp, gj, stream_key_idx, null_equal)
 
         ep = self.nplan.new_pipeline()
         self.nplan.set_current_identity(owner.identity)
@@ -5980,7 +5986,8 @@ class _Compiler:
         # separate optimisation (the join path's `pre_update_columns` pruning).
         ep, layout = self._wire_groupjoin(
             node, node, outer_id, ann["stream"], outer_keys, stream_keys, None,
-            aggregates, False, False, ann["unmatched"])
+            aggregates, False, False, ann["unmatched"],
+            null_equal=node.join_type == "inner not-distinct")
         # The aggregate's GROUP BY keys are S columns; every emitted row is a MATCHED
         # row (INNER only — GroupJoinStrategy), where they equal O's keys, so they are
         # O's key columns re-labelled.
@@ -7225,7 +7232,7 @@ class _Compiler:
     #   4 ANTI / 3 ANTI_NULL_AWARE   — these emit exactly the probe rows that do
     #                                  NOT match, i.e. precisely what a bound
     #                                  would prune.
-    #   6/7 not-distinct (INTERSECT/EXCEPT) — NULL is a matchable VALUE, and
+    #   6/7/9 not-distinct (INTERSECT/EXCEPT, window partition join) — NULL is a matchable VALUE, and
     #                                  skene's statistics are over NON-NULL values
     #                                  only, so a row group whose non-null values
     #                                  fall outside the bound can still hold NULL

@@ -580,6 +580,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                            size_t result, bint distinct, uint32_t max_iterations,
                            string name) except +
         void set_spill_root(string root)
+        void set_sort_run_bytes(size_t bytes)
         void set_native_skene_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* column_names,
@@ -792,7 +793,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                    cppvector[int] lt_kind, cppvector[int] lt_unit,
                                    cppvector[int] lt_precision, cppvector[int] lt_scale,
                                    cppvector[int] lt_dimension) except +
-        void set_groupjoin_accum_sink(size_t p, size_t gj, cppvector[size_t] key_idx) except +
+        void set_groupjoin_accum_sink(size_t p, size_t gj, cppvector[size_t] key_idx,
+                                      bint null_equal) except +
         void set_groupjoin_source(size_t p, size_t gj, bint per_key, bint multiply_d,
                                   int unmatched) except +
         void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
@@ -2938,6 +2940,7 @@ cdef class NativePlan:
             _root = _root[7:]
         if _root and "://" not in _root:
             self._e.set_spill_root(_root.encode("utf-8"))
+        self._e.set_sort_run_bytes(_config.SORT_RUN_BYTES)
 
     def __dealloc__(self):
         if self._e != NULL:
@@ -3629,7 +3632,8 @@ cdef class NativePlan:
 
         ``null_equal`` selects the SET-OPERATION key rule: NULL is an ordinary value
         that equals itself (SQL's IS NOT DISTINCT FROM), which is how INTERSECT and
-        EXCEPT compare rows. It must be set for exactly the probe modes 6/7 and left
+        EXCEPT compare rows, and how an aggregate window joins each row back to its
+        partition. It must be set for exactly the probe modes 6/7/9 and left
         false for every other join — see native_join2.hpp's JoinMode. The two halves
         have to agree: a build that excludes NULL keys under a probe that admits them
         drops every NULL row instead of matching it."""
@@ -3781,14 +3785,16 @@ cdef class NativePlan:
         return self._e.new_groupjoin_state(ref, _agg_spec_from_list(specs), ts,
                                            lk, lu, lp, lsc, ld)
 
-    def set_groupjoin_accum_sink(self, size_t p, size_t gj, list key_idx):
+    def set_groupjoin_accum_sink(self, size_t p, size_t gj, list key_idx,
+                                 bint null_equal=False):
         """GROUPJOIN stream half: accumulate pipeline ``p``'s rows (keys ``key_idx``)
-        into state ``gj``. Emits nothing."""
+        into state ``gj``. Emits nothing. ``null_equal`` (IS NOT DISTINCT FROM keys)
+        must match the build sink's."""
         cdef cppvector[size_t] keys
         cdef int i
         for i in key_idx:
             keys.push_back(<size_t>i)
-        self._e.set_groupjoin_accum_sink(p, gj, keys)
+        self._e.set_groupjoin_accum_sink(p, gj, keys, null_equal)
 
     def set_groupjoin_source(self, size_t p, size_t gj, bint per_key, bint multiply_d,
                              int unmatched):
@@ -3827,12 +3833,13 @@ cdef class NativePlan:
                         bint existence_three_valued=False):
         """mode: 0=inner, 1=left outer (probe side preserved), 2=semi,
         3=null-aware anti (NOT IN), 4=plain anti (NOT EXISTS),
-        6=semi not-distinct, 7=anti not-distinct (INTERSECT / EXCEPT).
+        6=semi not-distinct, 7=anti not-distinct (INTERSECT / EXCEPT),
+        9=inner not-distinct (an aggregate window's partition join).
         These disagree on NULL and are not interchangeable — see native_join2.hpp's
         JoinMode. 2/4 make a NULL key unmatchable; 3 propagates NOT IN's UNKNOWN (one
         NULL on the build side empties the result); 6/7 compare with IS NOT DISTINCT
         FROM, so NULL matches NULL. A set operation needs 6/7 and is a wrong answer
-        under any of the others. Modes 6/7 additionally require the build sink to be
+        under any of the others. Modes 6/7/9 additionally require the build sink to be
         given ``null_equal=True`` — both halves must agree.
 
         ``emit`` applies to modes 2/3/4 ONLY — the probe columns an existence filter

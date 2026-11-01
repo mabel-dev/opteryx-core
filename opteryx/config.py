@@ -220,6 +220,12 @@ what stops it."""
 KVSTORE_LOCATION: str = str(get("KVSTORE_LOCATION", "")).strip()
 """Single-store KV location (e.g. file://, valkey://, gs://, memory://)."""
 
+SORT_RUN_BYTES: int = int(get("SORT_RUN_BYTES", 1024 * 1024 * 1024))
+"""Input bytes an ORDER BY sorts in memory before writing a sorted run to spill and
+starting the next (docs/SORT_SPILL_DESIGN.md; ruled 2026-11-01). Counted as the sort
+receives its input, so ~1 GiB of dictionary-shaped strings is several GiB once sorted.
+A sort that reaches it with spill unconfigured (KVSTORE_LOCATION) fails loud."""
+
 KVSTORE_KEY_PREFIX: str = str(get("KVSTORE_KEY_PREFIX", "")).strip()
 """Optional global key prefix applied to configured KV stores."""
 

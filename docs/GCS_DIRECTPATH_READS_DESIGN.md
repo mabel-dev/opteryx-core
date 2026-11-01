@@ -79,7 +79,7 @@ io_pipeline (per scan: transport chosen once)
   └── DirectPath: GcsGrpcClient::read_many(bucket, object, generation?, ranges)
                      │  same contract: buffers in range order, HttpError-style
                      │  retryable/non-retryable errors, ByteGate admission
-                     ├── C5 storage reader   (BidiReadObject, ≤100 ranges/msg, CRC32C)
+                     ├── C5 storage reader   (ReadObject stream per range, CRC32C)
                      ├── C1 gRPC-over-h2     (nghttp2 session, 5-byte msg framing, trailers)
                      ├── C3 ALTS             (handshaker RPC + AES-GCM-rekey record layer)
                      ├── C4 discovery        (minimal xDS ADS → backend IPv6 endpoints)
@@ -97,9 +97,9 @@ The fetch threads, fetch-ahead, the C7 chunk cache, admission (`ByteGate`), memo
 - **Not** vendored gRPC.
 
 ### C2 — Protobuf wire format
-- Hand-rolled varint and length-delimited encode/decode for about 15 messages: handshaker request/response, xDS DiscoveryRequest/Response plus the Listener → RouteConfiguration → Cluster → ClusterLoadAssignment fields we read, and the BidiReadObject messages.
+- Hand-rolled varint and length-delimited encode/decode for about 15 messages: handshaker request/response, xDS DiscoveryRequest/Response plus the Listener → RouteConfiguration → Cluster → ClusterLoadAssignment fields we read, and the ReadObject request/response.
 - Unknown fields are skipped. A malformed required field raises an error.
-- `ChecksummedData.content` is decoded **straight into the range's destination buffer**, with no intermediate copy. Each range is preallocated from its known length, as `get_many` does now.
+- **RULED 2026-11-01 (superseded the same day, see C5):** BidiReadObject + one copy. Superseded because GCS refuses BidiReadObject on regional buckets; with `ReadObject`, `ChecksummedData.content` is parsed as it arrives and written **straight into the range's destination buffer**, with no intermediate copy.
 - Alternative: vendor upb, which is what gRPC uses. That is far more code than the subset we need. **Ruling R2.**
 
 ### C3 — ALTS
@@ -118,11 +118,11 @@ The fetch threads, fetch-ahead, the C7 chunk cache, admission (`ByteGate`), memo
 - This is the largest unknown (§10). If discovery turns out to need more of xDS than this subset, stop and come back to the architect. Do not vendor the gRPC xDS client.
 
 ### C5 — Storage reader
-- `read_many(bucket, object, ranges)` opens a `BidiReadObject` stream per object per call and puts all of the block's ranges into one request message (100 per message, more messages if needed). Each range gets a `read_id` equal to its slot index.
-- Each `ObjectRangeData` writes at its offset in the slot's buffer. `range_end` closes the slot.
-- **CRC32C is verified for every chunk.** A mismatch is a retryable error. This needs a native CRC32C, which is not in the tree today. It is small: ARMv8 `__crc32cd`, SSE4.2 `_mm_crc32_u64`, and a table-driven generic path for RISC-V. It must be specialised per architecture (ARCHPERF).
-- Generation pinning: the generation comes from the object's first metadata message and is kept for the rest of the scan, so a block never mixes object versions.
-- Redirects: on `BidiReadObjectRedirectedError`, retry once with `read_handle` and `routing_token` in `x-goog-request-params`.
+- **RULED 2026-11-01: `ReadObject`, one server-streaming call per range**, all multiplexed on the pooled connections. `BidiReadObject` is unavailable: GCS answered PERMISSION_DENIED, "The BidiReadObject RPC is not yet available for general use, or for project (762690895289) or bucket (opteryx_data)". It belongs to the zonal "Rapid" bucket private preview, which needs a Google account team; we have none.
+- `read_many(bucket, object, ranges)` starts one `ReadObject` (`read_offset`, `read_limit`) per range. A streaming parser follows each response's bytes and writes `content` straight into the range's buffer.
+- A range is complete when the stream ends with grpc-status OK, on a message boundary, with exactly `length` bytes.
+- **CRC32C is verified for every chunk.** A mismatch is a retryable error. `src/cpp/gcs_grpc/crc32c.hpp` selects the path at compile time: SSE4.2 on x86-64, ARMv8 CRC32 where the ISA floor enables it (Apple), and slice-by-8 tables otherwise. **RULED 2026-11-01:** the Linux AArch64 floor is now `armv8-a+crc+aes` (`build_common.py`), so the fleet gets hardware CRC32C too.
+- Generation: each stream's first message carries the object's metadata. Every range of one `read_many` must report the same generation (and the pinned one, if given), else the read fails as FAILED_PRECONDITION.
 - Auth: the scan's bearer token, the same one `http_headers_` sends today. ALTS authenticates the VM. The request is still authorized by the token.
 
 ### Connections and threads
@@ -158,8 +158,23 @@ Run on a 16 vCPU / 64 GB n4a bench VM from template v4 (the same shape as the la
 **Gate:** go ahead only if (3) beats (2) by **≥ 1.3x on aggregate cold throughput** or cuts **time to first byte by ≥ 30%**, and (1) has shown the plateau is not ours. Otherwise this design is dropped (KNOB, PROVEIT).
 - Infra prerequisite: firewall and routes on the fleet VPC for the ranges in §1, plus IPv6 on the subnet. This is an IAM/VPC change that needs the architect's OK.
 
+**Phase 0 result (2026-11-01, n4a-standard-4 spot bench VM from worker-fleet-v5, us-east1-b, no VPC changes):**
+- DirectPath works over **IPv4 alone**. The Go client resolved `google-c2p:///storage.googleapis.com` through xDS and connected to `34.126.8.41`. IPv6 and the MTU change are not needed to start. The metadata server answered 404 to the IPv6 capability query, the MTU stayed at 1460, and the VPC stayed in auto mode.
+- Probe: the Go storage client v1.70.0 (scratch only), ClickBench `hits` objects (~100 files), 8 MiB random ranges, 4 GiB per run, three arms interleaved with arm order alternating each rep, 3 reps. Medians, MB/s:
+
+| concurrency | REST (JSON/XML via GFE) | gRPC via GFE | gRPC DirectPath | DirectPath ÷ REST |
+|---|---|---|---|---|
+| 4 | 321 | 312 | 506 | 1.6x |
+| 16 | 269 | 267 | 1856 | 6.9x |
+| 64 | 286 | 252 | 4014 | 14x |
+
+- Time to first byte (64 KiB range, reused connection, p50): REST 29–31 ms, gRPC via the GFE 36 ms, DirectPath 33–36 ms. **There is no latency win.** The ~30 ms is GCS's own backend, so small-range jobs gain nothing.
+- Checks: 40 random 8 MiB ranges were identical (sha256) on REST and DirectPath, and the NIC receive counter confirmed ~3.8 GB/s on the wire. Neither the REST arm nor the gRPC-via-GFE arm got past ~350 MB/s at any concurrency, so **the REST plateau is the GFE path, not the protocol**.
+- **The gate passes on throughput** (≥ 1.3x) and fails on time to first byte.
+- Still owed: arm (1), our engine with its caps raised. On 4 vCPU the engine ran ~95% CPU-busy at ~415 MB/s cold, so the engine's own decode, not the transport, will cap what a real query gets from 4 GB/s. A cold engine A/B is part of Phase 2.
+
 **Phase 1: C1 + C2 + C5 over TLS to `storage.googleapis.com` (gRPC through the GFE, no ALTS).**
-This runs anywhere, Mac included, and exercises the whole read path, CRC32C and BidiReadObject. It is not expected to beat REST. It is a step toward Phase 2, not a product. Per R5 it is test-only: it is not a `GCS_TRANSPORT` value.
+This runs anywhere, Mac included, and exercises the whole read path, CRC32C and ReadObject. It is not expected to beat REST. It is a step toward Phase 2, not a product. Per R5 it is test-only: it is not a `GCS_TRANSPORT` value.
 - Tests: CRC mismatch injection, a redirect, a generation change mid-scan, range-count edges at 100 and 101, GFE-path reads against the live test bucket only if authorised (LIVESUITE).
 
 **Phase 2: C3 + C4 → DirectPath on the VM.**
@@ -192,6 +207,4 @@ Rerun the cold size ladder (4/16, 8/32, 16/64, 32/128) with REST and DirectPath 
 - The handshaker service address and method, and the `handshaker.proto` field numbers. The proto 404'd at `src/proto/grpc/gcp/handshaker.proto`; try `src/core/tsi/alts/handshaker/proto/`.
 - The values of `ALTS_RECORD_PROTOCOL` and `ALTS_APPLICATION_PROTOCOL`, the ALTS frame header layout (`frame_handler.{h,cc}`), the counter size, and the min/max negotiated frame size.
 - Whether xDS discovery can be served by the LDS → RDS → CDS → EDS subset in C4, and how often the endpoints change.
-- The exact `x-goog-request-params` format for bucket routing on `BidiReadObject`. GA status of `BidiReadObject`.
-- Billing (R7): whether a `BidiReadObject` stream counts as one Class B operation or one per range. Undocumented; at worst it equals today's cost.
 - What `grpc_alts_is_running_on_gcp()` checks. We need an equivalent, but only for the error message, because the config is explicit.

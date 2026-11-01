@@ -22,7 +22,10 @@ Rewrite:
     SELECT agg(e) OVER (PARTITION BY c) FROM t
     ->
     WITH _win AS (SELECT c, agg(e) AS $win_xxx FROM t GROUP BY c)
-    SELECT $win_xxx FROM t INNER JOIN _win ON t.c = _win.c
+    SELECT $win_xxx FROM t INNER JOIN _win ON t.c IS NOT DISTINCT FROM _win.c
+
+    The join is typed "inner not-distinct" (native JoinMode::InnerNotDistinct): the
+    GROUP BY gives NULL keys one group, so the join back must match NULL to NULL.
 
     SELECT agg(e) OVER () FROM t
     ->
@@ -63,7 +66,6 @@ Limitations (Phase 1):
 - The source must expose ONE relation name (see `_source_relation`) — no pre-existing
   join sitting directly under the window. A CTE or derived table IS one relation
   however many tables its body joins, so those are fine.
-- NULL partition keys: uses Eq (= not IS NOT DISTINCT FROM); NULL partitions are excluded.
 """
 
 from opteryx.compiled.planner.plan_graph import EdgeRole
@@ -447,7 +449,9 @@ def _replace_window_with_join(
     # back-fills it from the identifiers in a bound ON condition, and a cross join has
     # no ON to read. Left unset it reached the row-size estimate as None and died there.
     join_node = JoinStep()
-    join_node.type = "inner" if on_condition is not None else "cross join"
+    # IS NOT DISTINCT FROM, not `=`: the NULL partition is a partition, and an
+    # equi-join would drop every row whose partition key is NULL.
+    join_node.type = "inner not-distinct" if on_condition is not None else "cross join"
     join_node.on = on_condition
     join_node.using = None
     join_node.left_relation_names = None if on_condition is not None else [source_alias]

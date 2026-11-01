@@ -55,6 +55,7 @@ _ROWS_ARE_THE_ESTIMATE = 64
 _BUILD_PAYLOAD_JOINS = frozenset(
     {
         "inner",
+        "inner not-distinct",
         "left outer",
         "right outer",
         "full outer",

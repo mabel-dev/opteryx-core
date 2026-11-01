@@ -1599,7 +1599,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     self.telemetry.optimization_predicate_pullup_implied += 1
                             on_clause_build_filters = on_clause_build_filters + derived
                     context.collected_predicates = on_clause_build_filters + other_predicates
-                elif node.type not in ("cross join", "inner"):
+                elif node.type not in ("cross join", "inner", "inner not-distinct"):
                     # dump all the predicates
                     # IMPROVE: push past SEMI and ANTI joins
                     context.collected_predicates = [
@@ -1811,7 +1811,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
                 # For INNER equi-joins, derive implied predicates: if col_A op literal
                 # is collected for one join key, emit the same predicate for the partner key.
-                if node.on and node.type == "inner" and context.collected_predicates:
+                # "inner not-distinct" (an aggregate window's partition join) passes
+                # single-leg predicates down like INNER and transfers them across its
+                # keys — matched keys are identical, NULL included, so any test on one
+                # holds on the other. It is deliberately NOT given the INNER block above
+                # that folds a spanning WHERE equality into `on`: that would make the
+                # user's `=` null-safe.
+                if node.on and node.type in ("inner", "inner not-distinct") and context.collected_predicates:
                     equi_pairs = _get_equi_join_pairs(node.on)
                     if equi_pairs:
                         existing_keys: set = set()

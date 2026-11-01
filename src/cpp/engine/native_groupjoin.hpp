@@ -174,9 +174,13 @@ struct GroupJoinAccumLocal : LocalSinkState {
 struct GroupJoinAccumSink : Sink {
     GroupJoinState* st;
     std::vector<size_t> key_idx;   // streamed leg's join keys
+    // IS NOT DISTINCT FROM keys (an aggregate window's partition join): a NULL-keyed
+    // streamed row matches the NULL-keyed build key. Must agree with the build sink's
+    // `null_equal` — see Join2BuildSink::null_equal.
+    bool null_equal = false;
 
-    GroupJoinAccumSink(GroupJoinState* s, std::vector<size_t> keys)
-        : st(s), key_idx(std::move(keys)) {}
+    GroupJoinAccumSink(GroupJoinState* s, std::vector<size_t> keys, bool null_eq = false)
+        : st(s), key_idx(std::move(keys)), null_equal(null_eq) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GlobalSinkState>();
@@ -199,7 +203,7 @@ struct GroupJoinAccumSink : Sink {
         }
         GJLanes& L = *ls.lanes;
         if (!compute_row_hashes(in, key_idx, ls.h, err)) return SinkResult::CONTINUE;
-        const bool nullable = probe_keys_nullable(in, key_idx);
+        const bool nullable = !null_equal && probe_keys_nullable(in, key_idx);
 
         // Pass 1: each streamed row's slot (or none). The table is chosen per morsel.
         ls.mrow.clear();

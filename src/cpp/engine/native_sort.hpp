@@ -25,10 +25,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "fork_join.hpp"   // fork_join — exception-safe fan-out
@@ -126,10 +128,17 @@ inline MorselPtr rows_with_distance(const MorselPtr& in, int32_t col, ErrCtx& er
 
 // ---- SortSink ---------------------------------------------------------------------
 
-struct SortLocal : LocalSinkState { std::vector<MorselPtr> morsels; };
+// Every worker appends to ONE pile, under the lock, so the pile's bytes are the
+// sink's bytes: a per-worker share would spill a run of a quarter of the budget.
+// One lock per morsel is the same granularity as the byte charge.
 struct SortGlobal : GlobalSinkState {
     std::mutex mtx;
+    std::condition_variable cv;
     std::vector<MorselPtr> morsels;
+    size_t pile_bytes = 0;
+    bool run_active = false;                        // one run sorts at a time
+    std::vector<std::unique_ptr<MorselBuffer>> runs;
+    std::string err;                                // latched once; ErrCtx points here
 };
 
 // An emit subset is a genuine three-state: "no subset given" (emit everything) is
@@ -146,16 +155,26 @@ struct EmitSubset {
     }
 };
 
+// External sort (docs/SORT_SPILL_DESIGN.md §3; architect ruling 2026-11-01): input
+// accumulates to `run_bytes`, is sorted in memory, and is written out as a RUN of
+// kSortRunRowGroupRows-row row groups through a spill-configured MorselBuffer; finalize
+// merges the runs, one row group per run resident at a time. Input that never reaches
+// the budget takes exactly the in-memory path.
+inline constexpr size_t kSortRunRowGroupRows = 65536;
+
 struct SortSink : Sink, EmitSubset {
     std::vector<SortKeySpec> spec;
     MorselBuffer* out;
     size_t chunk_rows;
     // A leading COSINE_DISTANCE key (rows_with_distance). false = NULL placement as ordered.
     bool drop_unsearchable_leading = false;
+    // Where runs spill, and the input bytes that make one (SORT_RUN_BYTES).
+    SpillEnv* spill_env;
+    size_t run_bytes;
 
-    SortSink(std::vector<SortKeySpec> s, MorselBuffer* b, size_t chunk = 131072,
-             bool prune = false, std::vector<uint32_t> emit = {})
-        : spec(std::move(s)), out(b), chunk_rows(chunk) {
+    SortSink(std::vector<SortKeySpec> s, MorselBuffer* b, SpillEnv* env, size_t run,
+             size_t chunk = 131072, bool prune = false, std::vector<uint32_t> emit = {})
+        : spec(std::move(s)), out(b), chunk_rows(chunk), spill_env(env), run_bytes(run) {
         emit_prune = prune;
         emit_cols = std::move(emit);
     }
@@ -164,9 +183,9 @@ struct SortSink : Sink, EmitSubset {
         return std::make_unique<SortGlobal>();
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
-        return std::make_unique<SortLocal>();
+        return std::make_unique<LocalSinkState>();
     }
-    SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState& ls,
+    SinkResult sink(const MorselPtr& in, GlobalSinkState& gs, LocalSinkState&,
                     ErrCtx& err) override {
         if (in->num_rows() == 0) return SinkResult::CONTINUE;
         MorselPtr rows = in;
@@ -174,19 +193,98 @@ struct SortSink : Sink, EmitSubset {
             rows = rows_with_distance(in, spec[0].col_idx, err);
             if (err.code != 0 || rows->num_rows() == 0) return SinkResult::CONTINUE;
         }
-        static_cast<SortLocal&>(ls).morsels.push_back(rows);
+        auto& g = static_cast<SortGlobal&>(gs);
+        std::vector<MorselPtr> pile;
+        {
+            std::unique_lock<std::mutex> lk(g.mtx);
+            g.morsels.push_back(rows);
+            g.pile_bytes += cxx_morsel_nbytes(rows.get());
+            if (g.pile_bytes < run_bytes) return SinkResult::CONTINUE;
+            // Backpressure: one run sorts at a time, so resident input stays near two
+            // budgets however many workers feed the sink.
+            g.cv.wait(lk, [&g] { return !g.run_active; });
+            if (g.pile_bytes < run_bytes) return SinkResult::CONTINUE;  // another took it
+            pile.swap(g.morsels);
+            g.pile_bytes = 0;
+            g.run_active = true;
+        }
+        // On an execution worker: sort single-threaded, the other workers are busy.
+        write_run_(g, pile, 1, err);
+        {
+            std::lock_guard<std::mutex> lk(g.mtx);
+            g.run_active = false;
+        }
+        g.cv.notify_all();
         return SinkResult::CONTINUE;
     }
-    void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx&) override {
-        auto& g = static_cast<SortGlobal&>(gs);
-        auto& l = static_cast<SortLocal&>(ls);
-        std::lock_guard<std::mutex> lk(g.mtx);
-        for (MorselPtr& m : l.morsels) g.morsels.push_back(std::move(m));
-    }
+    void combine(GlobalSinkState&, LocalSinkState&, ErrCtx&) override {}
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<SortGlobal&>(gs);
-        sort_and_emit(g.morsels, spec, SIZE_MAX, chunk_rows,
-                      static_cast<unsigned>(g.query_dop), out, err, emit_ptr());
+        const unsigned dop = static_cast<unsigned>(g.query_dop);
+        if (g.runs.empty()) {
+            sort_and_emit(g.morsels, spec, SIZE_MAX, chunk_rows, dop, out, err, emit_ptr());
+            return;
+        }
+        if (!g.morsels.empty()) {
+            std::vector<MorselPtr> pile;
+            pile.swap(g.morsels);
+            if (!write_run_(g, pile, dop, err)) return;
+        }
+        std::vector<size_t> next_rg(g.runs.size(), 0);
+        auto next = [&](size_t r, MorselPtr& block) -> int {
+            MorselBuffer& run = *g.runs[r];
+            if (next_rg[r] >= run.claim_count()) return 0;
+            if (run.get(next_rg[r]++, block)) return 1;
+            fail_(g, err, run.error());
+            return -1;
+        };
+        auto emit = [&](MorselPtr&& m) -> bool {
+            if (out->append(m)) return true;
+            fail_(g, err, out->error());
+            return false;
+        };
+        merge_sorted_runs(g.runs.size(), spec, chunk_rows, emit_ptr(), next, emit, err);
+        for (auto& run : g.runs) run->release();
+    }
+
+  private:
+    static void fail_(SortGlobal& g, ErrCtx& err, const std::string& msg) {
+        std::lock_guard<std::mutex> lk(g.mtx);
+        if (g.err.empty()) g.err = msg;
+        err.code = 1;
+        err.msg = g.err.c_str();
+    }
+
+    // Sort `pile` and write it as one run. Fails loud when spill is not configured:
+    // the alternative is holding past the budget, which is the OOM this exists to stop.
+    bool write_run_(SortGlobal& g, std::vector<MorselPtr>& pile, unsigned nthreads,
+                    ErrCtx& err) {
+        if (spill_env == nullptr || spill_env->root.empty()) {
+            fail_(g, err,
+                  "ORDER BY input passed SORT_RUN_BYTES (" + std::to_string(run_bytes) +
+                      " bytes) and spill is not configured: set KVSTORE_LOCATION to a "
+                      "local directory (file:// or a bare path)");
+            return false;
+        }
+        auto run = std::make_unique<MorselBuffer>();
+        run->configure_run(spill_env);
+        run->set_label("Sort run");
+        MorselBuffer* r = run.get();
+        auto emit = [&](MorselPtr&& m) -> bool {
+            if (r->append(m)) return true;
+            fail_(g, err, r->error());
+            return false;
+        };
+        if (!sort_morsels_streamed(pile, spec, kSortRunRowGroupRows, nthreads, emit, err))
+            return false;
+        pile.clear();
+        if (!r->seal()) {
+            fail_(g, err, r->error());
+            return false;
+        }
+        std::lock_guard<std::mutex> lk(g.mtx);
+        g.runs.push_back(std::move(run));
+        return true;
     }
 };
 

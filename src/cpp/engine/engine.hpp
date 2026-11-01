@@ -284,6 +284,7 @@ public:
     // thread's thread_local latch dies with it, and ErrCtx::msg must outlive run().
     std::string span_err_text_;
     SpillEnv spill_env;   // shared spill config/store for every buffer this run
+    size_t sort_run_bytes_ = 0;   // set_sort_run_bytes; 0 until the plan sets it
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
     std::vector<std::unique_ptr<GroupJoinState>> groupjoin_states;
     // Runtime min/max join filter slots. unique_ptr because a probe Source holds
@@ -571,6 +572,9 @@ public:
     // plan build, before any pipeline runs; empty = spill not configured and
     // buffered accumulation is unbounded, exactly the pre-spill engine.
     void set_spill_root(std::string root) { spill_env.root = std::move(root); }
+    // Input bytes an ORDER BY sorts in memory before spilling a run (SORT_RUN_BYTES).
+    // Set at plan build, before any sort sink is made.
+    void set_sort_run_bytes(size_t bytes) { sort_run_bytes_ = bytes; }
     // Labels the buffer with the sink's display name so a spill failure names
     // the operator that overspent, then hands it to the sink.
     MorselBuffer* sink_buffer_(size_t buf) {
@@ -631,9 +635,10 @@ public:
     }
     // GROUPJOIN, stream half: accumulate the streamed leg into the shared state.
     // Like Join2MarkSink, it must NOT fill the join ref — only the build pipeline does.
-    void set_groupjoin_accum_sink(size_t p, size_t gj, std::vector<size_t> key_idx) {
+    void set_groupjoin_accum_sink(size_t p, size_t gj, std::vector<size_t> key_idx,
+                                  bool null_equal = false) {
         set_sink_(p, std::make_unique<GroupJoinAccumSink>(groupjoin_states.at(gj).get(),
-                                                          std::move(key_idx)));
+                                                          std::move(key_idx), null_equal));
     }
     // GROUPJOIN, emit half. `unmatched`: 0 drop (INNER), 1 organic LEFT (COUNT(*) counts
     // the padded row), 2 null-pad (a LEFT JOIN to a grouped relation).
@@ -1582,8 +1587,8 @@ public:
     void set_sort_sink(size_t p, std::vector<SortKeySpec> spec, size_t buf,
                        bool emit_prune, std::vector<uint32_t> emit_cols) {
         set_sink_(p, std::make_unique<SortSink>(std::move(spec), sink_buffer_(buf),
-                                                131072, emit_prune,
-                                                std::move(emit_cols)));
+                                                &spill_env, sort_run_bytes_, 131072,
+                                                emit_prune, std::move(emit_cols)));
     }
     void set_topn_sink(size_t p, std::vector<SortKeySpec> spec, size_t n, size_t buf,
                        bool emit_prune, std::vector<uint32_t> emit_cols) {

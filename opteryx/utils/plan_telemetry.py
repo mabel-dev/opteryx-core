@@ -177,7 +177,7 @@ def _join_legs(node):
         return "left", "right"
     if join_type == "cross":
         return "right", "left"
-    if join_type == "inner":
+    if join_type in ("inner", "inner not-distinct"):
         return "left", "right"
     # SEMI / ANTI normally build the right leg like every other filtering join,
     # but JoinAlgorithmStrategy can swap them to build the left instead — and
@@ -352,6 +352,8 @@ def _get_operator_label(node):
     if class_name == "ExistenceJoinNode":
         direction = _EXISTENCE_JOIN_DIRECTIONS.get(node.join_type, node.join_type)
         return f"EXISTENCE JOIN ({direction})"
+    if class_name == "DrakenInnerJoinNode" and node.join_type == "inner not-distinct":
+        return "INNER JOIN (NULL=NULL)"
     return _OPERATOR_LABELS.get(class_name)
 
 

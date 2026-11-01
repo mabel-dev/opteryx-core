@@ -114,8 +114,10 @@ _FEW_GROUPS_RATIO = 100
 _UNIQUE_STREAM_KEY = 0.9   # streamed key distinct / streamed rows at or above = unique
 _VARIABLE_WIDTH = frozenset({DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY})
 
-# Joins whose output is a pair row (the ones a groupjoin can replace).
-_PAIR_JOINS = ("inner", "left outer", "nested loop")
+# Joins whose output is a pair row (the ones a groupjoin can replace). "inner
+# not-distinct" (an aggregate window's partition join) is taken by the outer-leg form
+# only; `_organic` keeps its own, narrower list.
+_PAIR_JOINS = ("inner", "left outer", "nested loop", "inner not-distinct")
 
 
 def _conjuncts(node) -> list:
@@ -374,7 +376,10 @@ class GroupJoinStrategy(OptimizationStrategy):
         # emitted row has no inner key of its own — only O's.
         # "nested loop" = an INNER equi-join with a residual applied as a post-join
         # filter; the residual is evaluated over the groupjoin's output instead.
-        if join.type not in ("inner", "nested loop"):
+        # "inner not-distinct" = an aggregate window's partition join: the compiler
+        # wires every half of the groupjoin with IS NOT DISTINCT FROM keys, so the
+        # NULL partition's rows meet the NULL group.
+        if join.type not in ("inner", "nested loop", "inner not-distinct"):
             return
         left_nid, right_nid = plan.legs(join_nid)
         sides = [

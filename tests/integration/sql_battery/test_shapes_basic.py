@@ -3372,18 +3372,19 @@ def test_ranking_window_values():
     assert numbered["Jupiter"] == 1 and numbered["Uranus"] == 4, numbered
     assert len(numbered) == 9, numbered
 
-    # KNOWN DIVERGENCE, pinned deliberately: the AGGREGATE window path lowers to an
-    # inner join on the partition key (Eq, not IS NOT DISTINCT FROM — see
-    # window_to_join.py), so rows with a NULL partition key are DROPPED there,
-    # while the ranking path above keeps them. If either side changes, this test
-    # is the notice — the fix is a ruling, not a silent edit here.
+    # The AGGREGATE window path agrees with the ranking path: it lowers to an
+    # "inner not-distinct" join on the partition key (IS NOT DISTINCT FROM — see
+    # window_to_join.py), so the NULL partition is one partition of four. Until
+    # 2026-11-01 it was a plain equi-join and silently dropped those rows (ruled a
+    # bug, fixed by the architect's instruction).
     counted = dict(
         _rows(
             "SELECT name, COUNT(*) OVER (PARTITION BY surface_pressure) AS c FROM $planets",
             "name", "c",
         )
     )
-    assert len(counted) == 5 and "Jupiter" not in counted, counted
+    assert len(counted) == 9, counted
+    assert all(counted[n] == 4 for n in ("Jupiter", "Saturn", "Uranus", "Neptune")), counted
 
 
 def test_navigation_window_values():
