@@ -5,7 +5,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -19,6 +21,21 @@ std::atomic<int64_t> g_reserve{0};
 std::atomic<int64_t> g_cache_budget{0};
 std::atomic<int64_t> g_cache_bytes{0};
 std::atomic<draken_mem_shrink_fn> g_shrinker{nullptr};
+
+std::atomic<int64_t> g_io_budget{0};
+std::atomic<int64_t> g_io_held{0};
+std::atomic<int64_t> g_io_peak{0};
+std::mutex g_io_mu;
+std::condition_variable g_io_cv;
+uint64_t g_io_generation = 0;   // guarded by g_io_mu
+
+void io_advance() {
+    {
+        std::lock_guard<std::mutex> lk(g_io_mu);
+        ++g_io_generation;
+    }
+    g_io_cv.notify_all();
+}
 
 // ---- Compressor-pressure give-way (macOS) ------------------------------------
 // The charged term above only sees memory draken charges. On SF100 Q18 the
@@ -167,6 +184,39 @@ int64_t draken_mem_cache_bytes(void) { return g_cache_bytes.load(std::memory_ord
 
 void draken_mem_set_shrinker(draken_mem_shrink_fn fn) {
     g_shrinker.store(fn, std::memory_order_release);
+}
+
+void draken_io_configure(int64_t budget_bytes) { g_io_budget.store(budget_bytes, std::memory_order_relaxed); }
+int64_t draken_io_budget(void) { return g_io_budget.load(std::memory_order_relaxed); }
+
+void draken_io_charge(int64_t bytes) {
+    const int64_t now = g_io_held.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+    int64_t peak = g_io_peak.load(std::memory_order_relaxed);
+    while (now > peak && !g_io_peak.compare_exchange_weak(peak, now, std::memory_order_relaxed)) {
+    }
+}
+
+void draken_io_release(int64_t bytes) {
+    g_io_held.fetch_sub(bytes, std::memory_order_relaxed);
+    io_advance();
+}
+
+int64_t draken_io_held(void) { return g_io_held.load(std::memory_order_relaxed); }
+int64_t draken_io_peak(void) { return g_io_peak.load(std::memory_order_relaxed); }
+void draken_io_reset_peak(void) {
+    g_io_peak.store(g_io_held.load(std::memory_order_relaxed), std::memory_order_relaxed);
+}
+
+uint64_t draken_io_generation(void) {
+    std::lock_guard<std::mutex> lk(g_io_mu);
+    return g_io_generation;
+}
+
+void draken_io_notify(void) { io_advance(); }
+
+void draken_io_wait(uint64_t seen) {
+    std::unique_lock<std::mutex> lk(g_io_mu);
+    g_io_cv.wait(lk, [seen] { return g_io_generation != seen; });
 }
 
 }  // extern "C"

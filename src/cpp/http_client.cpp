@@ -170,28 +170,18 @@ void configure_socket_guard(CURL* easy, SocketGuard* guard, bool deny_private) {
 // assembles them into an HttpTuning. A caller (Opteryx's query engine) that
 // wants a per-query SET override never touches these; it builds its own
 // HttpTuning and passes it explicitly to get()/get_many() (see http_client.hpp).
-long http_timeout_floor_ms_env() {
-    static long v = []() {
-        const char* e = std::getenv("OPTERYX_HTTP_TIMEOUT_FLOOR_MS");
-        return e ? std::atol(e) : 10000L;   // 10s floor
-    }();
+// A deadline of 0 would mean "none" to curl, so a non-positive value is refused.
+long positive_ms_env(const char* name, long fallback) {
+    const char* e = std::getenv(name);
+    if (!e) return fallback;
+    const long v = std::atol(e);
+    if (v <= 0) throw std::invalid_argument(std::string(name) + " must be a positive number of ms (got '" + e + "')");
     return v;
 }
-double http_min_bw_bytes_per_s_env() {
-    static double v = []() {
-        const char* e = std::getenv("OPTERYX_HTTP_MIN_BW_MBPS");
-        double mbps = e ? std::atof(e) : 60.0;   // assume ≥60 Mbps (also the adaptive byte cap's starting speed)
-        return mbps * 1.0e6 / 8.0;
-    }();
-    return v;
-}
-long long http_max_bytes_in_flight_env() {
-    static long long v = []() {
-        const char* e = std::getenv("OPTERYX_HTTP_MAX_BYTES_IN_FLIGHT");
-        return e ? std::atoll(e) : 0LL;   // default: adaptive (see HttpTuning::max_bytes_in_flight)
-    }();
-    return v;
-}
+long http_stall_ms_env()   { static const long v = positive_ms_env("OPTERYX_HTTP_STALL_MS", 5000);    return v; }
+long http_ceiling_ms_env() { static const long v = positive_ms_env("OPTERYX_HTTP_CEILING_MS", 30000); return v; }
+long http_connect_ms_env() { static const long v = positive_ms_env("OPTERYX_HTTP_CONNECT_MS", 2000);  return v; }
+
 int http_max_retries_env() {
     static int v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_MAX_RETRIES");
@@ -256,7 +246,6 @@ long http_max_host_connections_env() {
     return v;
 }
 
-std::atomic<uint64_t> g_http_retries{0};
 
 // A CURL transport result is retryable if it is a transient connection/timeout/
 // partial-transfer condition (vs a definitive protocol/SSL error).
@@ -307,22 +296,66 @@ long range_span_bytes(const std::map<std::string, std::string>& headers) {
     return (end >= start) ? (end - start + 1) : 0;
 }
 
-// Timeout for moving `bytes` over ONE assumed-min-bandwidth stream, floored so
-// a small chunk that stalls times out in ~floor seconds, not the 60s client
-// default, and can be retried promptly.
-long timeout_for_bytes_ms(long bytes, const HttpTuning& tuning, long fallback_ms) {
-    double bw    = tuning.min_bandwidth_bytes_per_s;
-    long derived = bw > 0 ? static_cast<long>(bytes * 1000.0 / bw) : fallback_ms;
-    return std::max(tuning.timeout_floor_ms, derived);
+// The stall deadline (HttpTuning::stall_ms), watched from curl's progress callback.
+// Not curl's LOW_SPEED options: those average over a ~5 s window, so a transfer that
+// went quiet after some bytes was caught 5+ s late (measured 6.4 s for a 1 s stall).
+// The clock starts once the request is sent (pretransfer), so a request still queued
+// for a connection is never a stall; connect_ms and the ceiling bound that wait.
+struct StallWatch {
+    CURL*      easy     = nullptr;
+    long       stall_ms = 0;
+    curl_off_t moved    = -1;   // bytes up + down at the last change
+    std::chrono::steady_clock::time_point last;
+    bool       stalled  = false;
+
+    static int on_progress(void* p, curl_off_t, curl_off_t dlnow, curl_off_t, curl_off_t ulnow) {
+        auto* w = static_cast<StallWatch*>(p);
+        curl_off_t sent_us = 0;
+        curl_easy_getinfo(w->easy, CURLINFO_PRETRANSFER_TIME_T, &sent_us);
+        if (sent_us == 0) return 0;
+        const auto now = std::chrono::steady_clock::now();
+        if (dlnow + ulnow != w->moved) {
+            w->moved = dlnow + ulnow;
+            w->last = now;
+            return 0;
+        }
+        if (now - w->last < std::chrono::milliseconds(w->stall_ms)) return 0;
+        w->stalled = true;
+        return 1;   // aborts the transfer (CURLE_ABORTED_BY_CALLBACK)
+    }
+};
+
+// Progress deadlines (HttpTuning): connect within connect_ms, never go stall_ms
+// without a byte once sent, finish by `ceiling_ms`. `w` must outlive the transfer.
+void apply_deadlines(CURL* easy, const HttpTuning& t, long ceiling_ms, StallWatch* w) {
+    *w = StallWatch{};
+    w->easy = easy;
+    w->stall_ms = t.stall_ms;
+    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, t.connect_ms);
+    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,        ceiling_ms);
+    curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION,  StallWatch::on_progress);
+    curl_easy_setopt(easy, CURLOPT_XFERINFODATA,      w);
+    curl_easy_setopt(easy, CURLOPT_NOPROGRESS,        0L);
 }
 
-// Single-request timeout from its own Range span; the client default when no
-// Range is present.
-long request_timeout_ms(const std::map<std::string, std::string>& headers, long fallback_ms,
-                         const HttpTuning& tuning) {
-    long span = range_span_bytes(headers);
-    if (span < 0) return fallback_ms;
-    return timeout_for_bytes_ms(span, tuning, fallback_ms);
+// A stall abort is reported as the timeout it is, so it retries like one.
+CURLcode deadline_result(CURLcode res, const StallWatch& w) {
+    return w.stalled ? CURLE_OPERATION_TIMEDOUT : res;
+}
+
+// Which deadline a CURLE_OPERATION_TIMEDOUT was: curl reports connect and ceiling alike.
+std::string timeout_kind(const StallWatch& w, curl_off_t connect_us, const HttpTuning& t, long ceiling_ms) {
+    if (w.stalled) return "stalled (no bytes for " + std::to_string(t.stall_ms) + "ms)";
+    if (connect_us == 0) return "did not connect within " + std::to_string(t.connect_ms) + "ms";
+    return "exceeded the " + std::to_string(ceiling_ms) + "ms ceiling";
+}
+
+// Counts a deadline failure into the caller's stats: a stall, or the ceiling (a
+// timeout once connected that was not a stall).
+void note_deadline(HttpCallStats* stats, CURLcode res, const StallWatch& w, curl_off_t connect_us) {
+    if (stats == nullptr || res != CURLE_OPERATION_TIMEDOUT) return;
+    if (w.stalled) ++stats->stalls;
+    else if (connect_us != 0) ++stats->ceiling_timeouts;
 }
 
 // Backoff with full jitter: random in [0, base * 2^attempt], capped.
@@ -334,200 +367,6 @@ unsigned backoff_ms(int attempt) {
     return d(rng);
 }
 
-
-// ── Bytes-in-flight admission (HttpTuning::max_bytes_in_flight) ──────────────
-// One gate for the whole process: the link is shared by every thread and query.
-// Strict FIFO (tickets) so a large request cannot be starved by a stream of small
-// ones that each fit under the cap.
-//
-// ADAPTIVE CAP (max_bytes_in_flight == 0). The cap is the bytes that can still
-// land inside the deadline at the link's real speed, with headroom:
-//     cap = estimated_link_bytes_per_s x timeout_floor_s x kSafety
-// The link speed comes from RECEIVED BYTES, counted in the body write callback as
-// they arrive (note_received), over consecutive time slices of at least kSliceS:
-// each slice's sample is the bytes that actually arrived during it divided by its
-// length, so no sample can exceed the link. Crediting a request's whole size when
-// it COMPLETED (the previous scheme) is what this replaces: a short request that
-// lived through a burst of large completions credited bytes moved long before it
-// started, and on a 600 Mbit/s link measured 160-374 MB/s - a cap 2-5x what the link
-// could drain, so 50-60 admitted ranges shared it and 20-40 MB ranges ran out their
-// deadline (opteryx.app ClickBench Q20, reproduced on AIStor 2026-10-11). Slices
-// are closed when the gate is consulted (admission, release), so a slice may be
-// longer than kSliceS; a longer slice averages lower, never higher. The estimate
-// is the MAXIMUM over the last timeout_floor:
-//   - a max filter, not a mean, because a quiet moment (little demand) delivers
-//     little without the link being slow; a mean would shrink the cap and starve
-//     the very demand that would show the link is fast. Only a whole horizon of
-//     low samples lowers the estimate.
-//   - the assumption (min_bandwidth_bytes_per_s x timeout_floor, in full) stands for
-//     the first horizon and whenever a full horizon has produced no sample, so the
-//     gate opens at the assumed minimum and never learns "slow" from a warm-up.
-//   - headroom: kSafety < 1 means cap = 5 s of transfer at the estimate with the
-//     default 10 s floor, so in-flight bytes can exceed one second of throughput
-//     and the estimate can rise to a faster link.
-class ByteGate {
-public:
-    // The gate as one request saw it: the link estimate (0 = no sample yet, the
-    // assumed minimum applies), the cap that estimate gives, and what else was on
-    // the link. Carried into a timeout's error so it says whether the request was
-    // admitted into an over-full link or the link slowed after admission.
-    struct State {
-        double    estimate_bytes_per_s = 0.0;
-        long long cap                  = 0;
-        long long in_flight            = 0;
-        long long requests_in_flight   = 0;
-    };
-
-    // What a request remembers from admission: its bytes to release, and the gate
-    // it was admitted into for a timeout's report (`at_admit` excludes itself).
-    struct Admission {
-        long long bytes = 0;
-        double wait_s = 0.0; State at_admit;
-    };
-
-    // Body bytes as they arrive, from every transfer in this module (the link is
-    // shared whether or not a request was admitted through the gate).
-    void note_received(size_t bytes) {
-        received_.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
-    }
-
-    Admission acquire(long long bytes, const HttpTuning& t) {
-        const double t_request = now_s();
-        std::unique_lock<std::mutex> lk(m_);
-        const uint64_t ticket = next_ticket_++;
-        cv_.wait(lk, [&] {
-            return ticket == serving_ &&
-                   (in_flight_ == 0 || in_flight_ + bytes <= cap_locked(t, now_s()));
-        });
-        const double now = now_s();
-        if (first_use_ < 0) first_use_ = now;
-        const State at_admit = state_locked(t, now);
-        in_flight_ += bytes;
-        ++requests_in_flight_;
-        ++serving_;
-        cv_.notify_all();   // the next ticket may fit alongside this one
-        return Admission{bytes, now - t_request, at_admit};
-    }
-    State state(const HttpTuning& t) {
-        std::lock_guard<std::mutex> lk(m_);
-        return state_locked(t, now_s());
-    }
-    void release(const Admission& a) {
-        std::lock_guard<std::mutex> lk(m_);
-        in_flight_ -= a.bytes;
-        --requests_in_flight_;
-        close_slice_locked(now_s());
-        cv_.notify_all();
-    }
-private:
-    static constexpr double kSafety = 0.5;   // cap = this x (bytes the estimate moves in the deadline)
-    static constexpr double kSliceS = 0.25;  // minimum length of one received-bytes sample
-
-    static double now_s() {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
-
-    // Ends the current slice once it is at least kSliceS long, recording the rate
-    // the received bytes arrived at during it. The first call opens the first slice.
-    void close_slice_locked(double now) {
-        const long long received = received_.load(std::memory_order_relaxed);
-        if (slice_start_ < 0) { slice_start_ = now; slice_received_ = received; return; }
-        const double length = now - slice_start_;
-        if (length < kSliceS) return;
-        samples_.emplace_back(now, static_cast<double>(received - slice_received_) / length);
-        slice_start_    = now;
-        slice_received_ = received;
-    }
-
-    // Windowed max of the received-rate samples; 0 when the horizon holds none.
-    double estimate_locked(const HttpTuning& t, double now) {
-        close_slice_locked(now);
-        const double horizon = t.timeout_floor_ms / 1000.0;
-        while (!samples_.empty() && now - samples_.front().first > horizon) samples_.pop_front();
-        double measured = 0.0;
-        for (const auto& s : samples_) measured = std::max(measured, s.second);
-        return measured;
-    }
-
-    State state_locked(const HttpTuning& t, double now) {
-        return State{estimate_locked(t, now), cap_locked(t, now), in_flight_, requests_in_flight_};
-    }
-
-    long long cap_locked(const HttpTuning& t, double now) {
-        if (t.max_bytes_in_flight > 0) return t.max_bytes_in_flight;
-        const double horizon = t.timeout_floor_ms / 1000.0;
-        const double measured = estimate_locked(t, now);
-        // The assumed minimum is a FLOOR on the link, so it fills the deadline in full;
-        // a measured rate is an estimate that moves, so it keeps the safety margin. The
-        // assumption applies for the first horizon and whenever a horizon has produced
-        // no sample, so the gate never learns "slow" from a warm-up.
-        double cap = measured * horizon * kSafety;
-        const bool warming = first_use_ >= 0 && now - first_use_ < horizon;
-        if (warming || samples_.empty()) cap = std::max(cap, t.min_bandwidth_bytes_per_s * horizon);
-        return static_cast<long long>(cap);
-    }
-
-    std::mutex              m_;
-    std::condition_variable cv_;
-    long long               in_flight_   = 0;
-    long long               requests_in_flight_ = 0;
-    std::atomic<long long>  received_{0};          // body bytes arrived, ever (note_received)
-    double                  slice_start_    = -1.0;
-    long long               slice_received_ = 0;   // received_ when the current slice opened
-    uint64_t                next_ticket_ = 0;
-    uint64_t                serving_     = 0;
-    double                  first_use_   = -1.0;
-    std::deque<std::pair<double, double>> samples_;   // (time, bytes/s), oldest first
-};
-
-ByteGate& byte_gate() {
-    static ByteGate g;
-    return g;
-}
-
-// Holds `bytes` of the gate for the scope of one transfer attempt. No-op when the
-// cap is off (max_bytes_in_flight < 0) or the request has no known size.
-class ByteAdmission {
-public:
-    ByteAdmission(long long bytes, const HttpTuning& tuning, HttpGateUse* use) {
-        if (tuning.max_bytes_in_flight < 0 || bytes <= 0) return;
-        admission_ = byte_gate().acquire(bytes, tuning);
-        held_ = true;
-        if (use == nullptr) return;
-        const ByteGate::State& g = admission_.at_admit;
-        ++use->admissions;
-        use->wait_ns += static_cast<uint64_t>(admission_.wait_s * 1e9);
-        use->peak_in_flight_bytes = std::max(use->peak_in_flight_bytes, g.in_flight + bytes);
-        use->peak_requests = std::max(use->peak_requests, g.requests_in_flight + 1);
-        use->min_cap_bytes = use->min_cap_bytes == 0 ? g.cap : std::min(use->min_cap_bytes, g.cap);
-    }
-    ~ByteAdmission() { if (held_) byte_gate().release(admission_); }
-    bool held() const { return held_; }
-    const ByteGate::Admission& admission() const { return admission_; }
-    ByteAdmission(const ByteAdmission&) = delete;
-    ByteAdmission& operator=(const ByteAdmission&) = delete;
-private:
-    ByteGate::Admission admission_;
-    bool                held_ = false;
-};
-
-std::string format_gate_state(const ByteGate::State& g) {
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "est=%.1fMB/s cap=%lldB in_flight=%lldB/%lldreq",
-                  g.estimate_bytes_per_s / 1.0e6, g.cap, g.in_flight, g.requests_in_flight);
-    return buf;
-}
-
-// The gate the failed attempt was admitted into, and the gate now (after it
-// released), for a timeout's error: an over-full admission and a link that
-// slowed after admission read differently here.
-std::string gate_report(bool gated, const ByteGate::Admission& a, const HttpTuning& t) {
-    if (!gated) return " gate=off";
-    char wait[48];
-    std::snprintf(wait, sizeof(wait), "wait=%.0fms ", a.wait_s * 1000.0);
-    return std::string(" gate[admit: ") + wait + format_gate_state(a.at_admit) +
-           " | now: " + format_gate_state(byte_gate().state(t)) + "]";
-}
 
 // curl_easy_init()'s implicit auto-init (CURL_GLOBAL_ALL) is documented as not
 // thread-safe. tl_http_client() is thread_local, so multiple worker threads can
@@ -595,30 +434,18 @@ void discard_thread_multi() {
 
 namespace http_link {
 
-Admission::Admission(long long bytes, const HttpTuning& tuning, HttpGateUse* use)
-    : impl_(new ByteAdmission(bytes, tuning, use)) {}
-Admission::~Admission() { delete static_cast<ByteAdmission*>(impl_); }
-void note_received(size_t bytes) { byte_gate().note_received(bytes); }
-long timeout_ms(long bytes, const HttpTuning& tuning) {
-    return timeout_for_bytes_ms(bytes, tuning, 60000);  // fallback = HttpClient's default timeout_ms
-}
 unsigned backoff_ms(int attempt) { return ::backoff_ms(attempt); }
-void count_retries(uint64_t n) { g_http_retries.fetch_add(n, std::memory_order_relaxed); }
 
 }  // namespace http_link
-
-uint64_t HttpClient::total_retries() {
-    return g_http_retries.load(std::memory_order_relaxed);
-}
 
 HttpTuning HttpClient::default_tuning() {
     static HttpTuning t = []() {
         HttpTuning c;
         c.max_host_connections     = http_max_host_connections_env();
         c.max_retries               = http_max_retries_env();
-        c.max_bytes_in_flight       = http_max_bytes_in_flight_env();
-        c.min_bandwidth_bytes_per_s = http_min_bw_bytes_per_s_env();
-        c.timeout_floor_ms          = http_timeout_floor_ms_env();
+        c.stall_ms                  = http_stall_ms_env();
+        c.ceiling_ms                = http_ceiling_ms_env();
+        c.connect_ms                = http_connect_ms_env();
         c.use_multiplexing          = http_use_multiplexing_env();
         c.use_pipewait              = http_use_pipewait_env();
         c.force_http11              = http_force_http11_env();
@@ -642,7 +469,6 @@ struct ResponseBuffer {
         auto* buf = static_cast<ResponseBuffer*>(userp);
         const uint8_t* src = static_cast<const uint8_t*>(ptr);
         buf->body.insert(buf->body.end(), src, src + bytes);
-        byte_gate().note_received(bytes);
         return bytes;
     }
 
@@ -747,10 +573,9 @@ void HttpClient::configure_share(void* easy_handle) const {
     );
 }
 
-HttpClient::HttpClient(int max_connections, long timeout_ms, bool deny_private_addresses)
+HttpClient::HttpClient(int max_connections, bool deny_private_addresses)
     : share_handle_(nullptr),
       max_connections_(max_connections),
-      timeout_ms_(timeout_ms),
       deny_private_(deny_private_addresses),
       user_agent_("opteryx/1.0"),
       ca_bundle_(find_ca_bundle()) {
@@ -787,10 +612,9 @@ std::vector<uint8_t> HttpClient::get(
     const std::string& url,
     const std::map<std::string, std::string>& headers,
     const HttpTuning* tuning_ptr,
-    HttpGateUse* gate_use)
+    HttpCallStats* stats)
 {
     HttpTuning tuning = tuning_ptr ? *tuning_ptr : default_tuning();
-    long per_request_timeout_ms = request_timeout_ms(headers, timeout_ms_, tuning);
 
     for (int attempt = 0; ; ++attempt) {
         CURL* easy = curl_easy_init();
@@ -798,10 +622,11 @@ std::vector<uint8_t> HttpClient::get(
 
         ResponseBuffer buf;
         SocketGuard guard;
+        StallWatch watch;
 
         curl_easy_setopt(easy, CURLOPT_URL,            url.c_str());
         curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      per_request_timeout_ms);
+        apply_deadlines(easy, tuning, tuning.ceiling_ms, &watch);
         curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
         curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
         curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
@@ -818,13 +643,7 @@ std::vector<uint8_t> HttpClient::get(
         }
         if (hlist) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
 
-        CURLcode res;
-        {
-            // Same admission as get_many(), for this one range; see HttpTuning.
-            const long span = range_span_bytes(headers);
-            ByteAdmission admission(span > 0 ? span : 0, tuning, gate_use);
-            res = curl_easy_perform(easy);
-        }
+        const CURLcode res = deadline_result(curl_easy_perform(easy), watch);
         curl_slist_free_all(hlist);
 
         bool curl_ok = (res == CURLE_OK);
@@ -832,6 +651,8 @@ std::vector<uint8_t> HttpClient::get(
         if (curl_ok) curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
         long os_errno = 0;
         curl_easy_getinfo(easy, CURLINFO_OS_ERRNO, &os_errno);
+        curl_off_t connect_us = 0;
+        curl_easy_getinfo(easy, CURLINFO_CONNECT_TIME_T, &connect_us);
         curl_easy_cleanup(easy);
 
         if (guard.refused_private()) throw_private_address("get", guard, url);
@@ -841,10 +662,14 @@ std::vector<uint8_t> HttpClient::get(
 
         bool retryable = curl_ok ? http_status_retryable(http_code)
                                   : curl_result_retryable(res);
+        note_deadline(stats, res, watch, connect_us);
         if (!retryable || attempt >= tuning.max_retries) {
             if (!curl_ok)
                 throw HttpError(
                     std::string("get: CURL error: ") + curl_easy_strerror(res) +
+                        (res == CURLE_OPERATION_TIMEDOUT
+                             ? " (" + timeout_kind(watch, connect_us, tuning, tuning.ceiling_ms) + ")"
+                             : std::string()) +
                         " [os_errno=" + std::to_string(os_errno) + "] url=" + redact_url(url),
                     retryable, 0);
             throw HttpError(
@@ -852,7 +677,7 @@ std::vector<uint8_t> HttpClient::get(
                 retryable, http_code);
         }
 
-        g_http_retries.fetch_add(1, std::memory_order_relaxed);
+        if (stats) ++stats->retries;
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
     }
 }
@@ -873,7 +698,8 @@ std::map<std::string, std::string> HttpClient::head(
 
     curl_easy_setopt(easy, CURLOPT_URL,            url.c_str());
     curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      timeout_ms_);
+    StallWatch watch;
+    apply_deadlines(easy, default_tuning(), default_tuning().ceiling_ms, &watch);
     curl_easy_setopt(easy, CURLOPT_NOBODY,          1L);  // HEAD
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
     curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
@@ -891,7 +717,7 @@ std::map<std::string, std::string> HttpClient::head(
     }
     if (hlist) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
 
-    CURLcode res = curl_easy_perform(easy);
+    CURLcode res = deadline_result(curl_easy_perform(easy), watch);
 
     long http_code = 0;
     curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
@@ -936,7 +762,9 @@ HttpClient::PutResponse HttpClient::put(
     SocketGuard guard;
     curl_easy_setopt(easy, CURLOPT_URL,              url.c_str());
     curl_easy_setopt(easy, CURLOPT_USERAGENT,        user_agent_.c_str());
-    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,       timeout_ms);
+    // The caller's timeout is the ceiling: an upload's size is the caller's, not a read range.
+    StallWatch watch;
+    apply_deadlines(easy, default_tuning(), timeout_ms, &watch);
     curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST,    "PUT");
     curl_easy_setopt(easy, CURLOPT_POSTFIELDS,       size ? reinterpret_cast<const char*>(data) : "");
     curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(size));
@@ -958,7 +786,7 @@ HttpClient::PutResponse HttpClient::put(
     hlist = curl_slist_append(hlist, "Expect:");
     curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
 
-    CURLcode res = curl_easy_perform(easy);
+    CURLcode res = deadline_result(curl_easy_perform(easy), watch);
     long http_code = 0;
     curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(hlist);
@@ -993,7 +821,7 @@ HttpClient::PutResponse HttpClient::put(
 std::vector<std::vector<uint8_t>> HttpClient::get_many(
     const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
     const HttpTuning* tuning_ptr,
-    HttpGateUse* gate_use)
+    HttpCallStats* stats)
 {
     const size_t n = requests.size();
     if (n == 0) return {};
@@ -1007,17 +835,14 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         long           http_code = 0;
         long           os_errno  = 0;   // DEBUG: raw connect()/socket() errno, see CURLINFO_OS_ERRNO
         SocketGuard    guard;
-        long           timeout_ms = 0;  // budget applied on the last attempt
+        curl_off_t     connect_us = 0;  // CURLINFO_CONNECT_TIME_T on the last attempt
+        StallWatch     watch;
         curl_off_t     elapsed_us = 0;  // CURLINFO_TOTAL_TIME_T on the last attempt
     };
     std::vector<RequestCtx> ctx(n);
     // Shape of the last attempt's batch, for the exhausted-retries message.
     size_t last_batch_n     = 0;
     long   last_batch_bytes = 0;
-    // The gate the last attempt was admitted into; `last_gated` false when the
-    // cap is off or the batch had no known size (never admitted).
-    bool                last_gated = false;
-    ByteGate::Admission last_admission;
 
     // Fetch a subset of requests (by index) concurrently via the thread's CURLM,
     // harvesting result + status into ctx[idx]. Resets each buffer first so a
@@ -1039,26 +864,13 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         curl_multi_setopt(multi, CURLMOPT_PIPELINING,
                           tuning.use_multiplexing ? (long)CURLPIPE_MULTIPLEX : (long)CURLPIPE_NOTHING);
 
-        // Every range in this batch shares the same (at most host_cap) h2
-        // connections, so the assumed min bandwidth covers the WHOLE batch, not
-        // each range: every handle gets the time to move the batch's total bytes.
-        // A range-less GET has no known size and keeps the client default as its
-        // lower bound.
         long batch_bytes = 0;
         for (size_t i : idxs) {
             long span = range_span_bytes(requests[i].second);
             if (span > 0) batch_bytes += span;
         }
-        const long batch_timeout_ms = timeout_for_bytes_ms(batch_bytes, tuning, timeout_ms_);
         last_batch_n     = idxs.size();
         last_batch_bytes = batch_bytes;
-
-        // Wait for room on the link BEFORE any handle is created or added: curl
-        // starts each request's timer when it is added, so waiting here costs the
-        // request none of its deadline. Held until this attempt's transfers end.
-        ByteAdmission admission(batch_bytes, tuning, gate_use);
-        last_gated = admission.held();
-        if (last_gated) last_admission = admission.admission();
 
         auto cleanup = [&]() {
             for (size_t j = 0; j < idxs.size(); ++j) {
@@ -1086,10 +898,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
             curl_easy_setopt(easy, CURLOPT_URL,            req_url.c_str());
             curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-            ctx[i].timeout_ms = range_span_bytes(req_hdrs) < 0
-                ? std::max(timeout_ms_, batch_timeout_ms)
-                : batch_timeout_ms;
-            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      ctx[i].timeout_ms);
+            apply_deadlines(easy, tuning, tuning.ceiling_ms, &ctx[i].watch);
             curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
             curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
             curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
@@ -1142,13 +951,15 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 void* priv = nullptr;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_PRIVATE, &priv);
                 size_t i = reinterpret_cast<size_t>(priv);
-                ctx[i].res = msg->data.result;
+                ctx[i].res = deadline_result(msg->data.result, ctx[i].watch);
                 ctx[i].http_code = 0;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &ctx[i].http_code);
                 ctx[i].os_errno = 0;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_OS_ERRNO, &ctx[i].os_errno);
                 ctx[i].elapsed_us = 0;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_TOTAL_TIME_T, &ctx[i].elapsed_us);
+                ctx[i].connect_us = 0;
+                curl_easy_getinfo(msg->easy_handle, CURLINFO_CONNECT_TIME_T, &ctx[i].connect_us);
             }
         }
         cleanup();
@@ -1172,6 +983,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
             bool retryable = curl_ok ? http_status_retryable(ctx[i].http_code)
                                      : curl_result_retryable(ctx[i].res);
+            note_deadline(stats, ctx[i].res, ctx[i].watch, ctx[i].connect_us);
             if (!retryable) {
                 // Hard failure (4xx or definitive transport error) — fail now.
                 if (!curl_ok)
@@ -1191,11 +1003,13 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
             size_t i = retry_next.front();
             std::string cause = (ctx[i].res != CURLE_OK)
                 ? std::string("CURL error: ") + curl_easy_strerror(ctx[i].res) +
+                      (ctx[i].res == CURLE_OPERATION_TIMEDOUT
+                           ? " (" + timeout_kind(ctx[i].watch, ctx[i].connect_us, tuning, tuning.ceiling_ms) + ")"
+                           : std::string()) +
                       " [os_errno=" + std::to_string(ctx[i].os_errno) + " (" +
                       std::strerror(static_cast<int>(ctx[i].os_errno)) + ")]"
                 : std::string("HTTP ") + std::to_string(ctx[i].http_code);
-            // received vs expected + elapsed vs budget tells a transfer still
-            // moving (budget too tight) from one that stalled (dead connection).
+            // received vs expected + elapsed says how far the transfer got.
             const long span = range_span_bytes(requests[i].second);
             throw HttpError(
                 "get_many: exhausted " + std::to_string(max_retries) + " retries (" +
@@ -1205,14 +1019,12 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 " received=" + std::to_string(ctx[i].buf.body.size()) + "/" +
                 (span < 0 ? std::string("?") : std::to_string(span)) + "B" +
                 " elapsed=" + std::to_string(ctx[i].elapsed_us / 1000) + "ms" +
-                " timeout=" + std::to_string(ctx[i].timeout_ms) + "ms" +
                 " batch=" + std::to_string(last_batch_n) + " ranges/" +
-                std::to_string(last_batch_bytes) + "B" +
-                gate_report(last_gated, last_admission, tuning),
+                std::to_string(last_batch_bytes) + "B",
                 true, ctx[i].http_code);
         }
 
-        g_http_retries.fetch_add(retry_next.size(), std::memory_order_relaxed);
+        if (stats) stats->retries += retry_next.size();
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
         pending.swap(retry_next);
     }
@@ -1251,6 +1063,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
         long           http_code = 0;
         long           os_errno  = 0;
         SocketGuard    guard;
+        StallWatch     watch;
     };
     std::vector<RequestCtx> ctx(n);
 
@@ -1291,7 +1104,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
 
             curl_easy_setopt(easy, CURLOPT_URL,            req_url.c_str());
             curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      request_timeout_ms(req_hdrs, timeout_ms_, tuning));
+            apply_deadlines(easy, tuning, tuning.ceiling_ms, &ctx[i].watch);
             curl_easy_setopt(easy, CURLOPT_NOBODY,          1L);  // HEAD
             curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
             curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
@@ -1339,7 +1152,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 void* priv = nullptr;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_PRIVATE, &priv);
                 size_t i = reinterpret_cast<size_t>(priv);
-                ctx[i].res = msg->data.result;
+                ctx[i].res = deadline_result(msg->data.result, ctx[i].watch);
                 ctx[i].http_code = 0;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &ctx[i].http_code);
                 ctx[i].os_errno = 0;
@@ -1393,7 +1206,6 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 true, ctx[i].http_code);
         }
 
-        g_http_retries.fetch_add(retry_next.size(), std::memory_order_relaxed);
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
         pending.swap(retry_next);
     }

@@ -84,7 +84,7 @@ struct ParquetFooterResult {
  */
 #ifdef RUGO_ENABLE_HTTP
 inline HttpClient& footer_http_client() {
-    static HttpClient client(128, 60000);
+    static HttpClient client(128);
     return client;
 }
 #endif

@@ -538,7 +538,7 @@ struct MorselRef {
     // or released). survivor_mask is empty. The consumer must not build them.
     bool settled = false;
     int64_t settled_rows = 0;
-    // Memory admission (ParquetIOPipeline::set_memory_budget): the decoded-bytes
+    // Memory admission (the process IO budget, draken_io_*): the decoded-bytes
     // estimate this result holds on the pipeline's ledger, released by the
     // consumer's pop (try_get_result / wait_and_get_result). 0 = budget off.
     int64_t charged_bytes = 0;
@@ -2065,7 +2065,7 @@ class ParquetIOPipeline {
         // path) and carried so the other stage reuses the identical plan.
         bool page_prune_done = false;
         PagePrune page_prune;
-        // Memory admission (set_memory_budget): the footer-derived estimates
+        // Memory admission (the process IO budget): the footer-derived estimates
         // this item is charged for, and what it CURRENTLY holds on each ledger
         // so every exit path releases exactly what was taken.
         int64_t est_decoded_bytes = 0;
@@ -2400,10 +2400,11 @@ class ParquetIOPipeline {
     }
 
     // ── Memory admission ─────────────────────────────────────────────────────
-    // set_memory_budget(bytes): a cap on what THIS pipeline holds — decoded
-    // results from the moment a worker claims an item until the consumer pops
-    // its result (held_decoded_), plus compressed row-group bytes from fetch
-    // until decode has consumed them (held_prefetch_). Charges are the footer's
+    // The process IO budget (draken_io_*, core/mem_account.h) bounds what EVERY
+    // pipeline holds together. This pipeline's share is its decoded results
+    // from the moment a worker claims an item until the consumer pops its result
+    // (held_decoded_), plus compressed row-group bytes from fetch until decode
+    // has consumed them (held_prefetch_); each charge goes to both. Charges are the footer's
     // estimates (Σ total_uncompressed_size / Σ total_compressed_size of the
     // projected columns) so the ledger is exact by construction: whatever was
     // charged is what gets released, whichever path drops the item.
@@ -2415,8 +2416,13 @@ class ParquetIOPipeline {
     // decode (held_prefetch_ > 0), which the decode admission above guarantees
     // will happen. And the consumer's own inline-help decode in
     // wait_and_get_result never waits on admission at all: it is the drain.
-    // 0 (the default) = no budget, nothing changes.
-    int64_t memory_budget_bytes_ = 0;
+    // Those conditions are on THIS pipeline's own ledgers, so each pipeline can
+    // always progress once its own consumer drains it, whatever others hold;
+    // only the budget test is on the process total. A waiter blocks on the
+    // process generation (draken_io_wait), which a release in any pipeline
+    // advances. Read once at construction, so a pipeline's charges and releases
+    // agree even if the budget is reconfigured; 0 = off, nothing is charged.
+    const int64_t io_budget_ = draken_io_budget();
     std::atomic<int64_t>  held_decoded_{0};
     std::atomic<int64_t>  held_prefetch_{0};
     std::atomic<int64_t>  held_high_watermark_{0};
@@ -2434,26 +2440,43 @@ class ParquetIOPipeline {
     void ledger_charge(std::atomic<int64_t>& which, int64_t n) {
         if (n <= 0) return;
         which.fetch_add(n, std::memory_order_relaxed);
+        draken_io_charge(n);
         const int64_t total = held_decoded_.load(std::memory_order_relaxed) +
                               held_prefetch_.load(std::memory_order_relaxed);
         int64_t prev = held_high_watermark_.load(std::memory_order_relaxed);
         while (total > prev &&
                !held_high_watermark_.compare_exchange_weak(prev, total, std::memory_order_relaxed)) {}
     }
-    // Release + wake every admission waiter. The mutex is taken (and dropped)
-    // before the notify so a waiter between its predicate check and its wait
-    // cannot miss this release — the classic lost-wakeup ordering.
+    // Release, waking every admission waiter in the process: draken_io_release
+    // advances the generation each waiter read before its check, so none misses
+    // it. Safe under queue_mutex_ (the IO budget's lock is a leaf).
     void ledger_release(std::atomic<int64_t>& which, int64_t n) {
         if (n <= 0) return;
         which.fetch_sub(n, std::memory_order_relaxed);
-        if (memory_budget_bytes_ > 0) {
-            { const auto lk = spin_then_lock(queue_mutex_); }
-            queue_cv_.notify_all();
-        }
+        draken_io_release(n);
+    }
+    // Blocks (queue lock held on entry and exit) until `admissible`, counting the
+    // wait. The generation is read BEFORE each check, so a release between the
+    // check and the wait is never lost.
+    template <class Pred>
+    void io_admit(std::unique_lock<std::mutex>& lk, Pred admissible) {
+        uint64_t gen = draken_io_generation();
+        if (admissible()) return;
+        admission_waits_.fetch_add(1, std::memory_order_relaxed);
+        const auto t0 = std::chrono::steady_clock::now();
+        do {
+            lk.unlock();
+            draken_io_wait(gen);
+            lk.lock();
+            gen = draken_io_generation();
+        } while (!admissible());
+        admission_blocked_ns_.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(),
+            std::memory_order_relaxed);
     }
     // Under queue_mutex_: the decode-side charge taken at claim time.
     void claim_charge_locked(WorkItem& item) {
-        if (memory_budget_bytes_ <= 0) return;
+        if (io_budget_ <= 0) return;
         item.charged_decoded = item.est_decoded_bytes;
         ledger_charge(held_decoded_, item.charged_decoded);
         // A remote item's compressed bytes are charged by the fetch that buys
@@ -2512,29 +2535,61 @@ class ParquetIOPipeline {
         http_lat_buckets_[b].fetch_add(1, std::memory_order_relaxed);
     }
 
-    // The process bytes-in-flight gate as this scan's remote reads met it (HttpGateUse,
-    // summed over every fetch): whether it ever bit, and how near its cap the link ran.
-    std::atomic<uint64_t> gate_admissions_{0};
-    std::atomic<uint64_t> gate_wait_ns_{0};
-    std::atomic<int64_t>  gate_peak_in_flight_bytes_{0};
-    std::atomic<int64_t>  gate_peak_requests_{0};
-    std::atomic<int64_t>  gate_min_cap_bytes_{0};   // 0 = no admission yet
-#ifdef RUGO_ENABLE_HTTP
-    void record_gate_use(const HttpGateUse& u) {
-        if (u.admissions == 0) return;
-        gate_admissions_.fetch_add(u.admissions, std::memory_order_relaxed);
-        gate_wait_ns_.fetch_add(u.wait_ns, std::memory_order_relaxed);
-        int64_t prev = gate_peak_in_flight_bytes_.load(std::memory_order_relaxed);
-        while (u.peak_in_flight_bytes > prev &&
-               !gate_peak_in_flight_bytes_.compare_exchange_weak(prev, u.peak_in_flight_bytes,
-                                                                 std::memory_order_relaxed)) {}
-        prev = gate_peak_requests_.load(std::memory_order_relaxed);
-        while (u.peak_requests > prev &&
-               !gate_peak_requests_.compare_exchange_weak(prev, u.peak_requests, std::memory_order_relaxed)) {}
-        prev = gate_min_cap_bytes_.load(std::memory_order_relaxed);
-        while ((prev == 0 || u.min_cap_bytes < prev) &&
-               !gate_min_cap_bytes_.compare_exchange_weak(prev, u.min_cap_bytes, std::memory_order_relaxed)) {}
+    // This scan's remote requests (design docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md
+    // §4.4): retries and which deadline failed an attempt, from HttpCallStats; the
+    // requests on the wire now and at most; and Σ requests × their wall time over
+    // the span from the first fetch's start to the latest's end, whose ratio is
+    // the average number in flight.
+    std::atomic<uint64_t> http_retries_{0};
+    std::atomic<uint64_t> http_stalls_{0};
+    std::atomic<uint64_t> http_ceiling_timeouts_{0};
+    std::atomic<int64_t>  fetch_in_flight_{0};
+    std::atomic<int64_t>  fetch_in_flight_peak_{0};
+    std::atomic<uint64_t> fetch_request_ns_{0};
+    std::atomic<int64_t>  fetch_first_ns_{0};   // steady-clock ns; 0 = no fetch yet
+    std::atomic<int64_t>  fetch_last_ns_{0};
+
+    static int64_t steady_ns() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
     }
+    // Holds `n` requests on this scan's in-flight count for one fetch's lifetime.
+    class FetchTrack {
+    public:
+        FetchTrack(ParquetIOPipeline& p, int64_t n) : p_(p), n_(n), t0_(steady_ns()) {
+            const int64_t now = p_.fetch_in_flight_.fetch_add(n_, std::memory_order_relaxed) + n_;
+            int64_t peak = p_.fetch_in_flight_peak_.load(std::memory_order_relaxed);
+            while (now > peak &&
+                   !p_.fetch_in_flight_peak_.compare_exchange_weak(peak, now, std::memory_order_relaxed)) {}
+            int64_t none = 0;
+            p_.fetch_first_ns_.compare_exchange_strong(none, t0_, std::memory_order_relaxed);
+        }
+        ~FetchTrack() {
+            const int64_t t1 = steady_ns();
+            p_.fetch_in_flight_.fetch_sub(n_, std::memory_order_relaxed);
+            p_.fetch_request_ns_.fetch_add(static_cast<uint64_t>(n_ * (t1 - t0_)), std::memory_order_relaxed);
+            int64_t last = p_.fetch_last_ns_.load(std::memory_order_relaxed);
+            while (t1 > last && !p_.fetch_last_ns_.compare_exchange_weak(last, t1, std::memory_order_relaxed)) {}
+        }
+        FetchTrack(const FetchTrack&) = delete;
+        FetchTrack& operator=(const FetchTrack&) = delete;
+    private:
+        ParquetIOPipeline& p_;
+        const int64_t n_;
+        const int64_t t0_;
+    };
+#ifdef RUGO_ENABLE_HTTP
+    // One call's HttpCallStats, added to this scan's counters on every exit
+    // (a call that throws still had its retries and deadlines).
+    struct CallRecord {
+        ParquetIOPipeline& p;
+        HttpCallStats stats;
+        ~CallRecord() {
+            p.http_retries_.fetch_add(stats.retries, std::memory_order_relaxed);
+            p.http_stalls_.fetch_add(stats.stalls, std::memory_order_relaxed);
+            p.http_ceiling_timeouts_.fetch_add(stats.ceiling_timeouts, std::memory_order_relaxed);
+        }
+    };
 #endif
 
     /**
@@ -2979,23 +3034,19 @@ class ParquetIOPipeline {
     // §3/§5 — chosen once per scan, never a fallback); everything else is REST.
     std::vector<std::vector<uint8_t>> remote_get_many(
             const std::string& path, const std::vector<std::pair<int64_t, int64_t>>& ranges) {
-        HttpGateUse use;
-        std::vector<std::vector<uint8_t>> bufs;
-        if (gcs_grpc_connections_ > 0 && path.compare(0, 5, "gs://") == 0) {
-            bufs = gcs_grpc::directpath_get_many(
+        FetchTrack track(*this, static_cast<int64_t>(ranges.size()));
+        CallRecord rec{*this, {}};
+        if (gcs_grpc_connections_ > 0 && path.compare(0, 5, "gs://") == 0)
+            return gcs_grpc::directpath_get_many(
                 path, ranges, auth_header_set_ ? auth_header_ : std::string(), gcs_grpc_connections_,
-                http_tuning_set_ ? http_tuning_ : HttpClient::default_tuning(), &use);
-        } else {
-            const std::string url = fetch_url_for(path);
-            std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
-            reqs.reserve(ranges.size());
-            for (const auto& r : ranges)
-                reqs.emplace_back(url, http_headers_(
-                    "bytes=" + std::to_string(r.first) + "-" + std::to_string(r.first + r.second - 1)));
-            bufs = tl_http_client().get_many(reqs, http_tuning_set_ ? &http_tuning_ : nullptr, &use);
-        }
-        record_gate_use(use);
-        return bufs;
+                http_tuning_set_ ? http_tuning_ : HttpClient::default_tuning(), &rec.stats);
+        const std::string url = fetch_url_for(path);
+        std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
+        reqs.reserve(ranges.size());
+        for (const auto& r : ranges)
+            reqs.emplace_back(url, http_headers_(
+                "bytes=" + std::to_string(r.first) + "-" + std::to_string(r.first + r.second - 1)));
+        return tl_http_client().get_many(reqs, http_tuning_set_ ? &http_tuning_ : nullptr, &rec.stats);
     }
 #endif
 
@@ -3049,19 +3100,19 @@ class ParquetIOPipeline {
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            HttpGateUse use;
+            FetchTrack track(*this, 1);
+            CallRecord rec{*this, {}};
             bytes = tl_http_client().get(url, http_headers_(range_hdr),
-                                          http_tuning_set_ ? &http_tuning_ : nullptr, &use);
-            record_gate_use(use);
+                                          http_tuning_set_ ? &http_tuning_ : nullptr, &rec.stats);
 
         } else if (path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
             is_remote = true;
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            HttpGateUse use;
+            FetchTrack track(*this, 1);
+            CallRecord rec{*this, {}};
             bytes = tl_http_client().get(path, http_headers_(range_hdr),
-                                          http_tuning_set_ ? &http_tuning_ : nullptr, &use);
-            record_gate_use(use);
+                                          http_tuning_set_ ? &http_tuning_ : nullptr, &rec.stats);
 
         } else
 #else
@@ -3106,29 +3157,19 @@ class ParquetIOPipeline {
         {
             std::unique_lock<std::mutex> lk = spin_then_lock(queue_mutex_);
             if (pending_items_.empty()) return;
-            if (memory_budget_bytes_ > 0) {
-                // Memory admission: wait while what consumers will release is
-                // held AND this item would push the total over budget. Shutdown/
-                // cancel admit (the item bails at the top of decode and releases
-                // its charge); an empty queue means a helper took the item.
-                auto admissible = [this]() {
+            if (io_budget_ > 0) {
+                // Memory admission: wait while what THIS pipeline's consumer will
+                // release is held AND this item would push the process total over
+                // budget. Shutdown/cancel admit (the item bails at the top of
+                // decode and releases its charge); an empty queue means a helper
+                // took the item.
+                io_admit(lk, [this]() {
                     if (pending_items_.empty()) return true;
                     if (shutdown_.load(std::memory_order_relaxed) ||
                         cancelled_.load(std::memory_order_relaxed)) return true;
-                    const int64_t held = held_decoded_.load(std::memory_order_relaxed);
-                    if (held == 0) return true;
-                    return held + held_prefetch_.load(std::memory_order_relaxed) +
-                           pending_items_.front().est_decoded_bytes <= memory_budget_bytes_;
-                };
-                if (!admissible()) {
-                    admission_waits_.fetch_add(1, std::memory_order_relaxed);
-                    const auto t0 = std::chrono::steady_clock::now();
-                    queue_cv_.wait(lk, admissible);
-                    admission_blocked_ns_.fetch_add(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - t0).count(),
-                        std::memory_order_relaxed);
-                }
+                    if (held_decoded_.load(std::memory_order_relaxed) == 0) return true;
+                    return draken_io_held() + pending_items_.front().est_decoded_bytes <= io_budget_;
+                });
                 if (pending_items_.empty()) return;
             }
             item = std::move(pending_items_.front());
@@ -3258,29 +3299,18 @@ class ParquetIOPipeline {
                 publish_items(std::move(members));
                 return;
             }
-            if (memory_budget_bytes_ > 0) {
+            if (io_budget_ > 0) {
                 std::unique_lock<std::mutex> lk = spin_then_lock(queue_mutex_);
-                auto admissible = [this, block_bytes]() {
+                io_admit(lk, [this, block_bytes]() {
                     if (shutdown_.load(std::memory_order_relaxed) ||
                         cancelled_.load(std::memory_order_relaxed)) return true;
-                    const int64_t held = held_prefetch_.load(std::memory_order_relaxed);
-                    if (held == 0) return true;
-                    return held + held_decoded_.load(std::memory_order_relaxed) +
-                           block_bytes <= memory_budget_bytes_;
-                };
-                if (!admissible()) {
-                    admission_waits_.fetch_add(1, std::memory_order_relaxed);
-                    const auto t0 = std::chrono::steady_clock::now();
-                    queue_cv_.wait(lk, admissible);
-                    admission_blocked_ns_.fetch_add(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - t0).count(),
-                        std::memory_order_relaxed);
-                }
+                    if (held_prefetch_.load(std::memory_order_relaxed) == 0) return true;
+                    return draken_io_held() + block_bytes <= io_budget_;
+                });
             }
             // The budget-off case charges nothing (ledger_charge is a no-op on
             // a zero charge only; guard on the budget itself).
-            fetch_block(*blk, ptrs, memory_budget_bytes_ > 0 ? ptrs : std::vector<WorkItem*>{});
+            fetch_block(*blk, ptrs, io_budget_ > 0 ? ptrs : std::vector<WorkItem*>{});
         } else {
             blk->fetched = true;   // nothing bought; every member bails or decodes empty
         }
@@ -3302,7 +3332,7 @@ class ParquetIOPipeline {
             members.push_back(&lead);
             std::vector<WorkItem*> charge{&lead};
             for (WorkItem& f : blk.followers) { members.push_back(&f); charge.push_back(&f); }
-            fetch_block(blk, members, memory_budget_bytes_ > 0 ? charge : std::vector<WorkItem*>{});
+            fetch_block(blk, members, io_budget_ > 0 ? charge : std::vector<WorkItem*>{});
             followers = std::move(blk.followers);
             blk.followers.clear();
         }
@@ -4671,12 +4701,11 @@ class ParquetIOPipeline {
             } else {
                 // Dropped: nobody will pop it, so its decoded charge comes back
                 // here instead (the release is a no-op when the budget is off).
-                held_decoded_.fetch_sub(result.charged_bytes, std::memory_order_relaxed);
+                ledger_release(held_decoded_, result.charged_bytes);
             }
         }
         pending_work_--;
-        if (memory_budget_bytes_ > 0) queue_cv_.notify_all();
-        else queue_cv_.notify_one();
+        queue_cv_.notify_one();
     }
 
     static int64_t pruned_bytes_of(const PageJumpPlan& jp) {
@@ -4924,33 +4953,21 @@ class ParquetIOPipeline {
         fetch_pool_ = std::make_unique<BS::thread_pool<BS::tp::priority>>(depth);
     }
 
-    // Memory admission budget in bytes (0 = off). Set once at plan time, before
-    // any submit — the claim/admission paths read it unsynchronised on that
-    // promise, exactly like set_fetch_ahead. The read-back is memory_budget_bytes().
-    void set_memory_budget(int64_t bytes) {
-        if (bytes < 0) throw std::invalid_argument(
-            "set_memory_budget: bytes must be >= 0 (got " + std::to_string(bytes) + ")");
-        if (pending_work_.load(std::memory_order_relaxed) != 0 ||
-            enqueue_count_.load(std::memory_order_relaxed) != 0)
-            throw std::logic_error("set_memory_budget: called after work was submitted");
-        memory_budget_bytes_ = bytes;
-    }
     // Primitive-args overload: Cython declares HttpTuning-by-struct awkwardly
     // (it's a plain C++ aggregate, not exposed to Python), so the binding calls
     // this instead of constructing an HttpTuning on the Cython side.
     void set_http_tuning(long max_host_connections, int max_retries,
-                          double min_bandwidth_bytes_per_s, long timeout_floor_ms,
                           bool use_multiplexing, bool use_pipewait, bool force_http11,
-                          long long max_bytes_in_flight) {
+                          long stall_ms, long ceiling_ms, long connect_ms) {
         HttpTuning t;
         t.max_host_connections = max_host_connections;
         t.max_retries = max_retries;
-        t.min_bandwidth_bytes_per_s = min_bandwidth_bytes_per_s;
-        t.timeout_floor_ms = timeout_floor_ms;
         t.use_multiplexing = use_multiplexing;
         t.use_pipewait = use_pipewait;
         t.force_http11 = force_http11;
-        t.max_bytes_in_flight = max_bytes_in_flight;
+        t.stall_ms = stall_ms;
+        t.ceiling_ms = ceiling_ms;
+        t.connect_ms = connect_ms;
         set_http_tuning(t);
     }
 #endif
@@ -5295,18 +5312,12 @@ class ParquetIOPipeline {
         return true;
     }
 
-    // Under queue_mutex_: a popped result gives its decoded charge back and
-    // wakes whoever is blocked — a back-pressured producer (queue was full) or,
-    // with a budget, every admission waiter (notify_all: waiters have different
-    // thresholds, and the one woken by notify_one may not be the one that fits).
+    // Under queue_mutex_: a popped result gives its decoded charge back (waking
+    // the process's admission waiters) and wakes a back-pressured producer.
     void pop_release_locked(MorselRef& out) {
-        if (memory_budget_bytes_ > 0) {
-            held_decoded_.fetch_sub(out.charged_bytes, std::memory_order_relaxed);
-            out.charged_bytes = 0;
-            queue_cv_.notify_all();
-        } else {
-            queue_cv_.notify_one();
-        }
+        ledger_release(held_decoded_, out.charged_bytes);
+        out.charged_bytes = 0;
+        queue_cv_.notify_one();
     }
 
     /**
@@ -5377,11 +5388,13 @@ class ParquetIOPipeline {
     void cancel() {
         cancelled_.store(true, std::memory_order_relaxed);
         queue_cv_.notify_all();
+        if (io_budget_ > 0) draken_io_notify();   // admission waiters admit on cancel
     }
 
     void wait_shutdown() {
         shutdown_ = true;
         queue_cv_.notify_all();
+        if (io_budget_ > 0) draken_io_notify();
         if (!decode_pool_) return;
         // Fetch-ahead: drain the FETCH stage first. Every fetch ticket dispatches
         // a decode ticket as its last act, so decode cannot be quiescent while a
@@ -5423,11 +5436,15 @@ class ParquetIOPipeline {
 #else
     int gcs_grpc_connections() const { return 0; }
 #endif
-    uint64_t gate_admissions() const { return gate_admissions_.load(std::memory_order_relaxed); }
-    uint64_t gate_wait_ns() const { return gate_wait_ns_.load(std::memory_order_relaxed); }
-    int64_t gate_peak_in_flight_bytes() const { return gate_peak_in_flight_bytes_.load(std::memory_order_relaxed); }
-    int64_t gate_peak_requests() const { return gate_peak_requests_.load(std::memory_order_relaxed); }
-    int64_t gate_min_cap_bytes() const { return gate_min_cap_bytes_.load(std::memory_order_relaxed); }
+    uint64_t http_stalls() const { return http_stalls_.load(std::memory_order_relaxed); }
+    uint64_t http_ceiling_timeouts() const { return http_ceiling_timeouts_.load(std::memory_order_relaxed); }
+    int64_t fetch_in_flight_peak() const { return fetch_in_flight_peak_.load(std::memory_order_relaxed); }
+    uint64_t fetch_request_ns() const { return fetch_request_ns_.load(std::memory_order_relaxed); }
+    // First fetch's start to the latest fetch's end; 0 before any fetch.
+    int64_t fetch_span_ns() const {
+        const int64_t first = fetch_first_ns_.load(std::memory_order_relaxed);
+        return first == 0 ? 0 : fetch_last_ns_.load(std::memory_order_relaxed) - first;
+    }
     uint64_t prefetch_discarded_bytes() const {
         return prefetch_discarded_bytes_.load(std::memory_order_relaxed);
     }
@@ -5435,7 +5452,7 @@ class ParquetIOPipeline {
     // Memory admission read-backs: the budget this pipeline actually runs (0 =
     // off), the peak of both ledgers together, and how often / how long a
     // ticket waited at the gate.
-    int64_t memory_budget_bytes() const { return memory_budget_bytes_; }
+    int64_t memory_budget_bytes() const { return io_budget_; }
     int64_t memory_held_high_watermark() const {
         return held_high_watermark_.load(std::memory_order_relaxed);
     }
@@ -5539,15 +5556,8 @@ class ParquetIOPipeline {
     uint64_t bytes_fetched() const {
         return bytes_fetched_.load(std::memory_order_relaxed);
     }
-    // Process-cumulative count of range requests re-issued on transient failure
-    // (WP-5). Global across all pipelines/workers; not per-query.
-    uint64_t http_retries() const {
-#ifdef RUGO_ENABLE_HTTP
-        return HttpClient::total_retries();
-#else
-        return 0;
-#endif
-    }
+    // This scan's range requests re-issued on transient failure.
+    uint64_t http_retries() const { return http_retries_.load(std::memory_order_relaxed); }
 };
 
 }  // namespace rugo

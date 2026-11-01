@@ -52,35 +52,14 @@ struct HttpError : std::runtime_error {
 struct HttpTuning {
     long   max_host_connections      = 3;               // get_many()'s per-host connection cap
     int    max_retries                = 2;               // transient-failure retry budget
-    double min_bandwidth_bytes_per_s  = 60.0e6 / 8.0;     // assumed floor bandwidth per get()/get_many() call (60 Mbps)
-    long   timeout_floor_ms           = 10000;            // minimum per-request (get_many: per-batch) timeout
 
-    // ── Bytes in flight ────────────────────────────────────────────────────
-    // Process-wide cap on the bytes of range requests being transferred at once,
-    // across every thread, scan and query. A request (get_many: a batch attempt)
-    // is admitted only if its bytes fit under the cap, first come first served; a
-    // request larger than the cap is admitted alone, so nothing deadlocks. Waiting
-    // for admission happens BEFORE curl starts the request's timer, so it never
-    // spends the request's deadline.
-    //
-    // WHY: the deadline is sized from the request's own bytes at an assumed
-    // minimum bandwidth (min_bandwidth_bytes_per_s, timeout_floor_ms), but N
-    // concurrent requests share one link. Wide columns make each request large,
-    // so the same concurrency puts far more bytes on the wire (measured locally:
-    // 24 requests = 181 MB in flight for a wide string column against 17 MB for
-    // an int64 column) and the last byte can then land after the deadline of a
-    // link that was moving data the whole time. Locally, on a 100 Mbps shared
-    // link, that column fails with no cap (242 MB in flight) and completes at 94%
-    // of the link with a 23 MB cap.
-    //
-    //   <0 = no cap
-    //   0  = ADAPTIVE (default): cap = estimated link speed x timeout_floor x 0.5,
-    //        the estimate being a windowed max of measured aggregate throughput,
-    //        starting from min_bandwidth_bytes_per_s (see ByteGate in
-    //        http_client.cpp). A FIXED cap is wrong on a fast link: 25 MB measured
-    //        4x slower (129 -> 31 MB/s) for the wide column at 1200 Mbps shared.
-    //   >0 = that many bytes, fixed
-    long long max_bytes_in_flight     = 0;
+    // ── Deadlines (docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.1) ──────────
+    // A transfer fails when no byte arrives for stall_ms, when connecting takes
+    // connect_ms, or at ceiling_ms however it is progressing. None depends on the
+    // request's size or an assumed bandwidth: a busy link is never a timeout.
+    long   stall_ms                   = 5000;
+    long   ceiling_ms                 = 30000;
+    long   connect_ms                 = 2000;
 
     // ── HTTP/2 multiplexing ────────────────────────────────────────────────
     // get_many() adds every range's easy handle to one CURLM at once. WITHOUT
@@ -136,15 +115,12 @@ struct HttpTuning {
     bool   force_http11               = false;            // CURLOPT_HTTP_VERSION
 };
 
-// What the bytes-in-flight gate (HttpTuning::max_bytes_in_flight) did to one caller's
-// transfer attempts, summed by the caller, so a scan can show whether the gate bit.
-// "In flight" is the gate's view right after an admission, the admitted request included.
-struct HttpGateUse {
-    uint64_t  admissions           = 0;  // attempts admitted through the gate
-    uint64_t  wait_ns              = 0;  // time those attempts waited for admission
-    long long peak_in_flight_bytes = 0;
-    long long peak_requests        = 0;
-    long long min_cap_bytes        = 0;  // smallest cap an admission saw; 0 = none
+// What one caller's transfer attempts met, summed by the caller so a scan reports
+// its own retries and which deadline fired, not the process's.
+struct HttpCallStats {
+    uint64_t retries          = 0;  // attempts re-issued after a transient failure
+    uint64_t stalls           = 0;  // attempts failed by HttpTuning::stall_ms
+    uint64_t ceiling_timeouts = 0;  // attempts failed by HttpTuning::ceiling_ms
 };
 
 class HttpClient {
@@ -160,8 +136,7 @@ public:
      */
     // deny_private_addresses: refuse any connection whose peer is not a public
     // unicast address (checked per socket, so redirects are covered).
-    HttpClient(int max_connections = 128, long timeout_ms = 60000,
-               bool deny_private_addresses = false);
+    HttpClient(int max_connections = 128, bool deny_private_addresses = false);
     ~HttpClient();
 
     // Non-copyable — share handle is not copyable
@@ -173,10 +148,8 @@ public:
      *
      * Uses curl_easy_perform() — each call has its own CURL* easy handle.
      * Sets CURLOPT_SHARE so the shared connection/DNS cache is used. Retries
-     * transient failures (per `tuning.max_retries`) and derives the per-request
-     * timeout from the Range span (per `tuning.min_bandwidth_bytes_per_s` /
-     * `tuning.timeout_floor_ms`). get_many() applies the same policy to the
-     * batch's TOTAL bytes, since its ranges share connections.
+     * transient failures (per `tuning.max_retries`) under the progress deadlines
+     * `tuning.stall_ms` / `ceiling_ms` / `connect_ms`, as get_many() does.
      *
      * @param url      URL to fetch
      * @param headers  Optional request headers (e.g. Range, Authorization)
@@ -188,7 +161,7 @@ public:
         const std::string& url,
         const std::map<std::string, std::string>& headers = {},
         const HttpTuning* tuning = nullptr,
-        HttpGateUse* gate_use = nullptr
+        HttpCallStats* stats = nullptr
     );
 
     /**
@@ -249,7 +222,7 @@ public:
     std::vector<std::vector<uint8_t>> get_many(
         const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
         const HttpTuning* tuning = nullptr,
-        HttpGateUse* gate_use = nullptr
+        HttpCallStats* stats = nullptr
     );
 
     /**
@@ -281,10 +254,6 @@ public:
     // This is what get()/get_many() fall back to when called with tuning=nullptr.
     static HttpTuning default_tuning();
 
-    // Process-cumulative count of individual range requests re-issued by
-    // get()/get_many()'s transient-failure retry logic. For dev telemetry
-    // (surfaced in the IO pipeline diagnostics); not reset per query.
-    static uint64_t total_retries();
 
     /**
      * Probe common CA bundle locations and return the first readable one.
@@ -297,7 +266,6 @@ private:
     void*       share_handle_;                   // CURLSH* — shared connection/DNS cache
     std::mutex  share_mutexes_[CURL_LOCK_DATA_LAST]; // one mutex per curl_lock_data type
     int         max_connections_;                // per-host connection cap used by get_many()
-    long        timeout_ms_;
     bool        deny_private_;                   // refuse non-public peers (see ctor)
     std::string user_agent_;
     std::string ca_bundle_;                      // Path to CA bundle found at init time
@@ -320,31 +288,10 @@ private:
     static void _share_unlock(CURL*, curl_lock_data data, void* userp);
 };
 
-// The link policy get_many() applies, for another transport that moves the same
-// GCS bytes (DirectPath gRPC, src/cpp/gcs_grpc/directpath_fetch.cpp), so both obey
-// one contract: the byte gate, the bandwidth-derived timeout, the retry backoff and
-// the retry counter. Each is this extension's own copy, like everything here.
+// get_many()'s retry backoff, for another transport that moves the same GCS bytes
+// (DirectPath gRPC, src/cpp/gcs_grpc/directpath_fetch.cpp), so both retry alike.
 namespace http_link {
 
-// Holds `bytes` of the byte gate for one transfer attempt (a no-op when the cap is
-// off or `bytes` <= 0), exactly as a get_many() batch does.
-class Admission {
-public:
-    Admission(long long bytes, const HttpTuning& tuning, HttpGateUse* use);
-    ~Admission();
-    Admission(const Admission&) = delete;
-    Admission& operator=(const Admission&) = delete;
-
-private:
-    void* impl_;
-};
-
-// Body bytes as they arrive, so the gate's link estimate sees this transport too.
-void note_received(size_t bytes);
-// get_many()'s batch timeout for `bytes`.
-long timeout_ms(long bytes, const HttpTuning& tuning);
-// get_many()'s retry backoff (full jitter) and retry counter.
 unsigned backoff_ms(int attempt);
-void count_retries(uint64_t n);
 
 }  // namespace http_link

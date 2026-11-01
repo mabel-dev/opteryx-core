@@ -132,7 +132,7 @@ class CredentialedGcsFileSystem(_ScopeGuard, OpteryxGcsFileSystem):
         )
         self._Request = Request
         self._token_lock = threading.Lock()
-        self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
+        self.http_client = HttpClient(max_connections=128)
 
     @property
     def signs_urls(self) -> bool:

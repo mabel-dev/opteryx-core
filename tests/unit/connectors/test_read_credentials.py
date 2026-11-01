@@ -308,7 +308,7 @@ def test_http_errors_never_quote_a_query_string():
     error text keeps the path and drops the rest."""
     from opteryx.compiled.http_client import HttpClient
 
-    client = HttpClient(max_connections=1, timeout_ms=2000)
+    client = HttpClient(max_connections=1)
     with pytest.raises(RuntimeError) as raised:
         client.get(f"http://127.0.0.1:9/bucket/key.parquet?X-Amz-Signature={CANARY}")
     message = str(raised.value)

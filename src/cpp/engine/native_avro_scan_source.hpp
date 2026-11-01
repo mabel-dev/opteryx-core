@@ -379,7 +379,7 @@ public:
         g->states.resize(spec_->files.size());
         for (const auto& url : spec_->urls) {
             if (!url.empty()) {
-                g->http = std::make_unique<HttpClient>(128, 60000, spec_->deny_private_addresses);
+                g->http = std::make_unique<HttpClient>(128, spec_->deny_private_addresses);
                 break;
             }
         }

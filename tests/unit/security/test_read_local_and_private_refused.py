@@ -42,7 +42,7 @@ def test_local_read_allowed_when_opted_in(monkeypatch):
     ],
 )
 def test_http_client_refuses_non_public_peer(url):
-    client = HttpClient(max_connections=1, timeout_ms=2000, deny_private_addresses=True)
+    client = HttpClient(max_connections=1, deny_private_addresses=True)
     with pytest.raises(Exception, match="non-public address"):
         client.head(url)
 

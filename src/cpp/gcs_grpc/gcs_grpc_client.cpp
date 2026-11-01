@@ -1,6 +1,7 @@
 #include "gcs_grpc_client.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -61,10 +62,22 @@ struct Batch {
 // Every other field is skipped by its wire type.
 class RangeStream : public CallHandler {
 public:
-    RangeStream(Batch* batch, uint8_t* dest, int64_t length, void (*on_received)(size_t) = nullptr)
-        : batch_(batch), dest_(dest), length_(length), on_received_(on_received) {}
+    RangeStream(Batch* batch, uint8_t* dest, int64_t length)
+        : batch_(batch), dest_(dest), length_(length), last_progress_ns_(now_ns()) {}
+
+    static int64_t now_ns() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    // How long since this stream last received body bytes (since it started, before
+    // the first); 0 once closed. Read by the waiting caller, written on the I/O thread.
+    int64_t idle_ms(int64_t now) const {
+        if (closed_.load(std::memory_order_acquire)) return 0;
+        return (now - last_progress_ns_.load(std::memory_order_relaxed)) / 1000000;
+    }
 
     bool on_body(const uint8_t* p, size_t n) override {
+        last_progress_ns_.store(now_ns(), std::memory_order_relaxed);
         try {
             consume(p, n);
             return true;
@@ -77,6 +90,7 @@ public:
     void on_close(int status, const std::string& message) override {
         status_ = status;
         message_ = message;
+        closed_.store(true, std::memory_order_release);
         batch_->done();  // nothing touches `this` after this line
     }
 
@@ -231,7 +245,6 @@ private:
                     advance(k);
                     std::memcpy(dest_ + pos_, p, k);
                     crc_run_ = crc32c_extend(crc_run_, p, k);
-                    if (on_received_) on_received_(k);
                     pos_ += static_cast<int64_t>(k);
                     p += k;
                     n -= k;
@@ -260,7 +273,8 @@ private:
     Batch* batch_;
     uint8_t* dest_;
     const int64_t length_;
-    void (*on_received_)(size_t);
+    std::atomic<int64_t> last_progress_ns_;
+    std::atomic<bool> closed_{false};
     int64_t pos_ = 0;
 
     St st_ = St::Prefix;
@@ -355,8 +369,11 @@ std::shared_ptr<GrpcConnection> GcsGrpcClient::pick_connection(const std::string
 
 std::vector<std::vector<uint8_t>> GcsGrpcClient::read_many(const std::string& bucket, const std::string& object,
                                                            const std::vector<ByteRange>& ranges,
-                                                           const std::string& authorization, int64_t timeout_ms,
-                                                           int64_t generation, int64_t* out_generation) {
+                                                           const std::string& authorization, int64_t stall_ms,
+                                                           int64_t ceiling_ms, int64_t generation,
+                                                           int64_t* out_generation) {
+    if (stall_ms <= 0 || ceiling_ms <= 0)
+        throw std::invalid_argument("GcsGrpcClient: stall_ms and ceiling_ms must be positive");
     for (const ByteRange& r : ranges)
         if (r.offset < 0 || r.length <= 0) throw std::invalid_argument("GcsGrpcClient: invalid byte range");
     if (ranges.empty()) return {};
@@ -366,7 +383,7 @@ std::vector<std::vector<uint8_t>> GcsGrpcClient::read_many(const std::string& bu
     Metadata md;
     md.emplace_back("authorization", authorization);
     md.emplace_back("x-goog-request-params", "bucket=" + url_encode(bucket_path));
-    md.emplace_back("grpc-timeout", std::to_string(std::max<int64_t>(timeout_ms, 1)) + "m");
+    md.emplace_back("grpc-timeout", std::to_string(ceiling_ms) + "m");
 
     std::vector<std::vector<uint8_t>> out(ranges.size());
     for (size_t i = 0; i < ranges.size(); ++i) out[i].resize(static_cast<size_t>(ranges[i].length));
@@ -379,7 +396,7 @@ std::vector<std::vector<uint8_t>> GcsGrpcClient::read_many(const std::string& bu
     calls.reserve(ranges.size());
     std::string connect_error;
     for (size_t i = 0; i < ranges.size(); ++i) {
-        streams.push_back(std::make_unique<RangeStream>(&batch, out[i].data(), ranges[i].length, options_.on_received));
+        streams.push_back(std::make_unique<RangeStream>(&batch, out[i].data(), ranges[i].length));
         std::shared_ptr<GrpcConnection> conn;
         try {
             conn = pick_connection(bucket);
@@ -397,12 +414,33 @@ std::vector<std::vector<uint8_t>> GcsGrpcClient::read_many(const std::string& bu
         calls.emplace_back(std::move(conn), id);
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    bool timed_out = false;
+    // Progress deadlines (docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.1): the batch
+    // fails when any open stream goes stall_ms without body bytes, or at the ceiling.
+    const auto ceiling = std::chrono::steady_clock::now() + std::chrono::milliseconds(ceiling_ms);
+    const auto tick = std::chrono::milliseconds(std::max<int64_t>(stall_ms / 5, 10));
+    std::string deadline_error;
+    GcsGrpcError::Deadline deadline = GcsGrpcError::kNoDeadline;
     {
         std::unique_lock<std::mutex> lk(batch.mu);
-        if (!batch.cv.wait_until(lk, deadline, [&] { return batch.open == 0; })) {
-            timed_out = true;
+        while (batch.open != 0) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= ceiling) {
+                deadline_error = "exceeded the " + std::to_string(ceiling_ms) + " ms ceiling";
+                deadline = GcsGrpcError::kCeiling;
+                break;
+            }
+            const int64_t now_ns = RangeStream::now_ns();
+            for (size_t i = 0; i < streams.size() && deadline_error.empty(); ++i)
+                if (streams[i]->idle_ms(now_ns) >= stall_ms) {
+                    deadline = GcsGrpcError::kStalled;
+                    deadline_error = "stalled (no bytes for " + std::to_string(stall_ms) + " ms) on range " +
+                                     std::to_string(i) + " after " + std::to_string(streams[i]->received()) +
+                                     " of " + std::to_string(ranges[i].length) + " bytes";
+                }
+            if (!deadline_error.empty()) break;
+            batch.cv.wait_until(lk, std::min(ceiling, now + tick), [&] { return batch.open == 0; });
+        }
+        if (!deadline_error.empty()) {
             lk.unlock();
             for (auto& c : calls) c.first->cancel(c.second);
             lk.lock();
@@ -411,9 +449,8 @@ std::vector<std::vector<uint8_t>> GcsGrpcClient::read_many(const std::string& bu
     }
 
     if (!connect_error.empty()) throw GcsGrpcError(connect_error + " (" + where + ")", true, kUnavailable);
-    if (timed_out)
-        throw GcsGrpcError("GCS gRPC read of " + where + " timed out after " + std::to_string(timeout_ms) + " ms",
-                           true, kDeadlineExceeded);
+    if (!deadline_error.empty())
+        throw GcsGrpcError("GCS gRPC read of " + where + " " + deadline_error, true, kDeadlineExceeded, deadline);
 
     int64_t seen_generation = 0;
     for (size_t i = 0; i < streams.size(); ++i) {

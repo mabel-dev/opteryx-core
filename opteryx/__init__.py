@@ -102,6 +102,12 @@ from opteryx.compiled.structures.memory_pool import configure_slab_pool as _slab
 
 _slab_configure(_c7_config.SLAB_POOL_BUDGET_BYTES, _c7_config.SLAB_POOL_PREFAULT_BYTES)
 
+# Process IO budget (draken/core/mem_account.h): one budget for the bytes every parquet IO
+# pipeline holds, a share of the same container the chunk cache is sized from.
+from opteryx.compiled.structures.memory_pool import configure_io_budget as _io_configure
+
+_io_configure((_c7_cgroup_bytes() or _c7_physical_bytes()) * _c7_config.IO_BUDGET_PERCENT // 100)
+
 if OPTERYX_DEBUG:  # pragma: no cover
     from opteryx.debugging import OpteryxImportFinder
 

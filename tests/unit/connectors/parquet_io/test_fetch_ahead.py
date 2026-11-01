@@ -164,13 +164,13 @@ def test_local_only_scan_does_not_arm_the_fetch_pool():
         rows, diag = _scan(path, fetch_ahead=6)
     assert sorted(rows) == list(range(N))
     assert diag["fetch_ahead_depth"] == 0
-    assert diag["byte_gate_admissions"] == 0
-    assert diag["byte_gate_min_cap_bytes"] == 0
+    assert diag["fetch_in_flight_peak"] == 0
+    assert diag["fetch_in_flight_avg"] == 0.0
 
 
-def test_remote_scan_reports_the_byte_gate():
-    """Every remote fetch passes the process bytes-in-flight gate; the scan's
-    diagnostics carry what it met there, so a capped link is visible."""
+def test_remote_scan_reports_its_requests():
+    """A remote scan reports its own requests: how many were on the wire at most
+    and on average, and which deadline failed any attempt (none here)."""
     with tempfile.TemporaryDirectory() as tmp:
         path, name = _write(tmp)
         proc, port = _server(tmp)
@@ -180,11 +180,9 @@ def test_remote_scan_reports_the_byte_gate():
             proc.kill(); proc.wait()
     assert sorted(rows) == list(range(N))
     assert diag["gcs_transport"] == "rest"
-    assert diag["byte_gate_admissions"] >= N_ROW_GROUPS
-    assert diag["byte_gate_wait_ns"] >= 0
-    assert 0 < diag["byte_gate_peak_in_flight_bytes"] <= diag["bytes_fetched"]
-    assert 1 <= diag["byte_gate_peak_requests"]
-    assert diag["byte_gate_min_cap_bytes"] > 0
+    assert 1 <= diag["fetch_in_flight_peak"] <= diag["http_request_count"]
+    assert 0.0 < diag["fetch_in_flight_avg"] <= diag["fetch_in_flight_peak"]
+    assert diag["http_stalls"] == diag["http_ceiling_timeouts"] == diag["http_retries"] == 0
 
 
 def test_native_plan_reports_depth_and_rejects_an_inert_one():

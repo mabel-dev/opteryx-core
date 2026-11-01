@@ -115,7 +115,6 @@ class OpteryxHttpFileSystem:
 
         self.http_client = HttpClient(
             max_connections=128,
-            timeout_ms=60000,
             deny_private_addresses=not config.ALLOW_LOCAL_READS,
         )
 

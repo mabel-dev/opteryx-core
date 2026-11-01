@@ -336,22 +336,21 @@ http_max_host_connections_env() for the empirical justification of the default."
 HTTP_MAX_RETRIES: int = int(get("OPTERYX_HTTP_MAX_RETRIES", 2))
 """Retry budget for transient HTTP/transport failures (5xx, 429, connect/timeout/recv errors)."""
 
-HTTP_MIN_BANDWIDTH_MBPS: float = float(get("OPTERYX_HTTP_MIN_BW_MBPS", 60.0))
-"""Assumed floor bandwidth (Mbps), used to derive a per-request timeout from the Range span so
-a stalled small request times out promptly rather than waiting the full client timeout. Also
-the speed the adaptive bytes-in-flight cap starts from (HTTP_MAX_BYTES_IN_FLIGHT). Raised from
-20 to 60 on 2026-09-30; it changes a deadline only for a request larger than 75 MB, below which
-the timeout floor governs."""
+HTTP_STALL_MS: int = int(get("OPTERYX_HTTP_STALL_MS", 5000))
+"""A remote transfer (REST or DirectPath) fails, retryably, when no byte arrives for this
+long. A busy link that is moving bytes never trips it, whatever the request's size."""
 
-HTTP_REQUEST_TIMEOUT_FLOOR_MS: int = int(get("OPTERYX_HTTP_TIMEOUT_FLOOR_MS", 10000))
-"""Minimum per-request timeout (ms), regardless of how small the Range span is."""
+HTTP_CEILING_MS: int = int(get("OPTERYX_HTTP_CEILING_MS", 30000))
+"""A remote read fails, retryably, at this age however it is progressing. Queries on the VM
+deployment take milliseconds to seconds; a read still running here has failed the query."""
 
-HTTP_MAX_BYTES_IN_FLIGHT: int = int(get("OPTERYX_HTTP_MAX_BYTES_IN_FLIGHT", 0))
-"""Process-wide cap on the bytes of range requests in flight at once, across all threads and
-queries; a request larger than the cap is admitted alone. 0 = ADAPTIVE (the default): the cap
-follows the link's measured throughput, starting from the assumed minimum bandwidth above;
-> 0 = a fixed number of bytes; < 0 = no cap. See HttpTuning::max_bytes_in_flight in
-src/cpp/http_client.hpp."""
+HTTP_CONNECT_MS: int = int(get("OPTERYX_HTTP_CONNECT_MS", 2000))
+"""A REST connection (TCP + TLS) must be up within this long."""
+
+for _name, _ms in (("OPTERYX_HTTP_STALL_MS", HTTP_STALL_MS), ("OPTERYX_HTTP_CEILING_MS", HTTP_CEILING_MS),
+                   ("OPTERYX_HTTP_CONNECT_MS", HTTP_CONNECT_MS)):
+    if _ms <= 0:
+        raise ValueError(f"{_name} must be a positive number of ms, not {_ms}")
 
 DISABLE_HTTP_MULTIPLEXING: bool = get_bool("OPTERYX_HTTP_DISABLE_MULTIPLEXING", False)
 """Turn OFF HTTP/2 multiplexing (CURLOPT_PIPEWAIT) for get_many() batches.
@@ -586,28 +585,16 @@ the first-touch cost at boot rather than on its first query. 0 = none (the pool
 faults slots as the first query acquires them). Counts toward the retained
 set: the pool keeps at least this much faulted. See SLAB_POOL_BUDGET_BYTES."""
 
-PARQUET_IO_MEMORY_BUDGET_BYTES: int = int(get("PARQUET_IO_MEMORY_BUDGET_BYTES", 0))
-"""Memory admission budget for one parquet scan's IO pipeline, in BYTES.
-0 = auto: half of the cgroup memory limit when one is in effect (Cloud Run),
-else half of physical RAM, else off. -1 = off explicitly.
-
-What it bounds is what the pipeline itself HOLDS: decoded row groups from the
-moment a worker claims one until the consumer pops its result, plus compressed
-row-group bytes from fetch until decode has consumed them. Charges are the
-footer's own estimates (Σ total_uncompressed_size / Σ total_compressed_size of
-the projected columns), so the ledger is exact by construction and needs no
-allocator hook. A worker that would push the total over budget waits at the
-gate until a consumer pop releases enough; one is always admitted when nothing
-consumer-releasable is held, so the scan can never stall on its own budget.
-
-Why: before this the only bound on in-flight decode was a COUNT — the result
-queue capacity (1024) and the submission window — with no relation to bytes. On
-an 8 GiB worker a wide-row-group scan that ran ahead of a slow consumer was an
-OOM, surfaced as a 503 with no memory log (see docs/ on the worker OOM class).
-The pipeline reports the budget it runs (`memory_budget_bytes`), the peak it
-held (`memory_held_high_watermark`) and how long tickets waited at the gate
-(`admission_blocked_ns`) in io_scan_diagnostics — the read-backs that prove the
-knob binds and show whether it ever bit."""
+IO_BUDGET_PERCENT: int = int(get("IO_BUDGET_PERCENT", 10))
+"""The process-wide budget for bytes every parquet IO pipeline holds together, as a percent of
+the container (the cgroup limit when set, else physical RAM): compressed row-group bytes from
+fetch until decode, decoded results until the consumer pops them. One budget per process, read
+at import (docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.2). A pipeline waits for room only while
+it holds bytes its own consumer will release, so no scan stalls on what another holds. The
+read-backs per scan are `memory_budget_bytes`, `memory_held_high_watermark`,
+`admission_waits` and `admission_blocked_ns`. 0 = off."""
+if not 0 <= IO_BUDGET_PERCENT <= 100:
+    raise ValueError(f"IO_BUDGET_PERCENT must be 0-100, not {IO_BUDGET_PERCENT}")
 
 """Minimum REMOTE row groups a scan must submit before `PARQUET_IO_FETCH_AHEAD`
 is armed at all; below it the scan runs the coupled path (depth 0). Counted

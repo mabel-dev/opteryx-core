@@ -297,8 +297,8 @@
         "default_source": "environment",
         "environment_key": "GCS_TRANSPORT"
     },
-    "http_max_bytes_in_flight": {
-        "name": "http_max_bytes_in_flight",
+    "http_ceiling_ms": {
+        "name": "http_ceiling_ms",
         "type": "INT64",
         "owner": "USER",
         "visibility": "RESTRICTED",
@@ -307,7 +307,19 @@
         "set_by": "platform_admin only",
         "default": null,
         "default_source": "environment",
-        "environment_key": "OPTERYX_HTTP_MAX_BYTES_IN_FLIGHT"
+        "environment_key": "OPTERYX_HTTP_CEILING_MS"
+    },
+    "http_connect_ms": {
+        "name": "http_connect_ms",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "OPTERYX_HTTP_CONNECT_MS"
     },
     "http_max_connections_per_host": {
         "name": "http_max_connections_per_host",
@@ -333,18 +345,6 @@
         "default_source": "environment",
         "environment_key": "OPTERYX_HTTP_MAX_RETRIES"
     },
-    "http_min_bandwidth_mbps": {
-        "name": "http_min_bandwidth_mbps",
-        "type": "FLOAT64",
-        "owner": "USER",
-        "visibility": "RESTRICTED",
-        "settable": true,
-        "requires_entitlement": "platform_admin",
-        "set_by": "platform_admin only",
-        "default": null,
-        "default_source": "environment",
-        "environment_key": "OPTERYX_HTTP_MIN_BW_MBPS"
-    },
     "http_pipewait": {
         "name": "http_pipewait",
         "type": "BOOL",
@@ -357,8 +357,8 @@
         "default_source": "environment",
         "environment_key": "OPTERYX_HTTP_PIPEWAIT"
     },
-    "http_request_timeout_floor_ms": {
-        "name": "http_request_timeout_floor_ms",
+    "http_stall_ms": {
+        "name": "http_stall_ms",
         "type": "INT64",
         "owner": "USER",
         "visibility": "RESTRICTED",
@@ -367,7 +367,19 @@
         "set_by": "platform_admin only",
         "default": null,
         "default_source": "environment",
-        "environment_key": "OPTERYX_HTTP_TIMEOUT_FLOOR_MS"
+        "environment_key": "OPTERYX_HTTP_STALL_MS"
+    },
+    "io_budget_percent": {
+        "name": "io_budget_percent",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "IO_BUDGET_PERCENT"
     },
     "kvstore_key_prefix": {
         "name": "kvstore_key_prefix",
@@ -683,18 +695,6 @@
         "default": null,
         "default_source": "environment",
         "environment_key": "PARQUET_IO_IN_FLIGHT_LIMIT"
-    },
-    "parquet_io_memory_budget_bytes": {
-        "name": "parquet_io_memory_budget_bytes",
-        "type": "INT64",
-        "owner": "USER",
-        "visibility": "RESTRICTED",
-        "settable": true,
-        "requires_entitlement": "platform_admin",
-        "set_by": "platform_admin only",
-        "default": null,
-        "default_source": "environment",
-        "environment_key": "PARQUET_IO_MEMORY_BUDGET_BYTES"
     },
     "parquet_late_materialization_abandon_after": {
         "name": "parquet_late_materialization_abandon_after",

@@ -29,10 +29,12 @@ namespace gcs_grpc {
 
 // A failed read. `retryable` follows the same contract as HttpError::retryable.
 struct GcsGrpcError : std::runtime_error {
+    enum Deadline { kNoDeadline = 0, kStalled = 1, kCeiling = 2 };
     bool retryable;
     int grpc_status;
-    GcsGrpcError(const std::string& what, bool retryable_, int status)
-        : std::runtime_error(what), retryable(retryable_), grpc_status(status) {}
+    Deadline deadline;  // which of read_many's deadlines failed the read, if one did
+    GcsGrpcError(const std::string& what, bool retryable_, int status, Deadline deadline_ = kNoDeadline)
+        : std::runtime_error(what), retryable(retryable_), grpc_status(status), deadline(deadline_) {}
 };
 
 struct ByteRange {
@@ -54,9 +56,6 @@ public:
         int connections = 8;
         std::string ca_file;  // empty = OpenSSL default verify paths
         bool direct_path = false;
-        // Called on an I/O thread with each chunk of object bytes as it arrives
-        // (the engine feeds its byte gate's link estimate from it); null = none.
-        void (*on_received)(size_t bytes) = nullptr;
     };
 
     explicit GcsGrpcClient(Options options);
@@ -65,11 +64,13 @@ public:
     // order. `authorization` is the full header value ("Bearer ..."). With
     // `generation` > 0 the read is pinned to that generation; the generation
     // actually read is written to `*out_generation` when non-null. Blocks until
-    // done or `timeout_ms` passes. Throws GcsGrpcError.
+    // done; fails (retryable) when any range goes `stall_ms` without bytes or the
+    // whole read passes `ceiling_ms`. Throws GcsGrpcError.
     std::vector<std::vector<uint8_t>> read_many(const std::string& bucket, const std::string& object,
                                                 const std::vector<ByteRange>& ranges,
-                                                const std::string& authorization, int64_t timeout_ms,
-                                                int64_t generation = 0, int64_t* out_generation = nullptr);
+                                                const std::string& authorization, int64_t stall_ms,
+                                                int64_t ceiling_ms, int64_t generation = 0,
+                                                int64_t* out_generation = nullptr);
 
 private:
     std::shared_ptr<GrpcConnection> pick_connection(const std::string& bucket);

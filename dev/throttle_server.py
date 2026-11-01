@@ -26,6 +26,8 @@ Behaviour:
   per-connection cap to emulate per-stream object-store limits.
 - Faults: with probability error_rate the request gets a 503 before any
   body bytes (deterministic per (seed, request_counter) for reproducibility).
+- Stalls: with --stall-after-bytes N, every GET sends N body bytes and then
+  nothing more while keeping the connection open (a dead upstream).
 """
 
 import argparse
@@ -40,8 +42,9 @@ CHUNK_SIZE = 64 * 1024
 
 
 class ThrottleConfig:
-    def __init__(self, root, rtt_ms=0.0, bandwidth_mbps=0.0, error_rate=0.0, seed=0):
+    def __init__(self, root, rtt_ms=0.0, bandwidth_mbps=0.0, error_rate=0.0, seed=0, stall_after_bytes=-1):
         self.root = os.path.abspath(root)
+        self.stall_after_bytes = stall_after_bytes  # -1 = never stall
         self.rtt_s = rtt_ms / 1000.0
         # bytes/sec; 0 = unthrottled
         self.bandwidth_bps = bandwidth_mbps * 1_000_000 / 8.0
@@ -140,8 +143,14 @@ class ThrottleHandler(BaseHTTPRequestHandler):
         with open(full, "rb") as f:
             f.seek(start)
             remaining = length
+            stall_at = self.config.stall_after_bytes
             while remaining > 0:
-                chunk = f.read(min(CHUNK_SIZE, remaining))
+                sent = length - remaining
+                if 0 <= stall_at <= sent:
+                    time.sleep(3600)  # connection stays open, no more bytes
+                    return
+                limit = CHUNK_SIZE if stall_at < 0 else min(CHUNK_SIZE, stall_at - sent)
+                chunk = f.read(min(limit, remaining))
                 if not chunk:
                     break
                 t0 = time.monotonic()
@@ -158,9 +167,9 @@ class ThrottleHandler(BaseHTTPRequestHandler):
                         time.sleep(budget - elapsed)
 
 
-def serve(root, port, rtt_ms=0.0, bandwidth_mbps=0.0, error_rate=0.0, seed=0):
+def serve(root, port, rtt_ms=0.0, bandwidth_mbps=0.0, error_rate=0.0, seed=0, stall_after_bytes=-1):
     """Start the server (blocking). Returns only on shutdown."""
-    config = ThrottleConfig(root, rtt_ms, bandwidth_mbps, error_rate, seed)
+    config = ThrottleConfig(root, rtt_ms, bandwidth_mbps, error_rate, seed, stall_after_bytes)
     handler = type("BoundThrottleHandler", (ThrottleHandler,), {"config": config})
     # Accept backlog. socketserver's default is 5: a scan fanning out 60+
     # concurrent range GETs overflowed it, the kernel dropped the SYNs, and the
@@ -184,8 +193,11 @@ def main():
     parser.add_argument("--bandwidth-mbps", type=float, default=0.0, help="per-connection cap; 0 = unthrottled")
     parser.add_argument("--error-rate", type=float, default=0.0, help="probability of an injected 503 per GET")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--stall-after-bytes", type=int, default=-1,
+                        help="send this many body bytes per GET, then nothing (-1 = never)")
     args = parser.parse_args()
-    serve(args.root, args.port, args.rtt_ms, args.bandwidth_mbps, args.error_rate, args.seed)
+    serve(args.root, args.port, args.rtt_ms, args.bandwidth_mbps, args.error_rate, args.seed,
+          args.stall_after_bytes)
 
 
 if __name__ == "__main__":

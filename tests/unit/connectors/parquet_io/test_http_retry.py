@@ -1,5 +1,5 @@
 """
-WP-5: bounded retries + per-request timeouts for remote range reads.
+WP-5: bounded retries + progress deadlines for remote range reads.
 
 HttpClient.get_many() now retries individual range requests that fail with a
 transient cause (5xx/429 or a connection/timeout/partial-transfer CURL error),
@@ -151,62 +151,79 @@ def test_transient_faults_recover():
         proc.kill(); proc.wait()
 
 
-# Runs in a child so OPTERYX_HTTP_* (read once per process into statics) apply.
-# Server: 8 Mbps = 1 MB/s PER CONNECTION, so a 256 KiB range takes ~256 ms.
-# Client assumes 16 Mbps = 2 MB/s, so ONE range's own budget is ~131 ms - too
-# short for any range, alone or batched. A 12-range batch over the 3-connection
-# host cap takes ~4 x 256 ms = ~1 s; its whole-batch budget is 12 x 131 ms = ~1.6 s.
-_BATCH_BUDGET_CHILD = r"""
-import sys
+# Deadlines are progress-based (docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.1): a
+# transfer fails when no byte arrives for OPTERYX_HTTP_STALL_MS, or at
+# OPTERYX_HTTP_CEILING_MS. Runs in a child so those env values (read once per
+# process into statics) apply.
+_DEADLINE_CHILD = r"""
+import sys, time
 from opteryx.compiled.http_client import HttpClient
-url, which = sys.argv[1], sys.argv[2]
-KIB256 = 256 * 1024
-if which == "single":
-    reqs = [(url, {"Range": f"bytes=0-{KIB256 - 1}"})]
-else:
-    reqs = [(url, {"Range": f"bytes={i * KIB256}-{(i + 1) * KIB256 - 1}"}) for i in range(12)]
+url, n, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+reqs = [(url, {"Range": f"bytes={i * size}-{(i + 1) * size - 1}"}) for i in range(n)]
+t0 = time.monotonic()
 try:
     out = HttpClient().get_many(reqs)
-    assert all(len(b) == KIB256 for b in out)
-    print("OK")
+    assert all(len(b) == size for b in out)
+    print(f"OK {time.monotonic() - t0:.2f}")
 except RuntimeError as e:
-    print("ERR " + str(e))
+    print(f"ERR {time.monotonic() - t0:.2f} {e}")
 """
 
 
-def _run_budget_child(port, which):
-    env = dict(os.environ, OPTERYX_HTTP_TIMEOUT_FLOOR_MS="50", OPTERYX_HTTP_MIN_BW_MBPS="16")
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
-    res = subprocess.run(
-        [sys.executable, "-c", _BATCH_BUDGET_CHILD, _url(port), which],
-        env=env, cwd=root, capture_output=True, text=True, timeout=60,
-    )
-    return res.stdout.strip() + res.stderr.strip()
-
-
-def test_get_many_budget_covers_the_whole_batch():
-    """The time budget is sized from the batch's TOTAL bytes, because every
-    range in a get_many batch shares the same connections. The single-range
-    control proves the throttle really bites at these settings (a range cannot
-    finish inside its own budget), and pins the exhausted-retries diagnostics."""
+def _deadline_run(server_args, n, size, **env):
     _ensure_data()
     proc = subprocess.Popen(
-        [sys.executable, SERVER, "--root", DATA_DIR, "--port", "0", "--bandwidth-mbps", "8"],
+        [sys.executable, SERVER, "--root", DATA_DIR, "--port", "0", *server_args],
         stdout=subprocess.PIPE, text=True,
     )
     port = int(proc.stdout.readline().strip().split("port=")[1])
     try:
-        control = _run_budget_child(port, "single")
-        assert control.startswith("ERR "), control
-        assert "Timeout" in control, control
-        assert "timeout=131ms" in control, control
-        assert "batch=1 ranges/262144B" in control, control
-        assert "received=" in control and "/262144B" in control, control
-        assert "elapsed=" in control, control
-
-        assert _run_budget_child(port, "batch") == "OK"
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+        res = subprocess.run(
+            [sys.executable, "-c", _DEADLINE_CHILD, _url(port), str(n), str(size)],
+            env=dict(os.environ, **env), cwd=root, capture_output=True, text=True, timeout=60,
+        )
+        out = res.stdout.strip() or res.stderr.strip()
+        status, elapsed, *rest = out.split(" ", 2)
+        return status, float(elapsed), (rest[0] if rest else "")
     finally:
         proc.kill(); proc.wait()
+
+
+def test_slow_wide_batch_completes_under_a_short_stall():
+    """24 ranges share 3 connections on a 4 Mbps-per-connection link: ~2 s in all,
+    so most ranges wait well past the 1 s stall before their first byte. A busy
+    link is not a stall - queued ranges must not time out - and the batch is not
+    bounded by a size-derived budget any more."""
+    status, elapsed, detail = _deadline_run(
+        ["--bandwidth-mbps", "4"], 24, 128 * 1024,
+        OPTERYX_HTTP_STALL_MS="1000", OPTERYX_HTTP_MAX_RETRIES="0",
+    )
+    assert status == "OK", detail
+    assert elapsed > 1.5, f"link not slow enough to test queueing: {elapsed:.2f}s"
+
+
+def test_dead_link_fails_promptly_as_a_stall():
+    """Headers, 1000 body bytes, then nothing on an open connection."""
+    status, elapsed, detail = _deadline_run(
+        ["--stall-after-bytes", "1000"], 1, 64 * 1024,
+        OPTERYX_HTTP_STALL_MS="1000", OPTERYX_HTTP_MAX_RETRIES="0",
+    )
+    assert status == "ERR", detail
+    assert "stalled (no bytes for 1000ms)" in detail, detail
+    assert "received=1000/65536B" in detail, detail
+    assert elapsed < 3.0, f"stall took {elapsed:.2f}s to fail"
+
+
+def test_crawling_link_fails_at_the_ceiling():
+    """2 MiB at 1 MB/s keeps moving (never a stall) but outlives an 800 ms ceiling."""
+    status, elapsed, detail = _deadline_run(
+        ["--bandwidth-mbps", "8"], 1, 2 * 1024 * 1024,
+        OPTERYX_HTTP_STALL_MS="5000", OPTERYX_HTTP_CEILING_MS="800", OPTERYX_HTTP_MAX_RETRIES="0",
+    )
+    assert status == "ERR", detail
+    assert "exceeded the 800ms ceiling" in detail, detail
+    assert elapsed < 2.0, f"ceiling took {elapsed:.2f}s to fire"
 
 
 if __name__ == "__main__":
@@ -214,5 +231,7 @@ if __name__ == "__main__":
     test_persistent_5xx_raises_exhausted(); print("persistent 5xx exhausted: OK")
     test_4xx_not_retried_and_immediate(); print("4xx immediate, no retry: OK")
     test_transient_faults_recover(); print("transient recover: OK")
-    test_get_many_budget_covers_the_whole_batch(); print("batch budget: OK")
+    test_slow_wide_batch_completes_under_a_short_stall(); print("slow wide batch: OK")
+    test_dead_link_fails_promptly_as_a_stall(); print("dead link stall: OK")
+    test_crawling_link_fails_at_the_ceiling(); print("ceiling: OK")
     print("all WP-5 tests passed")

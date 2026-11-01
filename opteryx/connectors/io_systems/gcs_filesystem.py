@@ -109,7 +109,7 @@ class OpteryxGcsFileSystem:
             request = Request()
             self.client_credentials.refresh(request)
 
-        self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
+        self.http_client = HttpClient(max_connections=128)
 
     @property
     def _bearer(self) -> str:

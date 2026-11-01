@@ -209,7 +209,7 @@ class VectorIndexFile {
         }
         url_ = gcs ? rugo::gcs_to_https(location) : location;
         if (remote_) {
-            http_ = std::make_unique<HttpClient>(16, 120000);
+            http_ = std::make_unique<HttpClient>(16);
         } else {
             fd_ = ::open(location.c_str(), O_RDONLY);
             if (fd_ < 0) { *err = "vector index: cannot open " + location + ": " + std::strerror(errno); return false; }

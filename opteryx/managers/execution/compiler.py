@@ -4175,7 +4175,6 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
         from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
-        from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.pool_reader import range_conjuncts_exact
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -4492,10 +4491,6 @@ class _Compiler:
                 scan.properties.variables,
                 config.PARQUET_GCS_IO_WORKERS,
             ),
-            # Memory admission budget (bytes; 0 = off): what this scan's pipeline
-            # may hold in decoded + prefetched bytes. Read back as
-            # `memory_budget_bytes` in io_scan_diagnostics.
-            memory_budget=resolve_memory_budget(_scan_vars, _scan_overrides),
             # Per-scan IO shaping. Resolved here, per scan, rather than left to
             # the pipeline's compiled-in defaults: until this was plumbed the
             # native path ignored every one of these SETs while the trampoline
@@ -4650,7 +4645,6 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
         from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
-        from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.expression import get_all_nodes_of_type
@@ -4794,7 +4788,6 @@ class _Compiler:
             config.PARQUET_GCS_IO_WORKERS,
         )
         in_flight_override = resolve_in_flight_limit(_scan_vars, _scan_overrides)
-        memory_budget = resolve_memory_budget(_scan_vars, _scan_overrides)
         http_tuning = resolve_http_tuning(_scan_vars, _scan_overrides)
         coalesce_tuning = resolve_coalesce_tuning(_scan_vars, _scan_overrides)
         # Row-group pruning triples — identical to the single-pass path, applied to
@@ -4828,7 +4821,6 @@ class _Compiler:
                 in_flight_limit_override=in_flight_override,
                 http_tuning=http_tuning,
                 coalesce_tuning=coalesce_tuning,
-                memory_budget=memory_budget,
                 filesystem=filesystem,
                 footer_bytes_cache=scan_footer_bytes_cache(),
             )
@@ -7774,6 +7766,8 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     from opteryx.compiled.structures.memory_pool import process_memory_charged
     from opteryx.compiled.structures.memory_pool import process_memory_peak
     from opteryx.compiled.structures.memory_pool import reset_process_memory_peak
+    from opteryx.compiled.structures.memory_pool import io_budget_stats
+    from opteryx.compiled.structures.memory_pool import reset_io_budget_peak
     from opteryx.compiled.structures.memory_pool import flush_chunk_cache
     from opteryx.compiled.structures.memory_pool import chunk_cache_stats
     from opteryx.compiled.structures.memory_pool import slab_pool_stats
@@ -7929,6 +7923,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
             _op.set_chunk_cache_admit(_chunk_cache_admit)
         # Process memory account: the peak is per query from here.
         reset_process_memory_peak()
+        reset_io_budget_peak()
         _t0 = _t.perf_counter_ns()
         handle = native_plan_execute(pool, nplan, dop, out_q, errslot)
         _submit_ns = _t.perf_counter_ns() - _t0
@@ -8114,6 +8109,11 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                 # alloc/free pairing leak in the account).
                 telemetry._reading["memory_charged_peak_bytes"] = process_memory_peak()
                 telemetry._reading["memory_charged_end_bytes"] = process_memory_charged()
+                # Process IO budget: the budget, and the most every scan's pipeline
+                # held together during this query.
+                _io = io_budget_stats()
+                telemetry._reading["io_budget_bytes"] = _io["budget"]
+                telemetry._reading["io_held_peak_bytes"] = _io["peak"]
                 # Chunk cache (C7), process-lifetime counters as of this query's end.
                 _cc = chunk_cache_stats()
                 for _k in ("bytes", "entries", "hits", "misses", "inserts", "refused",

@@ -1,20 +1,23 @@
-"""Memory admission for the parquet IO pipeline (`parquet_io_memory_budget_bytes`).
+"""Memory admission for parquet IO pipelines: one process-wide budget (`IO_BUDGET_PERCENT`,
+docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.2).
 
-The pipeline holds decoded row groups from the moment a worker claims one until
-the consumer pops its result, plus compressed bytes from fetch to decode. With a
-budget set, a worker whose item would push that total over budget waits at the
-gate until a pop releases enough — but one is always admitted when nothing
-consumer-releasable is held, so a budget can never stall a scan on its own.
+Every pipeline charges the same budget for what it holds: decoded row groups from the
+moment a worker claims one until the consumer pops its result, plus compressed bytes
+from fetch to decode. A worker whose item would push the process total over budget
+waits until a release in ANY pipeline makes room — but it waits only while its own
+pipeline holds bytes its own consumer will release, so no scan can stall on its own
+budget or on what another scan holds.
 
 What is pinned here:
-  * the knob reaches the pipeline and reads back (`memory_budget_bytes`) — the
-    "prove the knob moves" gate — on both the trampoline and the native plan;
+  * the import-time budget is IO_BUDGET_PERCENT of the container, and a pipeline
+    reads back the budget it was built under (`memory_budget_bytes`), on both the
+    trampoline and the native plan; 0 = off;
   * a budget far smaller than one row group still returns every row (progress);
-  * the peak held (`memory_held_high_watermark`) stays at budget plus at most
-    one item's estimate, and the gate is SEEN to bite (`admission_waits` > 0)
-    when many row groups queue behind a slow consumer;
-  * off by default in these APIs (0), and the auto derivation yields a positive
-    number on any host that reports its memory.
+  * the peak held stays at budget plus at most two items, and the budget is SEEN to
+    bite (`admission_waits` > 0) under a slow consumer;
+  * two scans running at once share ONE budget: the process peak stays bounded and
+    both finish;
+  * the ledger balances: nothing is left held once scans close.
 """
 
 import json
@@ -25,12 +28,28 @@ import time
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
+
+from opteryx import config
+from opteryx.compiled.platform import cgroup_memory_limit_bytes
+from opteryx.compiled.platform import physical_memory_total_bytes
+from opteryx.compiled.structures.memory_pool import configure_io_budget
+from opteryx.compiled.structures.memory_pool import io_budget_stats
+from opteryx.compiled.structures.memory_pool import reset_io_budget_peak
 
 ROW_GROUP_SIZE = 5_000
 N_ROW_GROUPS = 40
 N = ROW_GROUP_SIZE * N_ROW_GROUPS
+
+IMPORT_BUDGET = io_budget_stats()["budget"]
+
+
+@pytest.fixture(autouse=True)
+def restore_budget():
+    yield
+    configure_io_budget(IMPORT_BUDGET)
 
 
 def _write(tmp, tag=""):
@@ -50,16 +69,19 @@ def _rg_estimate(path):
     return sum(rg.column(i).total_uncompressed_size for i in range(rg.num_columns))
 
 
-def _scan(path, memory_budget, workers=4, slow=False):
+def _open(path, workers):
     from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc
 
+    return iter_row_groups_ipc(None, [path], ["x", "y"], decode_workers=workers)
+
+
+def _scan(path, workers=4, slow=False):
     fd, diag_path = tempfile.mkstemp(suffix=".jsonl")
     os.close(fd)
     os.environ["OPTERYX_IO_DIAG_JSON"] = diag_path
     seen = []
     try:
-        gen = iter_row_groups_ipc(None, [path], ["x", "y"], decode_workers=workers,
-                                  memory_budget=memory_budget)
+        gen = _open(path, workers)
         try:
             for _scan_rg, rg in gen:
                 seen.extend(rg[b"x"].to_pylist())
@@ -76,11 +98,18 @@ def _scan(path, memory_budget, workers=4, slow=False):
         os.remove(diag_path)
 
 
-def test_off_by_default_and_reads_back_when_set():
+def test_import_budget_is_the_configured_share_of_the_container():
+    container = cgroup_memory_limit_bytes() or physical_memory_total_bytes()
+    assert IMPORT_BUDGET == container * config.IO_BUDGET_PERCENT // 100
+
+
+def test_off_and_on_read_back():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(tmp)
-        rows_off, diag_off = _scan(path, memory_budget=0)
-        rows_on, diag_on = _scan(path, memory_budget=1 << 30)
+        configure_io_budget(0)
+        rows_off, diag_off = _scan(path)
+        configure_io_budget(1 << 30)
+        rows_on, diag_on = _scan(path)
     assert diag_off["memory_budget_bytes"] == 0
     assert diag_off["admission_waits"] == 0
     assert diag_on["memory_budget_bytes"] == 1 << 30
@@ -93,7 +122,8 @@ def test_tiny_budget_still_completes_and_bounds_the_peak():
         est = _rg_estimate(path)
         # Smaller than ONE row group: only the "nothing held → admit" rule lets
         # anything through, so the scan runs one row group at a time.
-        rows, diag = _scan(path, memory_budget=est // 2, workers=4, slow=True)
+        configure_io_budget(est // 2)
+        rows, diag = _scan(path, workers=4, slow=True)
     assert sorted(rows) == list(range(N))
     assert diag["memory_budget_bytes"] == est // 2
     # Peak is bounded by the budget plus the two items the design admits
@@ -110,10 +140,45 @@ def test_budget_of_a_few_row_groups_bites_only_under_a_slow_consumer():
         path = _write(tmp)
         est = _rg_estimate(path)
         budget = est * 3
-        rows, diag = _scan(path, memory_budget=budget, workers=4, slow=True)
+        configure_io_budget(budget)
+        rows, diag = _scan(path, workers=4, slow=True)
     assert sorted(rows) == list(range(N))
     assert diag["memory_held_high_watermark"] <= budget + 2 * est
     assert diag["admission_waits"] > 0
+
+
+def test_two_scans_share_one_budget():
+    """Two pipelines open at once, consumed alternately by a slow consumer: their
+    combined peak is bounded by ONE budget (plus each pipeline's two unconditional
+    items), both return every row, and nothing is held once both close."""
+    with tempfile.TemporaryDirectory() as tmp:
+        a, b = _write(tmp, "_a"), _write(tmp, "_b")
+        est = _rg_estimate(a)
+        budget = est * 3
+        configure_io_budget(budget)
+        held_before = io_budget_stats()["held"]
+        reset_io_budget_peak()
+        gens = [_open(a, 4), _open(b, 4)]
+        seen = [[], []]
+        try:
+            live = [True, True]
+            while any(live):
+                for k in (0, 1):
+                    if not live[k]:
+                        continue
+                    item = next(gens[k], None)
+                    if item is None:
+                        live[k] = False
+                        continue
+                    seen[k].extend(item[1][b"x"].to_pylist())
+                    time.sleep(0.005)
+        finally:
+            for g in gens:
+                g.close()
+        stats = io_budget_stats()
+    assert sorted(seen[0]) == sorted(seen[1]) == list(range(N))
+    assert stats["peak"] <= budget + 4 * est, (stats, est)
+    assert stats["held"] == held_before, stats
 
 
 def test_native_plan_reads_the_budget_back():
@@ -125,7 +190,8 @@ def test_native_plan_reads_the_budget_back():
         # test_fetch_ahead.py's xfail for the full diagnosis), which would make
         # this a test of that bug rather than of the budget.
         paths = [_write(tmp, "_a"), _write(tmp, "_b")]
-        plan = open_native_scan_plan(paths, ["x"], decode_workers=2, memory_budget=12345678)
+        configure_io_budget(12345678)
+        plan = open_native_scan_plan(paths, ["x"], decode_workers=2)
         try:
             assert plan.row_group_count == 2 * N_ROW_GROUPS
             assert plan.diagnostics()["memory_budget_bytes"] == 12345678
@@ -133,16 +199,6 @@ def test_native_plan_reads_the_budget_back():
             plan.close()
 
 
-def test_auto_derivation_is_positive_or_honestly_off():
-    from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget
-    from opteryx.compiled.platform import cgroup_memory_limit_bytes
-    from opteryx.compiled.platform import physical_memory_total_bytes
-
-    auto = resolve_memory_budget(None)
-    ceiling = cgroup_memory_limit_bytes() or physical_memory_total_bytes() or 0
-    if ceiling > 0:
-        assert auto == int(ceiling * 0.5)
-    else:
-        assert auto == 0
-    assert resolve_memory_budget(None, {"parquet_io_memory_budget_bytes": -1}) == 0
-    assert resolve_memory_budget(None, {"parquet_io_memory_budget_bytes": 4096}) == 4096
+def test_negative_budget_is_refused():
+    with pytest.raises(ValueError, match=">= 0"):
+        configure_io_budget(-1)

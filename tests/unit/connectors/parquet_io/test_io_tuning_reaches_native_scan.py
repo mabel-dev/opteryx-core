@@ -86,12 +86,9 @@ def test_http_tuning_shape_matches_set_http_tuning():
     """8 fields, in the order set_http_tuning/CppIOPipeline.__cinit__ unpack."""
     tuning = io_tuning.resolve_http_tuning(None)
     assert len(tuning) == 8
-    max_conns, retries, min_bw_bytes, timeout_floor, multiplexing, pipewait, http11, bytes_in_flight = tuning
-    assert isinstance(bytes_in_flight, int)
+    max_conns, retries, multiplexing, pipewait, http11, stall_ms, ceiling_ms, connect_ms = tuning
+    assert (stall_ms, ceiling_ms, connect_ms) == (5000, 30000, 2000)
     assert isinstance(max_conns, int) and isinstance(retries, int)
-    # Stored/SET in Mbps, handed over in bytes/s.
-    assert isinstance(min_bw_bytes, float) and min_bw_bytes > 0
-    assert isinstance(timeout_floor, int)
     assert isinstance(multiplexing, bool) and isinstance(pipewait, bool)
     assert isinstance(http11, bool)
 

@@ -75,6 +75,28 @@ int64_t draken_mem_cache_bytes(void);
 typedef void (*draken_mem_shrink_fn)(int64_t target_cache_bytes);
 void    draken_mem_set_shrinker(draken_mem_shrink_fn fn);
 
+// --- IO budget (docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.2) ----------------
+// One budget for the bytes every IO pipeline in the process holds: compressed
+// row-group bytes from fetch until decode, decoded results until the consumer pops
+// them. Pipelines charge and release; the admission decision (wait only while the
+// pipeline itself holds releasable bytes) stays in the pipeline. A waiter reads
+// the generation, re-checks, and blocks in draken_io_wait until any release or
+// notify moves it, so a release in one pipeline wakes waiters in every other.
+// Budget 0 = off (nothing is charged or waited on).
+void     draken_io_configure(int64_t budget_bytes);
+int64_t  draken_io_budget(void);
+void     draken_io_charge(int64_t bytes);
+void     draken_io_release(int64_t bytes);
+int64_t  draken_io_held(void);
+// High-water mark of draken_io_held() since draken_io_reset_peak (query start).
+int64_t  draken_io_peak(void);
+void     draken_io_reset_peak(void);
+uint64_t draken_io_generation(void);
+// Wakes every waiter without a release (a pipeline cancelled or shutting down).
+void     draken_io_notify(void);
+// Blocks until the generation differs from `seen`.
+void     draken_io_wait(uint64_t seen);
+
 #ifdef __cplusplus
 }
 

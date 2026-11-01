@@ -247,6 +247,35 @@ def reset_process_memory_peak() -> None:
     draken_mem_reset_peak()
 
 
+# The process IO budget (core/mem_account.h, docs/REMOTE_READ_FLOW_CONTROL_DESIGN.md §4.2):
+# bytes every parquet IO pipeline holds, together.
+cdef extern from "core/mem_account.h" nogil:
+    void draken_io_configure(int64_t budget_bytes)
+    int64_t draken_io_budget()
+    int64_t draken_io_held()
+    int64_t draken_io_peak()
+    void draken_io_reset_peak()
+
+
+def configure_io_budget(int64_t budget_bytes) -> None:
+    """Set the process IO budget in bytes (0 = off). Called once at import; a
+    pipeline reads it when it is built."""
+    if budget_bytes < 0:
+        raise ValueError(f"IO budget must be >= 0 bytes, not {budget_bytes}")
+    draken_io_configure(budget_bytes)
+
+
+def io_budget_stats() -> dict:
+    """The process IO budget, what pipelines hold now, and the most they held
+    together since the last reset (query start)."""
+    return {"budget": draken_io_budget(), "held": draken_io_held(), "peak": draken_io_peak()}
+
+
+def reset_io_budget_peak() -> None:
+    """Restart the IO high-water mark at what is held now (query start)."""
+    draken_io_reset_peak()
+
+
 cdef extern from "core/mem_account.h" nogil:
     void draken_mem_configure(int64_t container_bytes, int64_t reserve_bytes, int64_t cache_budget_bytes)
     int64_t draken_mem_container()

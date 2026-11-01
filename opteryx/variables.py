@@ -333,21 +333,19 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # SERVER: shown, not SET-able.
     "gcs_transport": (VARCHAR, FromConfig("GCS_TRANSPORT"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "gcs_grpc_connections": (INT64, FromConfig("GCS_GRPC_CONNECTIONS"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "io_budget_percent": (INT64, FromConfig("IO_BUDGET_PERCENT"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Same reasoning as the three above, for the HTTP client that services GCS
     # range reads (src/cpp/http_client.cpp / rugo/src/parquet/io_pipeline.hpp).
     # Named for what they DO, not for the env var they replace — the old env-only
-    # names (OPTERYX_HTTP_MIN_BW_MBPS etc.) were too terse to be self-explanatory
+    # names (OPTERYX_HTTP_MAX_HOST_CONNECTIONS etc.) were too terse to be self-explanatory
     # on a `SHOW VARIABLES` a caller has never seen before.
     "http_max_connections_per_host": (
         INT64, FromConfig("HTTP_MAX_CONNECTIONS_PER_HOST"), VariableOwner.USER, Visibility.RESTRICTED),
-    "http_max_bytes_in_flight": (
-        INT64, FromConfig("HTTP_MAX_BYTES_IN_FLIGHT"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_max_retries": (
         INT64, FromConfig("HTTP_MAX_RETRIES"), VariableOwner.USER, Visibility.RESTRICTED),
-    "http_min_bandwidth_mbps": (
-        FLOAT64, FromConfig("HTTP_MIN_BANDWIDTH_MBPS"), VariableOwner.USER, Visibility.RESTRICTED),
-    "http_request_timeout_floor_ms": (
-        INT64, FromConfig("HTTP_REQUEST_TIMEOUT_FLOOR_MS"), VariableOwner.USER, Visibility.RESTRICTED),
+    "http_stall_ms": (INT64, FromConfig("HTTP_STALL_MS"), VariableOwner.USER, Visibility.RESTRICTED),
+    "http_ceiling_ms": (INT64, FromConfig("HTTP_CEILING_MS"), VariableOwner.USER, Visibility.RESTRICTED),
+    "http_connect_ms": (INT64, FromConfig("HTTP_CONNECT_MS"), VariableOwner.USER, Visibility.RESTRICTED),
     # HTTP/2 multiplexing. Named for the state a caller does NOT want (per the
     # convention at the top of this file), so the default-False state is the fast
     # one. `disable_http_multiplexing` exists to A/B the CURLOPT_PIPEWAIT fix
@@ -400,13 +398,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS in config.py.
     "parquet_io_fetch_ahead_min_blocks": (
         INT64, FromConfig("PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS"),
-        VariableOwner.USER, Visibility.RESTRICTED),
-    # Memory admission budget for one scan's IO pipeline (bytes; 0 = auto from
-    # the cgroup limit / physical RAM, -1 = off). SET-able per scan because the
-    # right value is a share of the WORKER's memory, which the deployment knows
-    # and the engine only estimates — see PARQUET_IO_MEMORY_BUDGET_BYTES.
-    "parquet_io_memory_budget_bytes": (
-        INT64, FromConfig("PARQUET_IO_MEMORY_BUDGET_BYTES"),
         VariableOwner.USER, Visibility.RESTRICTED),
     # C7: false = this statement's parquet scans may use chunk-cache hits but never
     # fill it, and the cache is flushed before it runs. For compaction-style jobs

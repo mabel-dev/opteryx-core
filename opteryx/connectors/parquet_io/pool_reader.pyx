@@ -128,6 +128,11 @@ cdef _refuse_nested_group_column(const RowGroupStats* rg, const string& name, st
 
 
 
+
+def _in_flight_avg(request_ns, span_ns):
+    """Average requests on the wire over a scan's fetch span (0.0 before any fetch)."""
+    return request_ns / span_ns if span_ns > 0 else 0.0
+
 cdef class _CoverageRequest:
     """Owns one scan's native statistics-coverage request (P3/P4,
     stats_coverage_request.hpp) for the length of open_native_scan_plan - freed
@@ -699,16 +704,12 @@ cdef class CppIOPipeline:
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
                   int64_t pool_size=256*1024*1024,
                   http_tuning=None, coalesce_tuning=None, auth_header=None,
-                  int fetch_ahead=0, int64_t memory_budget=0):
+                  int fetch_ahead=0):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
         # Fetch-ahead depth (0 = off = the coupled path). Validated by the
         # opener via _submission_window; set before any submit.
         if fetch_ahead > 0:
             self.pipeline.set_fetch_ahead(fetch_ahead)
-        # Memory admission budget (bytes; 0 = off), resolved by the caller via
-        # io_tuning.resolve_memory_budget. Set before any submit.
-        if memory_budget > 0:
-            self.pipeline.set_memory_budget(memory_budget)
         self.pool = MemoryPool(pool_size, name="parquet-io", auto_resize=False)
         self.committed_bytes = 0
         # Workers serialize decoded columns directly into this pool's reserved
@@ -726,14 +727,12 @@ cdef class CppIOPipeline:
             self.pipeline.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes,
                                               <int64_t>_gap_bytes)
         if http_tuning is not None:
-            (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
-             _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11,
-             _max_bytes_in_flight) = http_tuning
+            (_max_host_connections, _max_retries, _use_multiplexing, _use_pipewait,
+             _force_http11, _stall_ms, _ceiling_ms, _connect_ms) = http_tuning
             self.pipeline.set_http_tuning(
                 <long>_max_host_connections, <int>_max_retries,
-                <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
                 <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
-                <long long>_max_bytes_in_flight,
+                <long>_stall_ms, <long>_ceiling_ms, <long>_connect_ms,
             )
         # Bearer credential for the C++ fetches — the alternative to pre-signing
         # each object (see _sign_paths). None when the connector still signs, in
@@ -1128,17 +1127,15 @@ cdef class CppIOPipeline:
             "prefetch_discarded_bytes": self.pipeline.prefetch_discarded_bytes(),
             # How this scan's gs:// ranges travel, read back from the pipeline.
             "gcs_transport": "grpc" if self.pipeline.gcs_grpc_connections() > 0 else "rest",
-            # The process bytes-in-flight gate as this scan met it: admissions, time
-            # waited for one, the most in flight (bytes, requests) right after one,
-            # and the smallest cap seen (0 = never admitted).
-            "byte_gate_admissions": self.pipeline.gate_admissions(),
-            "byte_gate_wait_ns": self.pipeline.gate_wait_ns(),
-            "byte_gate_peak_in_flight_bytes": self.pipeline.gate_peak_in_flight_bytes(),
-            "byte_gate_peak_requests": self.pipeline.gate_peak_requests(),
-            "byte_gate_min_cap_bytes": self.pipeline.gate_min_cap_bytes(),
-            # Memory admission: the budget the pipeline actually runs (0 = off) —
-            # the read-back that proves `parquet_io_memory_budget_bytes` bound —
-            # the peak it held, and whether the gate ever bit.
+            # This scan's requests: which deadline failed an attempt, the most on
+            # the wire at once, and the average (Σ request time / fetch span).
+            "http_stalls": self.pipeline.http_stalls(),
+            "http_ceiling_timeouts": self.pipeline.http_ceiling_timeouts(),
+            "fetch_in_flight_peak": self.pipeline.fetch_in_flight_peak(),
+            "fetch_in_flight_avg": _in_flight_avg(self.pipeline.fetch_request_ns(),
+                                                  self.pipeline.fetch_span_ns()),
+            # Memory admission: the process IO budget the pipeline ran under (0 =
+            # off), the peak THIS scan held, and how long its tickets waited.
             "memory_budget_bytes": self.pipeline.memory_budget_bytes(),
             "memory_held_high_watermark": self.pipeline.memory_held_high_watermark(),
             "admission_blocked_ns": self.pipeline.admission_blocked_ns(),
@@ -3056,7 +3053,6 @@ cpdef IpcRowGroupSource open_ipc_source(
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
     int remote_decode_workers=0,
-    int64_t memory_budget=0,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -3252,7 +3248,6 @@ cpdef IpcRowGroupSource open_ipc_source(
         # Armed only when something is remote: a local-only scan gets the
         # validated window but no idle fetch threads.
         fetch_ahead=fetch_ahead if _any_remote_path(paths) else 0,
-        memory_budget=memory_budget,
     )
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
@@ -3293,7 +3288,6 @@ cpdef IpcRowGroupSource open_pass2_source(
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
     int remote_decode_workers=0,
-    int64_t memory_budget=0,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -3374,7 +3368,6 @@ cpdef IpcRowGroupSource open_pass2_source(
         coalesce_tuning=coalesce_tuning,
         auth_header=_native_auth_header(filesystem),
         fetch_ahead=fetch_ahead if _any_remote_path([p for p, _, _ in work_items]) else 0,
-        memory_budget=memory_budget,
     )
     return src
 
@@ -3520,11 +3513,11 @@ cdef class NativeScanPlan:
             "fetch_ahead_depth": self.pipeline_ptr.fetch_ahead_depth(),
             "prefetch_discarded_bytes": self.pipeline_ptr.prefetch_discarded_bytes(),
             "gcs_transport": "grpc" if self.pipeline_ptr.gcs_grpc_connections() > 0 else "rest",
-            "byte_gate_admissions": self.pipeline_ptr.gate_admissions(),
-            "byte_gate_wait_ns": self.pipeline_ptr.gate_wait_ns(),
-            "byte_gate_peak_in_flight_bytes": self.pipeline_ptr.gate_peak_in_flight_bytes(),
-            "byte_gate_peak_requests": self.pipeline_ptr.gate_peak_requests(),
-            "byte_gate_min_cap_bytes": self.pipeline_ptr.gate_min_cap_bytes(),
+            "http_stalls": self.pipeline_ptr.http_stalls(),
+            "http_ceiling_timeouts": self.pipeline_ptr.http_ceiling_timeouts(),
+            "fetch_in_flight_peak": self.pipeline_ptr.fetch_in_flight_peak(),
+            "fetch_in_flight_avg": _in_flight_avg(self.pipeline_ptr.fetch_request_ns(),
+                                                  self.pipeline_ptr.fetch_span_ns()),
             # Memory admission + PageIndex read-backs — see CppIOPipeline.diagnostics().
             "memory_budget_bytes": self.pipeline_ptr.memory_budget_bytes(),
             "memory_held_high_watermark": self.pipeline_ptr.memory_held_high_watermark(),
@@ -3685,7 +3678,6 @@ cpdef NativeScanPlan open_native_scan_plan(
     int in_flight_limit_override=0,
     http_tuning=None,
     coalesce_tuning=None,
-    int64_t memory_budget=0,
     coverage=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
@@ -4053,10 +4045,6 @@ cpdef NativeScanPlan open_native_scan_plan(
     # above was validated either way.
     if fetch_ahead > 0 and _remote_scan:
         plan.pipeline_ptr.set_fetch_ahead(fetch_ahead)
-    # Memory admission budget (bytes; 0 = off) — resolved per scan by the caller
-    # through io_tuning.resolve_memory_budget; read back as `memory_budget_bytes`.
-    if memory_budget > 0:
-        plan.pipeline_ptr.set_memory_budget(memory_budget)
     # Per-scan IO shaping, resolved by the caller through
     # connectors/parquet_io/io_tuning (default -> env -> SET). Both are None
     # unless the caller resolved them, in which case the pipeline keeps its own
@@ -4068,14 +4056,12 @@ cpdef NativeScanPlan open_native_scan_plan(
         plan.pipeline_ptr.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes,
                                               <int64_t>_gap_bytes)
     if http_tuning is not None:
-        (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
-         _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11,
-             _max_bytes_in_flight) = http_tuning
+        (_max_host_connections, _max_retries, _use_multiplexing, _use_pipewait,
+         _force_http11, _stall_ms, _ceiling_ms, _connect_ms) = http_tuning
         plan.pipeline_ptr.set_http_tuning(
             <long>_max_host_connections, <int>_max_retries,
-            <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
             <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
-            <long long>_max_bytes_in_flight,
+            <long>_stall_ms, <long>_ceiling_ms, <long>_connect_ms,
         )
     # E37: hand the per-column key flags to the decoder so non-key string columns
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
@@ -4655,7 +4641,6 @@ def iter_row_groups_ipc(
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
     int remote_decode_workers=0,
-    int64_t memory_budget=0,
 ):
     """
     C++ Parquet IO pipeline: read + decode + serialize all in C++, no Python in hot path.
@@ -4681,7 +4666,6 @@ def iter_row_groups_ipc(
         fetch_ahead=fetch_ahead,
         fetch_ahead_min_blocks=fetch_ahead_min_blocks,
         remote_decode_workers=remote_decode_workers,
-        memory_budget=memory_budget,
     )
     cdef list names = src.column_names_bytes
     cdef list vectors

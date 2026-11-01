@@ -40,7 +40,6 @@ __all__ = [
     "resolve_fetch_ahead_gate",
     "resolve_http_tuning",
     "resolve_in_flight_limit",
-    "resolve_memory_budget",
 ]
 
 # The variables a SINGLE SCAN may carry its own value for — the vocabulary a
@@ -58,19 +57,18 @@ __all__ = [
 PER_SCAN_VARIABLES = frozenset({
     "disable_http2",
     "disable_http_multiplexing",
-    "http_max_bytes_in_flight",
+    "http_ceiling_ms",
+    "http_connect_ms",
     "http_max_connections_per_host",
     "http_max_retries",
-    "http_min_bandwidth_mbps",
     "http_pipewait",
-    "http_request_timeout_floor_ms",
+    "http_stall_ms",
     "parquet_io_coalesce_gap_bytes",
     "parquet_io_coalesce_max_bytes",
     "parquet_io_coalesce_waste_ratio",
     "parquet_io_fetch_ahead",
     "parquet_io_fetch_ahead_min_blocks",
     "parquet_io_in_flight_limit",
-    "parquet_io_memory_budget_bytes",
 })
 
 
@@ -89,32 +87,32 @@ def _value(name, variables, default, overrides):
 def resolve_http_tuning(variables, overrides=None) -> tuple:
     """The 8-tuple `set_http_tuning` / `CppIOPipeline.__cinit__` expect.
 
-    Bandwidth is stored and SET in Mbps (the human-facing unit) and converted to
-    bytes/s here, matching `HttpTuning`'s C++ field.
-
     The two multiplexing flags are stored as `disable_*` — the state a caller
     normally does NOT want, per variables.py's naming convention — and inverted
     here into the positive sense `HttpTuning` uses.
     """
-    min_bw_mbps = _value(
-        "http_min_bandwidth_mbps", variables, config.HTTP_MIN_BANDWIDTH_MBPS, overrides
-    )
     return (
         _value(
             "http_max_connections_per_host", variables, config.HTTP_MAX_CONNECTIONS_PER_HOST, overrides
         ),
         _value("http_max_retries", variables, config.HTTP_MAX_RETRIES, overrides),
-        min_bw_mbps * 1.0e6 / 8.0,
-        _value(
-            "http_request_timeout_floor_ms", variables, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS, overrides
-        ),
         not _value(
             "disable_http_multiplexing", variables, config.DISABLE_HTTP_MULTIPLEXING, overrides
         ),
         _value("http_pipewait", variables, config.HTTP_PIPEWAIT, overrides),
         _value("disable_http2", variables, config.DISABLE_HTTP2, overrides),
-        int(_value("http_max_bytes_in_flight", variables, config.HTTP_MAX_BYTES_IN_FLIGHT, overrides)),
+        _positive_ms("http_stall_ms", variables, config.HTTP_STALL_MS, overrides),
+        _positive_ms("http_ceiling_ms", variables, config.HTTP_CEILING_MS, overrides),
+        _positive_ms("http_connect_ms", variables, config.HTTP_CONNECT_MS, overrides),
     )
+
+
+def _positive_ms(name, variables, default, overrides) -> int:
+    # 0 would mean "no deadline" to curl, so a SET or hint to it is refused.
+    ms = int(_value(name, variables, default, overrides))
+    if ms <= 0:
+        raise ValueError(f"{name} must be a positive number of ms, not {ms}")
+    return ms
 
 
 def resolve_coalesce_tuning(variables, overrides=None) -> tuple:
@@ -159,35 +157,3 @@ def resolve_fetch_ahead_gate(variables, overrides=None) -> int:
     return int(_value(
         "parquet_io_fetch_ahead_min_blocks", variables,
         config.PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS, overrides))
-
-
-# The auto budget's share of the container's (or host's) memory. Half: the scan
-# is one consumer among the query's operators — a sort/aggregate downstream of a
-# wide scan needs its own room, and the worker OOM this exists to prevent was a
-# scan that ran ahead of exactly such a consumer.
-_AUTO_MEMORY_BUDGET_FRACTION = 0.5
-
-
-def resolve_memory_budget(variables, overrides=None) -> int:
-    """Memory admission budget for the scan's IO pipeline, in bytes, as the
-    pipeline should run it: a positive cap, or 0 for off.
-
-    The knob's own vocabulary is 0 = auto, -1 = off. Auto derives from the
-    cgroup limit when one is in effect (the container's real ceiling), else
-    physical RAM (bare metal / dev), times _AUTO_MEMORY_BUDGET_FRACTION; when
-    neither can be detected there is nothing honest to derive from, and the
-    result is off (0) — which the pipeline's `memory_budget_bytes` read-back
-    then shows, rather than a guessed number."""
-    raw = int(_value(
-        "parquet_io_memory_budget_bytes", variables, config.PARQUET_IO_MEMORY_BUDGET_BYTES, overrides))
-    if raw > 0:
-        return raw
-    if raw < 0:
-        return 0
-    from opteryx.compiled.platform import cgroup_memory_limit_bytes
-    from opteryx.compiled.platform import physical_memory_total_bytes
-
-    ceiling = cgroup_memory_limit_bytes() or physical_memory_total_bytes() or 0
-    if ceiling <= 0:
-        return 0
-    return int(ceiling * _AUTO_MEMORY_BUDGET_FRACTION)

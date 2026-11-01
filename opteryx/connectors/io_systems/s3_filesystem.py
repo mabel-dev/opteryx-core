@@ -642,7 +642,7 @@ class OpteryxS3FileSystem:
         # max_connections caps per-host concurrency inside each get_many()
         # call's CURLM event loop and sets the connection cache size, matching
         # the GCS and HTTP filesystems so a wide projection is never queued.
-        self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
+        self.http_client = HttpClient(max_connections=128)
 
     # ── URL construction ────────────────────────────────────────────────────
 

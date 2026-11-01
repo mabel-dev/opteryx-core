@@ -34,25 +34,39 @@ cdef extern from *:
     #include "gcs_grpc/gcs_grpc_client.hpp"
 
     // Runs inside the catch(...) Cython generates for `except +translator`.
-    static void opteryx_gcs_grpc_error_info(std::string& message, int& retryable, int& status) {
+    // 0 = GcsGrpcError, 1 = invalid argument, 2 = any other std::exception. Every
+    // kind must be caught here: an uncaught rethrow terminates the process.
+    static int opteryx_gcs_grpc_error_info(std::string& message, int& retryable, int& status) {
         try {
             throw;
         } catch (const gcs_grpc::GcsGrpcError& err) {
             message = err.what();
             retryable = err.retryable;
             status = err.grpc_status;
+            return 0;
+        } catch (const std::invalid_argument& err) {
+            message = err.what();
+            return 1;
+        } catch (const std::exception& err) {
+            message = err.what();
+            return 2;
         }
     }
     """
-    void opteryx_gcs_grpc_error_info(string& message, int& retryable, int& status)
+    int opteryx_gcs_grpc_error_info(string& message, int& retryable, int& status)
 
 
 cdef void _raise_gcs_grpc_error() except *:
     cdef string message
     cdef int retryable = 0
     cdef int status = 0
-    opteryx_gcs_grpc_error_info(message, retryable, status)
-    raise GcsGrpcError(message.decode("utf-8", "replace"), retryable, status)
+    cdef int kind = opteryx_gcs_grpc_error_info(message, retryable, status)
+    text = message.decode("utf-8", "replace")
+    if kind == 1:
+        raise ValueError(text)
+    if kind == 2:
+        raise RuntimeError(text)
+    raise GcsGrpcError(text, retryable, status)
 
 
 cdef extern from "gcs_grpc/crc32c.hpp" namespace "gcs_grpc":
@@ -78,8 +92,9 @@ cdef extern from "gcs_grpc/gcs_grpc_client.hpp" namespace "gcs_grpc":
         CGcsGrpcClient(Options) except +
         vector[vector[uint8_t]] read_many(const string& bucket, const string& obj,
                                           const vector[ByteRange]& ranges,
-                                          const string& authorization, int64_t timeout_ms,
-                                          int64_t generation, int64_t* out_generation) except +_raise_gcs_grpc_error nogil
+                                          const string& authorization, int64_t stall_ms,
+                                          int64_t ceiling_ms, int64_t generation,
+                                          int64_t* out_generation) except +_raise_gcs_grpc_error nogil
 
 
 cdef extern from "gcs_grpc/alts.hpp" namespace "gcs_grpc":
@@ -194,7 +209,7 @@ cdef class GcsGrpcClient:
         self._client.reset(new CGcsGrpcClient(o))
 
     def read_many(self, str bucket, str obj, list ranges, str authorization,
-                  int64_t timeout_ms=60000, int64_t generation=0):
+                  int64_t stall_ms=5000, int64_t ceiling_ms=30000, int64_t generation=0):
         """Read [(offset, length), ...] of gs://bucket/obj; returns (list[bytes], generation)."""
         cdef vector[ByteRange] cr
         cdef ByteRange r
@@ -208,7 +223,7 @@ cdef class GcsGrpcClient:
         cdef int64_t got_generation = 0
         cdef vector[vector[uint8_t]] out
         with nogil:
-            out = self._client.get().read_many(b, o, cr, a, timeout_ms, generation, &got_generation)
+            out = self._client.get().read_many(b, o, cr, a, stall_ms, ceiling_ms, generation, &got_generation)
         cdef list buffers = []
         cdef size_t i
         for i in range(out.size()):
