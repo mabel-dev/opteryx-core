@@ -188,6 +188,9 @@ from rugo.parquet_reader cimport footer_suffix_bytes as _cpp_footer_suffix_bytes
 # fetched, keyed by data-file path. Envelope bytes only — reconstructed through the same
 # parser as a cold fetch, so a hit can never disagree with a cold read.
 from opteryx.connectors.parquet_io.footer_remote_cache import remote_footer_cache
+# Instance-local footer cache on disk: survives a process restart, probed before the
+# cross-instance tier.
+from opteryx.connectors.parquet_io.footer_disk_cache import footer_disk_cache
 from opteryx.exceptions import DatasetDataReadError
 from opteryx.logging import get_logger
 
@@ -2057,6 +2060,9 @@ cdef class IpcRowGroupSource:
     cdef int footer_cache_hits
     cdef int footer_cache_misses
     cdef int footer_process_cache_hits
+    # Footers served from the local disk tier, which sits between the in-process caches
+    # and the remote tier; -1 when no disk tier is configured or nothing reached it.
+    cdef int footer_disk_cache_hits
     # Row groups excluded by pushed-predicate min/max + bloom pruning at plan
     # time (open_ipc_source), before any work item is submitted for decode.
     # Stays 0 for a pass-2 source (open_pass2_source) — pass-1 already chose
@@ -2081,6 +2087,7 @@ cdef class IpcRowGroupSource:
         self.footer_cache_hits = -1
         self.footer_cache_misses = -1
         self.footer_process_cache_hits = -1
+        self.footer_disk_cache_hits = -1
         self.pruned_row_group_count = 0
 
     def __dealloc__(self):
@@ -2115,6 +2122,8 @@ cdef class IpcRowGroupSource:
         diag = self.pipeline.diagnostics()
         if self.footer_process_cache_hits >= 0:
             diag["footer_process_cache_hits"] = self.footer_process_cache_hits
+        if self.footer_disk_cache_hits >= 0:
+            diag["footer_disk_cache_hits"] = self.footer_disk_cache_hits
         if self.footer_cache_hits >= 0:
             diag["footer_cache_hits"] = self.footer_cache_hits
             diag["footer_cache_misses"] = self.footer_cache_misses
@@ -2660,11 +2669,12 @@ cdef tuple _acquire_remote_footers(
       1. classify: for each remote-scheme, non-prefetched file, parse it straight
          from the in-process parsed-struct cache or the in-process bytes cache, or
          record it as still needing a footer;
-      2. probe the shared (cross-instance) footer cache with ONE batched mget and
-         parse any envelope another instance already fetched;
+      2. probe the local disk cache, then the shared (cross-instance) footer cache with
+         ONE batched mget for the disk misses, and parse any envelope found; a shared
+         hit is written to disk;
       3. fetch the residual (probe misses) from origin in ONE concurrent batch
          (`_fetch_footers_many`, which releases the GIL), parse it, and write those
-         envelopes back to the shared cache in ONE batched set.
+         envelopes to disk and back to the shared cache in ONE batched set.
 
     Step 3 is the ONLY place a remote footer is read from origin, so it is the only
     place that writes the shared cache. A caller's own per-path loop must never
@@ -2683,7 +2693,8 @@ cdef tuple _acquire_remote_footers(
     lookup and the `submit_row_group` fetch — or needs no map at all
     (`native_scan_rejection` only reads types).
 
-    Returns (remote_files_seen, process_hits, tier_hits, tier_misses) for telemetry.
+    Returns (remote_files_seen, process_hits, disk_hits, tier_hits, tier_misses) for
+    telemetry; `tier_misses` is the count fetched from origin.
     `remote_files_seen == 0` means the scan was all-local and the other counters carry
     no information — the caller should report nothing rather than report zeros."""
     cdef ParquetFooterRef probe
@@ -2704,6 +2715,8 @@ cdef tuple _acquire_remote_footers(
     # (orig_path, fetch_url, size) for remote files that still need a footer fetched.
     remote_candidates = []
     footer_remote = remote_footer_cache()
+    footer_disk = footer_disk_cache()
+    cdef Py_ssize_t disk_hits = 0
 
     # ── Step 1: classify ────────────────────────────────────────────────────────
     for path in paths:
@@ -2733,15 +2746,28 @@ cdef tuple _acquire_remote_footers(
                                   file_sizes.get(path, -1) if file_sizes else -1))
 
     if not remote_candidates:
-        return (remote_files_seen, process_hits, 0, 0)
+        return (remote_files_seen, process_hits, 0, 0, 0)
 
-    # ── Step 2: one batched probe of the shared (cross-instance) cache ──────────
+    # ── Step 2: probe the local disk, then one batched probe of the shared cache ─
     probe_hits = set()
+    if footer_disk is not None:
+        for path, fetch_url, _ in remote_candidates:
+            envelope = footer_disk.get(path)
+            if envelope is None:
+                continue
+            if footer_bytes_cache is not None:
+                footer_bytes_cache.put(fetch_url, envelope)
+            _parse_and_cache_footer(path, envelope, footer_map)
+            probe_hits.add(path)
+        disk_hits = len(probe_hits)
     if footer_remote is not None:
-        for path, envelope in footer_remote.get_many([c[0] for c in remote_candidates]).items():
+        for path, envelope in footer_remote.get_many(
+                [c[0] for c in remote_candidates if c[0] not in probe_hits]).items():
             if footer_bytes_cache is not None:
                 footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
             _parse_and_cache_footer(path, envelope, footer_map)
+            if footer_disk is not None:
+                footer_disk.put(path, envelope)
             probe_hits.add(path)
 
     # ── Step 3: fetch the residual from origin in one concurrent batch ─────────
@@ -2764,6 +2790,8 @@ cdef tuple _acquire_remote_footers(
             _parse_and_cache_footer(batch_orig[bi], envelope, footer_map)
             # Write back only AFTER a successful parse, so a cross-instance reader never
             # receives bytes that fail to decode here.
+            if footer_disk is not None:
+                footer_disk.put(batch_orig[bi], envelope)
             pending_remote.append((batch_orig[bi], envelope))
         if footer_remote is not None and pending_remote:
             footer_remote.put_many(pending_remote)
@@ -2774,8 +2802,8 @@ cdef tuple _acquire_remote_footers(
     # there would make a mis-set OPTERYX_FOOTER_CACHE_LOCATION look identical to a warm
     # process that simply didn't need the tier — the two failure modes must be
     # distinguishable from telemetry alone.
-    return (remote_files_seen, process_hits,
-            len(probe_hits), len(remote_candidates) - len(probe_hits))
+    return (remote_files_seen, process_hits, disk_hits,
+            len(probe_hits) - disk_hits, len(remote_candidates) - len(probe_hits))
 
 
 cdef void _parse_and_cache_footer(
@@ -3076,8 +3104,8 @@ cpdef IpcRowGroupSource open_ipc_source(
     # a remote file: `_acquire_remote_footers` guarantees every non-prefetched remote
     # file already has a parsed footer in `_PARSED_FOOTER_CACHE` (and, since a non-NULL
     # footer_map is passed here, in `src.footer_map` too).
-    cdef Py_ssize_t remote_files_seen, process_hits, tier_hits, tier_misses
-    remote_files_seen, process_hits, tier_hits, tier_misses = _acquire_remote_footers(
+    cdef Py_ssize_t remote_files_seen, process_hits, disk_hits, tier_hits, tier_misses
+    remote_files_seen, process_hits, disk_hits, tier_hits, tier_misses = _acquire_remote_footers(
         paths, orig_to_cpp, file_sizes, footer_bytes_cache,
         src.footer_map, prefetched_footers, _native_auth_header(filesystem),
     )
@@ -3086,6 +3114,8 @@ cpdef IpcRowGroupSource open_ipc_source(
     # exactly the case where the remote counters go absent and need explaining.
     if remote_files_seen:
         src.footer_process_cache_hits = process_hits
+    if footer_disk_cache() is not None and (disk_hits or tier_hits or tier_misses):
+        src.footer_disk_cache_hits = disk_hits
     if tier_hits or tier_misses:
         src.footer_cache_hits = tier_hits
         src.footer_cache_misses = tier_misses

@@ -223,3 +223,34 @@ def test_warm_process_reports_in_process_hits_and_omits_remote_counters(
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+def test_disk_tier_is_probed_before_the_remote_tier_and_filled_on_origin_fetch(
+    http_server, patched_remote_cache, monkeypatch, tmp_path
+):
+    # The disk tier is what survives a restart: a footer on disk must be served without
+    # reaching the shared tier, and an origin fetch must land on disk for the next process.
+    from opteryx.connectors.parquet_io.footer_disk_cache import FooterDiskCache
+
+    disk = FooterDiskCache(directory=str(tmp_path), max_bytes=64 * 1024 * 1024)
+    monkeypatch.setattr(pool_reader, "footer_disk_cache", lambda: disk)
+    url_hit = f"{http_server}/{FILE_HIT}"
+    url_miss = f"{http_server}/{FILE_MISS}"
+    disk.put(url_hit, _envelope_bytes(FILE_HIT))
+
+    src = pool_reader.open_ipc_source(
+        None,
+        [url_hit, url_miss],
+        [_first_column(FILE_HIT)],
+        decode_workers=2,
+        footer_bytes_cache=ParquetFooterBytesCache(64 * 1024 * 1024),
+    )
+    try:
+        diag = src.diagnostics()
+    finally:
+        src.close()
+
+    assert diag.get("footer_disk_cache_hits") == 1, diag
+    assert diag.get("footer_cache_hits") == 0, diag
+    assert diag.get("footer_cache_misses") == 1, diag
+    assert FooterDiskCache(directory=str(tmp_path), max_bytes=64 * 1024 * 1024).get(url_miss) is not None

@@ -739,6 +739,17 @@ over the network: past some size, shipping the payload to and from the cache cos
 more than the object-storage read it replaces. Oversized manifests are still served
 from origin and still cached on local disk — only the remote write is skipped."""
 
+FOOTER_CACHE_PATH: str = get("OPTERYX_FOOTER_CACHE_PATH", "")
+"""Directory for the on-disk Parquet footer cache. Empty disables the cache.
+
+Sits between the in-process footer caches and the remote tier, so footers survive a
+process restart (every fleet deploy). Must name a real disk, for the same reason as
+`MANIFEST_CACHE_PATH`; give it its own directory, not the manifest cache's — each
+cache adopts every file in its directory at startup."""
+
+FOOTER_CACHE_BYTES: int = int(get("OPTERYX_FOOTER_CACHE_BYTES", 1024 * 1024 * 1024))
+"""Byte ceiling for the on-disk footer cache; least-recently-read footers go first."""
+
 FOOTER_REMOTE_LOCATION: str = str(get("OPTERYX_FOOTER_CACHE_LOCATION", "")).strip()
 """KV store backing the shared (remote) Parquet footer cache, e.g. `valkey://host:6376`.
 

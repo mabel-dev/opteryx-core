@@ -1,0 +1,5 @@
+# Seeds that have found a bug in the reference (Opteryx vs DuckDB) fuzzer.
+#
+# When a random seed fails, add it here with a one-line note. Pinned seeds run
+# on every invocation, ahead of the random ones and regardless of TEST_SEED, so
+# a fixed bug cannot come back unnoticed.

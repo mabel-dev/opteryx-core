@@ -38,14 +38,14 @@ With neither tier configured, ``manifest_cache_tiers()`` is empty, the wrapper i
 installed, and behaviour is exactly what it was before this cache existed.
 """
 
-import os
 import re
 import threading
-from collections import OrderedDict
 from hashlib import sha256
 from typing import Dict
 from typing import List
 from typing import Optional
+
+from opteryx.connectors.disk_lru_cache import DiskLRUCache
 
 # `<dataset_location>/metadata/manifest-<snapshot_id>.parquet`. The snapshot id in
 # the name is what makes the entry immutable; a path without one is not cacheable.
@@ -89,125 +89,11 @@ def _is_parquet(payload: bytes) -> bool:
     )
 
 
-class CorruptCacheEntry(Exception):
-    """A cache entry exists but is not a well-formed parquet payload."""
-
-
-class ManifestDiskCache:
-    """Byte-bounded LRU of manifest parquet payloads on local disk.
-
-    Entries are keyed by the SHA-256 of the full manifest URI, so two datasets
-    that share a snapshot id (ids are millisecond timestamps, not UUIDs) cannot
-    collide.
-    """
+class ManifestDiskCache(DiskLRUCache):
+    """Byte-bounded LRU of manifest parquet payloads on local disk, keyed by manifest URI."""
 
     def __init__(self, directory: str, max_bytes: int):
-        if max_bytes <= 0:
-            raise ValueError(f"manifest cache max_bytes must be positive, got {max_bytes}")
-
-        self._directory = directory
-        self._max_bytes = max_bytes
-        self._lock = threading.Lock()
-
-        # digest -> size in bytes, in LRU order (oldest first)
-        self._index: "OrderedDict[str, int]" = OrderedDict()
-        self._resident = 0
-
-        os.makedirs(directory, exist_ok=True)
-        self._seed_index()
-
-    def _seed_index(self) -> None:
-        """Adopt entries left by an earlier process on this instance's disk.
-
-        Ordered by mtime so the LRU approximates the order they were last written.
-        Stale `.tmp` files from a crashed writer are removed; they are never read.
-        """
-        entries = []
-        for name in os.listdir(self._directory):
-            path = os.path.join(self._directory, name)
-            if name.endswith(".tmp"):
-                os.unlink(path)
-                continue
-            stat = os.stat(path)
-            entries.append((stat.st_mtime, name, stat.st_size))
-
-        for _, name, size in sorted(entries):
-            self._index[name] = size
-            self._resident += size
-
-        self._evict_to_fit(0)
-
-    def _path(self, digest: str) -> str:
-        return os.path.join(self._directory, digest)
-
-    def _evict_to_fit(self, incoming: int) -> None:
-        """Drop least-recently-used entries until `incoming` more bytes fit.
-
-        Caller holds the lock.
-        """
-        while self._index and self._resident + incoming > self._max_bytes:
-            digest, size = self._index.popitem(last=False)
-            os.unlink(self._path(digest))
-            self._resident -= size
-            _metrics["evictions"] += 1
-
-    def get(self, uri: str) -> Optional[bytes]:
-        """Return the cached payload for `uri`, or None on a miss.
-
-        A present-but-malformed entry raises rather than silently re-fetching:
-        a cache that quietly repairs itself hides a broken disk.
-        """
-        digest = sha256(uri.encode("utf-8")).hexdigest()
-
-        with self._lock:
-            if digest not in self._index:
-                _metrics["misses"] += 1
-                return None
-
-            self._index.move_to_end(digest)
-            with open(self._path(digest), "rb") as handle:
-                payload = handle.read()
-
-        if not _is_parquet(payload):
-            raise CorruptCacheEntry(
-                f"manifest cache entry for {uri} is not a valid parquet payload "
-                f"({len(payload)} bytes); disk at {self._directory} may be damaged"
-            )
-
-        _metrics["hits"] += 1
-        _metrics["bytes_served"] += len(payload)
-        return payload
-
-    def put(self, uri: str, payload: bytes) -> None:
-        """Store `payload` under `uri`, evicting LRU entries to stay in budget.
-
-        A payload larger than the whole budget is not cached; caching it would
-        evict every other entry to hold one item.
-        """
-        size = len(payload)
-        if size > self._max_bytes:
-            return
-
-        digest = sha256(uri.encode("utf-8")).hexdigest()
-        final = self._path(digest)
-        tmp = f"{final}.{os.getpid()}.{threading.get_ident()}.tmp"
-
-        with self._lock:
-            if digest in self._index:
-                return
-
-            self._evict_to_fit(size)
-
-            # Write-then-rename: a reader never observes a partial payload, and a
-            # crashed writer leaves only a .tmp, which _seed_index sweeps.
-            with open(tmp, "wb") as handle:
-                handle.write(payload)
-            os.replace(tmp, final)
-
-            self._index[digest] = size
-            self._resident += size
-            _metrics["writes"] += 1
-            _metrics["bytes_written"] += size
+        super().__init__(directory, max_bytes, _is_parquet, "manifest", _metrics)
 
 
 class RemoteManifestCache:

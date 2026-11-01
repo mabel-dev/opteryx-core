@@ -67,7 +67,7 @@ from typing import Callable, Dict, Optional
 
 from draken.draken_native import DrakenType as _DrakenType
 
-from opteryx.expression import ExpressionColumn, NodeType, format_expression
+from opteryx.expression import ExpressionColumn, NodeType, format_expression, get_all_nodes_of_type
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type, _STRING_CATEGORIES
@@ -773,6 +773,23 @@ def _prune_false_or_branches(predicate):
     return result
 
 
+def _cnf_operand_key(operand):
+    """Grouping key for a CNF point-test operand: its rendering PLUS the bound
+    identity of every column it reads, or None when a column is unbound.
+
+    The rendering alone names a column without its relation, so `p.id = 1` and
+    `s.id IN (2, 3)` both keyed "id" and were fused into one `id IN (1, 2, 3)`
+    applied to a single side — a silent wrong answer on any join of tables that
+    share a column name."""
+    identities = []
+    for identifier in get_all_nodes_of_type(operand, (NodeType.IDENTIFIER,)):
+        schema_column = identifier.schema_column
+        if schema_column is None or schema_column.identity is None:
+            return None
+        identities.append(schema_column.identity)
+    return format_expression(operand), tuple(identities)
+
+
 def rewrite_cnf_eq_to_inlist(condition, telemetry, *, plan_context):
     """
     For a CNF (n-ary OR) node, group Eq branches that share the same left-hand
@@ -787,7 +804,7 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry, *, plan_context):
     if condition.node_type != NodeType.CNF:
         return condition
 
-    groups: Dict[str, dict] = {}
+    groups: Dict[tuple, dict] = {}
     non_eq = []
 
     for branch in condition.parameters:
@@ -815,10 +832,10 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry, *, plan_context):
             if point is not None and branch.value == "InList":
                 column, values, element_type = point
 
-        if column is None:
+        key = None if column is None else _cnf_operand_key(column)
+        if key is None:
             non_eq.append(branch)
             continue
-        key = format_expression(column)
         if key not in groups:
             groups[key] = {"values": [], "node": branch, "column": column, "element_type": None}
         groups[key]["values"].extend(values)

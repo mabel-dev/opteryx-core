@@ -8204,6 +8204,12 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                         telemetry._reading["footer_process_cache_hits"] = sum(
                             d["footer_process_cache_hits"] for d in _process_diags
                         )
+                    # Local disk tier (footer_disk_cache.py), between the two above.
+                    _disk_diags = [d for d in _io_diags if "footer_disk_cache_hits" in d]
+                    if _disk_diags:
+                        telemetry._reading["footer_disk_cache_hits"] = sum(
+                            d["footer_disk_cache_hits"] for d in _disk_diags
+                        )
             _tc0 = _t.perf_counter_ns()
             nplan.close_scan_plans()
             _close_scans_ns = _drain_scans_ns + _t.perf_counter_ns() - _tc0
