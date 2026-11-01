@@ -56,6 +56,32 @@ inline bool fk_is_string(DrakenType t) {
     return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY;
 }
 
+// An untyped NULL operand (DRAKEN_NULL) makes a LIKE-family predicate NULL on every
+// row. Row count comes from the typed side; NULL LIKE NULL takes the subject's.
+VecResult fk_null_bool(const DrakenVector* v, const DrakenVector* p) {
+    const uint32_t n = v->type == DRAKEN_NULL && p->type != DRAKEN_NULL ? p->length : v->length;
+    const size_t nb = (static_cast<size_t>(n) + 7) / 8;
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+    auto* validity = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+    if (out == nullptr || validity == nullptr) {
+        draken_free(out);
+        draken_free(validity);
+        return draken_error_sentinel("allocation failed");
+    }
+    std::memset(out, 0, nb > 0 ? nb : 1);
+    std::memset(validity, 0, nb > 0 ? nb : 1);
+    VecResult r{};
+    r.data = out;
+    r.validity = validity;
+    r.selection = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length = n;
+    r.length = n;
+    r.type = DRAKEN_BOOL;
+    r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    return r;
+}
+
 // Shared ASCII case transform (VARCHAR/VARBINARY only — see file header).
 //
 // SHAPE-PRESERVING (the string-CAST pattern, cast_string.cpp): the fold is a pure
@@ -1247,6 +1273,8 @@ VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
     const bool ci = (ctx != nullptr) && ((static_cast<const binary_op_ctx*>(ctx)->op_code & 2) != 0);
     const DrakenVector* v = args[0];
     const DrakenVector* p = args[1];
+    if (v->type == DRAKEN_NULL || p->type == DRAKEN_NULL)
+        return fk_null_bool(v, p);
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel_fmt("%s: string operands required", who);
     // VARBINARY is a legal case-insensitive subject: it folds ASCII, exactly as
@@ -1365,6 +1393,8 @@ VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t n
     const bool ci = (mode & 2) != 0;
     const DrakenVector* v = args[0];
     const DrakenVector* p = args[1];
+    if (v->type == DRAKEN_NULL || p->type == DRAKEN_NULL)
+        return fk_null_bool(v, p);
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_contains: string operands required");
     // VARBINARY folds ASCII like VARCHAR — see draken_like for the ruling. This is
@@ -1441,6 +1471,8 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
     const bool ci = (mode & 2) != 0;
     const DrakenVector* v = args[0];
     const DrakenVector* p = args[1];
+    if (v->type == DRAKEN_NULL || p->type == DRAKEN_NULL)
+        return fk_null_bool(v, p);
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_like: string operands required");
     // ILIKE accepts a VARBINARY subject. Case folding on VARBINARY is the SAME
@@ -1562,6 +1594,8 @@ VecResult draken_like_adaptive(void* ctx, const DrakenVector* const* args, uint3
 
     const DrakenVector* v = args[0];
     const DrakenVector* p = args[1];
+    if (v->type == DRAKEN_NULL || p->type == DRAKEN_NULL)
+        return fk_null_bool(v, p);
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_like_adaptive: string operands required");
 
@@ -1672,6 +1706,8 @@ VecResult draken_like_program(void* ctx, const DrakenVector* const* args, uint32
 
     const DrakenVector* v = args[0];
     const DrakenVector* p = args[1];
+    if (v->type == DRAKEN_NULL || p->type == DRAKEN_NULL)
+        return fk_null_bool(v, p);
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_like_program: string operands required");
 

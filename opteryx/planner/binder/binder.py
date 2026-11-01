@@ -978,7 +978,15 @@ def _bind_new_column(node, node_type, column_name, context, schemas):
             "AllOp",
         )
     ):
-        if node.right.node_type == NodeType.LITERAL:
+        if node.right.node_type == NodeType.LITERAL and node.right.value is None:
+            # `x = ANY(CAST(NULL AS ARRAY<T>))`: there is no array to search, so every
+            # ANY / ALL form is NULL on every row — exactly `x = NULL`, as it is for
+            # an array COLUMN's NULL rows.
+            from opteryx.planner import build_literal_node
+
+            node.value = "Eq"
+            node.right = build_literal_node(None, plan_context=context.plan_context)
+        elif node.right.node_type == NodeType.LITERAL:
             if type(node.right.value) is not tuple:
                 try:
                     node.right.value = tuple(node.right.value)

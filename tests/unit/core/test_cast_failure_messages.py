@@ -132,6 +132,34 @@ def test_try_cast_still_nulls_instead_of_raising(expression, phrase):
         assert sum(m.num_rows for m in morsels) > 0
     finally:
         session.close()
+
+
+@pytest.mark.parametrize(
+    "target, literal",
+    [
+        ("FLOAT64", "1.5"),
+        ("FLOAT32", "1.5"),
+        ("INT64", "7"),
+        ("INT8", "7"),
+        ("UINT64", "7"),
+        ("BOOL", "true"),
+        ("DATE", "2026-11-01"),
+        ("IPV4", "10.0.0.1"),
+        ("DECIMAL(10, 2)", "1.50"),
+    ],
+)
+def test_null_rows_in_a_string_column_do_not_fail_the_cast(target, literal):
+    """A NULL row's string slot is empty; CAST must not parse it and raise "''"."""
+    cast = f"SELECT CAST(CASE WHEN id = 3 THEN '{literal}' END AS {target}) AS x FROM $planets"
+    session = opteryx.session()
+    try:
+        nulls = list(session.execute_to_morsels(f"SELECT x FROM ({cast}) WHERE x IS NULL"))
+        values = list(session.execute_to_morsels(f"SELECT x FROM ({cast}) WHERE x IS NOT NULL"))
+    finally:
+        session.close()
+
+    assert sum(m.num_rows for m in nulls) == 8
+    assert sum(m.num_rows for m in values) == 1
 def test_folded_literal_failure_names_a_type_the_dialect_accepts():
     """The planner's own message must not name an INTERNAL spelling.
 

@@ -114,7 +114,15 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
         if physical_type == <int>DRAKEN_UINT16:
             return Vector(_draken_native.vector_uint16_from_constant(None, 1))
         if physical_type == <int>DRAKEN_UINT32:
+            _ensure_sql_types()
+            if logical is not None and logical.kind == _LogicalKind_IPV4:
+                # IPV4 is a UINT32 refined by its descriptor; without it the null
+                # is a plain integer and the CIDR kernel refuses it.
+                return Vector(_draken_native.vector_retag_uint32_as_ipv4(
+                    _draken_native.vector_uint32_from_constant(None, 1)))
             return Vector(_draken_native.vector_uint32_from_constant(None, 1))
+        if physical_type == <int>DRAKEN_INTERVAL:
+            return Vector(_draken_native.vector_interval_from_constant(None, 1))
         if physical_type == <int>DRAKEN_UINT64:
             return Vector(_draken_native.vector_uint64_from_constant(None, 1))
         if physical_type == <int>DRAKEN_FLOAT32:
@@ -3442,6 +3450,15 @@ cdef Py_ssize_t _linearize(
                         _src_logical is not None
                         and _src_logical.kind == _LogicalKind_IPV4
                     )
+        _src_nt = node.left.node_type
+        if source_phys_name is None and (
+            _src_nt == _NT_AND or _src_nt == _NT_OR or _src_nt == _NT_XOR
+            or _src_nt == _NT_NOT or _src_nt == _NT_COMPARISON_OPERATOR
+        ):
+            # A predicate is BOOL by construction. Optimizer rewrites build new ones
+            # without a bound column (`NOT (x > 3)` -> `x <= 3`, see
+            # boolean_simplication._inverted), which left the cast's source untyped.
+            source_phys_name = "BOOL"
 
         from opteryx.expression.casts import resolve_cast
         try:

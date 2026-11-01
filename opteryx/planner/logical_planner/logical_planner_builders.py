@@ -1584,33 +1584,14 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         # (compiled_expression.pyx): without it the stamp here would be undone at
         # materialization, which is where every BOOL null became DRAKEN_NULL again.
         #
-        # `logical is None` deliberately excludes IPV4, whose category is INTEGER
-        # (so ordering/grouping/joins run on the raw uint32) but which carries a
-        # descriptor — stamping that onto a folded null is the attach-vs-skip
-        # question that path answers separately, and this is not the place to
-        # re-answer it. VARBINARY and temporal targets are likewise untouched: a
-        # VARBINARY null reaching the string-concat closure would be stringified
-        # (VARBINARY is not in its string allow-list). Those two are
-        # the same shape as the BOOLEAN gap above and are still open.
-        #
-        # DECIMAL and DATE/TIMESTAMP/TIME pass the same test: `AVG(CAST(NULL AS
-        # DECIMAL(12,3)))`, `MIN(CAST(NULL AS TIMESTAMP))` and a CASE branch of one
-        # were refused while the column forms run. Their descriptor (precision/scale,
-        # unit) is in the stamped ColumnType, which `_materialise_constant_literal`
-        # reads. INTERVAL has no null constant there and stays untyped.
+        # DECIMAL, DATE/TIMESTAMP/TIME, VARBINARY, UUID, IPV4 and INTERVAL pass the
+        # same test: `AVG(CAST(NULL AS DECIMAL(12,3)))`, `MAX(CAST(NULL AS UUID))`,
+        # `LENGTH(CAST(NULL AS VARBINARY))` and `CAST(NULL AS IPV4) <<= '10.0.0.0/8'`
+        # were refused while the column forms run. Every target is stamped; the
+        # descriptor (precision/scale, unit, IPV4) is in the ColumnType, which
+        # `_materialise_constant_literal` reads.
         _null_ct = _column_type_for(target_type.replace("TRY_", ""), params)
-        if (
-            _null_ct.logical is None
-            and _null_ct.category
-            in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.BOOLEAN)
-        ) or _null_ct.category in (
-            LogicalCategory.DECIMAL,
-            LogicalCategory.DATE,
-            LogicalCategory.TIMESTAMP,
-            LogicalCategory.TIME,
-        ):
-            return Literal(value=None, type=_null_ct, alias=alias, arena=literal_node.arena)
-        return Literal(type=_CT_NULL, alias=alias, arena=literal_node.arena)
+        return Literal(value=None, type=_null_ct, alias=alias, arena=literal_node.arena)
 
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")

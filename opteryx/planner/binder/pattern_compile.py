@@ -58,31 +58,36 @@ def compile_rlike_pattern(predicate, *, plan_context) -> None:
         return
 
     pattern_value = predicate.right.value
-    if isinstance(pattern_value, str):
+    if pattern_value is None:
+        # A typed NULL pattern: draken_rlike answers NULL for every row when its
+        # blob operand is NULL, so the pattern becomes a NULL of the blob's type.
+        compiled_blob = None
+    elif isinstance(pattern_value, str):
         pattern_value = pattern_value.encode("utf8")
     elif not isinstance(pattern_value, bytes):
         raise NotSupportedError(
             f"**RLIKE**/REGEXP_LIKE pattern must be a string constant, got {type(pattern_value)!r}."
         )
 
-    from opteryx.compiled import vector_ops as compiled_vector_ops
+    if pattern_value is not None:
+        from opteryx.compiled import vector_ops as compiled_vector_ops
 
-    # Prefer the SIMD op-program (blob version 2) when the pattern decomposes to
-    # ASCII literals joined by `.*`/`.+` with optional `^`/`$` anchors — it beats
-    # the transition-table DFA (blob version 1) on short and long columns alike.
-    # The blob's version byte tells compiled_expression which kernel to dispatch
-    # (draken_like_program vs draken_rlike). Non-decomposable patterns fall
-    # through to the DFA, which stays the correct, fully-general path.
-    compiled_blob = compiled_vector_ops.compile_rlike_program(pattern_value)
-    if compiled_blob is None:
-        compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
-    if compiled_blob is None:
-        raise NotSupportedError(
-            "**RLIKE**/REGEXP_LIKE pattern is outside the supported regex dialect "
-            "(no lookaround/backreferences/case-fold, ASCII pattern content only, "
-            "anchors only at the outermost start/end, and the compiled automaton "
-            f"must stay within the state-count cap): {pattern_value!r}"
-        )
+        # Prefer the SIMD op-program (blob version 2) when the pattern decomposes to
+        # ASCII literals joined by `.*`/`.+` with optional `^`/`$` anchors — it beats
+        # the transition-table DFA (blob version 1) on short and long columns alike.
+        # The blob's version byte tells compiled_expression which kernel to dispatch
+        # (draken_like_program vs draken_rlike). Non-decomposable patterns fall
+        # through to the DFA, which stays the correct, fully-general path.
+        compiled_blob = compiled_vector_ops.compile_rlike_program(pattern_value)
+        if compiled_blob is None:
+            compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
+        if compiled_blob is None:
+            raise NotSupportedError(
+                "**RLIKE**/REGEXP_LIKE pattern is outside the supported regex dialect "
+                "(no lookaround/backreferences/case-fold, ASCII pattern content only, "
+                "anchors only at the outermost start/end, and the compiled automaton "
+                f"must stay within the state-count cap): {pattern_value!r}"
+            )
 
     from opteryx.planner import build_literal_node
 

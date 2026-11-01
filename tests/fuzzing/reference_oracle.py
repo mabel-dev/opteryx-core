@@ -16,12 +16,11 @@ deliberately narrow: the exception types each engine raises for a query it
 rejects. Anything else (an AssertionError, a crash surfacing as something
 unexpected) propagates and fails the case.
 
-ValueError, ZeroDivisionError, RuntimeError and IncompatibleTypesError are on the
-Opteryx list because they reach the caller outside the `opteryx.exceptions.Error`
-hierarchy today: integer overflow and modulo-by-zero surface as bare ValueError
-when constant-folded, and as RuntimeError ("[1]: ExprFilterOperator: ...") when a
-native operator fails mid-execution; `IncompatibleTypesError` derives from
-`Exception`, not `Error`.
+ValueError, ZeroDivisionError and RuntimeError are on the Opteryx list because
+they reach the caller outside the `opteryx.exceptions.Error` hierarchy today:
+integer overflow and modulo-by-zero surface as bare ValueError when
+constant-folded, and as RuntimeError ("[1]: ExprFilterOperator: ...") when a
+native operator fails mid-execution.
 
 OUTCOMES
 --------
@@ -47,7 +46,6 @@ import duckdb
 
 import opteryx
 from opteryx.exceptions import Error as OpteryxError
-from opteryx.exceptions import IncompatibleTypesError
 from tests.fuzzing.reference_grammar import DUCKDB
 from tests.fuzzing.reference_grammar import OPTERYX
 from tests.fuzzing.reference_grammar import Query
@@ -55,7 +53,7 @@ from tests.fuzzing.reference_grammar import describe_data
 from tests.fuzzing.reference_grammar import query_reductions
 from tests.fuzzing.reference_grammar import write_parquet
 
-OPTERYX_REJECTIONS = (OpteryxError, IncompatibleTypesError, ValueError, ZeroDivisionError, RuntimeError)
+OPTERYX_REJECTIONS = (OpteryxError, ValueError, ZeroDivisionError, RuntimeError)
 DUCKDB_REJECTIONS = (duckdb.Error,)
 
 # Significant digits for float comparison. Plain projections are compared at 15

@@ -1899,10 +1899,11 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
             return predicate
 
     # String literals hold bytes (P3-c), so one branch serves VARCHAR and VARBINARY
-    # patterns alike.
-    if predicate.right.node_type == NodeType.LITERAL and predicate.right.type in (
-        _lt.VARCHAR,
-        _lt.VARBINARY,
+    # patterns alike. A typed NULL pattern has no bytes to rewrite.
+    if (
+        predicate.right.node_type == NodeType.LITERAL
+        and predicate.right.type in (_lt.VARCHAR, _lt.VARBINARY)
+        and predicate.right.value is not None
     ):
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if b"%%" in predicate.right.value:

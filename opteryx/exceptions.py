@@ -816,7 +816,7 @@ def _literal_display(value, column_type):
     return value
 
 
-class IncompatibleTypesError(Exception):
+class IncompatibleTypesError(SqlError):
     """
     Raised when attempting to join fields of incompatible types.
 
