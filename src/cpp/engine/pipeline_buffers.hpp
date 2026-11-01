@@ -365,6 +365,7 @@ struct MorselBuffer {
         skene::WriteOptions options = skene::WriteOptions::for_spill();
         options.codec = skene::SectionCodec::kZstd;
         options.zstd_level = 1;   // bakeoff: 0.30x in 58ms; decode is level-flat
+        options.as_is = true;     // spill, not persistence: no encoding decisions
 
         std::vector<uint8_t> bytes;
         skene::FileWriter writer;

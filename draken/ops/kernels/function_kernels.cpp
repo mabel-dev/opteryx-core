@@ -1843,10 +1843,16 @@ inline bool fk_cmp_i128(int op, __int128 a, __int128 b) {
         case 4: return a >  b; case 5: return a <= b; default: return a >= b;
     }
 }
+// The ruled float total order (float_ops.h, architect 2026-05-22): NaN == NaN, NaN
+// above every number, -0.0 == 0.0 — the order FLOAT-vs-FLOAT compares already use.
+// Raw IEEE operators made `int_col < NaN` FALSE while `NaN > float_col` was TRUE.
 inline bool fk_cmp_dbl(int op, double a, double b) {
+    using draken::ops::fp_total_eq;
+    using draken::ops::fp_total_lt;
     switch (op) {
-        case 1: return a == b; case 2: return a != b; case 3: return a <  b;
-        case 4: return a >  b; case 5: return a <= b; default: return a >= b;
+        case 1: return fp_total_eq(a, b);  case 2: return !fp_total_eq(a, b);
+        case 3: return fp_total_lt(a, b);  case 4: return fp_total_lt(b, a);
+        case 5: return !fp_total_lt(b, a); default: return !fp_total_lt(a, b);
     }
 }
 

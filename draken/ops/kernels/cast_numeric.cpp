@@ -870,9 +870,20 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
         const bool wide = c->result_precision > 18;
         double mult = 1.0;
         for (int i = 0; i < scale; ++i) mult *= 10.0;
-        // Compressed: one value per physical slot (no value can fail here).
+        // A value outside the declared precision — or NaN / ±Infinity — fails loud
+        // (TRY_CAST: NULL), as DECIMAL→DECIMAL does. Unchecked, the int conversion
+        // below saturated: 1e300 and Infinity became 9223372036854775.807, which is
+        // not even a DECIMAL(12,3).
+        double lim = 1.0;
+        for (int i = 0; i < c->result_precision; ++i) lim *= 10.0;
         const bool phys = draken_is_compressed(v);
         const uint32_t n = phys ? v->data_length : v->length;
+        std::vector<uint8_t> cast_live;
+        const uint8_t* cast_lv = phys ? kernel_live_slots(v, cast_live) : nullptr;
+        const uint8_t* val_in = v->validity;
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(n > 0u ? n : 1u, 0u);
+        bool any_bad = false;
         const size_t es = wide ? 16u : 8u;
         uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
         if (!out) return draken_error_sentinel("Allocation failed");
@@ -884,6 +895,19 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
             double scaled = d * mult;
             // half away from zero
             double rounded = scaled >= 0.0 ? std::floor(scaled + 0.5) : std::ceil(scaled - 0.5);
+            if (!(std::fabs(rounded) < lim)) {   // also true for NaN
+                const bool dead = phys ? (cast_lv != nullptr && cast_lv[j] == 0u)
+                                       : (val_in != nullptr && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u);
+                if (!dead && !is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "cast float->decimal: value %g out of range for DECIMAL(%d, %d)",
+                        d, (int)c->result_precision, scale);
+                }
+                std::memset(out + static_cast<size_t>(j) * es, 0, es);
+                if (!dead) { bad[j] = 1u; any_bad = true; }
+                continue;
+            }
             if (wide) {
                 __int128 w = static_cast<__int128>(rounded);
                 std::memcpy(out + static_cast<size_t>(j) * 16u, &w, 16u);
@@ -899,6 +923,7 @@ VecResult draken_cast_float_to_decimal(void* ctx, const DrakenVector* v) {
         r.dec_precision = c->result_precision;
         r.dec_scale = static_cast<uint8_t>(scale);
         cast_emit_shape(r, v, phys);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }

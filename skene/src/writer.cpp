@@ -155,6 +155,7 @@ struct WriteContext {
     std::vector<SectionEntry>* sections = nullptr;// the node's section list
     SectionCodec               codec = SectionCodec::kNone;
     int                        zstd_level = 0;
+    bool                       as_is = false;     // WriteOptions::as_is
 };
 
 // The checksum covers the STORED bytes, so it is computed after both stages —
@@ -248,6 +249,7 @@ Status emit_section(WriteContext& ctx, SectionKind kind, const void* data, size_
 Status emit_selection(WriteContext& ctx, const uint32_t* codes, uint32_t length,
                       uint32_t data_length) {
     const size_t plain = static_cast<size_t>(length) * sizeof(uint32_t);
+    if (ctx.as_is) return emit_section(ctx, SectionKind::kSelection, codes, plain);
     std::vector<uint8_t> packed;
     if (bitpack_encode_codes(codes, length, data_length, &packed))
         return emit_encoded(ctx, SectionKind::kSelection, Encoding::kBitpack,
@@ -297,6 +299,7 @@ Status emit_slot_lane(WriteContext& ctx, SectionKind kind,
                       const std::vector<uint32_t>& lane) {
     const uint32_t count = static_cast<uint32_t>(lane.size());
     const size_t   plain = static_cast<size_t>(count) * sizeof(uint32_t);
+    if (ctx.as_is) return emit_section(ctx, kind, lane.data(), plain);
 
     struct Form {
         Encoding             encoding;
@@ -1205,6 +1208,12 @@ Status validate_options(const WriteOptions& options) {
     if (options.block_row_groups == 0)
         return fail(Code::kMalformed,
                     "block_row_groups is 0 — a block holds at least one row group");
+    // Value ordering IS an encoding decision (it rewrites data and codes), so
+    // asking for both is asking for two different files.
+    if (options.as_is && options.read_acceleration)
+        return fail(Code::kMalformed,
+                    "as_is and read_acceleration are both set — as_is writes "
+                    "draken's form unchanged, read_acceleration reorders it");
     // `codec` and `zstd_level` describe one setting between them, so a
     // combination that means two different things is rejected rather than
     // resolved. A caller who sets a level and gets no zstd — or selects zstd and
@@ -1414,6 +1423,7 @@ Status FileWriter::add_row_group(const CxxMorsel& morsel) {
         base.stage      = &state_->stage;
         base.codec      = options.codec;
         base.zstd_level = options.zstd_level;
+        base.as_is      = options.as_is;
 
         std::vector<ColumnPlan> plans(column_count);
         for (size_t i = 0; i < column_count; ++i) {

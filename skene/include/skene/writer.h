@@ -74,6 +74,16 @@ struct WriteOptions {
     // rejects it instead of picking a winner (see writer.cpp).
     int zstd_level = 0;
 
+    // Store every section in the form draken already holds it — a dictionary
+    // vector as its codes and dictionary, a dense one as its data — and make NO
+    // encoding decision: no bit-packing, no delta, no per-lane candidate search.
+    // `codec` is still applied, once, to each eligible section. For spill
+    // (written once, read once, in-process; architect 2026-11-01): the lane
+    // search costs every candidate to its final compressed size, which is
+    // persistence work. Rejected alongside read_acceleration, whose value
+    // ordering is itself an encoding decision.
+    bool as_is = false;
+
     // Narrows which columns get a bloom filter. EMPTY MEANS ALL of them, under
     // read_acceleration — this is a restriction, not an opt-in.
     //

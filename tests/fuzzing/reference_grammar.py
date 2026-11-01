@@ -67,14 +67,16 @@ INT64_MAX = 2**63 - 1
 INT64_MIN = -(2**63)
 
 # Small domains so equality predicates and join keys actually match, plus the
-# edge values that broke ParticleDB. No NaN, ±Infinity or ±1e300 (which reach
-# NaN mid-expression): reference_known_gaps "nan-comparisons-inconsistent".
+# edge values that broke ParticleDB. ±Infinity is in (arithmetic over it reaches
+# NaN mid-expression, which both engines order as the greatest value); NaN is not
+# stored, because the join register's open NaN-join-key defect would then fire on
+# every FLOAT join key.
 VALUE_POOLS = {
     Ty.INT: [0, 1, -1, 2, 3, 5, 7, 10, -10, 100, 2**31, 2**53 + 1, INT64_MAX, INT64_MIN],
     # Dyadic and small, so a float SUM of column values is exact in every
     # accumulation order: a parallel SUM's order is not the engine's to fix, and
     # cancellation (1e15 + 0.1 - 1e15) makes order show in every digit.
-    Ty.FLOAT: [0.0, -0.0, 0.5, 1.0, -1.5, 2.5, 3.0, 0.125, 64.0, -64.0],
+    Ty.FLOAT: [0.0, -0.0, 0.5, 1.0, -1.5, 2.5, 3.0, 0.125, 64.0, -64.0, float("inf"), float("-inf")],
     Ty.DEC: [decimal.Decimal(v) for v in ("0", "1.250", "-2.500", "0.001", "3", "999999999.999", "-0.500")],
     Ty.STR: ["", "a", "A", "b", "B", "_a", "a b", "abc", "Abc", "é", "z"],
     Ty.BOOL: [True, False],
@@ -463,23 +465,6 @@ class ExprGen:
                 return candidate
         column = self.rng.choice(self.scope)
         return IsNull(column, self.rng.random() < 0.5)
-
-
-def excluded(query: "Query") -> Optional[str]:
-    """The reference_known_gaps id that withholds `query`, or None.
-
-    Only for wrong answers the engine is known to give: those are never absorbed
-    by the comparison, so the shape is withheld here instead, and each id here has
-    a pinned test asserting the wrong answer still happens."""
-    if query.distinct and any(item.ty == Ty.FLOAT and not isinstance(item, Col) for item in query.items):
-        return "signed-zero-splits-computed-float-groups"
-    literals = {n.value for n in query.nodes() if isinstance(n, Lit) and n.ty == Ty.STR}
-    folded = {}
-    for text in literals:
-        if text.lower() in folded and folded[text.lower()] != text:
-            return "case-variant-string-literals-collapse"
-        folded[text.lower()] = text
-    return None
 
 
 def walk(node: Node) -> Iterator[Node]:

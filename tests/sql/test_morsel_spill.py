@@ -168,11 +168,16 @@ def test_startup_sweep_collects_dead_owners():
 
 
 # A tie-free total order with NULLs and a string key: duplicates of `k` are broken by
-# `s`, so the spilled and in-memory answers must match row for row.
+# `s`, so the spilled and in-memory answers must match row for row. Five ranges, not
+# one: generate_series arrives as ONE morsel, which can only ever make one run.
 _RUN_SOURCE = (
     "(SELECT s, CASE WHEN s % 97 = 0 THEN NULL "
-    "ELSE CAST((s * 7919) % 100003 AS VARCHAR) END AS k "
-    "FROM generate_series(1, 2000000) AS s) AS t"
+    "ELSE CAST((s * 7919) % 100003 AS VARCHAR) END AS k FROM ("
+    + " UNION ALL ".join(
+        f"SELECT s FROM generate_series({lo + 1}, {lo + 400000}) AS s"
+        for lo in range(0, 2000000, 400000)
+    )
+    + ") AS g) AS t"
 )
 
 

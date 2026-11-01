@@ -10,6 +10,7 @@
 #include "ops/kernels/kernel_context.h"   // binary_op_ctx
 #include "ops/fixed_int_ops.h"            // draken::ops::fi_int_arith, fi_combine_validity
 #include "ops/decimal_arith.h"            // draken::ops::dec_add/sub/mul/div/mod
+#include "ops/float_ops.h"                // fp_canon: float results never carry -0.0 (hash contract)
 #include "ops/interval_ops.h"             // draken::ops::interval_add/sub (S-A.1)
 #include "ops/int_bitwise.h"              // draken::ops::bitwise_and/or/xor/shl/shr
 #include "ops/int64_compare.h"            // draken::ops::cmp_alloc_bool_buf (IP-in-CIDR result)
@@ -55,13 +56,16 @@ inline double bd_read_f64(const DrakenVector& v, uint32_t i) {
     }
 }
 
+// Results are fp_canon'd, as in float_ops.h: the 2026-05-22 float ruling folds -0.0
+// to +0.0 "at ingestion AND at arithmetic output", and `(x - 5) * 0.0` otherwise
+// hands DISTINCT / GROUP BY a -0.0 that hashes apart from 0.0.
 inline double bd_apply_f64(int op, double x, double y) {
     switch (op) {
-        case BOP_PLUS:     return x + y;
-        case BOP_MINUS:    return x - y;
-        case BOP_MULTIPLY: return x * y;
-        case BOP_DIVIDE:   return x / y;           // true divide; x/0 → ±inf, 0/0 → nan (IEEE, matches DuckDB)
-        case BOP_MODULO:   return std::fmod(x, y);
+        case BOP_PLUS:     return draken::ops::fp_canon(x + y);
+        case BOP_MINUS:    return draken::ops::fp_canon(x - y);
+        case BOP_MULTIPLY: return draken::ops::fp_canon(x * y);
+        case BOP_DIVIDE:   return draken::ops::fp_canon(x / y);   // true divide; x/0 → ±inf, 0/0 → nan (IEEE, matches DuckDB)
+        case BOP_MODULO:   return draken::ops::fp_canon(std::fmod(x, y));
         default: throw std::invalid_argument("bd_apply_f64: unsupported op");
     }
 }
@@ -82,10 +86,10 @@ inline float bd_read_f32(const DrakenVector& v, uint32_t i) {
 
 inline float bd_apply_f32(int op, float x, float y) {
     switch (op) {
-        case BOP_PLUS:     return x + y;
-        case BOP_MINUS:    return x - y;
-        case BOP_MULTIPLY: return x * y;
-        case BOP_MODULO:   return std::fmod(x, y);  // float overload
+        case BOP_PLUS:     return draken::ops::fp_canon(x + y);
+        case BOP_MINUS:    return draken::ops::fp_canon(x - y);
+        case BOP_MULTIPLY: return draken::ops::fp_canon(x * y);
+        case BOP_MODULO:   return draken::ops::fp_canon(std::fmod(x, y));  // float overload
         default: throw std::invalid_argument("bd_apply_f32: unsupported op");
     }
 }

@@ -29,7 +29,6 @@ import pytest
 from tests.fuzzing import reference_known_gaps as known_gaps
 from tests.fuzzing.harness import case_seeds
 from tests.fuzzing.harness import iterations
-from tests.fuzzing.reference_grammar import excluded
 from tests.fuzzing.reference_grammar import random_query
 from tests.fuzzing.reference_oracle import Outcome
 from tests.fuzzing.reference_oracle import canonical
@@ -49,11 +48,6 @@ HITS: Counter = Counter()
 def test_reference_fuzzing(seed):
     print(f"\nSeed: {seed}")
     query = random_query(random.Random(seed))
-
-    withheld = excluded(query)
-    if withheld is not None:
-        HITS[f"withheld:{withheld}"] += 1
-        return
 
     try:
         verdict, opteryx_sql, _ = compare(query)

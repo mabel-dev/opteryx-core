@@ -50,6 +50,32 @@ cdef object _LITERAL = NodeType.LITERAL
 cdef object _arms = None
 
 
+cdef str _fold_outside_quotes(str text):
+    """`text` lower-cased everywhere EXCEPT inside single-quoted string literals.
+
+    Rendered expression names spell literals with SQL `''` escaping, so splitting on
+    `'` alternates outside/inside (an escaped quote toggles twice). The case-insensitive
+    reuse below is right for identifiers and wrong for literal text."""
+    cdef list parts = text.split("'")
+    cdef Py_ssize_t i
+    for i in range(0, len(parts), 2):
+        parts[i] = parts[i].lower()
+    return "'".join(parts)
+
+
+cdef bint _same_text_outside_case(object column, str column_name):
+    """Whether `column` (by name or alias) is `column_name` up to identifier case."""
+    if column.name == column_name:
+        return True
+    cdef str folded = _fold_outside_quotes(column_name)
+    if _fold_outside_quotes(column.name) == folded:
+        return True
+    for alias in column.aliases or ():
+        if _fold_outside_quotes(alias) == folded:
+            return True
+    return False
+
+
 cdef inline object _python_arms():
     global _arms
     if _arms is None:
@@ -581,6 +607,12 @@ cpdef tuple inner_binder(
                 and node.type != found_column.column_type
             ):
                 found_column = None
+        elif found_column is not None and not _same_text_outside_case(found_column, column_name):
+            # An expression's name is matched case-insensitively so `UPPER(Name)` reuses
+            # `upper(name)`, but the lower-casing also reached the string literals inside
+            # it: `name || 'x'` reused `name || 'X'` (both columns answered 'MercuryX'),
+            # and `('b') = ('B')` was TRUE. Literal text must match exactly.
+            found_column = None
         # If the column exists in the schema, bind the node as a repeat of it.
         if found_column is not None:
             return _python_arms()._bind_reused(

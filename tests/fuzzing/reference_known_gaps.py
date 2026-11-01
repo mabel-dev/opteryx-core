@@ -80,22 +80,8 @@ def _raised(error_name: str, fragment: str):
 
 REGISTER: List[Gap] = [
     # ─────────────────────────────────────────────────────────────────────────
-    # WITHHELD — wrong answers
+    # WITHHELD — divergences
     # ─────────────────────────────────────────────────────────────────────────
-    Gap(
-        id="case-variant-string-literals-collapse",
-        kind=WITHHELD,
-        sql="SELECT ('b') = ('B') AS x",
-        still_present=lambda rows, error: error is None and rows == [(True,)],
-        detail=(
-            "WRONG ANSWER. Two PARENTHESISED string literals in one statement that differ "
-            "only in case are treated as the same value: `SELECT ('b') = ('B')` is TRUE, "
-            "`SELECT ('b') || ('B')` is 'bb', and `WHERE name || ('x') = name || ('X')` "
-            "matches every row. Unparenthesised (`'b' = 'B'`) is correct, and so is a pair "
-            "where only one side is parenthesised. Reads like literal de-duplication keyed "
-            "on a case-folded identifier. Withheld by reference_grammar.excluded()."
-        ),
-    ),
     Gap(
         id="numeric-to-integer-cast-truncates",
         kind=WITHHELD,
@@ -110,22 +96,6 @@ REGISTER: List[Gap] = [
         ),
     ),
     Gap(
-        id="nan-comparisons-inconsistent",
-        kind=WITHHELD,
-        sql="SELECT COUNT(*) AS x FROM $planets WHERE id < CAST('NaN' AS FLOAT64)",
-        still_present=lambda rows, error: error is None and rows == [(0,)],
-        detail=(
-            "WRONG ANSWER. NaN orders inconsistently: `NaN > 1000000.0` is TRUE (NaN "
-            "greatest, as in PostgreSQL and DuckDB) but `id < NaN` over an INT64 column "
-            "matches nothing, so `x < NaN` and `NaN > x` disagree. DuckDB matches all 9 "
-            "rows. NaN semantics are already open with the architect (single-table "
-            "register 'nan-rows-fall-outside-every-predicate-bucket', join register "
-            "'nan-join-keys-match-themselves-in-every-join-but-inner'). Withheld: the "
-            "generator has no NaN, and no ±Infinity or ±1e300 either, because "
-            "`Infinity + -Infinity` and `1e300 * 1e300 - Infinity` make NaN mid-expression."
-        ),
-    ),
-    Gap(
         id="cast-boolean-to-varchar-capitalised",
         kind=WITHHELD,
         sql="SELECT CAST(TRUE AS VARCHAR) AS x",
@@ -134,22 +104,6 @@ REGISTER: List[Gap] = [
             "DIVERGENCE. CAST(TRUE AS VARCHAR) is 'True' (Python's spelling); PostgreSQL "
             "and DuckDB give 'true'. Withheld: reference_grammar._CASTS emits no BOOL -> "
             "VARCHAR cast."
-        ),
-    ),
-    Gap(
-        id="signed-zero-splits-computed-float-groups",
-        kind=WITHHELD,
-        sql="SELECT COUNT(DISTINCT CAST(id - 5 AS FLOAT64) * CAST('0.0' AS FLOAT64)) AS x FROM $planets",
-        still_present=lambda rows, error: error is None and rows == [(2,)],
-        detail=(
-            "WRONG ANSWER. A COMPUTED float expression that yields both -0.0 and 0.0 puts "
-            "them in different groups: DISTINCT returns two zero rows, GROUP BY returns "
-            "(-0.0, 4) and (0.0, 5) for $planets, COUNT(DISTINCT) says 2. -0.0 = 0.0 in "
-            "SQL, so all three should see one value; PostgreSQL and DuckDB do. Grouping "
-            "on a float COLUMN holding both zeros is correct (the generator's data has "
-            "both and passes), so the normalisation is missing only on the computed-key "
-            "path. Withheld: reference_grammar.excluded() rejects DISTINCT over a "
-            "non-column FLOAT item."
         ),
     ),
     # ─────────────────────────────────────────────────────────────────────────
@@ -214,29 +168,12 @@ REGISTER: List[Gap] = [
             items=(Binary("/", Col("t0", "c0", Ty.FLOAT), Lit(Ty.FLOAT, 0.0), Ty.FLOAT),),
         ),
         detail=(
-            "DIVERGENCE. Division by zero does not raise: FLOAT64 and INT64 `x / 0` answer "
-            "Infinity (NaN for 0/0), DECIMAL `x / 0` answers NULL — three behaviours, none "
-            "of them PostgreSQL's error. The reference text raises via `error('division by "
-            "zero')`. `%` by zero DOES raise in Opteryx, so it agrees. (Jepsen ParticleDB "
-            "#34.)"
-        ),
-    ),
-    Gap(
-        id="float-to-decimal-cast-clips-out-of-range",
-        kind=SIGNATURE,
-        outcome="reference_error",
-        signatures=("Could not cast value",),
-        query=lambda: Query(
-            tables=(_one_row((Ty.FLOAT, 1e300)),),
-            items=(Cast(Col("t0", "c0", Ty.FLOAT), Ty.DEC),),
-        ),
-        detail=(
-            "WRONG ANSWER surfacing as a divergence. CAST of a FLOAT64 COLUMN value that "
-            "does not fit DECIMAL(12,3) — 1e300, Infinity, -Infinity, NaN — answers "
-            "9223372036854775.807 (the INT64 maximum, scaled; itself outside DECIMAL(12,3)) "
-            "instead of raising. DuckDB and PostgreSQL raise. The constant-folded form of "
-            "the same cast raises an uncaught OverflowError instead — see "
-            "'non-finite-float-constant-to-decimal-crashes'."
+            "DIALECT, RULED. Division by zero does not raise: true division `/` is IEEE "
+            "(Infinity, NaN for 0/0 — draken float ruling 2026-05-22, kept when integer "
+            "DIV/% was made to raise 2026-09-29) and DECIMAL `x / 0` is NULL (ruled "
+            "2026-08-17, TPC-DS Q90). The standard and PostgreSQL raise; the reference text "
+            "raises via `error('division by zero')`. `%` by zero DOES raise in Opteryx, so "
+            "it agrees."
         ),
     ),
     Gap(
@@ -485,20 +422,6 @@ REGISTER: List[Gap] = [
             "FilterImpliedGroupKeyReductionStrategy: it replaces the group key with the "
             "filter's literal, re-typed as the key's type but still holding the original "
             "Python value."
-        ),
-    ),
-    Gap(
-        id="non-finite-float-constant-to-decimal-crashes",
-        kind=CRASH,
-        outcome="OverflowError",
-        signatures=("value exceeds declared precision",),
-        query=lambda: Query(tables=(), items=(Cast(Lit(Ty.FLOAT, float("inf")), Ty.DEC),)),
-        detail=(
-            "CRASH. A constant FLOAT64 that does not fit the target DECIMAL — Infinity, "
-            "1e300 — raises a raw OverflowError from "
-            "compiled_expression._materialise_constant_literal. The column form of the "
-            "same cast answers a clipped value instead: "
-            "'float-to-decimal-cast-clips-out-of-range'."
         ),
     ),
 ]

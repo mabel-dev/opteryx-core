@@ -52,7 +52,6 @@ from tests.fuzzing.reference_grammar import DUCKDB
 from tests.fuzzing.reference_grammar import OPTERYX
 from tests.fuzzing.reference_grammar import Query
 from tests.fuzzing.reference_grammar import describe_data
-from tests.fuzzing.reference_grammar import excluded
 from tests.fuzzing.reference_grammar import query_reductions
 from tests.fuzzing.reference_grammar import write_parquet
 
@@ -242,15 +241,12 @@ def shrink(query: Query, verdict: Verdict) -> Tuple[Query, Verdict, int]:
     restart from it, stop when no candidate does or the budget is spent.
 
     A candidate that crashes the engine is rejected, not raised: it is a
-    DIFFERENT failure, and the one being shrunk is already in hand. Candidates in
-    a withheld shape are skipped, so shrinking cannot walk into a known defect."""
+    DIFFERENT failure, and the one being shrunk is already in hand."""
     executions = 0
     improved = True
     while improved and executions < SHRINK_BUDGET:
         improved = False
         for candidate in query_reductions(query):
-            if excluded(candidate):
-                continue
             executions += 1
             try:
                 candidate_verdict, _, _ = compare(candidate)

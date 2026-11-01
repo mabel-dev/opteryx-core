@@ -46,6 +46,16 @@ def test_null_and_zero_keys_are_different_partitions():
     assert sorted(result) == [(i, 5 if i <= 5 else 4) for i in range(1, 10)]
 
 
+def test_null_partition_through_the_groupjoin():
+    """The window join is fused by the outer-leg GroupJoin, whose build, prefilter and
+    accumulate halves all run with IS NOT DISTINCT FROM keys. Pinned so the NULL-key
+    path of the fused operator stays exercised, not just the plain join."""
+    sql = "SELECT s_null, COUNT(*) OVER (PARTITION BY s_null) AS w FROM testdata.fuzzing.mixed"
+    plan = [str(row[1]) for row in _rows(f"EXPLAIN {sql}")]
+    assert any("applied outer leg as build (inner not-distinct)" in step for step in plan), plan
+    assert {w for key, w in _rows(sql) if key is None} == {411}
+
+
 def test_multi_column_partition_with_nulls():
     result = _rows(
         "SELECT s_null, b_value, COUNT(*) OVER (PARTITION BY s_null, b_value) AS w "
