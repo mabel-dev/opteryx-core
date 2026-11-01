@@ -102,10 +102,9 @@ def _extract_equalities(expr, equalities: dict) -> None:
         qn = ident.qualified_name
         if qn is None:
             continue
-        val = lit.value
-        if val is None:
+        if lit.value is None:
             continue
-        equalities[qn] = val
+        equalities[qn] = lit
 
 
 def _collect_equality_predicates(plan: LogicalPlan, start_nid) -> dict:
@@ -180,7 +179,15 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         if not equalities:
             return context
 
-        implied = [g for g in bare_keys if g.qualified_name in equalities]
+        # Only a literal already of the key's type IS the key's value: re-typing
+        # `dec_key = 3` or `float_key = 1` would need per-type conversion rules.
+        implied = [
+            g
+            for g in bare_keys
+            if g.qualified_name in equalities
+            and g.schema_column is not None
+            and equalities[g.qualified_name].type == g.schema_column.column_type
+        ]
         if not implied:
             return context
 
@@ -210,7 +217,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         for g in remaining:
             project_columns.append(_make_passthrough(g))
         for g in implied:
-            project_columns.append(_make_constant_literal(g, equalities[g.qualified_name]))
+            project_columns.append(_make_constant_literal(g, equalities[g.qualified_name].value))
         for agg in aggregates:
             project_columns.append(_make_passthrough(agg))
 

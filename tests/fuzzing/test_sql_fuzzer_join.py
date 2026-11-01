@@ -134,8 +134,6 @@ class FuzzColumn:
 
     name: str
     category: LogicalCategory
-    #: Does this column contain a NaN? See `Relation.key_fields`.
-    has_nan: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,26 +162,6 @@ class Relation:
     def names(self) -> set:
         return {column.name for column in self.fields}
 
-    @property
-    def key_fields(self) -> Tuple[FuzzColumn, ...]:
-        """The columns admissible as a JOIN KEY — everything except NaN-bearing ones.
-
-        STRUCTURAL EXCLUSION for join_known_gaps/
-        nan-join-keys-match-themselves-in-every-join-but-inner: a NaN key matches
-        itself in every join type except INNER, so `testdata.satellites.albedo =
-        testdata.satellites.magnitude` makes INNER say 0 and SEMI say 6. That breaks
-        the algebra identities on every case that draws one of the three NaN-bearing
-        columns, which would leave the fuzzer permanently red on a defect it has
-        already reported.
-
-        Scoped to the DATA, not to an error message: the exclusion is exactly the
-        columns that actually contain a NaN, discovered by reading them (see
-        get_tables), so it shrinks by itself as the corpus changes and disappears
-        entirely when the register entry does. Those columns remain fully available
-        for projection and for WHERE predicates — only the join KEY is withheld.
-        """
-        return tuple(column for column in self.fields if not column.has_nan)
-
 
 _tables_cache = None
 
@@ -207,23 +185,8 @@ def get_tables():
         morsels = list(session.execute_to_morsels(f"SELECT * FROM {table}"))
         if not morsels:
             raise ValueError(f"fuzzing source table {table!r} returned no data")
-        # NaN detection reads the VALUES rather than asking the engine
-        # `WHERE col != col`: whether a NaN comparison answers TRUE, FALSE or
-        # UNKNOWN is itself an open question (the single-table register's
-        # nan-rows-fall-outside-every-predicate-bucket), so a detector built on it
-        # would be resting on the thing it is meant to route around.
-        nan_columns = set()
-        for name, physical in morsels[0].schema.items():
-            if _CATEGORY_OF[physical] is not LogicalCategory.FLOAT:
-                continue
-            for row in harness.rows(f"SELECT {name} FROM {table}"):
-                value = row[0]
-                if isinstance(value, float) and value != value:
-                    nan_columns.add(name)
-                    break
         fields = tuple(
-            FuzzColumn(name=name, category=_CATEGORY_OF[physical],
-                       has_nan=name in nan_columns)
+            FuzzColumn(name=name, category=_CATEGORY_OF[physical])
             for name, physical in morsels[0].schema.items()
         )
         _tables_cache.append((table, fields, harness.scalar(f"SELECT COUNT(*) FROM {table}")))
@@ -486,7 +449,7 @@ def _equi_conjuncts(left_rel: Relation, right_rel: Relation) -> Tuple[str, ...]:
     # lower one comes up — a cheap geometric-ish decay.
     while this_value > last_value:
         last_value, this_value = this_value, random.random()
-        pair = _pick_pair(left_rel.key_fields, right_rel.key_fields, joinable)
+        pair = _pick_pair(left_rel.fields, right_rel.fields, joinable)
         if pair is None:
             return ()
         left_column, right_column = pair
@@ -498,8 +461,8 @@ def _equi_conjuncts(left_rel: Relation, right_rel: Relation) -> Tuple[str, ...]:
 
     if boolean_only:
         pair = _pick_pair(
-            left_rel.key_fields,
-            right_rel.key_fields,
+            left_rel.fields,
+            right_rel.fields,
             lambda l, r: joinable(l, r) and l != LogicalCategory.BOOLEAN,
         )
         if pair is None:
@@ -528,7 +491,7 @@ def _theta_conjunct(left_rel: Relation, right_rel: Relation) -> Optional[str]:
             and right != LogicalCategory.DECIMAL
         )
 
-    pair = _pick_pair(left_rel.key_fields, right_rel.key_fields, theta_comparable)
+    pair = _pick_pair(left_rel.fields, right_rel.fields, theta_comparable)
     if pair is None:
         return None
     left_column, right_column = pair
@@ -543,7 +506,7 @@ def _make_leg(join_type: str, left_rel: Relation, right_rel: Relation,
               independent: bool) -> Optional[JoinLeg]:
     """Build one join leg, or None when this relation pair admits no condition."""
     if join_type == "ASOF JOIN":
-        pair = _pick_pair(left_rel.key_fields, right_rel.key_fields, comparable)
+        pair = _pick_pair(left_rel.fields, right_rel.fields, comparable)
         if pair is None:
             return None
         left_column, right_column = pair
@@ -1618,30 +1581,6 @@ def test_regression_asof_coercion_does_not_leak_into_the_output():
         f"coercion column has leaked into the payload: {names}")
     assert not [name for name in names if "join key" in name], (
         f"a synthetic coercion column reached the output by name: {names}")
-
-
-def test_wrong_answer_nan_join_key_still_matches_itself():
-    """Pins join_known_gaps/nan-join-keys-match-themselves-in-every-join-but-inner.
-
-    Asserts the WRONG counts. When INNER and SEMI agree this goes red, and the fix is
-    to delete this test, the register entry, and the NaN exclusion in
-    `Relation.key_fields`.
-    """
-    on = "r0.albedo = r1.magnitude"
-    relation = "testdata.satellites"
-
-    def count(join_type):
-        return harness.scalar(
-            f"SELECT COUNT(*) FROM {relation} AS r0 {join_type} {relation} AS r1 ON {on}")
-
-    assert harness.scalar(
-        f"SELECT COUNT(*) FROM {relation} WHERE albedo IS NULL") == 0, (
-        "satellites.albedo has acquired a NULL; this pin is about NaN, not NULL")
-    assert count("INNER JOIN") == 0, "the INNER answer changed; re-derive this pin"
-    assert count("LEFT SEMI JOIN") != 0, (
-        "a NaN join key no longer matches itself under SEMI — the defect is FIXED. "
-        "Delete this test, the `nan-join-keys-match-themselves-in-every-join-but-inner` "
-        "register entry, and the exclusion in Relation.key_fields.")
 
 
 def test_wrong_answer_asof_tie_breaking_is_still_unstable():

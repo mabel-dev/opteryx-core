@@ -108,7 +108,7 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
     return node
 
 
-def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> Expression:
+def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> Expression | None:
     from opteryx.expression.functions import get_catalog
 
     parameters = [value, value_if_not_null]
@@ -123,6 +123,11 @@ def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> 
     # vector_iif, which rejects mismatched fixed-width types. Coerce literal
     # parameters to the resolved return type so the constant matches the column.
     result_type = resolved.inferred_return_type
+    # The fold must keep the product's type: DECIMAL(12,3) * 0 is DECIMAL(31,3) but
+    # IFNOTNULL answers DECIMAL(12,3), a mislabel that died as "BC_COMPARE fast path
+    # declined". None = don't fold.
+    if root.schema_column is None or result_type != root.schema_column.column_type:
+        return None
     result_lc = result_type.category if result_type is not None else None
     if result_lc not in (None, LogicalCategory.NULL):
         from opteryx.types.scalars.value_parsing import parse_value
@@ -172,6 +177,16 @@ def _keeps_result_type(root, operand) -> bool:
     return (
         root_column.column_type is not None
         and root_column.column_type == operand_column.column_type
+    )
+
+
+def _zero_product_is_zero(operand) -> bool:
+    """False for floats: Infinity * 0 and NaN * 0 are NaN, not 0."""
+    operand_column = operand.schema_column
+    return (
+        operand_column is not None
+        and operand_column.column_type is not None
+        and operand_column.column_type.category != LogicalCategory.FLOAT
     )
 
 
@@ -420,6 +435,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.left.node_type == NodeType.LITERAL
                 and root.right.node_type == NodeType.IDENTIFIER
                 and root.left.value == 0
+                and _zero_product_is_zero(root.right)
             ):
                 # 0 * anything = 0 (except NULL)
                 node = _build_if_not_null_node(
@@ -428,13 +444,15 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                     build_literal_node(0, plan_context=plan_context),
                     plan_context=plan_context,
                 )
-                telemetry.optimization_constant_fold_reduce += 1
-                return node
+                if node is not None:
+                    telemetry.optimization_constant_fold_reduce += 1
+                    return node
             if (
                 root.value == "Multiply"
                 and root.right.node_type == NodeType.LITERAL
                 and root.left.node_type == NodeType.IDENTIFIER
                 and root.right.value == 0
+                and _zero_product_is_zero(root.left)
             ):
                 # anything * 0 = 0 (except NULL)
                 node = _build_if_not_null_node(
@@ -443,8 +461,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                     build_literal_node(0, plan_context=plan_context),
                     plan_context=plan_context,
                 )
-                telemetry.optimization_constant_fold_reduce += 1
-                return node
+                if node is not None:
+                    telemetry.optimization_constant_fold_reduce += 1
+                    return node
             if (
                 root.value == "Multiply"
                 and root.left.node_type == NodeType.LITERAL

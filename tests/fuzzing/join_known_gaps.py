@@ -59,42 +59,6 @@ REGISTER: List[RegisteredDefect] = [
     # exclusion, and is pinned by its own `test_wrong_answer_*` test.
     # ─────────────────────────────────────────────────────────────────────────
     RegisteredDefect(
-        id="nan-join-keys-match-themselves-in-every-join-but-inner",
-        repro=(
-            "SELECT COUNT(*) FROM testdata.satellites AS r0 LEFT SEMI JOIN "
-            "testdata.satellites AS r1 ON r0.albedo = r1.magnitude"
-        ),
-        error_type="WrongAnswer",
-        signature="",
-        detail=(
-            "A NaN join key matches itself in every join type EXCEPT INNER, so the "
-            "same ON condition gets two different answers depending on the join.\n"
-            "`testdata.satellites` has no NULL albedo or magnitude, but 6 of each are "
-            "NaN. Under IEEE, NaN = NaN is FALSE, so nothing should match:\n"
-            "                 engine   truth\n"
-            "  INNER               0       0   correct\n"
-            "  LEFT SEMI           6       0   WRONG\n"
-            "  LEFT ANTI         171     177   WRONG\n"
-            "  LEFT              207     177   WRONG\n"
-            "  RIGHT             207     177   WRONG\n"
-            "  FULL              378     177   WRONG\n"
-            "`CROSS JOIN ... WHERE r0.albedo = r1.magnitude` returns 0, agreeing with "
-            "INNER and with the truth. The shape reads as the hash/existence path "
-            "treating two NaNs as equal because their bit patterns are equal, while "
-            "INNER applies a real comparison.\n"
-            "A NaN-free float pair on the same relations is correct in every join "
-            "type, so this is NaN-specific, not a float-key problem.\n"
-            "Which NaN semantics to adopt is the architect's call and is ALREADY open "
-            "— see the single-table register's "
-            "`nan-rows-fall-outside-every-predicate-bucket`, and the recorded NaN "
-            "divergence in sort ordering. That INNER and SEMI must agree with each "
-            "other is not a matter of semantics.\n"
-            "Pinned by test_wrong_answer_nan_join_key_still_matches_itself; the "
-            "generator declines NaN-bearing columns as join keys (Relation.key_fields, "
-            "which names this entry) so the algebra oracles are not permanently red."
-        ),
-    ),
-    RegisteredDefect(
         id="asof-tie-breaking-is-not-deterministic",
         repro=(
             "SELECT r0.name, r1.s_high FROM testdata.astronauts AS r0 ASOF JOIN "

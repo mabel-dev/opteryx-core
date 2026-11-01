@@ -872,8 +872,14 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
         source_range = _key_value_range(context.plan_context, context.node_id, source_col)
         if source_range is None:
             return
+        source_type = _column_type(source_col)
+        if source_type is not None and source_type.category == LogicalCategory.FLOAT:
+            # Float statistics omit NaN, which sorts above every value (ruled
+            # 2026-05-22): the max is no upper bound. Same rule as the scan's
+            # _nan_invisible_to_bounds.
+            source_range = source_range._replace(upper_bound=None)
         target_type = _column_type(target_col)
-        if not _comparable_encoding(_column_type(source_col), target_type):
+        if not _comparable_encoding(source_type, target_type):
             return
         offset = _resolve_offset(offset_terms, target_type)
         if offset is None:

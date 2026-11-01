@@ -131,28 +131,10 @@ REGISTER: List[Gap] = [
         sql="SELECT COUNT(*) FROM testdata.fuzzing.mixed WHERE b_value",
         still_present=_raised("UnsupportedSyntaxError", "cannot be a bare column name"),
         detail=(
-            "REFUSAL. `WHERE bool_col` and `WHERE NOT bool_col` are refused ('Say what to "
-            "compare it to'); standard SQL and DuckDB accept a boolean column as a search "
-            "condition. Withheld: the generator writes `col = TRUE`."
-        ),
-    ),
-    Gap(
-        id="join-keys-must-share-a-type",
-        kind=WITHHELD,
-        query=lambda: Query(
-            tables=(_one_row((Ty.FLOAT, 1.0)), Table("t1", (Column("c0", Ty.INT),), ((1,),))),
-            items=(Col("t0", "c0", Ty.FLOAT),),
-            join=Join("INNER", Binary("=", Col("t0", "c0", Ty.FLOAT), Col("t1", "c0", Ty.INT), Ty.BOOL)),
-        ),
-        still_present=lambda verdict: verdict.kind == "opteryx_error"
-        and type(verdict.opteryx.error).__name__ == "IncompatibleTypesError",
-        detail=(
-            "REFUSAL. An equi-join of a FLOAT64 key to an INT64 key read from parquet is "
-            "refused ('cannot be compared, because their types do not match'), though "
-            "the same comparison is accepted in WHERE, and `$planets.id = "
-            "testdata.planets.escape_velocity` joins. DuckDB and PostgreSQL join them. "
-            "(Jepsen found the same gap in ParticleDB, #58.) Withheld: join keys are "
-            "same-typed."
+            "RULED DIALECT (2026-08-10, logical_planner._validate_where_clause_expression): "
+            "a bare identifier as a WHERE/ON clause is refused as a probable typo ('Say "
+            "what to compare it to'), boolean or not; standard SQL and DuckDB accept "
+            "`WHERE bool_col`. Withheld: the generator writes `col = TRUE`."
         ),
     ),
     # ─────────────────────────────────────────────────────────────────────────
@@ -248,29 +230,6 @@ REGISTER: List[Gap] = [
         ),
     ),
     Gap(
-        id="decimal-compare-fast-path-declined",
-        kind=SIGNATURE,
-        outcome="opteryx_error",
-        signatures=("BC_COMPARE fast path declined",),
-        query=lambda: Query(
-            tables=(_one_row((Ty.DEC, decimal.Decimal("1.250"))),),
-            items=(Col("t0", "c0", Ty.DEC),),
-            where=Binary(
-                "<=",
-                Binary("*", Col("t0", "c0", Ty.DEC), Lit(Ty.DEC, decimal.Decimal("0")), Ty.DEC),
-                Binary("*", Lit(Ty.DEC, decimal.Decimal("0.001")), Lit(Ty.DEC, decimal.Decimal("999999999.999")), Ty.DEC),
-                Ty.BOOL,
-            ),
-        ),
-        detail=(
-            "ENGINE ERROR. Comparing two DECIMAL products of different result scales in a "
-            "WHERE fails mid-execution with RuntimeError 'BC_COMPARE fast path declined "
-            "(unsupported operand type or cross-type/cross-scale comparison)'. An internal "
-            "fast path declining is surfacing to the user as a query failure. DuckDB "
-            "answers. The same shape over `CAST(id AS DECIMAL(12,3))` from $planets runs."
-        ),
-    ),
-    Gap(
         id="overflow-on-rows-never-output",
         kind=SIGNATURE,
         outcome="opteryx_error",
@@ -338,68 +297,6 @@ REGISTER: List[Gap] = [
             "Opteryx answers 0 rows. LIMITATION: this would also absorb Opteryx silently "
             "wrapping a value DuckDB overflowed on; Opteryx's ruled behaviour is to raise "
             "on INT64 overflow, which 'overflow-on-rows-never-output' shows it does."
-        ),
-    ),
-    Gap(
-        id="decimal-compare-to-nan-constant-raises",
-        kind=SIGNATURE,
-        outcome="opteryx_error",
-        signatures=("cannot convert NaN to integer",),
-        query=lambda: Query(
-            tables=(_one_row((Ty.DEC, decimal.Decimal("1"))),),
-            items=(Col("t0", "c0", Ty.DEC),),
-            where=Binary(
-                "<=",
-                Col("t0", "c0", Ty.DEC),
-                Binary("*", Lit(Ty.FLOAT, -0.0), Lit(Ty.FLOAT, float("inf")), Ty.FLOAT),
-                Ty.BOOL,
-            ),
-        ),
-        detail=(
-            "A DECIMAL column compared with a FLOAT64 constant that folds to NaN "
-            "(`-0.0 * Infinity`) raises a bare ValueError from the decimal-literal "
-            "rescale; DuckDB answers. Same root as 'decimal-compare-to-infinite-constant-"
-            "crashes'."
-        ),
-    ),
-    # ─────────────────────────────────────────────────────────────────────────
-    # CRASH — raised outside the engine's rejection types
-    # ─────────────────────────────────────────────────────────────────────────
-    Gap(
-        id="decimal-compare-to-infinite-constant-crashes",
-        kind=CRASH,
-        outcome="InvalidOperation",
-        query=lambda: Query(
-            tables=(_one_row((Ty.DEC, decimal.Decimal("1"))),),
-            items=(Col("t0", "c0", Ty.DEC),),
-            where=Binary("=", Lit(Ty.FLOAT, float("-inf")), Col("t0", "c0", Ty.DEC), Ty.BOOL),
-        ),
-        detail=(
-            "CRASH. A DECIMAL compared with a FLOAT64 constant the decimal rescale cannot "
-            "represent (±Infinity in the repro) escapes as a raw "
-            "`decimal.InvalidOperation` from logical_type.rescale_decimal_literal "
-            "(compiler._rewrite_decimal_compares) — not an Opteryx error at all."
-        ),
-    ),
-    Gap(
-        id="filter-implied-group-key-literal-has-wrong-native-type",
-        kind=CRASH,
-        outcome="TypeError",
-        signatures=("holds a int", "holds a float", "holds a Decimal"),
-        query=lambda: Query(
-            tables=(Table("t0", (Column("c0", Ty.STR), Column("c1", Ty.DEC)), ()),),
-            items=(Col("t0", "c1", Ty.DEC), Col("t0", "c0", Ty.STR)),
-            where=Binary("=", Col("t0", "c1", Ty.DEC), Lit(Ty.INT, 3), Ty.BOOL),
-            group_by=(Col("t0", "c1", Ty.DEC), Col("t0", "c0", Ty.STR)),
-        ),
-        detail=(
-            "CRASH. `WHERE key = <literal> GROUP BY key, other` where the literal's type "
-            "differs from the key's (DECIMAL key = 3, DECIMAL key = 3.0, FLOAT64 key = 1, "
-            "INT64 key = a DECIMAL expression) raises a "
-            "raw TypeError ('Literal #N of type DECIMAL(12, 3) holds a int (3)') from "
-            "FilterImpliedGroupKeyReductionStrategy: it replaces the group key with the "
-            "filter's literal, re-typed as the key's type but still holding the original "
-            "Python value."
         ),
     ),
 ]

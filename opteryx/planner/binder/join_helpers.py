@@ -56,6 +56,13 @@ def _is_numeric_join_coercible(left_type, right_type) -> bool:
     )
 
 
+def _unparenthesised(node: Expression) -> Expression:
+    """`node` without its parentheses: `(p.id)` is still the column `p.id`."""
+    while node.node_type == NodeType.NESTED:
+        node = node.centre
+    return node
+
+
 def get_mismatched_condition_column_types(
     node: Expression, relaxed: bool = False, allow_numeric_join_coercion: bool = False
 ) -> dict:
@@ -115,8 +122,8 @@ def get_mismatched_condition_column_types(
         if left_type and right_type and left_type != right_type:
             if (
                 allow_numeric_join_coercion
-                and node.left.node_type == NodeType.IDENTIFIER
-                and node.right.node_type == NodeType.IDENTIFIER
+                and _unparenthesised(node.left).node_type == NodeType.IDENTIFIER
+                and _unparenthesised(node.right).node_type == NodeType.IDENTIFIER
                 and _is_numeric_join_coercible(left_type, right_type)
             ):
                 return None

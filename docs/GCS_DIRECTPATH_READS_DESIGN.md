@@ -1,6 +1,6 @@
 # GCS reads over gRPC Direct Connectivity (DirectPath)
 
-**Status (2026-11-01):** rulings R1–R7 made (§9). Phase 0 passed. Phase 1 is built. In Phase 2, C3 (ALTS) and C4 (discovery with RLS) are built and verified live; the engine wiring behind `GCS_TRANSPORT=grpc` and the ladder are still to do (§7).
+**Status (2026-11-01):** rulings R1–R7 made (§9). Phase 0 passed. Phase 1 is built. Phase 2 is built and wired behind `GCS_TRANSPORT=grpc`, and its 16/64 gate PASSED: cold 0.884x, hot 0.948x (§7). Phase 3 is the architect's call.
 
 **Problem:** cold reads are still slow. On the fleet size ladder (2026-10-30, bastian's 31 statements, chunk cache flushed between queries):
 
@@ -238,7 +238,33 @@ Rerun the cold size ladder (4/16, 8/32, 16/64, 32/128) with REST and DirectPath 
 | 16 | 1486 | 5327 | 7035 |
 
 - Each connection tops out at about 550 MB/s, because its one I/O thread both decrypts and parses. The best default for N is still for the engine ladder to decide (PERFNOTPOLICY). In the probe, 16 beats 8 by about 1.3x at 64 reads in flight.
-- **Still owed:** the engine wiring behind `GCS_TRANSPORT=grpc`, the cold ladder on 16/64, and how often endpoints change.
+- **Engine wiring (2026-11-01):**
+  - `GCS_TRANSPORT=rest|grpc` and `GCS_GRPC_CONNECTIONS` (default 8) live in `opteryx/config.py`; an unknown value raises at import. `pool_reader.pyx` arms each scan's pipeline with `set_gcs_transport_grpc` at plan time.
+  - In `io_pipeline.hpp`, all three gs:// range sites (data blocks, single ranges, bloom ranges) go through one `remote_get_many`.
+  - `gcs_grpc::directpath_get_many` (`src/cpp/gcs_grpc/directpath_fetch.cpp`) gives REST's contract: HttpError, the scan's retry budget and the byte gate. `http_link` exposes the gate, timeout, backoff and retry counter from `http_client.cpp`, and the gate's link estimate is fed from the gRPC bytes.
+  - The gRPC sources compile into `pool_reader.so` only. `_operators.so` resolves `directpath_get_many` from it at load (it is undefined there, defined in `pool_reader`), so the process has one client (R3).
+  - **Not covered:** footers and HEAD (`filesystem.hpp`) stay on REST, and so do the vector-index build and the non-parquet readers. READ_* is unaffected, because anonymous paths are rewritten to https.
+  - **Shortcut:** a retry re-reads the whole batch, not only the failed ranges.
+- **Tests:** `tests/unit/connectors/parquet_io/test_gcs_transport_grpc.py`. A gs:// row group on an armed pipeline reaches DirectPath, which refuses a scan with no credential. The config refuses unknown values.
+- **Cold ladder, 16/64 (2026-11-01).**
+  - Setup: an n4a-standard-16 Debian 13 VM, deleted afterwards. A HEAD tree built with GCC 14 at `-march=armv8-a+crc+aes`. ClickBench hits (14.7 GB) in `gs://opteryx_data`, six queries (Q03, Q20, Q21, Q22, Q23, Q31), a fresh process per run, cold then hot, arm order rotating.
+  - **Pass 1** (3 reps, the process's first query):
+
+| arm | cold total | hot total |
+|---|---|---|
+| REST | 8.31 s | 1.83 s |
+| grpc, 4 connections | 10.27 s (1.24x, slower) | 0.97x |
+| grpc, 8 connections | 7.47 s (0.899x) | 0.98x |
+| grpc, 16 connections | 7.47 s (0.898x) | 1.07x |
+
+  - **Pass 2** (REST vs grpc8, 5 reps), with an identical warm-up query on another dataset first, so a long-lived worker's one-off connection setup is excluded:
+    - cold total: REST 6.83 s, grpc8 6.04 s, **0.884x (11.6% faster)**;
+    - hot: 0.948x;
+    - the warm-up itself, which includes discovery and the handshakes: 1.12x;
+    - per query: Q23 0.79x, Q21 0.84x, Q22 0.89x, Q31 0.94x, Q20 0.96x, Q03 0.96x.
+  - **Gate: PASSED.** Cold improves by 11.6% at 16/64 and hot does not regress. The IO-heavy queries gain 16–21%.
+  - **N default = 8.** 16 gives the same cold time but a worse hot one; 4 is slower than REST.
+- **Still owed:** how often endpoints change, and Phase 3 (the fleet template flip, the architect's call).
 
 **Phase 3: flip the fleet template to `grpc`.** Architect's call, with the numbers in front of them.
 

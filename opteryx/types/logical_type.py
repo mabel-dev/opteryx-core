@@ -192,6 +192,9 @@ def rescale_decimal_literal(column_type, value, effective_op: Optional[str] = No
     if isinstance(value, bool) or not isinstance(value, (int, float, decimal.Decimal)):
         return None
     quantized = decimal.Decimal(str(value))
+    # NaN / ±Infinity sit on no gridline; the mixed numeric compare orders them
+    if not quantized.is_finite():
+        return None
     quantum = decimal.Decimal(1).scaleb(-int(column_type.logical.scale))
     rescaled = quantized.quantize(quantum)
     if rescaled == quantized:

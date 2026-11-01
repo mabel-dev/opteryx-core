@@ -583,9 +583,7 @@ def random_query(rng: random.Random) -> Query:
                 (a, b)
                 for a in tables[0].columns
                 for b in tables[1].columns
-                # Same type only: mixed numeric join keys are refused —
-                # reference_known_gaps "join-keys-must-share-a-type".
-                if a.ty == b.ty
+                if a.ty == b.ty or (a.ty in NUMERIC and b.ty in NUMERIC)
             ]
             if not pairs:
                 kind = "CROSS"
