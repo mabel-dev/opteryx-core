@@ -114,23 +114,27 @@ def _projection_head(body: LogicalPlan):
         nid = below[0][0]
 
 
-def _narrow_body_projection(body: LogicalPlan, refs, telemetry) -> None:
-    """Prune the body's output to the union of what its references read."""
+def _needed_body_identities(refs):
+    """The body output identities its references read (union), or None when any
+    reference's demand is unknown — an unpruned reference, an unmapped column, or a
+    zero-column demand (the planner's UNKNOWN sentinel)."""
     needed: set = set()
     for _plan, _nid, ref in refs:
         columns = ref.columns
         if not columns:
-            # an unpruned/unknown reference demands everything — do not narrow
-            return
+            return None
         mapping = ref.cte_column_map or {}
         for column in columns:
             body_identity = mapping.get(column.schema_column.identity)
             if body_identity is None:
-                return
+                return None
             needed.add(body_identity)
-    if not needed:
-        # a zero-column demand is the UNKNOWN sentinel elsewhere in the planner;
-        # never narrow to nothing
+    return needed or None
+
+
+def _narrow_body_projection(body: LogicalPlan, needed, telemetry) -> None:
+    """Prune the body's output to the union of what its references read."""
+    if needed is None:
         return
     project_nid, project = _projection_head(body)
     if project is None:
@@ -305,11 +309,22 @@ def coordinate_shared_cte(
 ):
     """Run both coordinations for one shared body. `consumer_plans` must already
     be optimized (main plan plus any dependent shared bodies). Returns the body
-    (boundary stripped), ready for its own optimization pass."""
+    (boundary stripped), ready for its own optimization pass, and the identities it
+    must OUTPUT — what its references read, else its whole boundary schema; None only
+    when neither is known.
+
+    Those outputs seed the body's own liveness (projection pushdown): with the
+    boundary gone, nothing at the head of the body states its width. A filter hoisted
+    onto the head declares only the columns IT reads, and a Sort below took that as
+    the whole demand — `density` was pruned from a body whose reference read it
+    ("a CTE reference column the shared body does not carry")."""
     refs = list(_refs_of(consumer_plans, cte_key))
     body_schema = strip_body_boundary(body)
+    needed = _needed_body_identities(refs) if refs else None
     if refs:
         _push_common_predicates(body, refs, body_schema, telemetry)
-        _narrow_body_projection(body, refs, telemetry)
-    return body
+        _narrow_body_projection(body, needed, telemetry)
+    if needed is None and body_schema is not None:
+        needed = {column.identity for column in body_schema.columns}
+    return body, needed
 

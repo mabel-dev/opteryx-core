@@ -297,7 +297,9 @@ struct LatmatScanSource : Source {
         // The drain below ends when nothing is owed, which only means "every unit was
         // walked" while the window can hold at least one row group. A zero window
         // would end pass 1 before it read anything — an empty answer, not a slow one.
-        if (in_flight_limit < 1) {
+        // With no work items (pruning removed every row group) the empty answer IS
+        // the answer, and the plan never sized a window for it (it stays 0).
+        if (n_items > 0 && in_flight_limit < 1) {
             err.code = 1;
             err.msg = "LatmatScanSource: in_flight_limit must be at least 1";
             return;

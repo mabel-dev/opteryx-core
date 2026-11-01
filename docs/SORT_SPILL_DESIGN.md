@@ -16,6 +16,14 @@ buffer, which spills on its own (D-2 resolved as the buffer hand-off, not a lazy
 unconfigured fails loud. Below the budget the path is the in-memory one. Motivating
 failure: `OPTIMIZE TABLE opteryx.test.pypi`, 24.3M rows, 14 GB peak, OOM on a 16 GB node.
 
+Parallel shape: a run sorts and gathers on the query's full width (the other workers
+are waiting on it), and each 64k-row chunk is encoded to its own spill unit on the
+team thread that gathered it (`MorselBuffer::encode_unit`, then `add_unit` in order).
+The merge's ordering loop only plans chunks; the gathers and encodes run on the team
+a wave at a time, and each run's next row group decodes in the background. Spill units
+are skene `as_is` + lz4. Measured on the pypi pass (Mac, 4 workers): 4.6 s and 4.2 GB
+peak, against 2.2 s and 14 GB in memory.
+
 Every section marked **[D-n]** below is a decision the architect owns; §12 collects them.
 
 Scope: the **SORT** breaker only (`SortSink` in

@@ -240,6 +240,8 @@ class OptimizerVisitor:
         # to know it owes one telemetry refresh of the FINAL plan (architect
         # ruling 2026-09-24: estimate telemetry describes the plan that runs).
         self.refreshed_statistics = False
+        # Set per optimize() call — see its `required_outputs`.
+        self._required_outputs = None
         self.strategies = [
             # Removes scalar subqueries by turning them into joins. Must run
             # before any strategy that reasons about joins or pushes predicates,
@@ -407,6 +409,8 @@ class OptimizerVisitor:
 
         root_nid = plan.exit_point()
         context = OptimizerContext(plan, self.plan_context)
+        if self._required_outputs:
+            context.collected_identities.update(self._required_outputs)
         if strategy.rebuilds_plan:
             # Rebuild-from-empty strategies re-add every surviving node and
             # edge themselves; they must start from nothing, not from a view
@@ -440,16 +444,21 @@ class OptimizerVisitor:
             return plan
         return optimized_plan
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
+    def optimize(self, plan: LogicalPlan, required_outputs=None) -> LogicalPlan:
         """
         Optimize the logical plan by applying all registered strategies in sequence.
 
         Parameters:
             plan (LogicalPlan): The logical plan to optimize.
+            required_outputs: identities the plan must emit whatever its head node
+                reads — a shared CTE body, whose boundary (the node that stated its
+                width) is stripped before this pass. Seeds every strategy's
+                `collected_identities`, i.e. projection pushdown's liveness.
 
         Returns:
             LogicalPlan: The fully optimized logical plan.
         """
+        self._required_outputs = required_outputs
         current_plan = plan
         # Plans enter the optimizer with no propagated statistics, so treat them
         # as stale until refresh_statistics has populated per-node estimates.
@@ -589,10 +598,10 @@ def do_optimizer(
         # filters and projections above its references have settled.
         optimized: dict = {}
         for key in reversed(list(shared.keys())):
-            body = coordinate_shared_cte(
+            body, outputs = coordinate_shared_cte(
                 shared[key], [plan] + list(optimized.values()), key, telemetry
             )
-            optimized[key] = optimizer.optimize(body)
+            optimized[key] = optimizer.optimize(body, required_outputs=outputs)
         # hand back in dependencies-first order — binding used it, compilation
         # relies on it (a producer pipeline must exist before its consumers)
         plan_context.shared_ctes = {key: optimized[key] for key in shared.keys()}

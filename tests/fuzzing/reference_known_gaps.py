@@ -382,29 +382,6 @@ REGISTER: List[Gap] = [
         ),
     ),
     Gap(
-        id="or-of-mixed-type-equalities-crashes-inlist-rewrite",
-        kind=CRASH,
-        outcome="TypeError",
-        signatures=("holds a tuple",),
-        query=lambda: Query(
-            tables=(_one_row((Ty.INT, 3)),),
-            items=(Col("t0", "c0", Ty.INT),),
-            where=Binary(
-                "OR",
-                Binary("=", Col("t0", "c0", Ty.INT), Lit(Ty.FLOAT, 0.0), Ty.BOOL),
-                Binary("=", Col("t0", "c0", Ty.INT), Lit(Ty.INT, 3), Ty.BOOL),
-                Ty.BOOL,
-            ),
-        ),
-        detail=(
-            "CRASH. `WHERE id = 0.0 OR id = 3` raises a raw TypeError ('Literal #N of type "
-            "ARRAY<FLOAT64> holds a tuple ((0.0, 3))') from predicate_rewriter."
-            "rewrite_cnf_eq_to_inlist: OR-ed equalities on one column are folded into an "
-            "IN list, and with a FLOAT and an INT literal the list literal is built from "
-            "a Python tuple rather than a native value."
-        ),
-    ),
-    Gap(
         id="filter-implied-group-key-literal-has-wrong-native-type",
         kind=CRASH,
         outcome="TypeError",
