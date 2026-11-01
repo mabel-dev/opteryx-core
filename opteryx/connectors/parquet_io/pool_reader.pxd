@@ -148,6 +148,11 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t cancelled_skips() nogil
         int fetch_ahead_depth() nogil
         int gcs_grpc_connections() nogil
+        uint64_t gate_admissions() nogil
+        uint64_t gate_wait_ns() nogil
+        int64_t gate_peak_in_flight_bytes() nogil
+        int64_t gate_peak_requests() nogil
+        int64_t gate_min_cap_bytes() nogil
         uint64_t prefetch_discarded_bytes() nogil
         int64_t memory_budget_bytes() nogil
         int64_t memory_held_high_watermark() nogil

@@ -20,6 +20,6 @@ namespace gcs_grpc {
 std::vector<std::vector<uint8_t>> directpath_get_many(const std::string& gs_path,
                                                       const std::vector<std::pair<int64_t, int64_t>>& ranges,
                                                       const std::string& authorization, int connections,
-                                                      const HttpTuning& tuning);
+                                                      const HttpTuning& tuning, HttpGateUse* gate_use);
 
 }  // namespace gcs_grpc

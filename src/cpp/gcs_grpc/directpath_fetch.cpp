@@ -40,7 +40,7 @@ GcsGrpcClient& process_client(int connections) {
 std::vector<std::vector<uint8_t>> directpath_get_many(const std::string& gs_path,
                                                       const std::vector<std::pair<int64_t, int64_t>>& ranges,
                                                       const std::string& authorization, int connections,
-                                                      const HttpTuning& tuning) {
+                                                      const HttpTuning& tuning, HttpGateUse* gate_use) {
     const size_t slash = gs_path.find('/', 5);
     if (gs_path.compare(0, 5, "gs://") != 0 || slash == std::string::npos || slash == 5 || slash + 1 == gs_path.size())
         throw std::invalid_argument("DirectPath: not a gs://bucket/object path: " + gs_path);
@@ -63,7 +63,7 @@ std::vector<std::vector<uint8_t>> directpath_get_many(const std::string& gs_path
     for (int attempt = 0;; ++attempt) {
         try {
             // Admitted before the deadline starts, as get_many() does.
-            http_link::Admission admission(bytes, tuning);
+            http_link::Admission admission(bytes, tuning, gate_use);
             return client.read_many(bucket, object, br, authorization,
                                     http_link::timeout_ms(static_cast<long>(bytes), tuning));
         } catch (const GcsGrpcError& e) {

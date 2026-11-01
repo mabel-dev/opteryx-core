@@ -1128,6 +1128,14 @@ cdef class CppIOPipeline:
             "prefetch_discarded_bytes": self.pipeline.prefetch_discarded_bytes(),
             # How this scan's gs:// ranges travel, read back from the pipeline.
             "gcs_transport": "grpc" if self.pipeline.gcs_grpc_connections() > 0 else "rest",
+            # The process bytes-in-flight gate as this scan met it: admissions, time
+            # waited for one, the most in flight (bytes, requests) right after one,
+            # and the smallest cap seen (0 = never admitted).
+            "byte_gate_admissions": self.pipeline.gate_admissions(),
+            "byte_gate_wait_ns": self.pipeline.gate_wait_ns(),
+            "byte_gate_peak_in_flight_bytes": self.pipeline.gate_peak_in_flight_bytes(),
+            "byte_gate_peak_requests": self.pipeline.gate_peak_requests(),
+            "byte_gate_min_cap_bytes": self.pipeline.gate_min_cap_bytes(),
             # Memory admission: the budget the pipeline actually runs (0 = off) —
             # the read-back that proves `parquet_io_memory_budget_bytes` bound —
             # the peak it held, and whether the gate ever bit.
@@ -3512,6 +3520,11 @@ cdef class NativeScanPlan:
             "fetch_ahead_depth": self.pipeline_ptr.fetch_ahead_depth(),
             "prefetch_discarded_bytes": self.pipeline_ptr.prefetch_discarded_bytes(),
             "gcs_transport": "grpc" if self.pipeline_ptr.gcs_grpc_connections() > 0 else "rest",
+            "byte_gate_admissions": self.pipeline_ptr.gate_admissions(),
+            "byte_gate_wait_ns": self.pipeline_ptr.gate_wait_ns(),
+            "byte_gate_peak_in_flight_bytes": self.pipeline_ptr.gate_peak_in_flight_bytes(),
+            "byte_gate_peak_requests": self.pipeline_ptr.gate_peak_requests(),
+            "byte_gate_min_cap_bytes": self.pipeline_ptr.gate_min_cap_bytes(),
             # Memory admission + PageIndex read-backs — see CppIOPipeline.diagnostics().
             "memory_budget_bytes": self.pipeline_ptr.memory_budget_bytes(),
             "memory_held_high_watermark": self.pipeline_ptr.memory_held_high_watermark(),

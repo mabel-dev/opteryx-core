@@ -489,10 +489,17 @@ ByteGate& byte_gate() {
 // cap is off (max_bytes_in_flight < 0) or the request has no known size.
 class ByteAdmission {
 public:
-    ByteAdmission(long long bytes, const HttpTuning& tuning) {
+    ByteAdmission(long long bytes, const HttpTuning& tuning, HttpGateUse* use) {
         if (tuning.max_bytes_in_flight < 0 || bytes <= 0) return;
         admission_ = byte_gate().acquire(bytes, tuning);
         held_ = true;
+        if (use == nullptr) return;
+        const ByteGate::State& g = admission_.at_admit;
+        ++use->admissions;
+        use->wait_ns += static_cast<uint64_t>(admission_.wait_s * 1e9);
+        use->peak_in_flight_bytes = std::max(use->peak_in_flight_bytes, g.in_flight + bytes);
+        use->peak_requests = std::max(use->peak_requests, g.requests_in_flight + 1);
+        use->min_cap_bytes = use->min_cap_bytes == 0 ? g.cap : std::min(use->min_cap_bytes, g.cap);
     }
     ~ByteAdmission() { if (held_) byte_gate().release(admission_); }
     bool held() const { return held_; }
@@ -588,7 +595,8 @@ void discard_thread_multi() {
 
 namespace http_link {
 
-Admission::Admission(long long bytes, const HttpTuning& tuning) : impl_(new ByteAdmission(bytes, tuning)) {}
+Admission::Admission(long long bytes, const HttpTuning& tuning, HttpGateUse* use)
+    : impl_(new ByteAdmission(bytes, tuning, use)) {}
 Admission::~Admission() { delete static_cast<ByteAdmission*>(impl_); }
 void note_received(size_t bytes) { byte_gate().note_received(bytes); }
 long timeout_ms(long bytes, const HttpTuning& tuning) {
@@ -778,7 +786,8 @@ HttpClient::~HttpClient() {
 std::vector<uint8_t> HttpClient::get(
     const std::string& url,
     const std::map<std::string, std::string>& headers,
-    const HttpTuning* tuning_ptr)
+    const HttpTuning* tuning_ptr,
+    HttpGateUse* gate_use)
 {
     HttpTuning tuning = tuning_ptr ? *tuning_ptr : default_tuning();
     long per_request_timeout_ms = request_timeout_ms(headers, timeout_ms_, tuning);
@@ -813,7 +822,7 @@ std::vector<uint8_t> HttpClient::get(
         {
             // Same admission as get_many(), for this one range; see HttpTuning.
             const long span = range_span_bytes(headers);
-            ByteAdmission admission(span > 0 ? span : 0, tuning);
+            ByteAdmission admission(span > 0 ? span : 0, tuning, gate_use);
             res = curl_easy_perform(easy);
         }
         curl_slist_free_all(hlist);
@@ -983,7 +992,8 @@ HttpClient::PutResponse HttpClient::put(
 
 std::vector<std::vector<uint8_t>> HttpClient::get_many(
     const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
-    const HttpTuning* tuning_ptr)
+    const HttpTuning* tuning_ptr,
+    HttpGateUse* gate_use)
 {
     const size_t n = requests.size();
     if (n == 0) return {};
@@ -1046,7 +1056,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         // Wait for room on the link BEFORE any handle is created or added: curl
         // starts each request's timer when it is added, so waiting here costs the
         // request none of its deadline. Held until this attempt's transfers end.
-        ByteAdmission admission(batch_bytes, tuning);
+        ByteAdmission admission(batch_bytes, tuning, gate_use);
         last_gated = admission.held();
         if (last_gated) last_admission = admission.admission();
 

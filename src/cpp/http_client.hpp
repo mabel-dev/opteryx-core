@@ -136,6 +136,17 @@ struct HttpTuning {
     bool   force_http11               = false;            // CURLOPT_HTTP_VERSION
 };
 
+// What the bytes-in-flight gate (HttpTuning::max_bytes_in_flight) did to one caller's
+// transfer attempts, summed by the caller, so a scan can show whether the gate bit.
+// "In flight" is the gate's view right after an admission, the admitted request included.
+struct HttpGateUse {
+    uint64_t  admissions           = 0;  // attempts admitted through the gate
+    uint64_t  wait_ns              = 0;  // time those attempts waited for admission
+    long long peak_in_flight_bytes = 0;
+    long long peak_requests        = 0;
+    long long min_cap_bytes        = 0;  // smallest cap an admission saw; 0 = none
+};
+
 class HttpClient {
 public:
     /**
@@ -176,7 +187,8 @@ public:
     std::vector<uint8_t> get(
         const std::string& url,
         const std::map<std::string, std::string>& headers = {},
-        const HttpTuning* tuning = nullptr
+        const HttpTuning* tuning = nullptr,
+        HttpGateUse* gate_use = nullptr
     );
 
     /**
@@ -236,7 +248,8 @@ public:
      */
     std::vector<std::vector<uint8_t>> get_many(
         const std::vector<std::pair<std::string, std::map<std::string, std::string>>>& requests,
-        const HttpTuning* tuning = nullptr
+        const HttpTuning* tuning = nullptr,
+        HttpGateUse* gate_use = nullptr
     );
 
     /**
@@ -317,7 +330,7 @@ namespace http_link {
 // off or `bytes` <= 0), exactly as a get_many() batch does.
 class Admission {
 public:
-    Admission(long long bytes, const HttpTuning& tuning);
+    Admission(long long bytes, const HttpTuning& tuning, HttpGateUse* use);
     ~Admission();
     Admission(const Admission&) = delete;
     Admission& operator=(const Admission&) = delete;

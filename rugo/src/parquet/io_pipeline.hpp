@@ -2512,6 +2512,31 @@ class ParquetIOPipeline {
         http_lat_buckets_[b].fetch_add(1, std::memory_order_relaxed);
     }
 
+    // The process bytes-in-flight gate as this scan's remote reads met it (HttpGateUse,
+    // summed over every fetch): whether it ever bit, and how near its cap the link ran.
+    std::atomic<uint64_t> gate_admissions_{0};
+    std::atomic<uint64_t> gate_wait_ns_{0};
+    std::atomic<int64_t>  gate_peak_in_flight_bytes_{0};
+    std::atomic<int64_t>  gate_peak_requests_{0};
+    std::atomic<int64_t>  gate_min_cap_bytes_{0};   // 0 = no admission yet
+#ifdef RUGO_ENABLE_HTTP
+    void record_gate_use(const HttpGateUse& u) {
+        if (u.admissions == 0) return;
+        gate_admissions_.fetch_add(u.admissions, std::memory_order_relaxed);
+        gate_wait_ns_.fetch_add(u.wait_ns, std::memory_order_relaxed);
+        int64_t prev = gate_peak_in_flight_bytes_.load(std::memory_order_relaxed);
+        while (u.peak_in_flight_bytes > prev &&
+               !gate_peak_in_flight_bytes_.compare_exchange_weak(prev, u.peak_in_flight_bytes,
+                                                                 std::memory_order_relaxed)) {}
+        prev = gate_peak_requests_.load(std::memory_order_relaxed);
+        while (u.peak_requests > prev &&
+               !gate_peak_requests_.compare_exchange_weak(prev, u.peak_requests, std::memory_order_relaxed)) {}
+        prev = gate_min_cap_bytes_.load(std::memory_order_relaxed);
+        while ((prev == 0 || u.min_cap_bytes < prev) &&
+               !gate_min_cap_bytes_.compare_exchange_weak(prev, u.min_cap_bytes, std::memory_order_relaxed)) {}
+    }
+#endif
+
     /**
      * Convert gs://bucket/path to https://storage.googleapis.com/bucket/path.
      */
@@ -2954,17 +2979,23 @@ class ParquetIOPipeline {
     // §3/§5 — chosen once per scan, never a fallback); everything else is REST.
     std::vector<std::vector<uint8_t>> remote_get_many(
             const std::string& path, const std::vector<std::pair<int64_t, int64_t>>& ranges) {
-        if (gcs_grpc_connections_ > 0 && path.compare(0, 5, "gs://") == 0)
-            return gcs_grpc::directpath_get_many(
+        HttpGateUse use;
+        std::vector<std::vector<uint8_t>> bufs;
+        if (gcs_grpc_connections_ > 0 && path.compare(0, 5, "gs://") == 0) {
+            bufs = gcs_grpc::directpath_get_many(
                 path, ranges, auth_header_set_ ? auth_header_ : std::string(), gcs_grpc_connections_,
-                http_tuning_set_ ? http_tuning_ : HttpClient::default_tuning());
-        const std::string url = fetch_url_for(path);
-        std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
-        reqs.reserve(ranges.size());
-        for (const auto& r : ranges)
-            reqs.emplace_back(url, http_headers_(
-                "bytes=" + std::to_string(r.first) + "-" + std::to_string(r.first + r.second - 1)));
-        return tl_http_client().get_many(reqs, http_tuning_set_ ? &http_tuning_ : nullptr);
+                http_tuning_set_ ? http_tuning_ : HttpClient::default_tuning(), &use);
+        } else {
+            const std::string url = fetch_url_for(path);
+            std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
+            reqs.reserve(ranges.size());
+            for (const auto& r : ranges)
+                reqs.emplace_back(url, http_headers_(
+                    "bytes=" + std::to_string(r.first) + "-" + std::to_string(r.first + r.second - 1)));
+            bufs = tl_http_client().get_many(reqs, http_tuning_set_ ? &http_tuning_ : nullptr, &use);
+        }
+        record_gate_use(use);
+        return bufs;
     }
 #endif
 
@@ -3018,15 +3049,19 @@ class ParquetIOPipeline {
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
+            HttpGateUse use;
             bytes = tl_http_client().get(url, http_headers_(range_hdr),
-                                          http_tuning_set_ ? &http_tuning_ : nullptr);
+                                          http_tuning_set_ ? &http_tuning_ : nullptr, &use);
+            record_gate_use(use);
 
         } else if (path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
             is_remote = true;
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
+            HttpGateUse use;
             bytes = tl_http_client().get(path, http_headers_(range_hdr),
-                                          http_tuning_set_ ? &http_tuning_ : nullptr);
+                                          http_tuning_set_ ? &http_tuning_ : nullptr, &use);
+            record_gate_use(use);
 
         } else
 #else
@@ -5383,7 +5418,16 @@ class ParquetIOPipeline {
     // is the read-back that proves the knob reached the pipeline.
     int fetch_ahead_depth() const { return fetch_ahead_; }
     // 0 = REST, else DirectPath's connection count — the read-back of GCS_TRANSPORT.
+#ifdef RUGO_ENABLE_HTTP
     int gcs_grpc_connections() const { return gcs_grpc_connections_; }
+#else
+    int gcs_grpc_connections() const { return 0; }
+#endif
+    uint64_t gate_admissions() const { return gate_admissions_.load(std::memory_order_relaxed); }
+    uint64_t gate_wait_ns() const { return gate_wait_ns_.load(std::memory_order_relaxed); }
+    int64_t gate_peak_in_flight_bytes() const { return gate_peak_in_flight_bytes_.load(std::memory_order_relaxed); }
+    int64_t gate_peak_requests() const { return gate_peak_requests_.load(std::memory_order_relaxed); }
+    int64_t gate_min_cap_bytes() const { return gate_min_cap_bytes_.load(std::memory_order_relaxed); }
     uint64_t prefetch_discarded_bytes() const {
         return prefetch_discarded_bytes_.load(std::memory_order_relaxed);
     }
