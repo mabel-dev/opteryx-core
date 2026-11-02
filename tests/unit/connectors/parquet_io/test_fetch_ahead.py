@@ -185,6 +185,43 @@ def test_remote_scan_reports_its_requests():
     assert diag["http_stalls"] == diag["http_ceiling_timeouts"] == diag["http_retries"] == 0
 
 
+def test_the_process_request_cap_binds_and_is_reported():
+    """HTTP_MAX_REQUESTS_IN_FLIGHT: uncapped, fetch-ahead 6 puts more than two reads on
+    the wire; capped at 2, the process never has more than two, the scan waits for
+    permits, and the answer is unchanged."""
+    from opteryx.compiled.structures.memory_pool import configure_io_request_cap
+    from opteryx.compiled.structures.memory_pool import io_request_stats
+    from opteryx.compiled.structures.memory_pool import reset_io_request_peak
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path, name = _write(tmp)
+        proc, port = _server(tmp, rtt_ms=20)
+        url = f"http://127.0.0.1:{port}/{name}"
+        try:
+            configure_io_request_cap(0)
+            rows_off, diag_off = _scan(url, fetch_ahead=6)
+            configure_io_request_cap(2)
+            reset_io_request_peak()
+            rows_on, diag_on = _scan(url, fetch_ahead=6)
+            stats = io_request_stats()
+        finally:
+            configure_io_request_cap(config.HTTP_MAX_REQUESTS_IN_FLIGHT)
+            proc.kill(); proc.wait()
+    assert sorted(rows_off) == sorted(rows_on) == list(range(N))
+    assert diag_off["request_cap"] == 0 and diag_off["request_cap_wait_ns"] == 0
+    assert diag_off["fetch_in_flight_peak"] > 2, diag_off
+    assert diag_on["request_cap"] == 2
+    assert stats["cap"] == 2 and 1 <= stats["peak"] <= 2 and stats["in_flight"] == 0, stats
+    assert diag_on["request_cap_wait_ns"] > 0, diag_on
+
+
+def test_negative_request_cap_is_refused():
+    from opteryx.compiled.structures.memory_pool import configure_io_request_cap
+
+    with pytest.raises(ValueError, match=">= 0"):
+        configure_io_request_cap(-1)
+
+
 def test_native_plan_reports_depth_and_rejects_an_inert_one():
     from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
 

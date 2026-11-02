@@ -235,3 +235,24 @@ code is `#ifdef RUGO_ENABLE_HTTP` like the rest of the remote path) and the §6 
    finish slowly (or hit the 30 s ceiling) and that is accepted.
 5. **Issuance:** not established as a defect (§5); the draft's "fix it first" step is withdrawn.
    The `fetch_in_flight_*` and `worker_blocked_ns` read-backs ship with step 2 and settle it.
+
+## 9. Addendum 2026-11-02: process request cap (BUILT, uncommitted)
+
+Fleet evidence on 0.9.185 (n488, TPC-H Q8 SF100): cold 26.2 s on REST against 15.9 s on 0.9.183.
+The orders and part scans' requests went from mostly < 50 ms to 100–500 ms, with up to ~90 reads
+in flight across the three scans. The byte gate's removal had left no limit on reads in flight.
+Ruled: cap the number of reads.
+
+- `HTTP_MAX_REQUESTS_IN_FLIGHT` (config, default 64, 0 = no cap; variable
+  `http_max_requests_in_flight`, SERVER/RESTRICTED per the 2026-08-28 ruling that process-wide
+  properties are not SET-able). Read at import, so a sweep is one restart per value.
+- One count per process in draken (`draken_io_requests_*`, `core/mem_account.cpp`, single home in
+  draken_native). `FetchTrack` takes n permits (clamped to the cap) before the request clock
+  starts, so every remote read in the parquet pipeline (REST get / get_many, DirectPath) is
+  covered on both the trampoline and the native scan.
+- Telemetry: per scan `request_cap`, `request_cap_wait_ns`; per query `io_requests_cap`,
+  `io_requests_peak`.
+- Test: `test_the_process_request_cap_binds_and_is_reported` (uncapped peak > 2; capped at 2 the
+  process peak is ≤ 2 and the scan waits).
+- Sweep owed on the fleet after release: cold Q8 at 32 / 64 / 128 / 0, interleaved. Target: back
+  near 15.9 s. If no value gets there, the cause is elsewhere and the cap comes out.

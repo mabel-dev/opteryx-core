@@ -147,6 +147,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t http_stalls() nogil
         uint64_t http_ceiling_timeouts() nogil
         int64_t fetch_in_flight_peak() nogil
+        uint64_t request_cap_wait_ns() nogil
         uint64_t fetch_request_ns() nogil
         int64_t fetch_span_ns() nogil
         uint64_t prefetch_discarded_bytes() nogil

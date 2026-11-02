@@ -97,6 +97,21 @@ void     draken_io_notify(void);
 // Blocks until the generation differs from `seen`.
 void     draken_io_wait(uint64_t seen);
 
+// The process cap on remote read requests in flight (HTTP_MAX_REQUESTS_IN_FLIGHT):
+// one count for every extension, like the IO budget. acquire(n) blocks until n
+// more fit under the cap and returns the permits it took - n clamped to the cap,
+// so a request batch wider than the cap still runs, alone. Cap 0 = off: acquire
+// takes nothing and never blocks. *waited_ns gets the time spent blocked (0 when
+// it did not block). release(n) returns what acquire took.
+void     draken_io_requests_configure(int64_t cap);
+int64_t  draken_io_requests_cap(void);
+int64_t  draken_io_requests_acquire(int64_t n, int64_t* waited_ns);
+void     draken_io_requests_release(int64_t n);
+int64_t  draken_io_requests_in_flight(void);
+// High-water mark of requests in flight since draken_io_requests_reset_peak.
+int64_t  draken_io_requests_peak(void);
+void     draken_io_requests_reset_peak(void);
+
 #ifdef __cplusplus
 }
 
@@ -143,6 +158,21 @@ class MemCharge {
 
   private:
     int64_t bytes_ = 0;
+};
+
+// Permits for n remote requests under the process cap, held for one fetch and
+// returned on every exit. waited_ns is the time spent blocked on the cap.
+class IoRequestPermit {
+  public:
+    explicit IoRequestPermit(int64_t n) : held_(draken_io_requests_acquire(n, &waited_ns_)) {}
+    ~IoRequestPermit() { draken_io_requests_release(held_); }
+    IoRequestPermit(const IoRequestPermit&) = delete;
+    IoRequestPermit& operator=(const IoRequestPermit&) = delete;
+    int64_t waited_ns() const noexcept { return waited_ns_; }
+
+  private:
+    int64_t waited_ns_ = 0;   // declared first: held_'s initialiser writes it
+    int64_t held_ = 0;
 };
 
 }  // namespace draken

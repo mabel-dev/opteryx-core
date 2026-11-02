@@ -596,6 +596,15 @@ read-backs per scan are `memory_budget_bytes`, `memory_held_high_watermark`,
 if not 0 <= IO_BUDGET_PERCENT <= 100:
     raise ValueError(f"IO_BUDGET_PERCENT must be 0-100, not {IO_BUDGET_PERCENT}")
 
+HTTP_MAX_REQUESTS_IN_FLIGHT: int = int(get("HTTP_MAX_REQUESTS_IN_FLIGHT", 64))
+"""The most remote range reads (REST GETs and DirectPath streams) the parquet IO pipelines may
+have on the wire together, process-wide; a fetch waits for room before it is issued. Read at
+import (draken_io_requests_*), so a sweep is a restart per value. 0 = no cap. Read-backs:
+per scan `request_cap` and `request_cap_wait_ns`; per query `io_requests_cap` and
+`io_requests_peak`."""
+if HTTP_MAX_REQUESTS_IN_FLIGHT < 0:
+    raise ValueError(f"HTTP_MAX_REQUESTS_IN_FLIGHT must be >= 0, not {HTTP_MAX_REQUESTS_IN_FLIGHT}")
+
 """Minimum REMOTE row groups a scan must submit before `PARQUET_IO_FETCH_AHEAD`
 is armed at all; below it the scan runs the coupled path (depth 0). Counted
 after row-group pruning, on the same work-item list the pipeline fetches, so a

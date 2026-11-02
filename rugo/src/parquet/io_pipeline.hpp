@@ -2548,15 +2548,19 @@ class ParquetIOPipeline {
     std::atomic<uint64_t> fetch_request_ns_{0};
     std::atomic<int64_t>  fetch_first_ns_{0};   // steady-clock ns; 0 = no fetch yet
     std::atomic<int64_t>  fetch_last_ns_{0};
+    std::atomic<uint64_t> request_cap_wait_ns_{0};   // blocked on the process request cap
 
     static int64_t steady_ns() {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    // Holds `n` requests on this scan's in-flight count for one fetch's lifetime.
+    // Holds `n` requests on this scan's in-flight count, and their permits under the
+    // process request cap, for one fetch's lifetime. The permit is taken before the
+    // clock starts, so time queued on the cap is not counted as request time.
     class FetchTrack {
     public:
-        FetchTrack(ParquetIOPipeline& p, int64_t n) : p_(p), n_(n), t0_(steady_ns()) {
+        FetchTrack(ParquetIOPipeline& p, int64_t n) : p_(p), n_(n), permit_(n), t0_(steady_ns()) {
+            p_.request_cap_wait_ns_.fetch_add(static_cast<uint64_t>(permit_.waited_ns()), std::memory_order_relaxed);
             const int64_t now = p_.fetch_in_flight_.fetch_add(n_, std::memory_order_relaxed) + n_;
             int64_t peak = p_.fetch_in_flight_peak_.load(std::memory_order_relaxed);
             while (now > peak &&
@@ -2576,6 +2580,7 @@ class ParquetIOPipeline {
     private:
         ParquetIOPipeline& p_;
         const int64_t n_;
+        const draken::IoRequestPermit permit_;
         const int64_t t0_;
     };
 #ifdef RUGO_ENABLE_HTTP
@@ -5439,6 +5444,7 @@ class ParquetIOPipeline {
     uint64_t http_stalls() const { return http_stalls_.load(std::memory_order_relaxed); }
     uint64_t http_ceiling_timeouts() const { return http_ceiling_timeouts_.load(std::memory_order_relaxed); }
     int64_t fetch_in_flight_peak() const { return fetch_in_flight_peak_.load(std::memory_order_relaxed); }
+    uint64_t request_cap_wait_ns() const { return request_cap_wait_ns_.load(std::memory_order_relaxed); }
     uint64_t fetch_request_ns() const { return fetch_request_ns_.load(std::memory_order_relaxed); }
     // First fetch's start to the latest fetch's end; 0 before any fetch.
     int64_t fetch_span_ns() const {

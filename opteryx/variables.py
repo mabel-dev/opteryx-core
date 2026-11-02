@@ -334,6 +334,7 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "gcs_transport": (VARCHAR, FromConfig("GCS_TRANSPORT"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "gcs_grpc_connections": (INT64, FromConfig("GCS_GRPC_CONNECTIONS"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "io_budget_percent": (INT64, FromConfig("IO_BUDGET_PERCENT"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "http_max_requests_in_flight": (INT64, FromConfig("HTTP_MAX_REQUESTS_IN_FLIGHT"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Same reasoning as the three above, for the HTTP client that services GCS
     # range reads (src/cpp/http_client.cpp / rugo/src/parquet/io_pipeline.hpp).
     # Named for what they DO, not for the env var they replace — the old env-only

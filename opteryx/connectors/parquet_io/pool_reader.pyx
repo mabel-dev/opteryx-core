@@ -75,6 +75,9 @@ from draken.draken_native import vector_retag_uint32_as_ipv4 as _retag_ipv4
 # column_deserializer._wrap_raw_pyobj — draken_vector_own_string copies the
 # slots+arena into a self-owned block and frees the inputs, so the worker buffers
 # must have been taken (nulled) on the MorselRef first to avoid a double free.
+cdef extern from "core/mem_account.h" nogil:
+    int64_t draken_io_requests_cap()
+
 cdef extern from "core/string_slot.h" nogil:
     ctypedef struct DrakenStringSlot:
         pass
@@ -1132,6 +1135,8 @@ cdef class CppIOPipeline:
             "http_stalls": self.pipeline.http_stalls(),
             "http_ceiling_timeouts": self.pipeline.http_ceiling_timeouts(),
             "fetch_in_flight_peak": self.pipeline.fetch_in_flight_peak(),
+            "request_cap": draken_io_requests_cap(),
+            "request_cap_wait_ns": self.pipeline.request_cap_wait_ns(),
             "fetch_in_flight_avg": _in_flight_avg(self.pipeline.fetch_request_ns(),
                                                   self.pipeline.fetch_span_ns()),
             # Memory admission: the process IO budget the pipeline ran under (0 =
@@ -3516,6 +3521,8 @@ cdef class NativeScanPlan:
             "http_stalls": self.pipeline_ptr.http_stalls(),
             "http_ceiling_timeouts": self.pipeline_ptr.http_ceiling_timeouts(),
             "fetch_in_flight_peak": self.pipeline_ptr.fetch_in_flight_peak(),
+            "request_cap": draken_io_requests_cap(),
+            "request_cap_wait_ns": self.pipeline_ptr.request_cap_wait_ns(),
             "fetch_in_flight_avg": _in_flight_avg(self.pipeline_ptr.fetch_request_ns(),
                                                   self.pipeline_ptr.fetch_span_ns()),
             # Memory admission + PageIndex read-backs — see CppIOPipeline.diagnostics().

@@ -7694,6 +7694,8 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     from opteryx.compiled.structures.memory_pool import process_memory_peak
     from opteryx.compiled.structures.memory_pool import reset_process_memory_peak
     from opteryx.compiled.structures.memory_pool import io_budget_stats
+    from opteryx.compiled.structures.memory_pool import io_request_stats
+    from opteryx.compiled.structures.memory_pool import reset_io_request_peak
     from opteryx.compiled.structures.memory_pool import reset_io_budget_peak
     from opteryx.compiled.structures.memory_pool import flush_chunk_cache
     from opteryx.compiled.structures.memory_pool import chunk_cache_stats
@@ -7851,6 +7853,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
         # Process memory account: the peak is per query from here.
         reset_process_memory_peak()
         reset_io_budget_peak()
+        reset_io_request_peak()
         _t0 = _t.perf_counter_ns()
         handle = native_plan_execute(pool, nplan, dop, out_q, errslot)
         _submit_ns = _t.perf_counter_ns() - _t0
@@ -8041,6 +8044,10 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                 _io = io_budget_stats()
                 telemetry._reading["io_budget_bytes"] = _io["budget"]
                 telemetry._reading["io_held_peak_bytes"] = _io["peak"]
+                # Process request cap, and the most reads every scan had in flight together.
+                _rq = io_request_stats()
+                telemetry._reading["io_requests_cap"] = _rq["cap"]
+                telemetry._reading["io_requests_peak"] = _rq["peak"]
                 # Chunk cache (C7), process-lifetime counters as of this query's end.
                 _cc = chunk_cache_stats()
                 for _k in ("bytes", "entries", "hits", "misses", "inserts", "refused",

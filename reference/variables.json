@@ -333,6 +333,18 @@
         "default_source": "environment",
         "environment_key": "OPTERYX_HTTP_MAX_HOST_CONNECTIONS"
     },
+    "http_max_requests_in_flight": {
+        "name": "http_max_requests_in_flight",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "RESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "HTTP_MAX_REQUESTS_IN_FLIGHT"
+    },
     "http_max_retries": {
         "name": "http_max_retries",
         "type": "INT64",

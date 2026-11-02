@@ -108,6 +108,11 @@ from opteryx.compiled.structures.memory_pool import configure_io_budget as _io_c
 
 _io_configure((_c7_cgroup_bytes() or _c7_physical_bytes()) * _c7_config.IO_BUDGET_PERCENT // 100)
 
+# Process cap on remote reads in flight, shared by every pipeline (same account, same home).
+from opteryx.compiled.structures.memory_pool import configure_io_request_cap as _io_request_cap
+
+_io_request_cap(_c7_config.HTTP_MAX_REQUESTS_IN_FLIGHT)
+
 if OPTERYX_DEBUG:  # pragma: no cover
     from opteryx.debugging import OpteryxImportFinder
 

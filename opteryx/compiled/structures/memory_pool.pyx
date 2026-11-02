@@ -255,6 +255,11 @@ cdef extern from "core/mem_account.h" nogil:
     int64_t draken_io_held()
     int64_t draken_io_peak()
     void draken_io_reset_peak()
+    void draken_io_requests_configure(int64_t cap)
+    int64_t draken_io_requests_cap()
+    int64_t draken_io_requests_in_flight()
+    int64_t draken_io_requests_peak()
+    void draken_io_requests_reset_peak()
 
 
 def configure_io_budget(int64_t budget_bytes) -> None:
@@ -274,6 +279,24 @@ def io_budget_stats() -> dict:
 def reset_io_budget_peak() -> None:
     """Restart the IO high-water mark at what is held now (query start)."""
     draken_io_reset_peak()
+
+
+def configure_io_request_cap(int64_t cap) -> None:
+    """Set the process cap on remote reads in flight (0 = no cap). Called once at import."""
+    if cap < 0:
+        raise ValueError(f"request cap must be >= 0, not {cap}")
+    draken_io_requests_configure(cap)
+
+
+def io_request_stats() -> dict:
+    """The request cap, requests in flight now, and the most in flight since the last reset."""
+    return {"cap": draken_io_requests_cap(), "in_flight": draken_io_requests_in_flight(),
+            "peak": draken_io_requests_peak()}
+
+
+def reset_io_request_peak() -> None:
+    """Restart the request high-water mark at what is in flight now (query start)."""
+    draken_io_requests_reset_peak()
 
 
 cdef extern from "core/mem_account.h" nogil:

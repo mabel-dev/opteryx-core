@@ -29,6 +29,12 @@ std::mutex g_io_mu;
 std::condition_variable g_io_cv;
 uint64_t g_io_generation = 0;   // guarded by g_io_mu
 
+std::atomic<int64_t> g_req_cap{0};
+int64_t g_req_in_flight = 0;            // guarded by g_req_mu
+std::atomic<int64_t> g_req_peak{0};
+std::mutex g_req_mu;
+std::condition_variable g_req_cv;
+
 void io_advance() {
     {
         std::lock_guard<std::mutex> lk(g_io_mu);
@@ -217,6 +223,52 @@ void draken_io_notify(void) { io_advance(); }
 void draken_io_wait(uint64_t seen) {
     std::unique_lock<std::mutex> lk(g_io_mu);
     g_io_cv.wait(lk, [seen] { return g_io_generation != seen; });
+}
+
+void draken_io_requests_configure(int64_t cap) {
+    {
+        std::lock_guard<std::mutex> lk(g_req_mu);
+        g_req_cap.store(cap, std::memory_order_relaxed);
+    }
+    g_req_cv.notify_all();
+}
+int64_t draken_io_requests_cap(void) { return g_req_cap.load(std::memory_order_relaxed); }
+
+int64_t draken_io_requests_acquire(int64_t n, int64_t* waited_ns) {
+    *waited_ns = 0;
+    std::unique_lock<std::mutex> lk(g_req_mu);
+    const int64_t cap = g_req_cap.load(std::memory_order_relaxed);
+    if (cap <= 0 || n <= 0) return 0;
+    const int64_t take = n < cap ? n : cap;
+    if (g_req_in_flight + take > cap) {
+        const auto t0 = std::chrono::steady_clock::now();
+        g_req_cv.wait(lk, [take, cap] { return g_req_in_flight + take <= cap; });
+        *waited_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now() - t0).count();
+    }
+    g_req_in_flight += take;
+    if (g_req_in_flight > g_req_peak.load(std::memory_order_relaxed))
+        g_req_peak.store(g_req_in_flight, std::memory_order_relaxed);
+    return take;
+}
+
+void draken_io_requests_release(int64_t n) {
+    if (n <= 0) return;
+    {
+        std::lock_guard<std::mutex> lk(g_req_mu);
+        g_req_in_flight -= n;
+    }
+    g_req_cv.notify_all();
+}
+
+int64_t draken_io_requests_in_flight(void) {
+    std::lock_guard<std::mutex> lk(g_req_mu);
+    return g_req_in_flight;
+}
+int64_t draken_io_requests_peak(void) { return g_req_peak.load(std::memory_order_relaxed); }
+void draken_io_requests_reset_peak(void) {
+    std::lock_guard<std::mutex> lk(g_req_mu);
+    g_req_peak.store(g_req_in_flight, std::memory_order_relaxed);
 }
 
 }  // extern "C"
