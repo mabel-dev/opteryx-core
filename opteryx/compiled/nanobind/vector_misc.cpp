@@ -493,19 +493,19 @@ void register_vector_misc(nb::module_ &m) {
 
             // Pure C++ from here to the wrap: no Python object is touched, so the
             // GIL is released for the scan itself.
+            uint8_t* validity;
             {
                 nb::gil_scoped_release _gil;
                 // Shared with the registered draken_ipv4_in_cidr kernel so the
                 // executor path and this evaluator path cannot answer
-                // differently. A NULL address is not contained by anything
-                // (false, not NULL), matching vector_ip_in_cidr; a dense vector
-                // skips the gather. See draken/ops/ipv4_predicates.h.
-                draken::ops::ipv4_in_cidr(dv, netmask, base_ip, dst);
+                // differently. A NULL address gives NULL; a dense vector skips
+                // the gather. See draken/ops/ipv4_predicates.h.
+                validity = draken::ops::ipv4_in_cidr(dv, netmask, base_ip, dst);
             }
 
             VecResult r;
             r.data           = dst;
-            r.validity       = nullptr;
+            r.validity       = validity;
             r.selection      = draken_identity_sel(n);
             r.owns_selection = false;
             r.data_length    = n;

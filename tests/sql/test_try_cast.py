@@ -201,11 +201,10 @@ def test_cast_null_to_a_numeric_type_carries_that_type():
     assert _col("SELECT id + CAST(NULL AS INTEGER) AS x FROM $planets")[:3] == [None, None, None]
 
 
-def test_null_stamping_leaves_the_descriptor_and_non_numeric_targets_alone():
-    """IPV4's category is INTEGER but it carries a DESCRIPTOR, and whether a
-    folded null should carry that is a separate question this change does not
-    re-answer. VARBINARY is untouched for the reasons already recorded at the
-    fold. Temporal targets ARE stamped (their unit rides in the ColumnType)."""
+def test_null_stamping_covers_descriptor_and_non_numeric_targets():
+    """Every CAST(NULL AS T) target is stamped (see the fold in
+    logical_planner_builders): IPV4 rides UINT32 with its descriptor in the
+    ColumnType, VARBINARY keeps its tag, temporal targets carry their unit."""
     from draken.draken_native import DrakenType
 
     def _type(sql):
@@ -213,11 +212,8 @@ def test_null_stamping_leaves_the_descriptor_and_non_numeric_targets_alone():
             return morsel.column("x").type
         return None
 
-    for sql in (
-        "SELECT CAST(NULL AS IPV4) AS x",
-        "SELECT CAST(NULL AS VARBINARY) AS x",
-    ):
-        assert _type(sql) == DrakenType.NULL, sql
+    assert _type("SELECT CAST(NULL AS IPV4) AS x") == DrakenType.UINT32
+    assert _type("SELECT CAST(NULL AS VARBINARY) AS x") == DrakenType.VARBINARY
     assert _type("SELECT CAST(NULL AS DATE) AS x") == DrakenType.DATE32
     # VARCHAR was already stamped, and stays stamped
     assert _type("SELECT CAST(NULL AS VARCHAR) AS x") == DrakenType.VARCHAR

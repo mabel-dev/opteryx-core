@@ -533,15 +533,24 @@ def test_containment_rewrite_declines_an_invalid_cidr_rather_than_raising_early(
         one(f"SELECT COUNT(*) AS c FROM ({_RANGE_SOURCE}) AS t WHERE CAST(a AS IPV4) <<= '10.0.0.0/33'")
 
 
-def test_containment_rewrite_preserves_null_handling():
-    """A NULL address is contained by nothing. The kernel returns FALSE and the
-    range returns NULL; WHERE discards both, which is the only reason the
-    rewrite is sound. If containment ever escapes a Filter, this stops holding."""
+def test_containment_of_a_null_address_is_null():
+    """A NULL address gives NULL, from the kernel (projection) and the range
+    rewrite (WHERE) alike — so NOT(<<=) does not select it either."""
     src = (
         "SELECT '10.0.0.1' AS a UNION ALL SELECT NULL UNION ALL SELECT '192.168.1.1'"
     )
+    projected = [
+        v
+        for morsel in opteryx.session().execute_to_morsels(
+            f"SELECT CAST(a AS IPV4) <<= '10.0.0.0/8' AS c FROM ({src}) AS t"
+        )
+        for v in morsel.column("c").to_pylist()
+    ]
+    assert sorted(projected, key=lambda v: (v is not None, v)) == [None, False, True]
+    assert one("SELECT '10.0.0.0/8' >>= CAST(NULL AS IPV4) AS c") == [None]
     assert one(f"SELECT COUNT(*) AS c FROM ({src}) AS t WHERE CAST(a AS IPV4) <<= '10.0.0.0/8'") == [1]
     assert one(f"SELECT COUNT(*) AS c FROM ({src}) AS t WHERE CAST(a AS IPV4) <<= '0.0.0.0/0'") == [2]
+    assert one(f"SELECT COUNT(*) AS c FROM ({src}) AS t WHERE NOT (CAST(a AS IPV4) <<= '10.0.0.0/8')") == [1]
 
 
 # ---------------------------------------------------------------------------

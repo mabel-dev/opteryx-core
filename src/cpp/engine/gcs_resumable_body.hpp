@@ -40,7 +40,7 @@ class GcsResumableBody final : public skene::OutputStream {
     explicit GcsResumableBody(std::string session_uri, size_t chunk_bytes = 32u << 20,
                               int max_attempts = 5, long timeout_ms = 120000)
         : uri_(std::move(session_uri)), chunk_(chunk_bytes), attempts_(max_attempts),
-          timeout_ms_(timeout_ms), http_(4, timeout_ms) {}
+          timeout_ms_(timeout_ms), http_(4) {}
 
     bool valid(std::string* err) const {
         if (uri_.empty()) { *err = "no upload session URI"; return false; }

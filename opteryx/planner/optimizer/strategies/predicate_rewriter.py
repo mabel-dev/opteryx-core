@@ -1354,10 +1354,7 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry, *, plan_context)
     optimisation, and declining leaves the kernel to raise the error it always
     raised, at the point it always raised it.
 
-    NULL: the kernel yields FALSE for a NULL address where the range yields NULL.
-    WHERE discards both, and this strategy only ever visits Filter conditions
-    (see PredicateRewriteStrategy.visit), so the distinction is unobservable. If
-    this is ever reached from a projection, that stops being true.
+    NULL: a NULL address gives NULL from both the kernel and the range.
 
     The result is a BETWEEN, not an `AND` of two comparisons, and that is
     load-bearing. This rewrite runs AFTER SplitConjunctivePredicates, so nothing

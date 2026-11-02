@@ -123,13 +123,13 @@ VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32
             return draken_error_sentinel("draken_ipv4_in_cidr: bool buffer alloc failed");
 
         // Shared with the nanobind twin (vector_misc.cpp) so the two cannot
-        // answer differently. NULL address → false, not NULL; dense vectors take
-        // a vectorisable non-gather path. See ops/ipv4_predicates.h.
-        draken::ops::ipv4_in_cidr(addr, netmask, base_ip, dst);
+        // answer differently. NULL address → NULL; dense vectors take a
+        // vectorisable non-gather path. See ops/ipv4_predicates.h.
+        uint8_t* validity = draken::ops::ipv4_in_cidr(addr, netmask, base_ip, dst);
 
         VecResult r;
         r.data           = dst;
-        r.validity       = nullptr;
+        r.validity       = validity;
         r.selection      = draken_identity_sel(n);
         r.owns_selection = false;
         r.data_length    = n;

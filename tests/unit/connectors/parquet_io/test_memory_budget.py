@@ -177,7 +177,8 @@ def test_two_scans_share_one_budget():
                 g.close()
         stats = io_budget_stats()
     assert sorted(seen[0]) == sorted(seen[1]) == list(range(N))
-    assert stats["peak"] <= budget + 4 * est, (stats, est)
+    # peak is process-wide: bytes another test left held are already in it
+    assert stats["peak"] - held_before <= budget + 4 * est, (stats, est, held_before)
     assert stats["held"] == held_before, stats
 
 

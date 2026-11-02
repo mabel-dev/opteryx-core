@@ -1,7 +1,8 @@
 #pragma once
 // draken/ops/ipv4_predicates.h — IPv4 CIDR containment over a UINT32 column.
 //
-//   ipv4_in_cidr(addr, netmask, base_ip, dst) → packed DRAKEN_BOOL bitmap
+//   ipv4_in_cidr(addr, netmask, base_ip, dst) → packed DRAKEN_BOOL bitmap in dst,
+//                                               returns the result validity
 //
 // The predicate is `(address & netmask) == base`: one AND and one compare per
 // row, no text parsing. That is the whole reason addresses are stored as uint32
@@ -35,12 +36,13 @@
 //   RISC-V gets the same treatment for free.
 //
 // NULL SEMANTICS
-//   A NULL address is contained by nothing → FALSE, not NULL. This matches what
-//   the string-based predicate has always done, and it is why the result carries
-//   no validity mask. Applied branchlessly: the packed byte is ANDed with the
-//   input's validity byte, so a null row's bit is cleared without a per-row
-//   branch. `validity` is indexed by LOGICAL row in both shapes (buffers.h:
-//   1 bit per logical row), so the same AND is correct for a dictionary vector.
+//   A NULL address gives NULL (three-valued logic, like every other comparison):
+//   the result validity is a copy of the address's. FALSE here was a wrong answer
+//   in a projection (`CAST(NULL AS IPV4) <<= '10.0.0.0/8'` read FALSE), and made
+//   NOT(addr <<= net) select NULL addresses. The data bit of a null row is also
+//   cleared (branchlessly, ANDed with the validity byte) so it is canonical 0.
+//   `validity` is indexed by LOGICAL row in both shapes (buffers.h: 1 bit per
+//   logical row), so the same AND and copy are correct for a dictionary vector.
 //
 // BIT-BOUNDARY CORRECTNESS
 //   `dst` must be zero-initialised by the caller (cmp_alloc_bool_buf does this).
@@ -51,6 +53,7 @@
 
 #include "core/buffers.h"
 #include "core/ipv4.h"
+#include "ops/int64_compare.h"  // cmp_copy_validity
 
 namespace draken {
 namespace ops {
@@ -99,7 +102,8 @@ static inline void ipv4_in_cidr_kernel(
     }
 }
 
-// Shape dispatch. `dst` must hold ceil(n/8) zeroed bytes.
+// Shape dispatch. `dst` must hold ceil(n/8) zeroed bytes. Returns the result
+// validity (owned by the caller, nullptr = all valid).
 //
 // The dense claim is checked, not assumed: DRAKEN_SEL_IDENTITY is a layout HINT
 // ("0 = don't know", buffers.h), so a missing flag costs a gather and never a
@@ -107,10 +111,10 @@ static inline void ipv4_in_cidr_kernel(
 // reads data[0 .. n-1] directly, and a vector that claimed identity while
 // carrying a shorter data buffer would read out of bounds rather than merely
 // answer slowly.
-inline void ipv4_in_cidr(const DrakenVector* addr,
-                         uint32_t            netmask,
-                         uint32_t            base_ip,
-                         uint8_t*            dst) noexcept
+inline uint8_t* ipv4_in_cidr(const DrakenVector* addr,
+                             uint32_t            netmask,
+                             uint32_t            base_ip,
+                             uint8_t*            dst)
 {
     const uint32_t  n    = addr->length;
     const uint32_t* data = static_cast<const uint32_t*>(addr->data);
@@ -124,6 +128,7 @@ inline void ipv4_in_cidr(const DrakenVector* addr,
     else
         ipv4_in_cidr_kernel<false>(data, addr->selection, netmask, base_ip,
                                    addr->validity, dst, n);
+    return addr->validity != nullptr ? cmp_copy_validity(addr->validity, n) : nullptr;
 }
 
 }  // namespace ops

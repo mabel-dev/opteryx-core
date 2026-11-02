@@ -4078,7 +4078,11 @@ def expand_between(node):
         # right = the lower-bound literal node, centre = the upper; reused as-is.
         lo = Comparison(value=("GtEq" if lower_incl else "Gt"), left=operand, right=node.right, arena=node.arena)
         hi = Comparison(value=("LtEq" if upper_incl else "Lt"), left=operand, right=node.centre, arena=node.arena)
-        return And(left=lo, right=hi, arena=node.arena)
+        # The AND takes the BETWEEN's identity: a planner-built BETWEEN (CIDR range,
+        # compaction) can be a projected column, which is read by that identity.
+        return And(left=lo, right=hi, alias=node.alias, query_column=node.query_column,
+                   schema_column=node.schema_column, relations=node.relations,
+                   arena=node.arena)
 
     return rewrite_children(node, expand_between)
 
