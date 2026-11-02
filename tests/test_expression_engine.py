@@ -137,10 +137,11 @@ class TestBinaryOpNullHandling:
         assert get_first_value(morsels[0], 0) == 11
 
     def test_null_plus_null(self, session):
-        """Test: NULL + NULL = NULL."""
-        morsels = list(session.execute_to_morsels("SELECT NULL + NULL AS result"))
-        assert len(morsels) > 0
-        assert get_first_value(morsels[0], 0) is None
+        """Test: NULL + NULL is refused at bind time — neither side has a type."""
+        from opteryx.exceptions import IncorrectTypeError
+
+        with pytest.raises(IncorrectTypeError):
+            list(session.execute_to_morsels("SELECT NULL + NULL AS result"))
 
 
 # ===========================================================================
