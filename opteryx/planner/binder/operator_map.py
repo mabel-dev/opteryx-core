@@ -464,6 +464,29 @@ def _is_internal_operator(operator: str) -> bool:
 # shortcut: the comparisons known to return BOOLEAN; the operator catalog records no
 # result type — derive this from it if it ever does.
 _BOOLEAN_COMPARISONS = frozenset({"Eq", "NotEq", "Lt", "LtEq", "Gt", "GtEq", "InList", "NotInList"})
+_NULL_ADOPTING_OPERATORS = frozenset(
+    {
+        "Plus", "Minus", "Multiply", "Divide", "Modulo", "MyIntegerDivide",
+        "BitwiseAnd", "BitwiseOr", "BitwiseXor", "ShiftLeft", "ShiftRight",
+    }
+)
+
+
+def null_operand_adopts(operator, null_node, other_ct):
+    """The type an untyped NULL literal operand of arithmetic or bitwise *operator*
+    takes from the other operand — `x + NULL` is NULL typed as x — or None when it
+    takes none: not such an operator, not a NULL literal, or no same-type entry for
+    the pair to use."""
+    if operator not in _NULL_ADOPTING_OPERATORS or null_node.node_type != NodeType.LITERAL:
+        return None
+    if null_node.type is None or null_node.type.category != OT.NULL:
+        return None
+    if other_ct is None or other_ct.category == OT.NULL:
+        return None
+    category = _SQL_TO_LC.get(other_ct.category, other_ct.category)
+    if OPERATOR_MAP.get((category, category, operator)) is None:
+        return None
+    return other_ct
 
 
 def determine_type(node):
@@ -588,6 +611,30 @@ def determine_type(node):
     # a CAST source, sort key or DISTINCT key. Which ops apply is checked elsewhere.
     if operator in _BOOLEAN_COMPARISONS and OT.NULL in (left_lc, right_lc):
         return BOOLEAN
+
+    # The binder retypes an untyped NULL literal operand to the other side's type
+    # (null_operand_adopts); what reaches here still untyped is refused by name.
+    if operator in _NULL_ADOPTING_OPERATORS and OT.NULL in (left_lc, right_lc):
+        from opteryx.expression import format_expression
+
+        if left_lc == right_lc:
+            raise IncorrectTypeError(
+                compose(
+                    f"{md_code(format_expression(node))} cannot be evaluated, because "
+                    f"neither side has a type to give the result",
+                    f"Give one side a type, for example {md_code('NULL::INTEGER + NULL')}",
+                )
+            )
+        typed_ct = right_ct if left_lc == OT.NULL else left_ct
+        if typed_ct is not None:
+            raise IncorrectTypeError(
+                compose(
+                    f"{md_code(format_expression(node))} cannot be evaluated, because "
+                    f"the NULL has no type and {md_code(_category_name(typed_ct.category))} "
+                    f"does not work with this operator against its own type",
+                    f"Cast the NULL to the type you mean, for example {md_code('NULL::INTERVAL')}",
+                )
+            )
 
     if left_lc is None or left_lc == OT.NULL:
         return None

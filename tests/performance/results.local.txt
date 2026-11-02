@@ -7,7 +7,7 @@ make clickbench-json          427180ms (12-OCT) [3-runs only]
 make clickbench-avro          140630ms (12-OCT) [3-runs only]
 make clickbench-odata          99112ms (25-OCT) [3-runs only, 8 fails]
 make clickbench-orc             6486ms (29-OCT)
-make tpch-sf1                  273.8ms (31-OCT) [0.79x]
+make tpch-sf1                  271.4ms (02-NOV) [0.78x]
 make tpch-sf10                1509.2ms (31-OCT) [0.41x]
 make tpch-sf100              20814.2ms (22-OCT) [0.68x]
 make tpcds-sf001               706.7ms (01-NOV) [1.23x]

@@ -19,6 +19,7 @@ from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar import fixed_value_function
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.binder.operator_map import null_operand_adopts
 from opteryx.planner.binder.pattern_compile import compile_rlike_pattern
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import (
@@ -1207,6 +1208,27 @@ def _bind_new_column(node, node_type, column_name, context, schemas):
         # is reported as that.
         if node_type == NodeType.COMPARISON_OPERATOR and node.value in ("RLike", "NotRLike"):
             compile_rlike_pattern(node, plan_context=context.plan_context)
+
+        # `x + NULL`: the NULL literal takes x's type — value, type and schema column
+        # together — so the pair binds and lowers like any typed one.
+        if node_type == NodeType.BINARY_OPERATOR and node.left is not None and node.right is not None:
+            for null_node, other_node in ((node.left, node.right), (node.right, node.left)):
+                adopted = null_operand_adopts(
+                    node.value,
+                    null_node,
+                    other_node.schema_column.column_type if other_node.schema_column is not None else None,
+                )
+                if adopted is not None:
+                    _old_sc = null_node.schema_column
+                    null_node.type = adopted
+                    null_node.schema_column = context.plan_context.columns.constant(
+                        _old_sc.name,
+                        column_type=adopted,
+                        aliases=list(_old_sc.aliases) if _old_sc.aliases else [],
+                        value=None,
+                        nullable=False,
+                    )
+                    break
 
         result_type = determine_type(node)  # ColumnType | None (Phase 2)
         # D-2: when the result is DECIMAL, also derive (precision, scale).

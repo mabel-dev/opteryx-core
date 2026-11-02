@@ -460,10 +460,10 @@ _TIMETRAVEL_CONSTANT = (
 )
 
 
-def _fold_constant_expression(node, plan_context):
-    """(value, ColumnType) of a constant time-travel expression: bound with no
-    relations in scope, then folded natively. Anything that does not fold to a DATE,
-    a TIMESTAMP or a string to read as one is refused."""
+def _bind_and_fold(node, plan_context, query_id):
+    """A closed constant expression, bound with no relations in scope and then folded
+    natively — the parse-time clauses (time travel, IN lists) have no binder pass of
+    their own. NESTED wrappers are looked through."""
     from opteryx.compiled.planner.binder_core import inner_binder
     from opteryx.models import ExecutionContext, QueryTelemetry
     from opteryx.planner.binder.binding_context import BindingContext
@@ -471,12 +471,19 @@ def _fold_constant_expression(node, plan_context):
 
     # A fresh context: NOW() / CURRENT_DATE mean the moment this clause is planned.
     context = BindingContext.initialize(
-        query_id="time-travel", execution_context=ExecutionContext(), plan_context=plan_context
+        query_id=query_id, execution_context=ExecutionContext(), plan_context=plan_context
     )
     bound, _ = inner_binder(node, context)
     folded = fold_constants(bound, QueryTelemetry.detached(), plan_context=plan_context)
     while folded.node_type == NodeType.NESTED:
         folded = folded.centre
+    return folded
+
+
+def _fold_constant_expression(node, plan_context):
+    """(value, ColumnType) of a constant time-travel expression. Anything that does
+    not fold to a DATE, a TIMESTAMP or a string to read as one is refused."""
+    folded = _bind_and_fold(node, plan_context, "time-travel")
     category = folded.type.category if folded.node_type == NodeType.LITERAL and folded.type is not None else None
     if category not in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP, LogicalCategory.VARCHAR):
         raise UnsupportedSyntaxError(
@@ -2523,20 +2530,14 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None, *, plan_context
     # left/right/value but no `.type`), so the type/value reads below would
     # see `.type is None` and either crash building the array or read a false
     # "mixed types" mismatch against the literal beside it. Fold each
-    # non-literal element to a concrete literal now, reusing the optimizer's
-    # constant folder — there's no schema/binder context yet for its usual
-    # (later) pass to run against, but every element here is a closed constant
-    # subtree by construction: the IN-list grammar admits no column
-    # references (`x IN (SELECT ...)` is the separate in_subquery() builder).
+    # non-literal element to a concrete literal now: bound with no relations in
+    # scope (native folding needs typed operands), then folded. Every element
+    # here is a closed constant subtree by construction: the IN-list grammar
+    # admits no column references (`x IN (SELECT ...)` is the separate
+    # in_subquery() builder).
     if any(v.node_type != NodeType.LITERAL for v in value_nodes):
-        from opteryx.models import QueryTelemetry
-        from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
-
-        # Folding here is incidental to building one IN-list; its counters belong
-        # to no query, so take an unregistered sink rather than the private base.
-        _telemetry = QueryTelemetry.detached()
         value_nodes = [
-            v if v.node_type == NodeType.LITERAL else fold_constants(v, _telemetry, plan_context=plan_context)
+            v if v.node_type == NodeType.LITERAL else _bind_and_fold(v, plan_context, "in-list")
             for v in value_nodes
         ]
         not_literal = [v for v in value_nodes if v.node_type != NodeType.LITERAL]

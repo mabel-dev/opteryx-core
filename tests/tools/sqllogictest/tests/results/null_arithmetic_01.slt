@@ -1,0 +1,72 @@
+# Arithmetic and bitwise operators with an untyped NULL operand: the NULL takes the
+# other operand's type, so `x + NULL` is NULL typed as `x + x`. `NULL + NULL` has no
+# type to adopt and is refused, as is a NULL against a type that has no same-type
+# form of the operator (DATE + DATE). Before this rule every such expression was
+# refused by the native engine; constant folding had answered the literal forms
+# through the deleted Python evaluator.
+
+query I
+SELECT NULL + 1
+----
+NULL
+
+query R
+SELECT NULL * 2.5
+----
+NULL
+
+query I
+SELECT (NULL + 1) IS NULL
+----
+1
+
+query I
+SELECT COUNT(*) FROM $planets WHERE (id + NULL) IS NULL
+----
+9
+
+query I
+SELECT COUNT(*) FROM $planets WHERE (NULL - id) IS NULL
+----
+9
+
+query I
+SELECT COUNT(*) FROM $planets WHERE (id % NULL) IS NULL
+----
+9
+
+query I
+SELECT COUNT(*) FROM $planets WHERE (id & NULL) IS NULL
+----
+9
+
+query I
+SELECT COUNT(*) FROM $planets WHERE (id << NULL) IS NULL
+----
+9
+
+query I
+SELECT COUNT(*) FROM $planets WHERE id = NULL + 1
+----
+0
+
+query I
+SELECT COUNT(*) FROM $planets WHERE id NOT IN (1 + 1, NULL + 1)
+----
+0
+
+query I
+SELECT (NULL - INTERVAL '1' DAY) IS NULL
+----
+1
+
+query I
+SELECT (CURRENT_DATE - NULL) IS NULL
+----
+1
+
+statement error IncorrectTypeError
+SELECT NULL + NULL
+
+statement error IncorrectTypeError
+SELECT CURRENT_DATE + NULL
