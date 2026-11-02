@@ -9,9 +9,8 @@
 // nanobind, no GIL. Each kernel maps a string-family operand to a lowercase-hex
 // DRAKEN_VARCHAR digest.
 //
-// Semantics are pinned to the pre-existing nanobind entry points in
-// opteryx/compiled/nanobind/vector_hash_codec.cpp (vector_md5 / vector_sha*),
-// which remain as the registrar's callable_ref and as the Python-visible API:
+// Semantics were pinned to the former nanobind entry points (vector_md5 /
+// vector_sha*, deleted with the Python evaluator):
 //   - operand must be VARCHAR / NVARCHAR / VARBINARY; anything else fails loud.
 //   - output is DRAKEN_VARCHAR, lowercase hex, 2 chars per digest byte.
 //   - digests hash the raw slot bytes; a null row stays null.

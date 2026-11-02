@@ -32,7 +32,7 @@ def _category_name(category) -> str:
 
 # Phase 3: OPERATOR_MAP is now authored directly on LogicalCategory (LC) keys.
 # Integer widths collapse to LC.INTEGER, floats to LC.FLOAT, JSONB/STRUCT to
-# LC.NVARCHAR — the map carries 325 entries. The count is asserted by
+# LC.NVARCHAR — the map carries 323 entries. The count is asserted by
 # test_operator_map_entry_count_is_accurate (tests/planner/test_operator_map.py)
 # rather than maintained by hand: it had drifted through at least three changes
 # (330 was stale before the ILIKE VARBINARY rows were added, and stale again by 13
@@ -198,7 +198,8 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.INTEGER     , LC.VARCHAR     , 'IPContainedBy'           ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.INTEGER     , 'IPContains'              ): OMT(_B, None, 100.0),
     (LC.INTEGER     , LC.INTEGER     , 'ShiftRight'              ): OMT(_I, None, 100.0),
-    (LC.INTERVAL    , LC.DATE        , 'Minus'                   ): OMT(_T, None, 100.0),
+    # No INTERVAL - DATE/TIMESTAMP: an interval minus an instant means nothing (the
+    # Python evaluator answered it as instant - interval). Refused, ruled 2026-11-02.
     (LC.INTERVAL    , LC.DATE        , 'Plus'                    ): OMT(_T, None, 100.0),
     (LC.UUID        , LC.ARRAY       , 'InList'                  ): OMT(_B, None, 100.0),
     (LC.UUID        , LC.ARRAY       , 'NotInList'               ): OMT(_B, None, 100.0),
@@ -216,7 +217,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.INTERVAL    , LC.INTERVAL    , 'Minus'                   ): OMT(_G, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'NotEq'                   ): OMT(_B, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'Plus'                    ): OMT(_G, None, 100.0),
-    (LC.INTERVAL    , LC.TIMESTAMP   , 'Minus'                   ): OMT(_T, None, 100.0),
     (LC.INTERVAL    , LC.TIMESTAMP   , 'Plus'                    ): OMT(_T, None, 100.0),
     (LC.NVARCHAR    , LC.ARRAY       , 'InList'                  ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.ARRAY       , 'NotInList'               ): OMT(_B, None, 100.0),

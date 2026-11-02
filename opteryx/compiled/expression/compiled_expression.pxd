@@ -128,7 +128,8 @@ cdef enum BCOpcode:
     BC_FUNCTION          = 15
     BC_EXTRACTION        = 16
     BC_CAST              = 17
-    BC_CASE              = 18
+    # 18 was BC_CASE (the Python CASE closure; CASE now lowers to IF_THEN_ELSE).
+    # Value left unused, not reissued.
     # Pre-materialised scalar literal: literal_obj holds a constant-shape Vector
     # (data_length==1) built ONCE at bind time. The executor re-stamps only the
     # logical length per morsel — no Python object, no isinstance, no re-encode.
@@ -195,15 +196,13 @@ ctypedef struct BytecodeInstr:
     int arity                # for BC_DNF / BC_CNF / BC_FUNCTION
     int op_code              # OP_EQ / OP_GT / ... for BC_COMPARE
     int flags                # bitfield of BCCompareFlag
-    int bool_value           # 0/1 for BC_LOAD_LIT_BOOL; 1 = is_nb_callable for BC_FUNCTION (legacy)
+    int bool_value           # 0/1 for BC_LOAD_LIT_BOOL; guard offset for BC_LAZY
     PyObject* literal_obj    # for BC_LOAD_LIT_SCALAR; key for BC_EXTRACTION
-    PyObject* compare_op_str # for BC_COMPARE (AnyOp fallback); op string for BC_BINARY_OP / BC_EXTRACTION
     int16_t left_type_code   # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
     int16_t right_type_code  # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
     PyObject* column_identity # for BC_LOAD_COL — bytes
     PyObject* column_name     # for BC_LOAD_COL — bytes
-    PyObject* callable_ref   # for BC_FUNCTION — kernel callable (legacy Python path) or NULL (C native)
-    # Phase 9b: C function ABI fields (zero if legacy Python path)
+    # C function ABI fields
     void* kernel_fn          # C function pointer: VecResult (*)(void* ctx, ...) for BC_FUNCTION/EXTRACTION/CAST/BINARY_OP
     void* ctx_ptr            # context struct pointer (op_code/unit/sub_op_code, etc.) or NULL
     # Width of a VECTOR result, from the bind-time declared return type; 0 = not a

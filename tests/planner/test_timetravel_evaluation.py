@@ -152,3 +152,27 @@ def test_a_time_of_day_survives_normalization():
     plan_context=plan_context)
 
     assert ts == datetime.datetime(2026, 9, 20, 13, 45)
+
+
+def test_interval_minus_a_date_is_refused():
+    """`INTERVAL - DATE` has no meaning. The Python time-travel evaluator answered it
+    as `DATE - INTERVAL` (operands swapped); the clause is now bound and folded like
+    any other constant, so it is refused by the same rule as everywhere else."""
+    import pytest
+    from opteryx.exceptions import IncorrectTypeError
+
+    with pytest.raises(IncorrectTypeError):
+        extract_timetravel_timestamp(
+            _parse_version("SELECT * FROM $planets TIMESTAMP AS OF INTERVAL '7' DAY - CURRENT_DATE"),
+            plan_context=PlanContext(),
+        )
+
+
+def test_a_non_temporal_value_is_refused():
+    import pytest
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    with pytest.raises(UnsupportedSyntaxError):
+        extract_timetravel_timestamp(
+            _parse_version("SELECT * FROM $planets TIMESTAMP AS OF 1 + 2"), plan_context=PlanContext()
+        )

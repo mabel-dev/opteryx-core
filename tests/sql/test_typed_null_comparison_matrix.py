@@ -143,5 +143,29 @@ def test_typed_null_comparison(template, a_value, a_type, b_value, b_type):
     assert not wrong, (wrong if base_ok else {"value form refused": str(base)[:160], **wrong})
 
 
+# CASE cannot produce an ARRAY, so the matrix's column forms never reach an array
+# column; JSONB_OBJECT_KEYS gives one. An untyped NULL is outside the matrix too.
+_KEYS = (
+    "(SELECT id, JSONB_OBJECT_KEYS(IIF(id > 4, '{\"a\": 1}', '{\"b\": 2}')) AS k "
+    "FROM $planets) AS t"
+)
+
+
+@pytest.mark.parametrize(
+    "sql,expected",
+    [
+        (f"SELECT k @> CAST(NULL AS ARRAY<VARCHAR>) AS x FROM {_KEYS}", [None] * 9),
+        (f"SELECT k @>> CAST(NULL AS ARRAY<VARCHAR>) AS x FROM {_KEYS}", [None] * 9),
+        (f"SELECT COUNT(*) AS x FROM {_KEYS} WHERE NOT (k @> CAST(NULL AS ARRAY<VARCHAR>))", [0]),
+        ("SELECT ['a', 'b'] @> NULL AS x", [None]),
+        ("SELECT '{\"a\": 1}' @? NULL AS x", [None]),
+        ("SELECT CAST(167772161 AS IPV4) <<= NULL AS x", [None]),
+        ("SELECT NULL >>= CAST(167772161 AS IPV4) AS x", [None]),
+    ],
+)
+def test_null_constant_operand_answers_null(sql, expected):
+    assert _column(sql) == expected
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

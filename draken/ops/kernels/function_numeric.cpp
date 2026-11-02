@@ -304,9 +304,9 @@ VecResult draken_power(void* ctx, const DrakenVector* const* args, uint32_t narg
 //
 // IEEE semantics, deliberately — same reasoning as draken_power, and here the folded
 // path is already OBSERVED to behave this way: `SELECT LOG(0, 10)` answers -inf and
-// `SELECT LOG(-1, 10)` answers NaN today, via bind-time folding. vector_misc.cpp's
-// vector_log documents that contract explicitly ("log(0)=-inf, log(-1)=NaN"). This
-// kernel reproduces it so the column path and the folded path agree.
+// `SELECT LOG(-1, 10)` answers NaN, the contract the former nanobind vector_log
+// documented ("log(0)=-inf, log(-1)=NaN"). This kernel is that contract for the
+// column path and the folded path alike.
 VecResult draken_log(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 2)
         return draken_error_sentinel("draken_log: expected 2 arguments (value, base)");

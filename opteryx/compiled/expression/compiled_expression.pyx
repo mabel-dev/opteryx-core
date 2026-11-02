@@ -848,7 +848,10 @@ def _build_array_membership_blob(values):
     here. The blob kind is therefore inferred from the LITERAL values, and the
     kernel verifies it against the actual child element type at RUN time, failing
     loud on a mismatch (e.g. `int_array @> ('a','b')`) rather
-    than silently answering false."""
+    than silently answering false. An EMPTY needle set is a valid blob (count 0):
+    the kernel answers it without reading an element."""
+    if isinstance(values, (list, tuple, set, frozenset)) and len(values) == 0:
+        return _pack_membership_blob([], 0, 0)
     vals = _membership_values(values)
     if vals is None:
         return None
@@ -856,6 +859,8 @@ def _build_array_membership_blob(values):
         return _pack_membership_blob(vals, 0, 0)
     if all(isinstance(v, (str, bytes)) for v in vals):
         return _pack_membership_blob(vals, 1, 0)
+    if all(isinstance(v, float) for v in vals):
+        return _pack_membership_blob(vals, 2, 0)
     return None   # mixed / unsupported literal types stay on the Python path
 
 
@@ -954,13 +959,10 @@ def _build_single_item_blob(value, item_ct, element_ct):
     return None
 
 
-# Result-handling flag bits (read by execute_bytecode after kernel return).
-# Set at bind time; used to dispatch result wrapping without isinstance/type checks.
-BC_RESULT_NEEDS_NB_WRAP = 0x10  # result is a raw nanobind Vector → wrap in Cython shim
-BC_RESULT_WRAP_AS_BOOL  = 0x20  # nb path: wrap as BoolVector (with NEEDS_NB_WRAP);
-                                # C-native path: marks a bool-mask-returning kernel
-                                # (LIKE family) for filter admission in _operators
-BC_RESULT_NO_DV         = 0x40  # result has no DV* (constant / scalar / not a vector) → store NULL in dv_stack
+# Result flag: marks a bool-mask-returning kernel (LIKE family, ...) for filter
+# admission in _operators. (0x10 and 0x40 were the Python evaluator's result-wrap
+# flags; left unused, not reissued.)
+BC_RESULT_WRAP_AS_BOOL  = 0x20
 
 # Binary op string → BCBinaryOpCode. Built once at first use.
 _BOP_CODE = {
@@ -979,12 +981,8 @@ _BOP_CODE = {
 }
 
 # P9.1: single source of truth for which (op, operand-types) dispatch C-native
-# via the unified draken_binop kernel. Increment 1 covers integer/float
-# ARITHMETIC and integer BITWISE — fixed-width results, ctx carries op_code only
-# (no decimal scales). DECIMAL, string concat, temporal and IP are NOT listed yet
-# and stay on the resolve_binary_op closure until their families are ported. This
-# is a deterministic, fail-loud routing decision (no silent fallback): a binop is
-# either explicitly C-native here or explicitly on the closure.
+# via the unified draken_binop kernel. A deterministic, fail-loud routing decision:
+# a binop is either explicitly C-native here or refused — there is no closure.
 _BINOP_NATIVE_INT = frozenset({
     "INT8", "INT16", "INT32", "INT64",
     # E33: draken_binop routes these to fi_int_arith (mixed with a narrow signed
@@ -1440,6 +1438,31 @@ cdef Py_ssize_t _linearize_cond_param(
     return _linearize(param, bc, depth)
 
 
+cdef Py_ssize_t _push_null_bool(CompiledBytecode bc, Py_ssize_t depth) except -1:
+    """Push a BOOLEAN NULL constant: the answer of a predicate whose bind-time
+    constant operand (a `@?` path, a `@>` needle set) is NULL, whatever the rows."""
+    return _push_bool_constant(bc, depth, None)
+
+
+cdef Py_ssize_t _push_bool_constant(CompiledBytecode bc, Py_ssize_t depth, object value) except -1:
+    """Push a BOOLEAN constant (True / False / None) as a native literal load —
+    TRUE/FALSE through BC_LOAD_LIT_BOOL, NULL as a typed BOOL null constant."""
+    cdef Vector const_lit
+    cdef BytecodeInstr* slot = bc._push_instr()
+    if value is None:
+        const_lit = _materialise_constant_literal(None, <int>DRAKEN_BOOL)
+        slot.opcode = BC_LOAD_LIT_CONST
+        bc._hold(const_lit)
+        slot.literal_obj = <PyObject*>const_lit
+    else:
+        slot.opcode = BC_LOAD_LIT_BOOL
+        slot.bool_value = 1 if value else 0
+    depth += 1
+    if depth > bc.max_stack_depth:
+        bc.max_stack_depth = depth
+    return depth
+
+
 cdef Py_ssize_t _linearize(
     CompiledExpression* node,
     CompiledBytecode bc,
@@ -1473,7 +1496,7 @@ cdef Py_ssize_t _linearize(
     cdef bint lower_incl, upper_incl
     cdef object bin_left_sc, bin_right_sc, bin_left_type, bin_right_type, bin_op_str
     cdef object unary_op_str
-    cdef object func_val, func_ref_obj, func_py_node, func_ref_meta, callable_obj
+    cdef object func_val, func_ref_obj, func_py_node, func_ref_meta
     cdef object _co_params
     cdef Py_ssize_t _co_i
     cdef object extr_op_str, extr_key, extr_callable, extr_key_vec
@@ -1481,7 +1504,7 @@ cdef Py_ssize_t _linearize(
     cdef object inlist_set_obj
     cdef int coerce_phys
     cdef object coerce_lit_val
-    cdef object cast_target_type, cast_unit, cast_params, cast_kernel, cast_py_node
+    cdef object cast_target_type, cast_unit, cast_params, cast_py_node
     cdef object src
     cdef object const_lit
 
@@ -1978,12 +2001,32 @@ cdef Py_ssize_t _linearize(
         # The needle literal is whatever the producer built — the rewriter emits a
         # list for AtArrow and a set for ArrayContainsAll — and
         # _build_array_membership_blob takes any of list/tuple/set/frozenset.
+        # A NULL needle set answers NULL for every array, column or literal — so it
+        # is settled here, before the column-only eligibility below.
+        if op_str in ("AtArrow", "ArrayContainsAll") and node.right != NULL \
+                and node.right.node_type == _NT_LITERAL and node.right.value != NULL \
+                and <object>node.right.value is None:
+            return _push_null_bool(bc, depth)
+        # An empty ARRAY literal holds no element, so no needle is in it: `@>` is
+        # FALSE, `@>>` is TRUE only for an empty needle set. (Its element type is
+        # unknowable, so the kernel's needle-kind check cannot be asked.)
+        if op_str in ("AtArrow", "ArrayContainsAll") and node.left != NULL \
+                and node.right != NULL and node.right.node_type == _NT_LITERAL \
+                and node.left.node_type == _NT_LITERAL \
+                and isinstance(<object>node.left.value, (list, tuple)) \
+                and len(<object>node.left.value) == 0 \
+                and isinstance(<object>node.right.value, (list, tuple, set, frozenset)):
+            return _push_bool_constant(
+                bc, depth, op_str == "ArrayContainsAll" and len(<object>node.right.value) == 0)
         if op_str in ("AtArrow", "ArrayContainsAll") and node.left != NULL \
                 and node.right != NULL \
                 and node.right.node_type == _NT_LITERAL and node.right.value != NULL \
                 and (node.left.node_type == _NT_IDENTIFIER
                      or node.left.node_type == _NT_EVALUATED
-                     or node.left.node_type == _NT_AGGREGATOR):
+                     or node.left.node_type == _NT_AGGREGATOR
+                     or (node.left.node_type == _NT_LITERAL
+                         and node.left.physical_type == <int>DRAKEN_ARRAY
+                         and isinstance(<object>node.left.value, (list, tuple)))):
             _aco_blob = _build_array_membership_blob(<object>node.right.value)
             if _aco_blob is not None:
                 from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _aco_alloc
@@ -1999,9 +2042,15 @@ cdef Py_ssize_t _linearize(
                     slot.flags = (BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
                                   | BC_C_NATIVE_CHILD)
                     slot.kernel_fn = <void*>(<unsigned long long>_aco_fn)
-                    # bc.count - 2 is the array's BC_LOAD_COL (this FUNCTION slot is
-                    # bc.count - 1) — same indexing the `= ANY` child path uses.
-                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                    # bc.count - 2 is the array's load (this FUNCTION slot is
+                    # bc.count - 1) — same indexing the `= ANY` child path uses. A
+                    # column load names the child by identity; an ARRAY literal has
+                    # no identity, so the slot carries the literal, whose own child
+                    # the cache resolvers read (draken_array_child_unwrap).
+                    if bc.instrs[bc.count - 2].opcode == BC_LOAD_LIT_CONST:
+                        slot.literal_obj = bc.instrs[bc.count - 2].literal_obj
+                    else:
+                        slot.column_identity = bc.instrs[bc.count - 2].column_identity
                     if _aco_ctx is not None:
                         bc._hold(_aco_ctx)
                         slot.ctx_ptr = <void*>(<unsigned long long>_aco_ctx.ctx_ptr)
@@ -2037,6 +2086,9 @@ cdef Py_ssize_t _linearize(
                         f"@? requires a string/JSON document on the left; got {_jpe_left_cat!r}"
                     )
             _jpe_path = <object>node.right.value
+            if _jpe_path is None:
+                # A NULL path answers NULL for every document.
+                return _push_null_bool(bc, depth)
             if isinstance(_jpe_path, str):
                 _jpe_path = _jpe_path.encode("utf-8")
             if isinstance(_jpe_path, bytes):
@@ -2057,10 +2109,15 @@ cdef Py_ssize_t _linearize(
                         slot.ctx_ptr = <void*>(<unsigned long long>_jpe_ctx.ctx_ptr)
                     return sub_depth   # doc pushed, fn pops 1 pushes 1 — net 0
 
+        # A NULL value is NULL against any (non-empty) list.
+        if op_str in ("InList", "NotInList") and node.left != NULL \
+                and node.left.node_type == _NT_LITERAL and node.left.value != NULL \
+                and <object>node.left.value is None:
+            return _push_null_bool(bc, depth)
+
         # IN-list — bind-time lowering to the C-ABI draken_in_list kernel for
         # plain literal collections over integer-family, FLOAT64 or string columns.
-        # Lists containing NULL keep the Python path (three-valued IN semantics
-        # the blob cannot carry — engine admission then rejects loud).
+        # NULL members never reach here: in_list() lifts them out into `x = NULL`.
         if op_str in ("InList", "NotInList") and node.right != NULL \
                 and node.right.node_type == _NT_LITERAL:
             _il_obj = <object>node.right.value
@@ -2088,7 +2145,10 @@ cdef Py_ssize_t _linearize(
         inlist_set_obj = None
         if node.right != NULL and node.right.node_type == _NT_LITERAL:
             inlist_set_obj = <object>node.right.value
-            if isinstance(inlist_set_obj, (list, tuple, set, frozenset)):
+            # An INTERVAL literal's value is a (months, us) tuple, but one scalar —
+            # the same distinction the LITERAL linearizer draws.
+            if node.right.physical_type != <int>DRAKEN_INTERVAL \
+                    and isinstance(inlist_set_obj, (list, tuple, set, frozenset)):
                 right_is_inlist_literal = True
                 # The string in-list edge (vector_in_list) is bytes-only — encode
                 # str members to bytes ONCE at bind (str must not reach the Draken
@@ -2333,17 +2393,10 @@ cdef Py_ssize_t _linearize(
         if slot.op_code == BOP_UNKNOWN:
             raise NotImplementedError(f"compiled_expression: unknown binary op {bin_op_str!r}")
 
-        # Phase 6: resolve the kernel at bind time.
-        from opteryx.expression.evaluator.arithmetic import resolve_binary_op
-        binop_kernel = resolve_binary_op(slot.op_code, bin_left_type, bin_right_type)
-        bc._hold(binop_kernel)
-        slot.callable_ref = <PyObject*>binop_kernel
-
-        # P9.1 (executor flip): route C-native families to the unified draken_binop
-        # kernel. When _c_native_binop allow-lists this (op, types), the executor
-        # dispatches it directly via BC_INSTR_C_NATIVE (no closure, no Python
-        # objects). resolve_binary_op stays in callable_ref as the path for every
-        # binop not yet C-native. _c_native_binop is the single source of truth.
+        # Route C-native families to the unified draken_binop kernel. When
+        # _c_native_binop allow-lists this (op, types) the slot is C-native; any other
+        # binop stays non-native, which execution refuses and folding declines.
+        # _c_native_binop is the single source of truth.
         bin_left_phys = getattr(bin_left_type.physical, "name", None) if bin_left_type is not None else None
         bin_right_phys = getattr(bin_right_type.physical, "name", None) if bin_right_type is not None else None
         bin_result_phys = getattr(bin_result_type.physical, "name", None) if bin_result_type is not None else None
@@ -2385,14 +2438,9 @@ cdef Py_ssize_t _linearize(
                     # by the engine at the plan-known ExprProject boundary
                     slot.flags |= BC_C_NATIVE_DESC
 
-        # Phase 1 result-wrap pattern: kernels return nanobind Vectors.
-        slot.flags |= BC_RESULT_NEEDS_NB_WRAP
-        # Binary ops never return BOOL, so BC_RESULT_WRAP_AS_BOOL stays false.
-
         # Keep type codes for debugging / introspection (not used in executor).
         slot.left_type_code = _sql_type_to_code(bin_left_type)
         slot.right_type_code = _sql_type_to_code(bin_right_type)
-        # Note: slot.compare_op_str no longer needed for BC_BINARY_OP, but field stays.
         return sub_depth - 1   # pop 2, push 1
 
     # ------------------------------------------------------------------
@@ -2459,7 +2507,6 @@ cdef Py_ssize_t _linearize(
         slot = bc._push_instr()
         slot.opcode = BC_UNARY_OP
         slot.op_code = <int>_UOP_CODE.get(unary_op_str, UOP_UNKNOWN)
-        # compare_op_str not set for BC_UNARY_OP — executor uses op_code int directly
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
@@ -2530,13 +2577,11 @@ cdef Py_ssize_t _linearize(
             raise ValueError(
                 f"compiled_expression: FUNCTION '{func_val}' has no function_ref — not bound"
             )
-        callable_obj = func_ref_meta.selected_overload.kernel.callable_ref
-
         # Every arm below keys off the function name — kernel lookup by
         # `draken_{name}`, and the _sub_/_affix_/_tr_/_extr_ lowering maps. node.value is
         # the name as parsed, so an alias (CEIL, SUBSTR, UCASE, ...) misses every one of
-        # them and silently takes the Python callable_ref. The catalog canonicalised the
-        # name during resolution; take it from there.
+        # them and lands non-native. The catalog canonicalised the name during
+        # resolution; take it from there.
         func_val = func_ref_meta.function_definition.name
 
         # `constant_only` is ENFORCED, for every function that declares it.
@@ -2656,9 +2701,6 @@ cdef Py_ssize_t _linearize(
                 if _sb_ctx is not None:
                     bc._hold(_sb_ctx)
                     slot.ctx_ptr = <void*>(<unsigned long long>_sb_ctx.ctx_ptr)
-                # No callable_ref: this is a c-native kernel — there is no Python
-                # fallback, and every VM arm gates on BC_INSTR_C_NATIVE before ever
-                # reading callable_ref.
                 return sub_depth   # operand pushed, fn pops 1 pushes 1
 
         # Column-valued SUBSTRING/LEFT/RIGHT — reached only when _sb_ok above didn't
@@ -2749,8 +2791,13 @@ cdef Py_ssize_t _linearize(
                 _tr_sc = <object>node.parameters[_tr_operand].schema_column
                 _tr_ct = (_tr_sc.column_type if _tr_sc is not None else None)
                 _tr_phys = (_tr_ct.physical.name if _tr_ct is not None else "")
+                # A DATE truncates to TIMESTAMP[us] — TRUNC_date's declared return type.
+                _tr_uv = -1
                 if _tr_phys == "TIMESTAMP64" and _tr_ct.logical is not None:
                     _tr_uv = int(_tr_ct.logical.unit.value)
+                elif _tr_phys == "DATE32":
+                    _tr_uv = 2   # MICROSECONDS
+                if _tr_uv >= 0:
                     from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _tr_alloc
                     _tr_fn, _tr_ctx = _resolve_kernel_and_context(
                         "draken_date_trunc", _tr_alloc, (_tr_unit, 0, 0, 0, 0, _tr_uv, 0))
@@ -2775,8 +2822,7 @@ cdef Py_ssize_t _linearize(
         # This arm is TOTAL for the 2-argument form: every path below either emits
         # the instruction or raises. It must not be allowed to decline, because
         # falling through would reach the generic name-only kernel lookup with
-        # arity=2 (the kernel would reject it as "expected 1 argument") or, past
-        # that, the Python callable_ref, whose humanize() takes no mode at all.
+        # arity=2 (the kernel would reject it as "expected 1 argument").
         #
         # The single-argument form is deliberately NOT handled here — it keeps its
         # existing route through the generic lookup below, where op_code is 0,
@@ -2874,8 +2920,6 @@ cdef Py_ssize_t _linearize(
                     if _dp_ctx is not None:
                         bc._hold(_dp_ctx)
                         slot.ctx_ptr = <void*>(<unsigned long long>_dp_ctx.ctx_ptr)
-                    # No callable_ref: c-native kernel, no Python fallback (VM arms
-                    # gate on BC_INSTR_C_NATIVE before reading callable_ref).
                     return sub_depth   # operand pushed, fn pops 1 pushes 1 — net +1
 
         # DATEDIFF(part, start, end) / DATE_DIFF — bind-time lowering to the C-ABI
@@ -3120,32 +3164,15 @@ cdef Py_ssize_t _linearize(
                 raise ValueError("compiled_expression: FUNCTION parameter NULL")
             sub_depth = _linearize_cond_param(func_val.upper() if func_val else "", i, node.parameters[i], bc, sub_depth)
 
-        # Pre-compute nb_func flag at bind time — eliminates runtime
-        # `type(callable).__name__ == "nb_func"` string comparison per call.
-        is_nb_callable = type(callable_obj).__name__ == "nb_func"
-
         slot = bc._push_instr()
         slot.opcode = BC_FUNCTION
         slot.arity = <int>n
-        slot.bool_value = 1 if is_nb_callable else 0
-
-        # Set result-wrap flags based on kernel return type (resolved at bind time).
-        # This eliminates runtime isinstance/type checks on the executor path.
         slot.flags = 0
-        if is_nb_callable:
-            slot.flags |= BC_RESULT_NEEDS_NB_WRAP
-            _ensure_sql_types()
-            # Phase 5: inferred_return_type is ColumnType; check .category for BOOLEAN.
-            _irt = func_ref_meta.inferred_return_type
-            if _irt is not None and _irt.category is _LogicalCategory_BOOLEAN:
-                slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
         _fn_rt = func_ref_meta.inferred_return_type
 
-        # Phase 9b: Resolve C kernel function pointer for function calls.
-        # Function kernels (Phase 9a-fn) are under development; resolution is optional.
-        # If a C kernel exists, use it; otherwise, fall back to Python callable_ref.
-        # This is the intended behaviour while function kernels are being ported.
+        # Resolve the C kernel for the call. A function with no native kernel stays
+        # non-native: execution refuses it and constant folding declines it.
         func_name = func_val.upper() if func_val else None
         if func_name is not None:
             # Scalar functions over a DECIMAL operand need the operand's scale — a
@@ -3184,12 +3211,11 @@ cdef Py_ssize_t _linearize(
                         _fn_ctx_arg = (0, _fn_dec_sc, 0, 0, 0, 0, 0)
             # TRUNC is overloaded in the catalog — TRUNC_numeric (kernel id "numeric",
             # draken_trunc), TRUNC_date and TRUNC_timestamp (kernel ids "date"/
-            # "timestamp", still Python-only) all share the name "TRUNC". The registry
-            # lookup below resolves by NAME ("draken_trunc"), which cannot distinguish
-            # overloads, so a bare name check would wrongly mark the temporal overloads
-            # C-native too and defer their (currently unavoidable) failure from PLAN
-            # time to RUN time. Gate on the bind-time-selected overload's kernel id so
-            # only TRUNC_numeric is ever offered to the registry.
+            # "timestamp", lowered by the draken_date_trunc arm above) all share the
+            # name "TRUNC". The registry lookup below resolves by NAME ("draken_trunc"),
+            # which cannot distinguish overloads, so a bare name check would hand a
+            # temporal operand the numeric kernel. Gate on the bind-time-selected
+            # overload's kernel id so only TRUNC_numeric is ever offered to the registry.
             _fn_skip_lookup = (
                 func_name == "TRUNC"
                 and getattr(func_ref_meta.selected_overload.kernel, "id", None) != "numeric"
@@ -3204,7 +3230,7 @@ cdef Py_ssize_t _linearize(
             # LITERAL the dedicated arm consumes) — and either crash
             # ("expected N arguments") or read ctx==NULL. When the dedicated arm
             # didn't fire (its eligibility check failed — e.g. a NULL/untyped
-            # operand), fall through to the Python callable_ref, never here.
+            # operand), the slot stays non-native and is refused, never here.
             if func_name in ("DATEDIFF", "TIMEDIFF", "UNIXTIME", "TIME_BUCKET", "FORMAT_TIMESTAMP"):
                 _fn_skip_lookup = True
             # SUBSTRING/SUBSTR: the dedicated literal-ctx arm above (_sb_ok) already
@@ -3213,11 +3239,10 @@ cdef Py_ssize_t _linearize(
             # name-only lookup would otherwise still match "draken_substring_2"/
             # "draken_substring_3" in the registry (registered for the literal-ctx
             # kernel draken_substring) with NO ctx and arity=n — same
-            # "expected N arguments" crash class as DATEDIFF/TIMEDIFF above. Fall
-            # through to the Python callable_ref path (currently unsupported at PLAN
-            # time — no C-native kernel handles column-valued from_pos/count yet)
-            # rather than dispatch the literal-only kernel against operands it cannot
-            # read.
+            # "expected N arguments" crash class as DATEDIFF/TIMEDIFF above. The slot
+            # stays non-native and is refused (no C-native kernel handles
+            # column-valued from_pos/count yet) rather than dispatch the literal-only
+            # kernel against operands it cannot read.
             if func_name in ("SUBSTRING", "SUBSTR"):
                 _fn_skip_lookup = True
             # Unary ARRAY reducers — SORT(arr) -> ARRAY, GREATEST/LEAST(arr) ->
@@ -3226,14 +3251,21 @@ cdef Py_ssize_t _linearize(
             # draken_cast_array_to_varchar — same ARRAY-elements-unreachable-from-
             # DrakenVector* wall). Only a DIRECT column load has a child to resolve,
             # so an indirect/computed array argument (e.g. SORT(some_function(x)))
-            # is NOT eligible — force it down the Python callable_ref path rather
-            # than dispatch a kernel that cannot see its own input. bc.instrs[
+            # is NOT eligible — it stays non-native and is refused rather than
+            # dispatch a kernel that cannot see its own input. bc.instrs[
             # bc.count - 2] is the arg's terminal instruction (this FUNCTION slot
             # was just pushed as bc.instrs[bc.count - 1]) — same indexing CAST's
             # BC_C_NATIVE_CHILD check above uses.
+            # An ARRAY literal is eligible for the SCALAR reducers too: its own child is
+            # resolved from the literal the instruction carries (see the `@>` lowering).
+            # Not SORT — its ARRAY result has no materialization from a literal.
             _reduce_child_eligible = (
                 func_name in ("SORT", "GREATEST", "LEAST") and n == 1 and bc.count >= 2
-                and bc.instrs[bc.count - 2].opcode == BC_LOAD_COL
+                and (bc.instrs[bc.count - 2].opcode == BC_LOAD_COL
+                     or (func_name != "SORT"
+                         and bc.instrs[bc.count - 2].opcode == BC_LOAD_LIT_CONST
+                         and node.parameters[0].node_type == _NT_LITERAL
+                         and node.parameters[0].physical_type == <int>DRAKEN_ARRAY))
             )
             if func_name in ("SORT", "GREATEST", "LEAST") and not _reduce_child_eligible:
                 _fn_skip_lookup = True
@@ -3386,19 +3418,18 @@ cdef Py_ssize_t _linearize(
                     # func_fn_t(ctx, args[], nargs) shape, reading args[0]=parent
                     # (offsets) / args[1]=child (elements).
                     slot.flags |= BC_C_NATIVE_CHILD
-                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
-            # else: kernel not available yet (pending Phase 9a-fn); callable_ref path remains
+                    if bc.instrs[bc.count - 2].opcode == BC_LOAD_LIT_CONST:
+                        slot.literal_obj = bc.instrs[bc.count - 2].literal_obj
+                    else:
+                        slot.column_identity = bc.instrs[bc.count - 2].column_identity
+            # else: no native kernel — the slot stays non-native and is refused.
 
-        bc._hold(callable_obj)
-        slot.callable_ref = <PyObject*>callable_obj
         if n == 0:
             return depth + 1
         return sub_depth - n + 1   # pop n, push 1
 
     # ------------------------------------------------------------------
-    # NT_CAST — compile source expression, resolve at bind time.
-    # Phase 5: resolve_cast(source_sql, target_type, args, unit) returns a
-    # pre-specialized kernel/closure; stored as callable_ref, invoked per-morsel.
+    # NT_CAST — compile source expression, resolve the native kernel at bind time.
     # ------------------------------------------------------------------
     if nt == _NT_CAST:
         if node.left == NULL:
@@ -3428,14 +3459,13 @@ cdef Py_ssize_t _linearize(
 
         # Phase 5: get the source operand's physical type from schema_column for
         # bind-time resolution. source_phys_name is the physical DrakenType name —
-        # the discriminant both resolve_cast (closure) and _c_native_cast (C kernel)
-        # key on. None when the binder left the source untyped (e.g. ARRAY columns).
+        # the discriminant _c_native_cast keys on. None when the binder left the source untyped (e.g. ARRAY columns).
         # source_is_ipv4 is the SECOND half of the source discriminant, and it is
         # not optional: an IPv4 column's physical type IS "UINT32", identical to a
         # plain unsigned column's, so the physical name alone cannot choose between
         # rendering '192.168.1.1' and rendering '3232235777'. The IPv4-ness lives
         # only in the bound ColumnType's LogicalKind descriptor (CLAUDE.md §14),
-        # so read it here and hand it to both resolvers explicitly.
+        # so read it here and hand it over explicitly.
         _ensure_sql_types()
         source_phys_name = None
         source_is_ipv4 = False
@@ -3451,6 +3481,16 @@ cdef Py_ssize_t _linearize(
                         and _src_logical.kind == _LogicalKind_IPV4
                     )
         _src_nt = node.left.node_type
+        if source_phys_name is None and _src_nt == _NT_LITERAL:
+            # An unbound literal (an IN-list element folded before binding) carries
+            # its own ColumnType; without it the cast resolved to no native kernel.
+            source_sql = (<object>node.left.source_node).type
+            if source_sql is not None:
+                source_phys_name = getattr(source_sql.physical, "name", None)
+                _src_logical = source_sql.logical
+                source_is_ipv4 = (
+                    _src_logical is not None and _src_logical.kind == _LogicalKind_IPV4
+                )
         if source_phys_name is None and (
             _src_nt == _NT_AND or _src_nt == _NT_OR or _src_nt == _NT_XOR
             or _src_nt == _NT_NOT or _src_nt == _NT_COMPARISON_OPERATOR
@@ -3460,40 +3500,13 @@ cdef Py_ssize_t _linearize(
             # boolean_simplication._inverted), which left the cast's source untyped.
             source_phys_name = "BOOL"
 
-        from opteryx.expression.casts import resolve_cast
-        try:
-            cast_kernel, _cast_needs_nb_input, _cast_returns_raw = resolve_cast(
-                source_phys_name, cast_target_type, cast_params, unit=cast_unit,
-                safe=cast_is_try, source_is_ipv4=source_is_ipv4
-            )
-        except NotImplementedError as e:
-            # A cast the engine refuses is NOT SUPPORTED — say so with the typed
-            # error, not a bare ValueError that reads as a defect. `resolve_cast`'s
-            # refusals already name the pair they refused, so the message is passed
-            # through untouched: prepending the pair a second time produced
-            # "Unsupported CAST: DECIMAL → DATE: No native CAST DECIMAL → DATE".
-            raise NotSupportedError(str(e))
-
         slot = bc._push_instr()
         slot.opcode = BC_CAST
         slot.flags = 0
         _ensure_sql_types()
 
-        # X (thin closures): wrap / input-unwrap are driven by the resolver, not by
-        # per-morsel type dispatch.
-        #   returns_raw  → kernel yields a raw nanobind Vector; executor wraps it.
-        #   needs_nb_input → kernel wants a raw nanobind Vector; executor unwraps the
-        #                    Cython shim to ._nb before the call (slot.bool_value flag).
-        if _cast_returns_raw:
-            slot.flags |= BC_RESULT_NEEDS_NB_WRAP
-        slot.bool_value = 1 if _cast_needs_nb_input else 0
-
-        # Y (executor flip): resolve the C-native kernel for this pair. When one
-        # exists (real + registered, fixed-width result), the executor dispatches
-        # it directly via BC_INSTR_C_NATIVE — no Python object per morsel. The
-        # resolve_cast closure remains in callable_ref as the fallback for every
-        # cast not yet C-native (strings, timestamps, DECIMAL/VECTOR/ARRAY, the
-        # late-bound escape hatch). _c_native_cast is the single source of truth.
+        # Resolve the C-native kernel for this pair; _c_native_cast is the single
+        # source of truth. A typed pair with no kernel is refused below.
         from opteryx.expression.casts import _c_native_cast
         _cn = _c_native_cast(source_phys_name, cast_target_type, safe=cast_is_try,
                              source_is_ipv4=source_is_ipv4)
@@ -3716,8 +3729,9 @@ cdef Py_ssize_t _linearize(
                                | BC_C_NATIVE_CHILD)
                 slot.column_identity = bc.instrs[bc.count - 2].column_identity
 
-        bc._hold(cast_kernel)
-        slot.callable_ref = <PyObject*>cast_kernel
+        if (slot.flags & BC_INSTR_C_NATIVE) == 0 and source_phys_name is not None:
+            raise NotSupportedError(
+                f"CAST {source_phys_name} → {cast_target_type} is not supported")
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
@@ -3803,7 +3817,7 @@ cdef Py_ssize_t _linearize(
         slot = bc._push_instr()
         slot.opcode = BC_EXTRACTION
         slot.op_code = sub_op
-        slot.flags = BC_RESULT_NEEDS_NB_WRAP
+        slot.flags = 0
 
         # Resolve the C-ABI kernel.
         #
@@ -3818,7 +3832,14 @@ cdef Py_ssize_t _linearize(
         # rejecting the query.
         # _NT_IDENTIFIER/_NT_EVALUATED/_NT_AGGREGATOR are exactly the node types that
         # lower to BC_LOAD_COL.
-        _extr_child_eligible = (
+        # An ARRAY literal is eligible too: its own child is resolved from the literal
+        # the instruction carries (see the `@>` lowering).
+        _extr_lit_array = (
+            sub_op == BC_EXTR_MAP_ARRAY and bc.count >= 2
+            and bc.instrs[bc.count - 2].opcode == BC_LOAD_LIT_CONST
+            and (<Vector>(<object>bc.instrs[bc.count - 2].literal_obj)).unified().type == DRAKEN_ARRAY
+        )
+        _extr_child_eligible = _extr_lit_array or (
             sub_op == BC_EXTR_MAP_ARRAY
             and (node.left.node_type == _NT_IDENTIFIER
                  or node.left.node_type == _NT_EVALUATED
@@ -3863,8 +3884,11 @@ cdef Py_ssize_t _linearize(
                 # instruction and passes it as the second ABI operand.
                 slot.flags |= BC_C_NATIVE_CHILD
                 # bc.count-1 is THIS slot (just pushed); bc.count-2 is the operand's
-                # own BC_LOAD_COL, which carries the identity to resolve the child by.
-                slot.column_identity = bc.instrs[bc.count - 2].column_identity
+                # own load: a column's identity, or the ARRAY literal itself.
+                if _extr_lit_array:
+                    slot.literal_obj = bc.instrs[bc.count - 2].literal_obj
+                else:
+                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
 
         # Store the extracted literal (bytes or Vector).
         if extr_literal is not None:
@@ -3875,92 +3899,6 @@ cdef Py_ssize_t _linearize(
             slot.bool_value = slot_bool_val
 
         return sub_depth   # pop 1, push 1 — net 0
-
-    # ------------------------------------------------------------------
-    # NT_CASE — compile all WHEN conditions and THEN/ELSE results to
-    # bytecode at bind time; resolve output type and select assembly kernel
-    # at bind time; store a pre-built closure in callable_ref.
-    # At execution time BC_CASE simply calls callable_ref(morsel) — no
-    # runtime type dispatch.
-    # ------------------------------------------------------------------
-    if nt == _NT_CASE:
-        src = <object>node.source_node
-
-        cond_bcs = [build_bytecode(lower(c)) for c in src.conditions]
-        result_bcs = [build_bytecode(lower(r)) for r in src.results]
-        else_bc = build_bytecode(lower(src.else_result)) if src.else_result is not None else None
-
-        # Phase 7: resolve output type at bind time.
-        #
-        # The binder resolves the CASE output type and records it on
-        # src.schema_column.column_type (the first non-NULL THEN/ELSE branch
-        # type — see binder.py NodeType.CASE). That is the authoritative
-        # output type and the source of truth for kernel selection.
-        #
-        # A CASE node has no `inferred_type`; the retired attribute-bag Node read
-        # it as None, so relying on it left kernel_type
-        # at the -1 runtime-dispatch sentinel for EVERY case. Runtime dispatch
-        # picks the kernel from the first non-None branch result vector, which is
-        # wrong when the first branch is a typed-NULL: a string CASE whose first
-        # THEN is NULL (e.g. `CASE WHEN .. THEN NULL ELSE str_col END`) was
-        # dispatched to the FIXED kernel, producing a fixed-width vector mislabelled
-        # as the string output column — a heap-corrupting type confusion downstream.
-        _ensure_sql_types()
-        _case_sc = src.schema_column
-        _case_ct = _case_sc.column_type if _case_sc is not None else None
-        case_inferred_type = _case_ct.category if _case_ct is not None else None
-
-        # Select the assembly kernel based on the inferred result type.
-        # All THEN/ELSE branches must agree on type (enforced by binder).
-        from opteryx.expression.evaluator.case_eval import build_case_fn
-
-        # Kernel type constants match the DEF values in case_eval.pyx
-        _ASSEMBLE_BOOL = 0
-        _ASSEMBLE_FIXED = 1
-        _ASSEMBLE_STRING = 2
-
-        # Determine kernel type from inferred type
-        if case_inferred_type is _LogicalCategory_BOOLEAN:
-            kernel_type = _ASSEMBLE_BOOL
-        elif case_inferred_type in _STRING_FAMILY:
-            kernel_type = _ASSEMBLE_STRING
-        elif case_inferred_type is None:
-            # Output type unresolved (e.g. every branch is NULL). Defer to runtime
-            # type dispatch via the -1 sentinel in build_case_fn.
-            kernel_type = -1
-        else:
-            # Fixed-width (numeric, date, timestamp, etc.)
-            kernel_type = _ASSEMBLE_FIXED
-
-        # A DECIMAL CASE also needs its declared (precision, scale) carried into the
-        # assembler: the branch parts come straight off the expression VM, which
-        # leaves DECIMAL results descriptor-less (the descriptor is re-attached at
-        # the ExprProject boundary, downstream of this path). Bind time is the only
-        # place that still knows the scale.
-        _case_dec_p = -1
-        _case_dec_s = -1
-        _case_sc = src.schema_column
-        _case_ct = _case_sc.column_type if _case_sc is not None else None
-        if _case_ct is not None and _case_ct.logical is not None and \
-                getattr(_case_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128"):
-            _case_dec_p = int(_case_ct.logical.precision)
-            _case_dec_s = int(_case_ct.logical.scale)
-
-        case_callable = build_case_fn(cond_bcs, result_bcs, else_bc, kernel_type,
-                                      _case_dec_p, _case_dec_s)
-
-        slot = bc._push_instr()
-        slot.opcode = BC_CASE
-        # CASE closure returns a nanobind Vector; set NEEDS_NB_WRAP.
-        slot.flags = BC_RESULT_NEEDS_NB_WRAP
-        if case_inferred_type is _LogicalCategory_BOOLEAN:
-            slot.flags |= BC_RESULT_WRAP_AS_BOOL
-        bc._hold(case_callable)
-        slot.callable_ref = <PyObject*>case_callable
-        depth += 1
-        if depth > bc.max_stack_depth:
-            bc.max_stack_depth = depth
-        return depth
 
     # ------------------------------------------------------------------
     # Bind-time invariant: every supported node type has an explicit branch
@@ -4087,14 +4025,109 @@ def expand_between(node):
     return rewrite_children(node, expand_between)
 
 
+def expand_case(node):
+    """PLAN-TIME tree rewrite: CASE becomes a right-folded IF_THEN_ELSE function
+    chain over the c-native blend kernel (draken_if_then_else).
+
+    The kernel blends same-type raw domains only, so literal THEN/ELSE branches are
+    retyped to the CASE's bound output ColumnType (DECIMAL: exact quantize only;
+    FLOAT: numeric literals). A missing ELSE becomes a typed NULL literal, and a CASE
+    whose every branch is an untyped NULL is the NULL literal. The outermost node keeps
+    the CASE's schema_column so downstream identity references still resolve.
+
+    Called from `lower()`, so a CASE has ONE lowering wherever it is compiled — the
+    runtime plan and constant folding alike. Non-mutating; nodes are minted in the
+    CASE's own arena."""
+    import decimal as _dec
+    from opteryx.compiled.structures.expressions import Function
+    from opteryx.compiled.structures.expressions import Literal
+    from opteryx.compiled.structures.expressions import is_expression
+    from opteryx.compiled.structures.expressions import rewrite_children
+    from opteryx.expression import NodeType
+
+    if not is_expression(node):
+        return node
+    if node.node_type != NodeType.CASE:
+        return rewrite_children(node, expand_case)
+
+    arena = node.arena
+    conditions = [expand_case(c) for c in node.conditions]
+    results = [expand_case(r) for r in node.results]
+    els = expand_case(node.else_result) if node.else_result is not None else None
+    sc = node.schema_column
+    out_ct = sc.column_type if sc is not None else None
+    if out_ct is None and all(
+        b is None or (b.node_type == NodeType.LITERAL and b.value is None)
+        for b in list(results) + [els]
+    ):
+        # Every branch is an untyped NULL: the CASE is NULL, whatever matches.
+        from opteryx.types.logical_type import NULL as _CT_NULL
+
+        nl = Literal(value=None, arena=arena)
+        nl.type = _CT_NULL
+        return nl.with_fields(schema_column=sc, alias=node.alias)
+
+    def _coerce(r):
+        if out_ct is None or r.node_type != NodeType.LITERAL:
+            return r
+        v = r.value
+        phys = getattr(out_ct.physical, "name", "")
+        if v is None:
+            nl = Literal(value=None, arena=arena)
+            nl.type = out_ct
+            return nl
+        if isinstance(v, bool) or not isinstance(v, (int, float, _dec.Decimal)):
+            return r
+        if phys in ("DECIMAL", "DECIMAL128") and out_ct.logical is not None:
+            scale = int(out_ct.logical.scale)
+            q = _dec.Decimal(v) if isinstance(v, float) else _dec.Decimal(str(v))
+            rescaled = q.quantize(_dec.Decimal(1).scaleb(-scale))
+            if rescaled != q:
+                return r   # inexact — leave it, kernel fails loud
+            # The literal carries the CASE's own declared type, both tiers alike:
+            # pinning a DECIMAL128 target to DECIMAL(18, scale) rescaled `ELSE 1.5000`
+            # past its precision. _materialise_constant_literal routes on the tag and
+            # on precision > 18, so a DECIMAL128-typed literal materialises correctly.
+            nl = Literal(value=rescaled, arena=arena)
+            nl.type = out_ct
+            return nl
+        if phys in ("FLOAT64", "FLOAT32"):
+            nl = Literal(value=float(v), arena=arena)
+            nl.type = out_ct
+            return nl
+        return r
+
+    # Same-scale contract: the blend kernel widens {DECIMAL, DECIMAL128} raw values
+    # assuming equal scales, so a non-literal decimal branch at a DIFFERENT scale
+    # cannot blend correctly. Refuse rather than answer wrong.
+    if (out_ct is not None and out_ct.logical is not None
+            and getattr(out_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")):
+        for br in list(results) + ([els] if els is not None else []):
+            if br.node_type == NodeType.LITERAL:
+                continue
+            br_ct = br.schema_column.column_type if br.schema_column is not None else None
+            if (br_ct is not None and br_ct.logical is not None
+                    and getattr(br_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")
+                    and int(br_ct.logical.scale) != int(out_ct.logical.scale)):
+                raise NotSupportedError(
+                    "CASE: branches are DECIMALs at different scales "
+                    f"({br_ct} and {out_ct}), which cannot be blended; CAST the "
+                    "branches to one DECIMAL type.")
+
+    acc = _coerce(els) if els is not None else _coerce(Literal(value=None, arena=arena))
+    for cond, res in zip(reversed(conditions), reversed(results)):
+        acc = Function(value="IF_THEN_ELSE", parameters=[cond, _coerce(res), acc], arena=arena)
+    return acc.with_fields(schema_column=sc, alias=node.alias)
+
+
 def lower(node):
     """Lower an expression tree into a CompiledExpressionHandle.
 
-    BETWEEN is expanded to a pair of compares FIRST — see `expand_between`. This
-    is the single entry point that builds the C node tree, so no consumer can
-    reach the executor with a domain-blind range check."""
+    CASE and BETWEEN are expanded FIRST — see `expand_case` and `expand_between`.
+    This is the single entry point that builds the C node tree, so no consumer can
+    reach the executor with a CASE closure or a domain-blind range check."""
     cdef CompiledExpressionHandle handle = CompiledExpressionHandle()
-    handle._root = handle._arena.lower(expand_between(node))
+    handle._root = handle._arena.lower(expand_between(expand_case(node)))
     return handle
 
 

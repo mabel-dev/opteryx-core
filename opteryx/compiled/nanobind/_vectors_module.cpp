@@ -20,54 +20,14 @@
 namespace nb = nanobind;
 
 // Forward declarations — one per vector_*.cpp translation unit.
-void register_vector_accessors(nb::module_ &m);
 void register_vector_ann(nb::module_ &m);
-void register_vector_array_reduce(nb::module_ &m);
-void register_vector_bitwise(nb::module_ &m);
-void register_vector_bool_ops(nb::module_ &m);
-void register_vector_casts(nb::module_ &m);
-void register_vector_codec(nb::module_ &m);
-void register_vector_hash_codec(nb::module_ &m);
 void register_vector_json(nb::module_ &m);
-void register_vector_math(nb::module_ &m);
-void register_vector_misc(nb::module_ &m);
-void register_vector_selection_concat(nb::module_ &m);
 void register_vector_sketch_reduce(nb::module_ &m);
-void register_vector_special(nb::module_ &m);
-void register_vector_split_native(nb::module_ &m);
-void register_vector_string_case(nb::module_ &m);
-void register_vector_string_misc(nb::module_ &m);
-void register_vector_string_misc2(nb::module_ &m);
-void register_vector_string_misc3(nb::module_ &m);
-void register_vector_array_membership(nb::module_ &m);
-void register_vector_string_slice(nb::module_ &m);
-void register_vector_temporal_arith(nb::module_ &m);
-void register_vector_temporal_convert(nb::module_ &m);
 void register_disk_reader(nb::module_ &m);  // src/cpp/disk_reader_native.cpp
 
 NB_MODULE(vectors, m) {
-    register_vector_accessors(m);
     register_vector_ann(m);
-    register_vector_array_reduce(m);
-    register_vector_bitwise(m);
-    register_vector_bool_ops(m);
-    register_vector_casts(m);
-    register_vector_codec(m);
-    register_vector_hash_codec(m);
     register_vector_json(m);
-    register_vector_math(m);
-    register_vector_misc(m);
-    register_vector_selection_concat(m);
     register_vector_sketch_reduce(m);
-    register_vector_special(m);
-    register_vector_split_native(m);
-    register_vector_string_case(m);
-    register_vector_string_misc(m);
-    register_vector_string_misc2(m);
-    register_vector_string_misc3(m);
-    register_vector_array_membership(m);
-    register_vector_string_slice(m);
-    register_vector_temporal_arith(m);
-    register_vector_temporal_convert(m);
     register_disk_reader(m);
 }

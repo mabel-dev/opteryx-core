@@ -15,8 +15,8 @@
  * Cast kernels: numeric / boolean conversions (Phase 9c).
  *
  * Real VecResult-producing bodies extracted from the proven nanobind compute in
- * opteryx/compiled/nanobind/vector_casts.cpp. The nanobind functions now shim to
- * these kernels (core lives in draken; the binding layer calls across).
+ * the former opteryx/compiled/nanobind/vector_casts.cpp (deleted with the Python
+ * evaluator); these kernels are the only implementation.
  *
  * Dense output: out[i] holds logical row i; selection is the global identity.
  * Null rows write a placeholder value and clear their validity bit (copied 1:1

@@ -21,7 +21,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     """
     import draken.draken_native as _dn
 
-    from opteryx.compiled.nanobind.vectors import vector_ip_trunc as _ip_trunc_kernel
 
     _greatest_kernel = _dn.vector_array_greatest
     _least_kernel    = _dn.vector_array_least
@@ -85,7 +84,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_ip_trunc_kernel,
                     ),
                 ),
             ),
@@ -107,7 +105,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_greatest_kernel,
                         cost_us_per_million=4482220.29,
                     ),
                 ),
@@ -130,7 +127,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_least_kernel,
                         cost_us_per_million=4419443.37,
                     ),
                 ),
@@ -153,7 +149,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=_sort_kernel,
                         cost_us_per_million=4.92,
                     ),
                 ),
@@ -167,26 +162,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
 
     These functions are grouped with utility functions per the requested merge.
     """
-    # Local imports to keep startup lightweight
-    from opteryx.compiled.nanobind.vectors import (
-        vector_contains_all,
-        vector_contains_any,
-    )
-    from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
-    from opteryx.expression.functions.implementations.utility import humanize as _of_humanize
-    from opteryx.expression.functions.implementations.utility import (
-        jsonb_object_keys as _of_jsonb_object_keys,
-    )
-    from opteryx.expression.functions.implementations.utility import (
-        generate_series as _of_generate_series,
-    )
-
-    class other_functions:
-        null_if = staticmethod(_of_null_if)
-        humanize = staticmethod(_of_humanize)
-        jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
-        generate_series = staticmethod(_of_generate_series)
-
     # Parameter short-hands
     _any = ParameterSpec(name="val", type_family="any")
 
@@ -271,7 +246,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             kernel=KernelSpec(
                 engine="draken",
                 id="default",
-                callable_ref=other_functions.generate_series,
                 cost_us_per_million=cost,
             ),
         )
@@ -299,7 +273,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "JSONB_OBJECT_KEYS",
-            other_functions.jsonb_object_keys,
             _CT_ARRAY(_CT_VARIANT),
             # "string", not "any": it parses its argument as a JSON document, so
             # a non-string never worked — it failed inside the native engine as
@@ -324,7 +297,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "HUMANIZE",
-            other_functions.humanize,
             _CT_VARCHAR,
             # `mode` names the scale system to render into — a CLOSED set
             # ('words' | 'compact' | 'bytes' | 'si' | 'time' | 'clock' |
@@ -373,7 +345,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,   # c-native: draken_cosine_similarity_text
                         cost_us_per_million=893647.14,
                     ),
                 ),
@@ -406,7 +377,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,   # c-native: draken_cosine_distance_text
                         cost_us_per_million=884934.76,
                     ),
                 ),

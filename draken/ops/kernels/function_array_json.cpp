@@ -52,6 +52,7 @@
 // right (`x = ANY([1,2,3])`) lowers separately, to draken_in_list.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -438,18 +439,60 @@ VecResult acm_run(void* ctx, const DrakenVector* const* args, uint32_t nargs,
     if (!out) throw std::bad_alloc();
     std::memset(out, 0, nb > 0 ? nb : 1);
 
-    const bool str_kind = (c->kind != 0);
+    // No needles: ANY of nothing is false, ALL of nothing is true — no element read,
+    // so no element-type check applies.
+    if (c->count == 0u) {
+        if (want_all)
+            for (uint32_t i = 0; i < n; ++i)
+                if (aj_row_valid(parent, i)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        VecResult r{};
+        r.data           = out;
+        r.validity       = nullptr;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_BOOL;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        return r;
+    }
+
+    const bool str_kind = (c->kind == 1);
+    const bool float_kind = (c->kind == 2);
     if (str_kind && !aj_is_string_family(child->type) && child->type != DRAKEN_VARIANT) {
         draken_free(out);
         return draken_error_sentinel_fmt(
             "%s: needle set is string-typed but the array's elements are type %d", who,
             (int)child->type);
     }
+    if (float_kind && child->type != DRAKEN_FLOAT64 && child->type != DRAKEN_FLOAT32) {
+        draken_free(out);
+        return draken_error_sentinel_fmt(
+            "%s: needle set is float-typed but the array's elements are type %d", who,
+            (int)child->type);
+    }
     const auto* sa = str_kind ? static_cast<const DrakenStringArena*>(child->data) : nullptr;
-    const auto* items = str_kind ? nullptr : reinterpret_cast<const int64_t*>(payload);
+    const auto* items = (str_kind || float_kind) ? nullptr : reinterpret_cast<const int64_t*>(payload);
+
+    // kind 2 needles use the engine's float equality, as draken_in_list does: NaN = NaN
+    // (split out to one slot, after the others) and -0.0 = 0.0 (equivalent under `<`).
+    std::vector<double> fitems;
+    bool f_nan = false;
+    if (float_kind) {
+        for (uint32_t e = 0; e < c->count; ++e) {
+            double d;
+            std::memcpy(&d, payload + static_cast<size_t>(e) * sizeof(double), sizeof(double));
+            if (std::isnan(d)) f_nan = true;
+            else fitems.push_back(d);
+        }
+        std::sort(fitems.begin(), fitems.end());
+        fitems.erase(std::unique(fitems.begin(), fitems.end()), fitems.end());
+    }
+    const uint32_t ncount = float_kind
+        ? static_cast<uint32_t>(fitems.size()) + (f_nan ? 1u : 0u) : c->count;
 
     std::vector<uint8_t> seen;                 // ALL: which needles this row hit
-    if (want_all) seen.resize(c->count);
+    if (want_all) seen.resize(ncount);
 
     for (uint32_t i = 0; i < n; ++i) {
         if (!aj_row_valid(parent, i)) continue;          // NULL row -> false
@@ -464,6 +507,21 @@ VecResult acm_run(void* ctx, const DrakenVector* const* args, uint32_t nargs,
             const uint32_t phys = child->selection[jj];
             if (str_kind) {
                 const int32_t idx = acm_find_string(payload, c->count, sa, phys);
+                if (idx >= 0) {
+                    if (!want_all) { hit_any = true; break; }
+                    seen[static_cast<size_t>(idx)] = 1u;
+                }
+            } else if (float_kind) {
+                const double d = child->type == DRAKEN_FLOAT64
+                    ? static_cast<const double*>(child->data)[phys]
+                    : static_cast<double>(static_cast<const float*>(child->data)[phys]);
+                int64_t idx = -1;
+                if (std::isnan(d)) {
+                    if (f_nan) idx = static_cast<int64_t>(fitems.size());
+                } else {
+                    const auto f = std::lower_bound(fitems.begin(), fitems.end(), d);
+                    if (f != fitems.end() && *f == d) idx = f - fitems.begin();
+                }
                 if (idx >= 0) {
                     if (!want_all) { hit_any = true; break; }
                     seen[static_cast<size_t>(idx)] = 1u;
@@ -487,7 +545,7 @@ VecResult acm_run(void* ctx, const DrakenVector* const* args, uint32_t nargs,
         bool result;
         if (want_all) {
             result = true;
-            for (uint32_t e = 0; e < c->count; ++e)
+            for (uint32_t e = 0; e < ncount; ++e)
                 if (!seen[e]) { result = false; break; }
         } else {
             result = hit_any;
@@ -1632,8 +1690,8 @@ VecResult draken_array_contains_any(void* ctx, const DrakenVector* const* args, 
 
 // `arr @>> needles` -> BOOL. True iff EVERY needle appears in the
 // row (needles ⊆ row) — note the direction: it is not "every element is a
-// needle". An empty row is therefore false for any non-empty needle set, and the
-// needle set is never empty (_membership_values rejects that).
+// needle". An empty row is therefore false for any non-empty needle set; an empty
+// needle set is true for every non-NULL row.
 VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     try {
         return acm_run(ctx, args, nargs, /*want_all=*/true, "draken_array_contains_all");

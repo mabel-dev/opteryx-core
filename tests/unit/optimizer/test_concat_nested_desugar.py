@@ -7,7 +7,7 @@
 Regression test: a CONCAT/CONCAT_WS call nested inside another CONCAT/CONCAT_WS
 call's own arguments reached the bytecode builder undesugared.
 
-CONCAT and CONCAT_WS have no kernel/callable_ref of their own (see
+CONCAT and CONCAT_WS have no kernel of their own (see
 opteryx/expression/functions/registrar/text.pyx) -- they are rewrite-only
 functions, meant to reach execution only after PredicateRewriteStrategy /
 FunctionRewriteStrategy desugar them to StringConcat ('||') chains

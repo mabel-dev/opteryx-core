@@ -134,7 +134,6 @@ class KernelSpec:
     # misleading rather than wrong-in-a-way-anything-would-catch. Removed
     # 2026-07-16 (architect).
     id: str  # kernel identifier, e.g., "integer_integer" or "polymorphic"
-    callable_ref: Callable
     engine: Literal["draken"] | object = _UNSET
     cost_us_per_million: float = 0.0  # measured cost per million rows
 
@@ -653,44 +652,6 @@ class FunctionCatalog:
         """
         canonical = self._aliases.get(name, name)
         return self._functions.get(canonical)
-
-    def get_kernel(self, func_name: str, kernel_id: Optional[str] = None) -> Optional[Callable]:
-        """Get kernel callable by function name and optional kernel ID.
-
-        Args:
-            func_name: Function name.
-            kernel_id: Specific kernel ID (e.g., "integer_integer"). If None, use default.
-
-        Returns:
-            Callable kernel or None if not found.
-        """
-        func_def = self.get_definition(func_name)
-        if not func_def:
-            return None
-
-        if kernel_id is None:
-            # Use first overload's kernel as default
-            if func_def.overloads:
-                return func_def.overloads[0].kernel.callable_ref
-            return None
-
-        # Find overload with matching kernel ID
-        for overload in func_def.overloads:
-            if overload.kernel.id == kernel_id:
-                return overload.kernel.callable_ref
-
-        return None
-
-    def get_default_kernel(self, func_name: str) -> Optional[Callable]:
-        """Get default kernel for a function (convenience wrapper).
-
-        Args:
-            func_name: Function name.
-
-        Returns:
-            Callable kernel or None if not found.
-        """
-        return self.get_kernel(func_name, kernel_id=None)
 
     def get_cost(self, func_name: str, kernel_id: Optional[str] = None) -> Optional[float]:
         """Get cost estimate for a function kernel.

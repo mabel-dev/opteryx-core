@@ -12,36 +12,6 @@ from opteryx.expression.functions import (
 def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     """Hash, encoding, and random-generation functions."""
 
-    # Local imports to avoid top-level import cycles and to keep costs lazy.
-    from opteryx.compiled.nanobind.vectors import (
-        vector_base64_decode,
-        vector_base64_encode,
-        vector_base85_decode,
-        vector_base85_encode,
-    )
-    from opteryx.compiled.nanobind.vectors import (
-        vector_hex_decode,
-        vector_hex_encode,
-        vector_md5,
-        vector_sha1,
-        vector_sha224,
-        vector_sha256,
-        vector_sha384,
-        vector_sha512,
-    )
-    from draken.interop.vector_sequence import vector_from_sequence
-    import draken.draken_native as _draken_native_he
-    from draken.vectors.vector import Vector as _Vector
-    from opteryx.expression.functions.implementations import arithmetic as number_functions
-    from opteryx.third_party.cyan4973.xxhash import hash_bytes
-
-    def _hash_kernel(array):
-        result = [
-            hex(hash_bytes(str(x).encode()))[2:].encode() if x is not None else None
-            for x in array
-        ]
-        return _Vector(vector_from_sequence(result, dtype=_draken_native_he.DrakenType.VARBINARY))
-
     # Parameter short-hands.
     #
     # These are "string", not "any", because that is what the kernels accept —
@@ -78,11 +48,10 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     # HASH is the exception: it emits VARBINARY and always did, so it stays.
     functions: list[FunctionDefinition] = [
         _make(
-            "HASH", _hash_kernel, _CT_VARBINARY, (_any,), cost=27801.26, summary="Generic hash."
+            "HASH", _CT_VARBINARY, (_any,), cost=27801.26, summary="Generic hash."
         ),
         _make(
             "MD5",
-            vector_md5,
             _CT_VARCHAR,
             (_any,),
             engine="draken",
@@ -91,7 +60,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA1",
-            vector_sha1,
             _CT_VARCHAR,
             (_any,),
             engine="draken",
@@ -100,7 +68,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA224",
-            vector_sha224,
             _CT_VARCHAR,
             (_any,),
             engine="draken",
@@ -109,7 +76,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA256",
-            vector_sha256,
             _CT_VARCHAR,
             (_any,),
             engine="draken",
@@ -118,7 +84,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA384",
-            vector_sha384,
             _CT_VARCHAR,
             (_any,),
             engine="draken",
@@ -127,7 +92,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA512",
-            vector_sha512,
             _CT_VARCHAR,
             (_any,),
             engine="draken",
@@ -152,7 +116,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.random_number,
                         cost_us_per_million=2742.84,
                     ),
                 ),
@@ -163,7 +126,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="zero_arg",
-                        callable_ref=number_functions.random_number,
                         cost_us_per_million=2737.36,
                     ),
                 ),
@@ -186,7 +148,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.random_normal,
                         cost_us_per_million=5355.11,
                     ),
                 ),
@@ -197,7 +158,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="zero_arg",
-                        callable_ref=number_functions.random_normal,
                         cost_us_per_million=5348.12,
                     ),
                 ),
@@ -207,10 +167,8 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         #
         # RANDOM_STRING(n) -> VARBINARY: n random BYTES per row (architect ruling
         # 2026-07-17). C-native only — the draken_random_string kernel
-        # (function_string_extra.cpp) is the sole implementation, so callable_ref
-        # is None (the coalesce/iif precedent: a c-native function declares "no
-        # Python"). It is VOLATILE, so it is never constant-folded (the one path a
-        # callable_ref would otherwise serve) — constant_folding.py excludes it.
+        # (function_string_extra.cpp) is the sole implementation. It is VOLATILE, so
+        # it is never constant-folded — constant_folding.py excludes it.
         # The old `number_functions.random_strings` binding is removed: its
         # (row_count, width) VARCHAR callable never matched this 1-param VARBINARY
         # signature, and the native engine has no per-morsel Python fallback anyway.
@@ -231,7 +189,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,
                         cost_us_per_million=9189.69,
                     ),
                 ),
@@ -239,7 +196,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "BASE64_ENCODE",
-            vector_base64_encode,
             _CT_VARCHAR,
             (_b,),
             engine="draken",
@@ -248,7 +204,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "BASE64_DECODE",
-            vector_base64_decode,
             _CT_VARBINARY,
             (_encoded("base64"),),
             engine="draken",
@@ -257,7 +212,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "BASE85_ENCODE",
-            vector_base85_encode,
             _CT_VARCHAR,
             (_b,),
             engine="draken",
@@ -266,7 +220,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "BASE85_DECODE",
-            vector_base85_decode,
             _CT_VARBINARY,
             (_encoded("base85"),),
             engine="draken",
@@ -275,14 +228,13 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "HEX_ENCODE",
-            vector_hex_encode,
             _CT_VARCHAR,
             (_b,),
             summary="Hex encode.",
             cost=6652.75,
         ),
         _make(
-            "HEX_DECODE", vector_hex_decode, _CT_VARBINARY, (_encoded("hex"),), summary="Hex decode.", cost=3.87
+            "HEX_DECODE", _CT_VARBINARY, (_encoded("hex"),), summary="Hex decode.", cost=3.87
         ),
     ]
 

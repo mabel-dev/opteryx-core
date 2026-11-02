@@ -1503,9 +1503,8 @@ SELECT * FROM testdata.missions WHERE current_timestamp > Lauched_at - INTERVAL 
 query shape 4503 8
 SELECT * FROM testdata.missions WHERE INTERVAL '7' DAY < current_timestamp - Lauched_at
 
-# INTERVAL compared with INTERVAL has no native kernel; the Vector has no less_than.
-# Pinned as the known failure until a comparison for INTERVAL operands is decided.
-query error AttributeError
+# INTERVAL orders by normalised length, 1 month = 30 days (Postgres; ruled 2026-11-02).
+query shape 4630 8
 SELECT * FROM testdata.missions WHERE INTERVAL '7' DAY < INTERVAL '8' DAY
 
 query shape 4503 8

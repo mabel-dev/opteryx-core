@@ -480,7 +480,8 @@ SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) -
 
 # SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
 # SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
-statement ok
+# INTERVAL - TIMESTAMP has no meaning; refused (ruled 2026-11-02 — it used to answer TIMESTAMP - INTERVAL)
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY > INTERVAL '1' DAY - current_timestamp
 
 statement ok

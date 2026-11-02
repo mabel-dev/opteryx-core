@@ -6,7 +6,7 @@
 """
 Regression test: an all-literal CONCAT/CONCAT_WS call crashed constant folding.
 
-CONCAT and CONCAT_WS have no kernel/callable_ref of their own (see
+CONCAT and CONCAT_WS have no kernel of their own (see
 opteryx/expression/functions/registrar/text.pyx) -- they are rewrite-only
 functions, meant to reach execution only after PredicateRewriteStrategy /
 FunctionRewriteStrategy desugar them to StringConcat ('||') chains. Those
@@ -20,9 +20,9 @@ A CONCAT call with a column operand (e.g. CONCAT(name, 'x')) never hit this,
 because the presence of an identifier makes it ineligible for folding, so it
 survived untouched to FunctionRewriteStrategy as before.
 
-Fixed in opteryx/planner/optimizer/strategies/constant_folding.py by applying
-the same CONCAT/CONCAT_WS -> StringConcat desugaring (predicate_rewriter.py's
-_rewrite_function) before attempting to fold an eligible FUNCTION node.
+Constant folding now runs only on the native evaluator and declines a tree it
+cannot run natively: the undesugared CONCAT is left for FunctionRewriteStrategy,
+and the second folding pass folds the resulting `||` chain.
 """
 
 import os

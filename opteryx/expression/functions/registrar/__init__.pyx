@@ -95,8 +95,7 @@ def _iterate_double_parameter_swapped(func):
 
 def _make(
     name: str,
-    callable_or_ret: Any,
-    maybe_ret: Any = None,
+    ret: Any,
     params: tuple = (),
     *,
     aliases: tuple = (),
@@ -115,27 +114,13 @@ def _make(
     """
     Central helper to construct a FunctionDefinition with a single overload.
 
-    Accepts either the (callable_ref, ret, params, ...) form or the
-    shorthand (ret, ...) form used for zero-arg/constant definitions.
-
     Usage examples:
-      _make("FOO", callable_ref, LogicalCategory.VARCHAR, (ParameterSpec(...),), cost=2.0)
+      _make("FOO", LogicalCategory.VARCHAR, (ParameterSpec(...),), cost=2.0)
       _make("NOW", LogicalCategory.TIMESTAMP, summary="Current timestamp.")
 
     `return_spec` replaces the fixed return type for a function whose result type
     is not a constant (pass `None` as the return type alongside it).
     """
-    # Distinguish calling form: callable_or_ret is a callable -> full form,
-    # otherwise it's the return-type shorthand.
-    if callable(callable_or_ret):
-        callable_ref = callable_or_ret
-        ret = maybe_ret
-        params = params or ()
-    else:
-        callable_ref = lambda *a: None
-        ret = callable_or_ret
-        params = () if maybe_ret is None else maybe_ret
-
     if return_spec is None:
         return_spec = ReturnSpec(mode="fixed", fixed_type=ret)
     elif ret is not None:
@@ -170,7 +155,6 @@ def _make(
                 kernel=KernelSpec(
                     engine=engine,
                     id=kernel_id or "default",
-                    callable_ref=callable_ref,
                     cost_us_per_million=cost,
                 ),
             ),

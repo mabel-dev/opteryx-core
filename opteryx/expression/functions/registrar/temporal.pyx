@@ -32,12 +32,10 @@ def get_builtin_temporal_functions() -> list:
     _date = ParameterSpec(name="date", type_family="datetime", excludes=_not_calendar)
 
     # Implementations are provided by the temporal implementation module.
-    from opteryx.expression.functions.implementations import temporal as date_functions
 
     return [
         _make(
             "TIME_BUCKET",
-            date_functions.date_floor,
             _CT_TIMESTAMP(),
             (
                 ParameterSpec(
@@ -73,7 +71,6 @@ def get_builtin_temporal_functions() -> list:
         ),
         _make(
             "DATEDIFF",
-            date_functions.date_diff,
             _CT_INT64,
             (_part, _date, ParameterSpec(name="end", type_family="datetime", excludes=_not_calendar)),
             aliases=("DATE_DIFF",),
@@ -82,7 +79,6 @@ def get_builtin_temporal_functions() -> list:
         ),
         _make(
             "TIMEDIFF",
-            date_functions.time_diff,
             _CT_INT64,
             (
                 ParameterSpec(name="time1", type_family="datetime", excludes=_not_calendar),
@@ -94,7 +90,6 @@ def get_builtin_temporal_functions() -> list:
         ),
         _make(
             "FORMAT_TIMESTAMP",
-            date_functions.date_format,
             _CT_VARCHAR,
             (ParameterSpec(name="pattern", type_family="string", constant_only=True), _date),
             aliases=("FORMAT_DATE",),
@@ -103,7 +98,6 @@ def get_builtin_temporal_functions() -> list:
         ),
         _make(
             "FROM_UNIXTIME",
-            date_functions.from_unixtimestamp,
             _CT_TIMESTAMP(),
             (
                 ParameterSpec(
@@ -144,7 +138,6 @@ def get_builtin_temporal_functions() -> list:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=date_functions.unixtime,
                         cost_us_per_million=517.15,
                     ),
                 ),
@@ -158,7 +151,6 @@ def get_builtin_temporal_functions() -> list:
                     kernel=KernelSpec(
                         engine="draken",
                         id="zero_arg",
-                        callable_ref=lambda *a: None,
                         cost_us_per_million=1.0,
                     ),
                 ),

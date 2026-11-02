@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import (
     IncompatibleTypesError,
+    IncorrectTypeError,
 )
 from opteryx.expression import ExpressionColumn
 from opteryx.expression import NodeType
@@ -763,6 +764,24 @@ def _bind_new_column(node, node_type, column_name, context, schemas):
 
     elif node_type == NodeType.CASE:
         aliases = [node.alias] if node.alias else []
+        # A WHEN is a BOOLEAN. An untyped NULL one is UNKNOWN, which never matches:
+        # it is the BOOLEAN null. Anything else is refused here, by the CASE's name.
+        for cond in node.conditions or []:
+            cond_sc = cond.schema_column
+            cond_ct = cond_sc.column_type if cond_sc is not None else None
+            if cond_ct is None or cond_ct == _CT_NULL:
+                if cond.node_type == NodeType.LITERAL and cond.value is None:
+                    cond.type = _lt.BOOLEAN
+                    if cond_sc is not None:
+                        cond.schema_column = context.plan_context.columns.retype(
+                            cond_sc, _lt.BOOLEAN
+                        )
+                continue
+            if cond_ct.category != LogicalCategory.BOOLEAN:
+                raise IncorrectTypeError(
+                    f"**CASE WHEN** requires a BOOLEAN condition, not "
+                    f"`{cond_ct.physical.name}`."
+                )
         branch_nodes = list(node.results or [])
         if node.else_result is not None:
             branch_nodes.append(node.else_result)

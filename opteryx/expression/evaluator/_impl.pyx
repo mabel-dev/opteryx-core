@@ -10,9 +10,8 @@
 """Expression evaluation engine — consolidated implementation module.
 
 Compiled into opteryx.expression.evaluator._impl.so. The leaf .pyx files
-(type_coercion / function_execution / temporal_ops /
-string_ops / json_ops / case_eval / arithmetic / comparisons / evaluation)
-are textually included below so the whole evaluator compiles to a single .so.
+(evaluation) are textually included below so the whole evaluator compiles to
+a single .so.
 
 The sibling __init__.py imports this module and re-exports its public API.
 (Phase 8c: tree-walker evaluate_case deleted; only compiled path remains.)
@@ -200,14 +199,6 @@ _DRAKEN_CMP_OP_FLIPPED[39] = -1
 
 # Include order: leaves with no intra-package deps first, then leaves that
 # depend on earlier names. Within each tier the order doesn't matter.
-# Phase 6: arithmetic_dispatch.pyx deleted — dispatch now at bind time via resolve_binary_op.
-include "type_coercion.pyx"
-include "temporal_ops.pyx"
-include "string_ops.pyx"
-include "json_ops.pyx"
-include "case_eval.pyx"
-include "arithmetic.pyx"
-include "comparisons.pyx"
 include "evaluation.pyx"
 
 

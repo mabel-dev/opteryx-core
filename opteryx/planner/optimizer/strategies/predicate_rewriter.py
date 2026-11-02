@@ -1389,13 +1389,11 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry, *, plan_context)
     if not isinstance(cidr_node.value, (str, bytes)):
         return predicate
 
-    # An IPv4 column's category IS INTEGER (the descriptor is not visible to
-    # LogicalCategory), so this is what "the address side" means here. The binder
-    # runs first and only admits that pairing, but the range is only equivalent
-    # to the mask-and-compare for an integer, so it is checked rather than
-    # assumed — the cost is one comparison at plan time.
-    addr_cat = addr_node.schema_column.category if addr_node.schema_column is not None else None
-    if addr_cat != LogicalCategory.INTEGER:
+    # The address must be what the kernel admits — physical UINT32 (an IPv4 rides
+    # it). The binder admits any INTEGER, which the kernel then refuses; answering
+    # an INT64 `<<=` here would make the rewrite change which queries fail.
+    addr_ct = addr_node.schema_column.column_type if addr_node.schema_column is not None else None
+    if addr_ct is None or addr_ct.physical != _DrakenType.UINT32:
         return predicate
 
     from draken.draken_native import ipv4_parse_cidr

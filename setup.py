@@ -883,31 +883,14 @@ extensions = [
             ("opteryx.expression.__init__", "opteryx/expression/__init__.pyx"),
             ("opteryx.expression.functions.__init__", "opteryx/expression/functions/__init__.pyx"),
             (
-                "opteryx.expression.functions.implementations.__init__",
-                "opteryx/expression/functions/implementations/__init__.pyx",
-            ),
-            (
                 "opteryx.expression.functions.registrar.__init__",
                 "opteryx/expression/functions/registrar/__init__.pyx",
             ),
         )
     ],
-    # yyjson.c used to be compiled in here for special_ops.pyx (`@?`), which
-    # cimported it at C level — on Linux (RTLD_LOCAL) cyyjson.so's symbols are not
-    # visible to other extensions. `@?` has a native kernel now and special_ops.pyx
-    # is deleted, so nothing under operations/ touches yyjson and the source is no
-    # longer linked in.
-    Extension(
-        "opteryx.expression.operations.__init__",
-        sources=[
-            "opteryx/expression/operations/__init__.pyx",
-        ],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
     # functions/catalog.pyx is textually included by functions/__init__.pyx;
-    # registrar/* and implementations/* are similarly consolidated into their
-    # package __init__ files. No per-leaf Extensions needed for any of them.
+    # registrar/* is similarly consolidated into its package __init__. No
+    # per-leaf Extensions needed for any of them.
     # Compiled (C++) representation of an expression tree; lowered from Node
     # at bind time and walked by the evaluator. See src/cpp/expression/.
     Extension(
@@ -1539,62 +1522,24 @@ _bitwise_bridge_link_args = (
 # ── Consolidated C′ vector-op module ──────────────────────────────────────
 # Each vector_*.cpp below exposes `void register_<name>(nb::module_&)` instead of
 # its own NB_MODULE; _vectors_module.cpp owns the single NB_MODULE(vectors, …) and
-# calls them all, so the 21 kernels link into ONE shared object rather than 21.
+# calls them all, so the kernels link into ONE shared object.
 # This removes the per-extension duplication of vector_alloc.cpp / nb_combined.cpp
 # that bloated the wheel. New vector-op file → add it here AND register it in
 # _vectors_module.cpp. (minilm_native stays separate: it resolves draken_identity_sel
 # from draken_native, and folding it in would rebind it to this module's
 # vector_alloc.cpp copy.)
 _vectors_op_cpp = [
-    "opteryx/compiled/nanobind/vector_accessors.cpp",
     "opteryx/compiled/nanobind/vector_ann.cpp",
-    "opteryx/compiled/nanobind/vector_array_reduce.cpp",
-    "opteryx/compiled/nanobind/vector_bitwise.cpp",
-    "opteryx/compiled/nanobind/vector_bool_ops.cpp",
-    "opteryx/compiled/nanobind/vector_casts.cpp",
-    "opteryx/compiled/nanobind/vector_codec.cpp",
-    "opteryx/compiled/nanobind/vector_hash_codec.cpp",
     "opteryx/compiled/nanobind/vector_json.cpp",
-    "opteryx/compiled/nanobind/vector_math.cpp",
-    "opteryx/compiled/nanobind/vector_misc.cpp",
-    "opteryx/compiled/nanobind/vector_selection_concat.cpp",
     "opteryx/compiled/nanobind/vector_sketch_reduce.cpp",
-    "opteryx/compiled/nanobind/vector_special.cpp",
-    "opteryx/compiled/nanobind/vector_split_native.cpp",
-    "opteryx/compiled/nanobind/vector_string_case.cpp",
-    "opteryx/compiled/nanobind/vector_string_misc.cpp",
-    "opteryx/compiled/nanobind/vector_string_misc2.cpp",
-    "opteryx/compiled/nanobind/vector_string_misc3.cpp",
-    "opteryx/compiled/nanobind/vector_array_membership.cpp",
-    "opteryx/compiled/nanobind/vector_string_slice.cpp",
-    "opteryx/compiled/nanobind/vector_temporal_arith.cpp",
-    "opteryx/compiled/nanobind/vector_temporal_convert.cpp",
     # Local-disk file IO (was opteryx.compiled.io.disk_reader).
     "src/cpp/disk_reader_native.cpp",
 ]
 # Vendored sources pulled in by individual kernels — compiled ONCE for the module.
 _vectors_extra_sources = [
-    # vector_codec — mabel base64 / base85 (base64 is NOT a unity build: list all)
-    "third_party/mabel/base64/_base64.c",
-    "third_party/mabel/base64/_base64_dispatch.c",
-    "third_party/mabel/base64/_base64_neon.c",
-    "third_party/mabel/base64/_base64_avx2.c",
-    "third_party/mabel/base64/_base64_rvv.c",
-    "third_party/mabel/base85/_base85.c",
-    # vector_hash_codec — vendored crypto digests + mabel base16 (unity build:
-    # _base16.c #includes the dispatch + per-arch SIMD sources, which self-guard so
-    # all variants compile on every platform — b16tobin_len/bintob16 come in via
-    # _base16_dispatch.c). Only _base16.c is listed; listing the per-arch files
-    # again would double-compile and duplicate symbols.
-    "third_party/crypto/md5.cpp",
-    "third_party/crypto/sha1.cpp",
-    "third_party/crypto/sha2.cpp",
-    "third_party/crypto/sha512.cpp",
-    "third_party/mabel/base16/_base16.c",
     # vector_json — yyjson (compiled as C11 by build_extension's .c handling)
     "third_party/yyjson/src/yyjson.c",
-    # vector_string_case — SIMD string ops (+ cpu_features dep)
-    "src/cpp/simd_string_ops.cpp",
+    # vector_ann — runtime SIMD dispatch (simd_dispatch.h → cpu_features)
     "draken/simd/cpu_features.cpp",
     # disk_reader_native — mmap/pread file reads + directory listing
     "src/cpp/disk_io.cpp",
@@ -1611,13 +1556,6 @@ extensions.append(
                 "draken/core/vector_alloc.cpp",
                 "third_party/nanobind/src/nb_combined.cpp",
             ]
-            + sorted(  # vector_string_misc2 — re2
-                glob.glob("third_party/re2/re2/*.cc")
-                + [
-                    "third_party/re2/util/strutil.cc",
-                    "third_party/re2/util/rune.cc",
-                ]
-            )
         ),
         include_dirs=include_dirs
         + [
@@ -1786,7 +1724,7 @@ def discover_packages():
 
     We start from find_packages and additionally add any directory under the
     owned roots that is a package by virtue of an __init__.pyx, so pure-Python
-    siblings (e.g. evaluator/__init__.py, functions/implementations/*.py) ship.
+    siblings (e.g. evaluator/__init__.py) ship.
     """
     base = set(
         find_packages(

@@ -1,25 +1,12 @@
 """
-vector_string_slice.cpp — NVARCHAR codepoint-awareness regression.
+SUBSTRING / LEFT / RIGHT with column-valued position/count/length — NVARCHAR
+codepoint-awareness, end to end through SQL.
 
-vector_string_substring / vector_string_slice_left / vector_string_slice_right
-(opteryx/compiled/nanobind/vector_string_slice.cpp) are the SUBSTRING/LEFT/RIGHT
-kernels used when from_pos/count/length is a per-row value (a Vector) rather
-than a bind-time literal. The literal-arg fast path (draken_substring in
-draken/ops/kernels/function_kernels.cpp, reached via SUBSTRING/LEFT/RIGHT with
-a constant position/length) already did codepoint-aware slicing for NVARCHAR;
-this file's column-arg implementations did NOT — they sliced by byte offset
-regardless of type, silently cutting multi-byte codepoints in half for
-non-ASCII NVARCHAR text. Fixed to branch on DRAKEN_NVARCHAR the same way the
-literal kernel does.
-
-There is no SQL entry point that reaches THIS file's nanobind kernels: SQL-level
-column-valued SUBSTRING/LEFT/RIGHT is served instead by the C-ABI kernels
+Column-valued SUBSTRING/LEFT/RIGHT is served by the C-ABI kernels
 draken_substring_dynamic / draken_left_dynamic / draken_right_dynamic
-(draken/ops/kernels/function_kernels.cpp), wired in via compiled_expression.pyx.
-The tests below that call vector_string_slice_left/right/substring directly
-exercise the nanobind reference implementation (unreachable from SQL, kept as a
-correctness oracle); test_substring_left_right_column_arg_sql exercises the real
-SQL path end to end.
+(draken/ops/kernels/function_kernels.cpp). For NVARCHAR they slice by codepoint,
+never by byte offset (which would cut multi-byte codepoints in half); VARCHAR
+stays byte-level.
 """
 
 import os
@@ -27,61 +14,12 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-import draken.draken_native as dn
 import opteryx
-from draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.nanobind.vectors import (
-    vector_string_slice_left,
-    vector_string_slice_right,
-    vector_string_substring,
-)
 
-DT = dn.DrakenType
 
 # Deliberately non-ASCII: 2-byte (é, ö) and 4-byte (😀) UTF-8 codepoints, so a
 # byte-sliced implementation lands mid-codepoint for most cut points.
 _ROWS = ["héllo wörld", "😀😀abc", "plain ascii"]
-
-
-def _to_list(vec):
-    return [vec[i] for i in range(len(vec))]
-
-
-def test_slice_left_nvarchar_column_length_is_codepoint_aware():
-    v = vector_from_sequence(_ROWS, dtype=DT.NVARCHAR)
-    lens = vector_from_sequence([5, 3, 6], dtype=DT.INT64)
-    out = _to_list(vector_string_slice_left(v, lens))
-    expected = [s[:n] for s, n in zip(_ROWS, [5, 3, 6])]
-    assert out == expected, out
-
-
-def test_slice_right_nvarchar_column_length_is_codepoint_aware():
-    v = vector_from_sequence(_ROWS, dtype=DT.NVARCHAR)
-    lens = vector_from_sequence([5, 3, 6], dtype=DT.INT64)
-    out = _to_list(vector_string_slice_right(v, lens))
-    expected = [s[-n:] for s, n in zip(_ROWS, [5, 3, 6])]
-    assert out == expected, out
-
-
-def test_substring_nvarchar_column_args_is_codepoint_aware():
-    v = vector_from_sequence(_ROWS, dtype=DT.NVARCHAR)
-    starts = vector_from_sequence([2, 1, 7], dtype=DT.INT64)
-    counts = vector_from_sequence([4, 2, 5], dtype=DT.INT64)
-    out = _to_list(vector_string_substring(v, starts, counts))
-    # SQL SUBSTRING is 1-based, inclusive of `count` codepoints from `start`.
-    expected = [s[st - 1:st - 1 + cnt] for s, st, cnt in zip(_ROWS, [2, 1, 7], [4, 2, 5])]
-    assert out == expected, out
-
-
-def test_slice_varchar_column_length_stays_byte_level():
-    # VARCHAR must NOT switch to codepoint slicing — byte-level behaviour is
-    # unchanged by the NVARCHAR fix.
-    v = vector_from_sequence(["hello world", "abcdef"], dtype=DT.VARCHAR)
-    lens = vector_from_sequence([5, 3], dtype=DT.INT64)
-    left = _to_list(vector_string_slice_left(v, lens))
-    right = _to_list(vector_string_slice_right(v, lens))
-    assert left == ["hello", "abc"], left
-    assert right == ["world", "def"], right
 
 
 def _py_substring(s, start, count=None):

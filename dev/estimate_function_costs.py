@@ -10,10 +10,8 @@ ordering strategy reads via ``catalog.get_cost()``.
 METHOD — measure through the real bytecode evaluator
 ----------------------------------------------------
 A function's cost is whatever it actually costs the engine to evaluate it over a
-morsel, *including* the real lowered execution path. Several functions never run
-through their ``callable_ref`` at all (CONCAT etc. are lowered to specialised
-bytecode), so calling the kernel callable directly would measure a fiction. We
-therefore measure exactly what the engine does:
+morsel, *including* the real lowered execution path, so we measure exactly what
+the engine does:
 
   1. Build a bound ``FUNC(col[, ...])`` expression node — an IDENTIFIER node per
      ordinary argument (resolved against a column in a synthetic test morsel) and
@@ -61,6 +59,9 @@ from opteryx.compiled.expression.compiled_expression import build_bytecode, lowe
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import execute_bytecode
 from opteryx.expression.functions import get_catalog
+from opteryx.expression.functions.registrar import get_builtin_constant_functions
+
+_CONSTANT_FUNCTIONS = {f.name for f in get_builtin_constant_functions()}
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.structures.expressions import Function
 from opteryx.compiled.structures.expressions import Literal
@@ -334,13 +335,10 @@ class CostBench:
         for overload in func_def.overloads:
             kernel = overload.kernel
             current = kernel.cost_us_per_million
-            kernel_name = getattr(kernel.callable_ref, "__name__", repr(kernel.callable_ref))
-            # Constant functions (NOW, PI, VERSION, ...) are defined via the _make
-            # shorthand, whose placeholder kernel is `lambda *a: None`. They are
-            # folded to a literal at bind time and have no per-row cost; executing
-            # the placeholder through BC_FUNCTION returns None and segfaults the VM.
-            # Skip them explicitly rather than risk a crash mid-sweep.
-            if getattr(kernel.callable_ref, "__qualname__", "") == "_make.<locals>.<lambda>":
+            kernel_name = f"{func_def.name}/{kernel.id}"
+            # Constant functions (NOW, PI, ...) are folded to a literal at bind time
+            # and have no per-row cost — and no kernel to run.
+            if func_def.name in _CONSTANT_FUNCTIONS:
                 results.append(
                     OverloadResult(
                         function_name=func_def.name,
@@ -350,7 +348,7 @@ class CostBench:
                         cost_us_per_million=None,
                         ns_per_row=None,
                         success=False,
-                        error="skipped: constant placeholder kernel (folded at bind time; no per-row cost)",
+                        error="skipped: constant function (folded at bind time; no per-row cost)",
                     )
                 )
                 continue

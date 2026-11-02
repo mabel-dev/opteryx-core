@@ -1276,87 +1276,14 @@ class _Compiler:
         return expand_between(expr)
 
     def _rewrite_case(self, expr):
-        """PLAN-TIME tree rewrite: CASE becomes a right-folded IF_THEN_ELSE
-        function chain over the c-native blend kernel (draken_if_then_else).
-        The kernel blends same-type raw domains only, so literal THEN/ELSE
-        branches are retyped to the CASE's bound output ColumnType (DECIMAL:
-        exact quantize only; FLOAT: numeric literals). A missing ELSE becomes
-        a typed NULL literal. The outermost node keeps the CASE's
-        schema_column so downstream identity references still resolve."""
-        import decimal as _dec
+        """PLAN-TIME tree rewrite: CASE becomes a right-folded IF_THEN_ELSE chain.
 
+        Delegates to the canonical `expand_case` — `lower()` applies the same
+        rewrite unconditionally, so this call is only needed to run it BEFORE
+        `_rewrite_decimal_compares`, which must see the expanded tree."""
+        from opteryx.compiled.expression.compiled_expression import expand_case
 
-        if not is_expression(expr):
-            return expr
-        if expr.node_type == NodeType.CASE:
-            conditions = [self._rewrite_case(c) for c in expr.conditions]
-            results = [self._rewrite_case(r) for r in expr.results]
-            els = (self._rewrite_case(expr.else_result)
-                   if expr.else_result is not None else None)
-            sc = expr.schema_column
-            out_ct = sc.column_type if sc is not None else None
-
-            def _coerce(r):
-                if out_ct is None or r.node_type != NodeType.LITERAL:
-                    return r
-                v = r.value
-                phys = getattr(out_ct.physical, "name", "")
-                if v is None:
-                    nl = Literal(value=None, arena=self.plan_context.expressions)
-                    nl.type = out_ct
-                    return nl
-                if isinstance(v, bool) or not isinstance(v, (int, float, _dec.Decimal)):
-                    return r
-                if phys in ("DECIMAL", "DECIMAL128") and out_ct.logical is not None:
-                    scale = int(out_ct.logical.scale)
-                    q = _dec.Decimal(v) if isinstance(v, float) else _dec.Decimal(str(v))
-                    rescaled = q.quantize(_dec.Decimal(1).scaleb(-scale))
-                    if rescaled != q:
-                        return r   # inexact — leave it, kernel fails loud
-                    nl = Literal(value=rescaled, arena=self.plan_context.expressions)
-                    # The literal carries the CASE's own declared type, both tiers
-                    # alike. It used to be pinned to an int64-tier DECIMAL(18, scale)
-                    # for a DECIMAL128 target, on the grounds that a DECIMAL128
-                    # literal could not be materialised — no longer true, and the
-                    # pin was not merely redundant: precision 18 with scale 18 can
-                    # represent nothing but a fraction, so a CASE blending a DECIMAL
-                    # column with a literal (result DECIMAL(38,18), the ordinary
-                    # shape for `ELSE 1.5000`) rescaled 1.5 to 19 unscaled digits and
-                    # raised a raw OverflowError, "decimal: value exceeds declared
-                    # precision". _materialise_constant_literal routes on the tag and
-                    # on precision > 18, so a DECIMAL128-typed literal materialises
-                    # through vector_decimal128_from_constant.
-                    nl.type = out_ct
-                    return nl
-                if phys in ("FLOAT64", "FLOAT32"):
-                    nl = Literal(value=float(v), arena=self.plan_context.expressions)
-                    nl.type = out_ct
-                    return nl
-                return r
-
-            # Same-scale contract: the blend kernel widens {DECIMAL, DECIMAL128}
-            # raw values assuming equal scales. A non-literal decimal branch at a
-            # DIFFERENT scale cannot blend correctly — leave the CASE unrewritten
-            # (it fails loud downstream) rather than answer wrong.
-            if (out_ct is not None and out_ct.logical is not None
-                    and getattr(out_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")):
-                for br in list(results) + ([els] if els is not None else []):
-                    if br.node_type == NodeType.LITERAL:
-                        continue
-                    br_ct = br.schema_column.column_type if br.schema_column is not None else None
-                    if (br_ct is not None and br_ct.logical is not None
-                            and getattr(br_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")
-                            and int(br_ct.logical.scale) != int(out_ct.logical.scale)):
-                        return expr
-
-            acc = _coerce(els) if els is not None else _coerce(
-                Literal(value=None, arena=self.plan_context.expressions))
-            for cond, res in zip(reversed(conditions), reversed(results)):
-                f = Function(value="IF_THEN_ELSE",
-                         parameters=[cond, _coerce(res), acc], arena=self.plan_context.expressions)
-                acc = f
-            return acc.with_fields(schema_column=sc, alias=expr.alias)
-        return rewrite_children(expr, self._rewrite_case)
+        return expand_case(expr)
 
     def _rewrite_decimal_compares(self, expr):
         """PLAN-TIME literal rescale: `decimal_col <op> numeric_literal` becomes a

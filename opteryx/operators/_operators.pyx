@@ -194,6 +194,9 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
 cdef extern from "core/alloc.h" nogil:
     void draken_free(void* ptr)
 
+cdef extern from "vectors/_vector_bridge.h":
+    const DrakenVector* draken_array_child_unwrap(object obj)
+
 cdef extern from "engine/spill_store.hpp" namespace "opteryx::engine::spill_tel" nogil:
     long long spill_tel_units "opteryx::engine::spill_tel::units_written_count" ()
     long long spill_tel_bytes_written "opteryx::engine::spill_tel::bytes_written_count" ()
@@ -1885,7 +1888,13 @@ cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
                 and (slot.flags & BC_C_NATIVE_CHILD) != 0):
             # BC_C_NATIVE_CHILD instructions (ARRAY->VARCHAR cast, SORT, arr[i])
             # carry the ARRAY operand's identity — the eval span resolves the
-            # owner-held child element vector through it.
+            # owner-held child element vector through it. An ARRAY literal has no
+            # identity: its child is resolved here and read from lit_dv instead.
+            if slot.opcode != BC_LOAD_COL and slot.column_identity == NULL:
+                lit_dv[lit_dv.size() - 1] = <void*>draken_array_child_unwrap(
+                    (<Vector>(<object>slot.literal_obj))._nb)
+                col_idx.push_back(-1)
+                continue
             ident = <bytes>slot.column_identity
             try:
                 ci = <int>layout.index(ident)
@@ -1970,6 +1979,33 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
     "last op must be an arena compute" restriction the GIL path needs does not
     apply. Mirrors build_bytecode's per-instruction admission exactly."""
     return _first_non_c_native(bc) < 0
+
+
+def bytecode_folds_natively(CompiledBytecode bc):
+    """PLAN-TIME: may constant folding run this program on evaluate_c_native?
+
+    The engine's own admission (every op c-native), plus evaluate_c_native's one
+    structural contract: a compute op last, so the result is an arena value. A
+    descriptor-carrying result (BC_C_NATIVE_DESC — DECIMAL, TIMESTAMP) is admitted,
+    unlike is_all_c_native: folding is a plan-known boundary and re-attaches the
+    descriptor from the target type before reading the value back."""
+    if _first_non_c_native(bc) >= 0:
+        return False
+    cdef int last = bc.instrs[bc.count - 1].opcode
+    return last not in (BC_LOAD_COL, BC_LOAD_LIT_CONST, BC_LOAD_LIT_BOOL, BC_LAZY)
+
+
+def bytecode_constant_result(CompiledBytecode bc):
+    """PLAN-TIME: (True, value) when the program is one literal load — lowering
+    settled the answer to a constant (a NULL needle set, a NULL IN, ...) and there
+    is nothing to evaluate — else (False, None)."""
+    if bc.count != 1:
+        return False, None
+    if bc.instrs[0].opcode == BC_LOAD_LIT_BOOL:
+        return True, bc.instrs[0].bool_value != 0
+    if bc.instrs[0].opcode == BC_LOAD_LIT_CONST:
+        return True, (<Vector>(<object>bc.instrs[0].literal_obj)).to_pylist()[0]
+    return False, None
 
 
 # Opcode -> the operation a reader recognises, for the refusal message only.

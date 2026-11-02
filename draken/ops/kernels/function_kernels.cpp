@@ -855,16 +855,17 @@ VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t 
 
 // TRUNC(ts, unit) — floor a TIMESTAMP64 to the unit boundary; result is the same
 // TIMESTAMP64 (unit preserved). ctx=binary_op_ctx: op_code=trunc part id,
-// left_unit=operand TimestampUnit (0=s,1=ms,2=us,3=ns). DATE32 operands rejected
-// (a DATE has no sub-day resolution to truncate — use it directly).
+// left_unit=operand TimestampUnit (0=s,1=ms,2=us,3=ns). A DATE32 operand is read as
+// the TIMESTAMP64 at the start of its day, in left_unit — TRUNC(DATE) is a TIMESTAMP.
 VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 1) return draken_error_sentinel("draken_date_trunc: expected 1 argument");
     if (ctx == nullptr) return draken_error_sentinel("draken_date_trunc: missing ctx");
     const auto* c = static_cast<const binary_op_ctx*>(ctx);
     const int part = c->op_code;
     const DrakenVector* v = args[0];
-    if (v->type != DRAKEN_TIMESTAMP64)
-        return draken_error_sentinel("draken_date_trunc: TIMESTAMP input required");
+    if (v->type != DRAKEN_TIMESTAMP64 && v->type != DRAKEN_DATE32)
+        return draken_error_sentinel("draken_date_trunc: DATE or TIMESTAMP input required");
+    const bool is_date = v->type == DRAKEN_DATE32;
 
     // A compressed operand truncates each of its data_length values once and the
     // result keeps the operand's encoding; a dense operand truncates per row.
@@ -876,13 +877,15 @@ VecResult draken_date_trunc(void* ctx, const DrakenVector* const* args, uint32_t
     // Sub-second ticks per second is a compile-time constant per unit, so the
     // floor divisions below are multiply-high + shift, not a divide per row.
     const int64_t* const src = static_cast<const int64_t*>(v->data);
+    const int32_t* const src_days = static_cast<const int32_t*>(v->data);
     const uint32_t* const sel = v->selection;
     const bool ok = ta_with_ticks_per_second(static_cast<int>(c->left_unit & 3),
-                                             [v, src, sel, out, cnt, comp, part](auto k) {
+                                             [v, src, src_days, is_date, sel, out, cnt, comp, part](auto k) {
       constexpr int64_t sub = decltype(k)::value;
       for (uint32_t i = 0; i < cnt; ++i) {
         if (!comp && !fk_row_valid(v, i)) { out[i] = 0; continue; }
-        int64_t raw = comp ? src[i] : src[sel[i]];
+        const uint32_t at = comp ? i : sel[i];
+        int64_t raw = is_date ? static_cast<int64_t>(src_days[at]) * 86400 * sub : src[at];
         int64_t secs = fk_floor_div(raw, sub);          // whole seconds since epoch
         int64_t sub_ticks = raw - secs * sub;            // preserved-then-dropped
         int64_t days = fk_floor_div(secs, 86400);

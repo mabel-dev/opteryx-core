@@ -12,8 +12,6 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.expression.functions.implementations import arithmetic as number_functions
-from opteryx.expression.functions.implementations import temporal as date_functions
 # LogicalCategory imported via __init__.pyx (textually included); canonical ColumnTypes also in scope.
 
 
@@ -37,7 +35,6 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.round1,
                         cost_us_per_million=862.39,
                     ),
                 ),
@@ -51,7 +48,6 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.round2,
                         cost_us_per_million=2575.73,
                     ),
                 ),
@@ -74,7 +70,6 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.abs_value,
                         cost_us_per_million=562.56,
                     ),
                 ),
@@ -102,7 +97,6 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.ceiling,
                         cost_us_per_million=2525.34,
                     ),
                 ),
@@ -130,7 +124,6 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.floor,
                         cost_us_per_million=2577.53,
                     ),
                 ),
@@ -153,7 +146,6 @@ def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.sqrt_value,
                         cost_us_per_million=549.22,
                     ),
                 ),
@@ -201,7 +193,6 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=number_functions.sign_value,
                         cost_us_per_million=890.70,
                     ),
                 ),
@@ -234,7 +225,6 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="numeric",
-                        callable_ref=number_functions.trunc,
                         cost_us_per_million=2560.56,
                     ),
                 ),
@@ -248,7 +238,6 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="date",
-                        callable_ref=date_functions.trunc_date,
                         cost_us_per_million=1126.66,
                     ),
                 ),
@@ -262,7 +251,6 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="timestamp",
-                        callable_ref=date_functions.trunc_timestamp,
                         cost_us_per_million=1035.01,
                     ),
                 ),
@@ -270,7 +258,6 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "POWER",
-            number_functions.safe_power,
             _CT_FLOAT64,
             (_num, ParameterSpec(name="exp", type_family="numeric")),
             cost=6247.94,
@@ -278,7 +265,6 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "LOG",
-            number_functions.log,
             _CT_FLOAT64,
             (_num, ParameterSpec(name="base", type_family="numeric")),
             summary="Logarithm with arbitrary base.",

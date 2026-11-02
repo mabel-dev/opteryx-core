@@ -5,7 +5,7 @@
 #include "core/string_slot.h"
 #include "core/alloc.h"
 #include "ops/int64_compare.h"   // cmp_alloc_bool_buf
-#include "ops/ipv4_predicates.h" // draken::ops::ipv4_in_cidr (shared with the nanobind twin)
+#include "ops/ipv4_predicates.h" // draken::ops::ipv4_in_cidr
 #include <cstring>
 
 /**
@@ -92,7 +92,7 @@ VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32
                 "draken_ipv4_in_cidr: one operand must be a UINT32 (IPv4) column");
         }
         if (cidr->type != DRAKEN_VARCHAR && cidr->type != DRAKEN_NVARCHAR
-                && cidr->type != DRAKEN_VARBINARY)
+                && cidr->type != DRAKEN_VARBINARY && cidr->type != DRAKEN_NULL)
             return draken_error_sentinel(
                 "draken_ipv4_in_cidr: the other operand must be a CIDR string");
         if (cidr->length == 0u)
@@ -102,8 +102,20 @@ VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32
         // every logical row to the same slot, so this is correct for a literal.
         const uint32_t cidr_slot = cidr->selection[0];
         // Validity is per LOGICAL row: row 0 is bit 0, whatever slot it reads.
-        if (cidr->validity != nullptr && !(cidr->validity[0] & 1u))
-            return draken_error_sentinel("draken_ipv4_in_cidr: CIDR operand is NULL");
+        // A NULL network (typed, or an untyped NULL) answers NULL for every address.
+        if (cidr->type == DRAKEN_NULL || (cidr->validity != nullptr && !(cidr->validity[0] & 1u))) {
+            const uint32_t n = addr->length;
+            VecResult r;
+            r.data           = draken::ops::cmp_alloc_bool_buf(n);
+            r.validity       = draken::ops::cmp_alloc_bool_buf(n);
+            r.selection      = draken_identity_sel(n);
+            r.owns_selection = false;
+            r.data_length    = n;
+            r.length         = n;
+            r.type           = DRAKEN_BOOL;
+            r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+            return r;
+        }
 
         const DrakenStringArena* ca =
             static_cast<const DrakenStringArena*>(cidr->data);
@@ -122,9 +134,8 @@ VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32
         if (dst == nullptr)
             return draken_error_sentinel("draken_ipv4_in_cidr: bool buffer alloc failed");
 
-        // Shared with the nanobind twin (vector_misc.cpp) so the two cannot
-        // answer differently. NULL address → NULL; dense vectors take a
-        // vectorisable non-gather path. See ops/ipv4_predicates.h.
+        // NULL address → NULL; dense vectors take a vectorisable non-gather path.
+        // See ops/ipv4_predicates.h.
         uint8_t* validity = draken::ops::ipv4_in_cidr(addr, netmask, base_ip, dst);
 
         VecResult r;

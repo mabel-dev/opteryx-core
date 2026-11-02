@@ -102,10 +102,10 @@ static nb::object impl_extract(
 
 
 // ---------------------------------------------------------------------------
-// vector_json_extract — full JSONPath / JSON Pointer
+// vector_json_extract_text — full JSONPath / JSON Pointer, `->>` semantics
 // ---------------------------------------------------------------------------
 
-static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes, bool text_mode) {
+static nb::object impl_json_extract_text(nb::object docs, nb::bytes path_bytes) {
     const char* raw = path_bytes.c_str();
     const size_t raw_len = path_bytes.size();
 
@@ -115,20 +115,7 @@ static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes, bool 
     const draken::ops::JsonPtrPath path =
         draken::ops::tokenize_jsonptr(json_ptr.data(), json_ptr.size());
 
-    return impl_extract(docs, path, 0 /* token walk */, text_mode,
-                        text_mode ? "vector_json_extract_text" : "vector_json_extract");
-}
-
-// ---------------------------------------------------------------------------
-// vector_map_access — simpler top-level object key
-// ---------------------------------------------------------------------------
-
-static nb::object impl_map_access(nb::object docs, nb::bytes key_bytes) {
-    // Verbatim top-level key: no pointer syntax, no escape resolution, never an
-    // array index.
-    const draken::ops::JsonPtrPath path =
-        draken::ops::single_key_path(key_bytes.c_str(), key_bytes.size());
-    return impl_extract(docs, path, 1 /* ObjGet */, false /* VARIANT */, "vector_map_access");
+    return impl_extract(docs, path, 0 /* token walk */, true, "vector_json_extract_text");
 }
 
 // ---------------------------------------------------------------------------
@@ -137,37 +124,14 @@ static nb::object impl_map_access(nb::object docs, nb::bytes key_bytes) {
 
 void register_vector_json(nb::module_ &m) {
 
-    m.def("vector_json_extract",
-        [](nb::object docs, nb::bytes path) -> nb::object {
-            return impl_json_extract(docs, path, /*text_mode=*/false);
-        },
-        nb::arg("docs"), nb::arg("path"),
-        "`->`: extract a field from each JSON document, as a JSON value.\n"
-        "path: bytes — dot-notation (\"$.a.b[0]\"), JSON Pointer (\"/a/b/0\"),\n"
-        "      or bare top-level key (\"name\").\n"
-        "Output: DRAKEN_VARIANT (JSON-text of extracted value).\n"
-        "Null TVL: null input row / missing key / JSON null → null output.\n"
-        "Invalid JSON → RuntimeError (fail fast).");
-
     m.def("vector_json_extract_text",
         [](nb::object docs, nb::bytes path) -> nb::object {
-            return impl_json_extract(docs, path, /*text_mode=*/true);
+            return impl_json_extract_text(docs, path);
         },
         nb::arg("docs"), nb::arg("path"),
         "`->>`: extract a field as TEXT. JSON strings are returned unquoted\n"
         "(raw UTF-8); other values (number/bool/object/array) are serialized to\n"
         "their JSON text. Output: DRAKEN_NVARCHAR.\n"
-        "Null TVL: null input row / missing key / JSON null → null output.\n"
-        "Invalid JSON → RuntimeError (fail fast).");
-
-    m.def("vector_map_access",
-        [](nb::object docs, nb::bytes key) -> nb::object {
-            return impl_map_access(docs, key);
-        },
-        nb::arg("docs"), nb::arg("key"),
-        "Top-level object key access on each JSON document in a VARCHAR vector.\n"
-        "key: bytes — simple field name (no path syntax).\n"
-        "Output: DRAKEN_VARIANT (JSON-text of extracted value).\n"
         "Null TVL: null input row / missing key / JSON null → null output.\n"
         "Invalid JSON → RuntimeError (fail fast).");
 }

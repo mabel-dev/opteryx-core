@@ -8,7 +8,6 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
 
 
 
@@ -23,10 +22,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
       - IIF (vectorized conditional)
     """
 
-    # Small adapter object bundling kernels implemented elsewhere
-    class other_functions:
-        null_if = staticmethod(_lf_null_if)
-
     # IFNULL/IFNOTNULL share COALESCE's branch-type resolver+validation
     # (_coalesce_return_type, defined in the package __init__ this file is
     # `include`d into) but need their own name in the error it raises.
@@ -37,10 +32,8 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
         return _coalesce_return_type(arg_nodes, func_name="IFNOTNULL")
 
     # COALESCE/IFNULL/IFNOTNULL/IIF are c-native: the bytecode builder resolves
-    # draken_{name} from the kernel registry and sets BC_INSTR_C_NATIVE, and every
-    # VM arm gates on that flag before reading callable_ref. There is no Python
-    # fallback (and never a silent one — an unsupported operand type fails loud in
-    # the kernel), so callable_ref is None rather than a dead nanobind binding.
+    # draken_{name} from the kernel registry and sets BC_INSTR_C_NATIVE. There is no
+    # Python fallback (an unsupported operand type fails loud in the kernel).
     # The null-conditional family's branches are typed `any`, which overstates
     # them twice over. `_check_blend_compatible` (registrar/__init__.pyx) mirrors
     # nc_dispatch: the branches must be ALL BOOLEAN, ALL string, or a blendable
@@ -92,7 +85,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,   # c-native: draken_coalesce
                         cost_us_per_million=3144.69,
                     ),
                 ),
@@ -116,7 +108,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,   # c-native: draken_ifnull
                         cost_us_per_million=3288.64,
                     ),
                 ),
@@ -140,7 +131,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,   # c-native: draken_ifnotnull
                         cost_us_per_million=2822.13,
                     ),
                 ),
@@ -167,7 +157,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=other_functions.null_if,
                         cost_us_per_million=0.72,
                     ),
                 ),
@@ -195,7 +184,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,   # c-native: draken_iif
                         cost_us_per_million=3589.92,
                     ),
                 ),

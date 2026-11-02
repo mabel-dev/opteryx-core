@@ -1,6 +1,5 @@
 """Operator sets for binder use.
 
-Phase 6: Runtime dispatch moved to resolve_binary_op at bind time.
 Phase 3: EXTRACTION_OPERATOR (MapAccess, Arrow, LongArrow) moved to bind-time
 resolution in compiled_expression.pyx with direct native kernel calls.
 """

@@ -477,7 +477,8 @@ SELECT missions @> ['STS-77'] FROM testdata.astronauts
 statement ok
 SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM testdata.astronauts
 
-statement error NotSupportedError
+# an empty needle set is answered natively (ANY of nothing is false), not refused
+statement ok
 SELECT missions @> [] FROM testdata.astronauts
 
 

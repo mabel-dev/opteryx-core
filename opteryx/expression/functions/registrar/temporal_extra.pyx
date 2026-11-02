@@ -23,7 +23,6 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
     call. It is declared fixed here instead.
     """
     # Local import to avoid heavy top-level imports / circular deps.
-    from opteryx.expression.functions.implementations import temporal as date_functions
 
     return [
         FunctionDefinition(
@@ -79,7 +78,6 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=date_functions.date_part,
                         cost_us_per_million=4761.27,
                     ),
                 ),

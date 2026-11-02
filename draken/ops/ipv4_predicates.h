@@ -9,12 +9,10 @@
 // (see core/ipv4.h for the bit order), and it is why sort/group/join need no
 // IPv4 awareness at all.
 //
-// WHY THIS IS A HEADER AND NOT A LOOP IN THE KERNEL
-//   Two call sites need this predicate: the registered C-ABI kernel
-//   (ops/kernels/binary_op_other.cpp, reached by the native executor) and its
-//   nanobind twin (opteryx/compiled/nanobind/vector_misc.cpp, reached by the
-//   Python evaluator). They had the same loop written out twice. One copy is
-//   the only way the two cannot answer differently.
+// CALLER
+//   The registered C-ABI kernel (ops/kernels/binary_op_other.cpp). It was a header
+//   so a nanobind twin for the Python evaluator could share it; that twin is gone
+//   with the evaluator.
 //
 // SIMD / §11 NOTE
 //   `Identity` is a COMPILE-TIME parameter, not a runtime branch, and it selects

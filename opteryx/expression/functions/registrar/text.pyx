@@ -13,36 +13,6 @@ set of compiled vector ops when available.
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.nanobind.vectors import (
-    vector_lowercase,
-    vector_uppercase,
-    vector_initcap,
-    vector_reverse,
-)
-from opteryx.compiled.nanobind.vectors import (
-    vector_string_slice_left,
-    vector_string_slice_right,
-    vector_string_substring,
-)
-from opteryx.compiled.nanobind.vectors import (
-    vector_md5,
-    vector_sha1,
-    vector_sha256,
-    vector_sha512,
-)
-from opteryx.compiled.nanobind.vectors import vector_soundex
-from opteryx.compiled.nanobind.vectors import (
-    vector_levenshtein,
-)
-from opteryx.compiled.nanobind.vectors import (
-    vector_replace,
-)
-from opteryx.compiled.nanobind.vectors import (
-    vector_length,
-    vector_octet_length,
-    vector_string_length,
-)
-import draken.draken_native as _draken_native_text_reg
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -69,7 +39,7 @@ def _native_only_affix(name, summary, cost):
     """`_STARTS_WITH` / `_ENDS_WITH` and their `_CI_` forms — the optimizer's
     `LIKE 'x%'` / `LIKE '%x'` rewrites. c-native only: compiled_expression lowers
     them to draken_starts_with / draken_ends_with (its `_affix_map`), so there is
-    no Python kernel (callable_ref None). The nanobind vector_starts_with /
+    no Python kernel. The nanobind vector_starts_with /
     vector_ends_with this used to point at were never dispatched (traced
     2026-10-06 over the sql and battery suites) and are deleted."""
     return FunctionDefinition(
@@ -92,7 +62,6 @@ def _native_only_affix(name, summary, cost):
                 kernel=KernelSpec(
                     engine="draken",
                     id="default",
-                    callable_ref=None,
                     cost_us_per_million=cost,
                 ),
             ),
@@ -103,9 +72,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
     """
     Core text functions (UPPER, LOWER, LENGTH, CONCAT, SUBSTRING, ...).
 
-    Uses the implementations in opteryx.expression.functions.implementations.text.
     """
-    from opteryx.expression.functions.implementations import text as string_functions
 
     # Parameter shortcuts
     _str = ParameterSpec(name="str", type_family="string")
@@ -114,7 +81,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
     return [
         _make(
             "UPPER",
-            vector_uppercase,
             None,
             (_str,),
             aliases=("UCASE",),
@@ -126,7 +92,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LOWER",
-            vector_lowercase,
             None,
             (_str,),
             aliases=("LCASE",),
@@ -153,7 +118,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_string_length,
                         cost_us_per_million=483.89,
                     ),
                 ),
@@ -164,7 +128,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_length,
                         cost_us_per_million=338.01,
                     ),
                 ),
@@ -187,7 +150,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_octet_length,
                         cost_us_per_million=414.54,
                     ),
                 ),
@@ -195,7 +157,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "INITCAP",
-            vector_initcap,
             None,
             (_string,),
             aliases=("TITLE",),
@@ -207,7 +168,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "REVERSE",
-            vector_reverse,
             None,
             (_string,),
             category="text",
@@ -218,7 +178,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "SOUNDEX",
-            vector_soundex,
             _CT_VARCHAR,
             (_string,),
             category="text",
@@ -265,14 +224,8 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         id="default",
                         # No draken_concat kernel exists — the optimizer (predicate_rewriter.py)
                         # always rewrites CONCAT(a, b, ...) to a || b || ... (StringConcat) chains
-                        # before execution, so this call is never dispatched under normal
-                        # operation. Unreachable via callable_ref too: the native engine has no
-                        # per-morsel Python fallback for projections (compiler.py `_unsupported`),
-                        # so a stray CONCAT that reaches the executor (e.g. DISABLE_OPTIMIZER=1)
-                        # is refused at plan time rather than run through this. Confirmed dead
-                        # 2026-07-17 in every mode: with the optimizer enabled it never reaches
-                        # kernel dispatch; with it disabled it is refused before reaching here.
-                        callable_ref=None,
+                        # before execution. A stray CONCAT that reaches the executor (e.g.
+                        # DISABLE_OPTIMIZER=1) has no kernel and is refused at plan time.
                         cost_us_per_million=523.0,
                     ),
                 ),
@@ -287,7 +240,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,  # rewritten to `||`; see CONCAT_varchar
                         cost_us_per_million=523.0,
                     ),
                 ),
@@ -302,7 +254,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,  # rewritten to `||`; see CONCAT_varchar
                         cost_us_per_million=523.0,
                     ),
                 ),
@@ -328,9 +279,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=lambda s, f: vector_string_substring(
-                            s, f, _draken_native_text_reg.vector_null_from_length(len(s))
-                        ),
                         cost_us_per_million=9236.83,
                     ),
                 ),
@@ -345,7 +293,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_string_substring,
                         cost_us_per_million=8114.72,
                     ),
                 ),
@@ -353,7 +300,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LEFT",
-            vector_string_slice_left,
             None,
             (
                 _string,
@@ -366,7 +312,6 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "RIGHT",
-            vector_string_slice_right,
             None,
             (
                 _string,
@@ -390,12 +335,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     Combined with the core group in one module for maintainability.
     """
     from opteryx.compiled import vector_ops as compiled_vector_ops
-    from opteryx.compiled.nanobind.vectors import (
-        vector_ltrim,
-        vector_rtrim,
-        vector_trim,
-    )
-    from opteryx.expression.functions.implementations import text as string_functions
 
     def _split_return_type(arg_nodes):
         """SPLIT(str, delim[, limit]): ARRAY<element> where element is the input's
@@ -512,9 +451,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         id="default",
                         # No draken_concat_ws kernel exists — every arity is rewritten by the
                         # optimizer (predicate_rewriter.py) to a StringConcat chain before
-                        # execution; see CONCAT's kernel comment above for why callable_ref is
-                        # unreachable in every mode, including DISABLE_OPTIMIZER=1.
-                        callable_ref=None,
+                        # execution; see CONCAT's kernel comment above.
                         cost_us_per_million=587.0,
                     ),
                 ),
@@ -529,7 +466,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,  # rewritten to `||`; see CONCAT_WS_varchar
                         cost_us_per_million=587.0,
                     ),
                 ),
@@ -544,7 +480,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=None,  # rewritten to `||`; see CONCAT_WS_varchar
                         cost_us_per_million=587.0,
                     ),
                 ),
@@ -577,7 +512,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.split,
                         cost_us_per_million=531.0,
                     ),
                 ),
@@ -592,7 +526,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.split,
                         cost_us_per_million=589.0,
                     ),
                 ),
@@ -618,7 +551,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.position,
                         cost_us_per_million=3378.43,
                     ),
                 ),
@@ -626,7 +558,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "REPLACE",
-            vector_replace,
             None,
             (
                 _string,
@@ -659,7 +590,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.regex_replace,
                         cost_us_per_million=26767.88,
                     ),
                 ),
@@ -685,7 +615,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_dfa_extract,
                         cost_us_per_million=112.0,
                     ),
                 ),
@@ -708,7 +637,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_trim,
                         cost_us_per_million=4610.05,
                     ),
                 ),
@@ -731,7 +659,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_ltrim,
                         cost_us_per_million=3552.05,
                     ),
                 ),
@@ -754,7 +681,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_rtrim,
                         cost_us_per_million=3764.16,
                     ),
                 ),
@@ -762,7 +688,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LEVENSHTEIN",
-            vector_levenshtein,
             _CT_INT64,
             (
                 _string,
@@ -801,7 +726,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.left_pad,
                         cost_us_per_million=3554.95,
                     ),
                 ),
@@ -835,7 +759,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.right_pad,
                         cost_us_per_million=3595.49,
                     ),
                 ),
@@ -875,7 +798,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.to_char,
                         cost_us_per_million=3475.73,
                     ),
                 ),
@@ -898,7 +820,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.to_ascii,
                         cost_us_per_million=493.54,
                     ),
                 ),
@@ -933,7 +854,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.match_against,
                         cost_us_per_million=1_500_000.0,
                     ),
                 ),

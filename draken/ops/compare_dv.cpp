@@ -16,6 +16,7 @@
 #include "ops/int64_compare.h"
 #include "ops/int128_compare.h"  // i128_compare_vector (DECIMAL128)
 #include "ops/uuid_ops.h"         // uuid_compare_vector (UUID)
+#include "ops/interval_compare.h" // interval_compare_vector (INTERVAL, 1 month = 30 days)
 #include "ops/float_ops.h"
 #include "ops/fixed_int_ops.h"   // i8/i16/i32 + u8/u16/u32 compare_vector
 #include "ops/uint64_compare.h"  // u64_compare_vector (UINT64)
@@ -108,6 +109,9 @@ static bool compare_typed(const DrakenVector& l, const DrakenVector& r, int op_c
             // memcmp order of the 16 bytes (uuid_ops.h); literals arrive as UUID
             // constant vectors, parsed at bind time.
             *out = draken::ops::uuid_compare_vector(l, r, op_code);
+            break;
+        case DRAKEN_INTERVAL:
+            *out = draken::ops::interval_compare_vector(l, r, op_code);
             break;
         case DRAKEN_INT8:
             *out = draken::ops::i8_compare_vector(l, r, op_code);

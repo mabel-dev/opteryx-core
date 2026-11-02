@@ -46,7 +46,8 @@ from draken.draken_native import vector_attach_logical_type
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.expression.evaluator import execute_bytecode
+from opteryx.expression.evaluator._impl import evaluate_c_native
+from opteryx.operators._operators import bytecode_constant_result, bytecode_folds_natively
 from opteryx.managers.virtual_datasets import one_row_data
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
@@ -59,53 +60,6 @@ from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Nested
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import Function
-from opteryx.compiled.structures.expressions import rewrite_children
-
-
-def _is_rewrite_only(node) -> bool:
-    """True for a FUNCTION that has no implementation of its own to call.
-
-    CONCAT, CONCAT_WS and the null-conditional family are DESUGARED
-    (PredicateRewriteStrategy / FunctionRewriteStrategy turn CONCAT into a
-    StringConcat chain, IIF into IF_THEN_ELSE, ...) rather than executed, so their
-    catalog overload carries no `callable_ref`. Asking the expression VM to run one
-    undesugared reaches `callable_obj(...)` with None and raises
-    "'NoneType' object is not callable" — a bare Python TypeError, from an ordinary
-    all-literal predicate.
-
-    Read off the resolved overload rather than a name list, so a function that
-    later gains or loses a kernel does not leave a stale name behind. There are
-    seven of these and they are exactly the desugared family.
-    """
-    if node.node_type != NodeType.FUNCTION or node.function_ref is None:
-        return False
-    kernel = node.function_ref.selected_overload.kernel
-    return kernel is None or kernel.callable_ref is None
-
-
-def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
-    """Desugar every rewrite-only FUNCTION in `node`'s subtree, bottom up.
-
-    Constant folding runs BEFORE the strategies that do this desugaring (see the
-    strategy order in optimizer/__init__), so an all-literal call arrives here in a
-    form nothing can execute. The folder already handled the case where such a call
-    is the whole expression; a call NESTED inside one was missed, which is why
-    `WHERE (CONCAT(647310.0000, b'item') < 'zeta')` raised while
-    `SELECT CONCAT('a', 'b')` folded. Depth is the only difference between them.
-
-    Children first: `_rewrite_function` inspects its own parameters, so it has to
-    see them in their final form.
-    """
-    from .predicate_rewriter import _rewrite_function
-
-    node = rewrite_children(
-        node,
-        lambda child: _desugar_rewrite_only(child, telemetry, plan_context=plan_context),
-        share=True,
-    )
-    if _is_rewrite_only(node):
-        return _rewrite_function(node, telemetry, plan_context=plan_context)
-    return node
 
 
 def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> Expression | None:
@@ -697,34 +651,17 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         # real VECTOR(n) it always was.)
         and _root_cat != LC.VECTOR
     ):
-        # Some functions (CONCAT, CONCAT_WS, ...) are rewrite-only: they have no
-        # kernel/callable_ref of their own and are only ever meant to reach
-        # execution after PredicateRewriteStrategy/FunctionRewriteStrategy desugar
-        # them (e.g. CONCAT -> StringConcat chains). Those strategies run AFTER
-        # ConstantFoldingStrategy, so an all-literal call such as CONCAT('a', 'b')
-        # arrives here undesugared and its callable_ref is None -- 'NoneType'
-        # object is not callable. Apply the same rewrite here first, ANYWHERE in
-        # the subtree about to be evaluated, so folding sees the canonical
-        # executable form (see _desugar_rewrite_only).
-        rewritten = _desugar_rewrite_only(root, telemetry, plan_context=plan_context)
-        if rewritten is not root:
-            return fold_constants(rewritten, telemetry, plan_context=plan_context)
-
         exact = _fold_exact_literal_arithmetic(root, telemetry, plan_context=plan_context)
         if exact is not None:
             return exact
 
-        table = one_row_data.read()
         bc = build_bytecode(lower(root))
-        result_vector = execute_bytecode(bc, table)
-        # execute_bytecode returns a Vector for native kernels, but a BARE LIST for
-        # a function still on the Python callable_ref path: the VM flags those
-        # BC_RESULT_NO_DV and pushes the callable's raw return value (see the
-        # BC_FUNCTION arm in evaluation.pyx). Those impls return plain lists (e.g.
-        # text.pyx::to_char -> [chr(a) for a in arr]), and constant folding is the
-        # ONE place they still run — the native engine refuses an unported function
-        # at plan time rather than falling back. Assuming a Vector here crashed
-        # `SELECT CHR(200)` with AttributeError: 'list' has no attribute 'to_pylist'.
+        # Folding runs the expression on the native evaluator, nothing else. A tree it
+        # cannot run is left in the plan for the engine, which runs it natively or
+        # refuses it — folding is never a second way for a query to be answered.
+        is_constant, result = bytecode_constant_result(bc)
+        if not is_constant and not bytecode_folds_natively(bc):
+            return root
         # A boolean connective carries NO schema_column — AND/OR are structure, not
         # a projected column — and `_build_transparent_node` copies that None onto
         # the NESTED wrapper it folds through here. Dereferencing it unconditionally
@@ -735,43 +672,60 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         # the `target_ct is None` case the re-attach below already handles.
         _target_sc = root.schema_column
         target_ct = _target_sc.column_type if _target_sc is not None else None
-        if not isinstance(result_vector, list):
-            if target_ct is not None and target_ct.logical is not None:
-                # A C-ABI kernel's VecResult carries a descriptor-bearing result
-                # (TIMESTAMP64 unit, DECIMAL precision/scale) in the raw domain —
-                # the nogil VM's arena adoption has nowhere to hold it (a bare
-                # DrakenVector* has no logical_type slot) and re-attaches only at
-                # the runtime plan-known boundary, ExprProjectOperator (see
-                # _dv_vecresult_adopt_c in evaluation.pyx). Constant folding is the
-                # OTHER plan-known boundary: the target descriptor is already known
-                # here (root.schema_column.column_type), so re-attach it before
-                # to_pylist() reads the value back out, exactly like
-                # ExprProjectOperator's `logical` param does at runtime.
-                #
-                # IPV4 is the one kind that must NOT be attached here. The attach
-                # exists so the readback lands in the LITERAL's own domain, and for
-                # every other kind it does: a TIMESTAMP64 reads back as a datetime
-                # and DECIMAL as a Decimal, both of which build_literal_node stores
-                # (converting the datetime back to int64 micros). An IPv4 reads back
-                # as dotted-decimal TEXT (ipv4_to_py_str), but a folded IPv4 literal
-                # is the raw uint32 — the form _cast_literal_value produces and
-                # _materialise_constant_literal consumes. Attaching would hand
-                # build_literal_node a str for a UINT32/IPV4 column, and its
-                # isinstance(value, (str, bytes)) branch would build a VARCHAR
-                # constant: value/type-tag divergence, wrong rows rather than a
-                # crash. Left un-attached, the vector is already plain UINT32, the
-                # readback is the int, and ExprProjectOperator re-attaches the
-                # descriptor downstream from the schema exactly as it does for a
-                # CAST-folded IPv4 literal.
-                if target_ct.logical.kind != LogicalKind.IPV4:
-                    vector_attach_logical_type(result_vector._nb, target_ct.logical)
-        result = result_vector[0] if isinstance(result_vector, list) else result_vector.to_pylist()[0]
+        _cast = root
+        while _cast.node_type == NodeType.NESTED:
+            _cast = _cast.centre
+        if target_ct is None and _cast.node_type == NodeType.CAST:
+            # An unbound CAST (an IN-list element folded before binding) names its
+            # own target; its descriptor is needed to read the result back.
+            from opteryx.planner.logical_planner.logical_planner_builders import _column_type_for
+
+            target_ct = _column_type_for(
+                _cast.value.replace("TRY_", ""), _cast.parameters or ()
+            )
+        if not is_constant:
+            result = _evaluate_natively(bc, target_ct)
         telemetry.optimization_constant_fold_expression += 1
         return build_literal_node(
             result, identity_of=root, suggested_type=target_ct, plan_context=plan_context
         )
 
     return root
+
+
+def _evaluate_natively(bc, target_ct):
+    """Run `bc` on the native evaluator over one row and read the value back."""
+    result_vector = evaluate_c_native(bc, one_row_data.read())
+    if target_ct is not None and target_ct.logical is not None:
+        # A C-ABI kernel's VecResult carries a descriptor-bearing result
+        # (TIMESTAMP64 unit, DECIMAL precision/scale) in the raw domain —
+        # the nogil VM's arena adoption has nowhere to hold it (a bare
+        # DrakenVector* has no logical_type slot) and re-attaches only at
+        # the runtime plan-known boundary, ExprProjectOperator (see
+        # _dv_vecresult_adopt_c in evaluation.pyx). Constant folding is the
+        # OTHER plan-known boundary: the target descriptor is already known
+        # here (root.schema_column.column_type), so re-attach it before
+        # to_pylist() reads the value back out, exactly like
+        # ExprProjectOperator's `logical` param does at runtime.
+        #
+        # IPV4 is the one kind that must NOT be attached here. The attach
+        # exists so the readback lands in the LITERAL's own domain, and for
+        # every other kind it does: a TIMESTAMP64 reads back as a datetime
+        # and DECIMAL as a Decimal, both of which build_literal_node stores
+        # (converting the datetime back to int64 micros). An IPv4 reads back
+        # as dotted-decimal TEXT (ipv4_to_py_str), but a folded IPv4 literal
+        # is the raw uint32 — the form _cast_literal_value produces and
+        # _materialise_constant_literal consumes. Attaching would hand
+        # build_literal_node a str for a UINT32/IPV4 column, and its
+        # isinstance(value, (str, bytes)) branch would build a VARCHAR
+        # constant: value/type-tag divergence, wrong rows rather than a
+        # crash. Left un-attached, the vector is already plain UINT32, the
+        # readback is the int, and ExprProjectOperator re-attaches the
+        # descriptor downstream from the schema exactly as it does for a
+        # CAST-folded IPv4 literal.
+        if target_ct.logical.kind != LogicalKind.IPV4:
+            vector_attach_logical_type(result_vector._nb, target_ct.logical)
+    return result_vector.to_pylist()[0]
 
 
 def _fold(expression: Expression, telemetry: QueryTelemetry, *, plan_context) -> Expression:

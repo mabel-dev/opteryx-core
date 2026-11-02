@@ -19,7 +19,6 @@ from draken.draken_native import ipv4_format
 from draken.draken_native import ipv4_parse
 
 from opteryx.compiled.structures.expressions import Expression
-from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.exceptions import (
     ArrayWithMixedTypesError,
     FunctionNotFoundError,
@@ -31,7 +30,6 @@ from opteryx.exceptions import (
     md_syntax,
 )
 from opteryx.expression import NodeType, format_expression
-from opteryx.expression.evaluator.arithmetic import resolve_binary_op
 from opteryx.expression.functions import functions as _list_functions
 from opteryx.expression.functions import is_function as _is_function
 from opteryx.expression.intervals import (
@@ -103,7 +101,6 @@ from opteryx.types.logical_type import (
     TimestampUnit,
 )
 from opteryx.utils import dates, suggest_alternative
-from opteryx.utils.vector_types import VectorType, get_vector_type
 from opteryx.compiled.structures.expressions import Aggregator
 from opteryx.compiled.structures.expressions import Function
 from opteryx.compiled.structures.expressions import Xor
@@ -202,10 +199,6 @@ def _span_of(first: dict, last: Optional[dict] = None):
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
 
-# Module-level ColumnType sentinels for factories (singletons can be compared directly).
-_SENTINEL_TIMESTAMP = _CT_TIMESTAMP()
-_SENTINEL_TIME = _CT_TIME()
-
 # Misspellings the edit-distance detector will not reach - LENGTH is three edits from
 # LEN, past the cap, and widening the cap to catch it would let the detector start
 # guessing at names that are not near-misses at all.
@@ -248,261 +241,6 @@ def _unknown_function(func: str, span=None) -> FunctionNotFoundError:
         func, aggregator_names() + _list_functions()
     )
     return FunctionNotFoundError(function=func, suggestion=likely, span=span)
-
-
-def _evaluate_fixed_temporal_function(function_name: str):
-    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-    if function_name in ("NOW", "CURRENT_TIMESTAMP", "UTC_TIMESTAMP"):
-        return now, _SENTINEL_TIMESTAMP
-    if function_name in ("CURRENT_DATE", "TODAY"):
-        return now.date(), _CT_DATE
-    if function_name == "YESTERDAY":
-        return (now - datetime.timedelta(days=1)).date(), _CT_DATE
-    if function_name == "CURRENT_TIME":
-        return now.time(), _SENTINEL_TIME
-    return None, None
-
-
-def _extract_single_scalar(value):
-    value_type = get_vector_type(value)
-    if value_type != VectorType.UNKNOWN:
-        if len(value) != 1:
-            raise UnsupportedSyntaxError(
-                "Time-travel expressions must evaluate to a single scalar value. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`."
-            )
-        return value[0]
-    # Already a Python scalar
-    return value
-
-
-def _as_binary_operand_array(value, value_type):
-    if value_type is None:
-        return [value]
-    cat = value_type.category
-    if cat == LogicalCategory.INTERVAL:
-        return [value]
-    if cat == LogicalCategory.TIMESTAMP:
-        timestamp = dates.parse_iso(value)
-        if timestamp is None:
-            raise UnsupportedSyntaxError(
-                "Unable to parse timestamp value in time-travel expression. Write it as a timestamp literal, for example `'2024-01-01 12:00'`."
-            )
-        return [int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)]
-    if cat == LogicalCategory.DATE:
-        dt = dates.parse_iso(value)
-        if dt is None:
-            raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression. Write it as a date literal, for example `'2024-01-01'`.")
-        return [(dt.date() - _EPOCH_DATE).days]
-    return [value]
-
-
-def _as_function_parameter_array(value, value_type):
-    if value_type is None:
-        return [value]
-    cat = value_type.category
-    if cat == LogicalCategory.TIMESTAMP:
-        dt = dates.parse_iso(value)
-        if dt is None:
-            raise UnsupportedSyntaxError("Unable to parse temporal function argument. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`.")
-        return [int((dt - _EPOCH_DT).total_seconds() * 1_000_000)]
-    if cat == LogicalCategory.DATE:
-        dt = dates.parse_iso(value)
-        if dt is None:
-            raise UnsupportedSyntaxError("Unable to parse temporal function argument. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`.")
-        return [(dt.date() - _EPOCH_DATE).days]
-    return [value]
-
-
-def _type_from_value(value):
-    if value is None:
-        return _CT_NULL
-    if isinstance(value, bool):
-        return _CT_BOOLEAN
-    if isinstance(value, datetime.datetime):
-        return _SENTINEL_TIMESTAMP
-    if isinstance(value, datetime.time):
-        return _SENTINEL_TIME
-    if isinstance(value, datetime.date):
-        return _CT_DATE
-    if isinstance(value, int):
-        return _CT_INT64
-    if isinstance(value, float):
-        return _CT_FLOAT64
-    if isinstance(value, (bytes, bytearray)):
-        return _CT_VARBINARY
-    if isinstance(value, str):
-        return _CT_VARCHAR
-    if isinstance(value, tuple) and len(value) == 2:
-        return _CT_INTERVAL
-    return None
-
-
-def _interval_to_past_timestamp(interval_value):
-    months = abs(int(interval_value[0]))
-    microseconds = abs(int(interval_value[1]))
-    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-    dt = dates.add_months(now, -months) if months else now
-    return dt - datetime.timedelta(microseconds=microseconds)
-
-
-def _apply_interval_scalar(base_value, base_type, interval_value, operator: str):
-    """Apply an INTERVAL to a DATE or TIMESTAMP scalar.
-
-    The bind-time kernel resolver converts dates to plain integers.
-    Unfortunately the interval kernels expect a PyArrow temporal array and
-    therefore return ``null`` when provided with a raw integer.  That bug
-    manifests during timetravel evaluation, e.g. ``CURRENT_DATE - INTERVAL '7' DAY``;
-    the arithmetic ends up producing ``None`` which is later treated as a
-    failure to resolve the expression.
-
-    To keep the timetravel evaluator simple we perform the arithmetic
-    ourselves using Python's ``datetime`` helpers.  This bypasses the
-    broken kernel and ensures the result is a sensible ``datetime``.
-    The returned value is always a ``datetime.datetime`` so that callers
-    can assume a timestamp-like object (even if the input was a plain
-    date).
-    """
-    # convert date-only values into datetimes at midnight
-    if isinstance(base_value, datetime.date) and not isinstance(base_value, datetime.datetime):
-        result = datetime.datetime.combine(base_value, datetime.time())
-    else:
-        result = base_value
-
-    sign = 1 if operator == "Plus" else -1
-    months, micros = interval_value
-    if months:
-        result = dates.add_months(result, sign * int(months))
-    if micros:
-        result = result + datetime.timedelta(microseconds=sign * int(micros))
-    return result
-
-
-def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
-    if node.node_type == NodeType.LITERAL:
-        _node_ct = node.type  # ColumnType or None
-        if (
-            _node_ct is not None
-            and _node_ct.category == LogicalCategory.INTERVAL
-            and apply_interval_literal_to_now
-        ):
-            return _interval_to_past_timestamp(node.value), _SENTINEL_TIMESTAMP
-        # The evaluator works on Python values: a string literal is its text.
-        if type(node.value) is bytes:
-            return node.text(), _node_ct
-        return node.value, _node_ct
-
-    if node.node_type == NodeType.NESTED:
-        return _evaluate_timetravel_expression(node.centre, apply_interval_literal_to_now)
-
-    if node.node_type == NodeType.FUNCTION:
-        fixed_value, fixed_type = _evaluate_fixed_temporal_function(node.value)
-        if fixed_type is not None:
-            return fixed_value, fixed_type
-
-        parameter_values = []
-        resolved_parameters = []
-        scalar_parameters = []
-        for parameter in node.parameters:
-            value, value_type = _evaluate_timetravel_expression(parameter)
-            scalar_parameters.append((value, value_type))
-            parameter_values.append(_as_function_parameter_array(value, value_type))
-            resolved_parameters.append(
-                Literal(
-                    type=value_type,
-                    value=native_literal_value(value, value_type),
-                    arena=node.arena,
-                )
-            )
-
-        if node.value == "TRUNC" and len(scalar_parameters) == 2:
-            trunc_value, trunc_value_type = scalar_parameters[0]
-            unit_value, unit_type = scalar_parameters[1]
-            _tcat = trunc_value_type.category if trunc_value_type is not None else None
-            _ucat = unit_type.category if unit_type is not None else None
-            if (
-                _tcat in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
-                and _ucat == LogicalCategory.VARCHAR
-            ):
-                if isinstance(trunc_value, datetime.date) and not isinstance(
-                    trunc_value, datetime.datetime
-                ):
-                    trunc_value = datetime.datetime.combine(trunc_value, datetime.time.min)
-                return dates.truncate_single(trunc_value, unit_value.lower()), _SENTINEL_TIMESTAMP
-
-        try:
-            from opteryx.expression.functions import FunctionResolutionContext
-            from opteryx.expression.functions import get_catalog as _get_catalog
-
-            _catalog = _get_catalog()
-            _func_def = _catalog.get_definition(node.value)
-            if _func_def is None or not _func_def.overloads:
-                raise _unknown_function(node.value, node.span)
-            resolved = _catalog.resolve(
-                node.value, resolved_parameters, FunctionResolutionContext(schema={}, bound_args={})
-            )
-            if resolved is None:
-                raise _unknown_function(node.value, node.span)
-            result = resolved.selected_overload.kernel.callable_ref(*parameter_values)
-        except (UnsupportedSyntaxError, FunctionNotFoundError):
-            raise
-        except Exception as err:
-            raise UnsupportedSyntaxError(
-                f"Unable to evaluate time-travel function '{node.value}'. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`."
-            ) from err
-
-        scalar = _extract_single_scalar(result)
-        return scalar, _type_from_value(scalar)
-
-    if node.node_type in (NodeType.BINARY_OPERATOR, NodeType.EXTRACTION_OPERATOR):
-        left_value, left_type = _evaluate_timetravel_expression(node.left)
-        right_value, right_type = _evaluate_timetravel_expression(node.right)
-
-        # short‑circuit arithmetic when one side is a DATE/TIMESTAMP and the
-        # other is an INTERVAL.  The generic kernel path converts dates to
-        # plain integers which then causes ``IntervalVector.apply_to_temporal``
-        # to bail out and return null.  We can evaluate these cases directly
-        # using Python's datetime helpers.
-        if node.value in ("Plus", "Minus"):
-            _lcat = left_type.category if left_type is not None else None
-            _rcat = right_type.category if right_type is not None else None
-            if (
-                _lcat in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
-                and _rcat == LogicalCategory.INTERVAL
-            ):
-                return (
-                    _apply_interval_scalar(left_value, left_type, right_value, node.value),
-                    _SENTINEL_TIMESTAMP,
-                )
-            if _lcat == LogicalCategory.INTERVAL and _rcat in (
-                LogicalCategory.DATE,
-                LogicalCategory.TIMESTAMP,
-            ):
-                # interval +/- date is effectively the same as date +/- interval
-                return (
-                    _apply_interval_scalar(right_value, right_type, left_value, node.value),
-                    _SENTINEL_TIMESTAMP,
-                )
-
-        left = _as_binary_operand_array(left_value, left_type)
-        right = _as_binary_operand_array(right_value, right_type)
-
-        op_code = _BOP_CODE.get(node.value, 0)
-        if op_code == 0:
-            raise UnsupportedSyntaxError(
-                f"Time-travel expression: unsupported operator '{node.value}'. Only `+` and `-` over a timestamp and an **INTERVAL** can be used here."
-            )
-        kernel = resolve_binary_op(op_code, left_type, right_type)
-        try:
-            result = kernel(left, right)
-        except Exception as err:
-            raise UnsupportedSyntaxError(
-                f"Unable to evaluate time-travel expression with operator '{node.value}'. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`."
-            ) from err
-
-        scalar = _extract_single_scalar(result)
-        return scalar, _type_from_value(scalar)
-
-    raise UnsupportedSyntaxError("Time-travel expression must resolve to a scalar value. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`.")
 
 
 def _as_datetime(value):
@@ -681,11 +419,9 @@ def extract_timetravel_timestamp(version_clause, *, plan_context) -> Optional[ob
         TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY
         TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')
 
-    Args:
-        version_clause: The version field from the table AST
-
-    Returns:
-        Parsed datetime object or None if no version clause
+    The expression is planned like any other constant: bound, then folded by
+    native constant folding. One that does not fold to a single value is refused —
+    there is no second evaluator for time travel.
 
     Raises:
         UnsupportedSyntaxError: If syntax is unsupported or doesn't evaluate to one timestamp
@@ -694,9 +430,12 @@ def extract_timetravel_timestamp(version_clause, *, plan_context) -> Optional[ob
         return None
 
     expression_ast = _extract_version_expression(version_clause)
-    expression_node = build(expression_ast, plan_context=plan_context)
-    value, value_type = _evaluate_timetravel_expression(
-        expression_node, apply_interval_literal_to_now=True
+    if "Interval" in expression_ast:
+        # A bare INTERVAL names how far back: `AS OF INTERVAL '1' DAY` is
+        # `AS OF CURRENT_TIMESTAMP - INTERVAL '1' DAY`.
+        expression_ast = {"BinaryOp": {"left": _CURRENT_TIMESTAMP_AST, "op": "Minus", "right": expression_ast}}
+    value, value_type = _fold_constant_expression(
+        build(expression_ast, plan_context=plan_context), plan_context
     )
 
     if value is None:
@@ -705,6 +444,48 @@ def extract_timetravel_timestamp(version_clause, *, plan_context) -> Optional[ob
         )
 
     return _normalize_timetravel_value(value, value_type)
+
+
+_CURRENT_TIMESTAMP_AST = {
+    "Function": {
+        "name": [{"Identifier": {"value": "CURRENT_TIMESTAMP", "quote_style": None}}],
+        "uses_odbc_syntax": False, "parameters": "None", "args": "None",
+        "within_group": [], "filter": None, "null_treatment": None, "over": None,
+    }
+}
+
+_TIMETRAVEL_CONSTANT = (
+    "Time travel takes a value that can be worked out before the query runs, for example "
+    "`TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`."
+)
+
+
+def _fold_constant_expression(node, plan_context):
+    """(value, ColumnType) of a constant time-travel expression: bound with no
+    relations in scope, then folded natively. Anything that does not fold to a DATE,
+    a TIMESTAMP or a string to read as one is refused."""
+    from opteryx.compiled.planner.binder_core import inner_binder
+    from opteryx.models import ExecutionContext, QueryTelemetry
+    from opteryx.planner.binder.binding_context import BindingContext
+    from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
+
+    # A fresh context: NOW() / CURRENT_DATE mean the moment this clause is planned.
+    context = BindingContext.initialize(
+        query_id="time-travel", execution_context=ExecutionContext(), plan_context=plan_context
+    )
+    bound, _ = inner_binder(node, context)
+    folded = fold_constants(bound, QueryTelemetry.detached(), plan_context=plan_context)
+    while folded.node_type == NodeType.NESTED:
+        folded = folded.centre
+    category = folded.type.category if folded.node_type == NodeType.LITERAL and folded.type is not None else None
+    if category not in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP, LogicalCategory.VARCHAR):
+        raise UnsupportedSyntaxError(
+            f"Unable to evaluate time-travel expression `{format_expression(folded)}` to a "
+            "point in time. " + _TIMETRAVEL_CONSTANT
+        )
+    # The engine holds a string literal as its bytes; the timestamp parser reads text.
+    value = folded.text() if type(folded.value) is bytes else folded.value
+    return value, folded.type
 
 
 def is_version_as_of_clause(version_clause) -> bool:

@@ -11,30 +11,14 @@ the values declared on the NodeType IntEnum in opteryx/expression/__init__.py;
 a runtime check in opteryx/expression/evaluator/__init__.py verifies this.
 """
 
-import sys as _sys
-
-from opteryx.compiled.expression.compiled_expression import (
-    BC_RESULT_NEEDS_NB_WRAP,
-    BC_RESULT_WRAP_AS_BOOL,
-    BC_RESULT_NO_DV,
-)
-from opteryx.compiled.nanobind.vectors import vector_bitwise_not as _vector_bitwise_not
-from opteryx.compiled.nanobind.vectors import (
-    vector_string_is_empty as _vector_string_is_empty,
-    vector_string_is_not_empty as _vector_string_is_not_empty,
-)
-from opteryx.exceptions import ColumnReferencedBeforeEvaluationError, IncompatibleTypesError
-from opteryx.types.logical_type import LogicalCategory as _LogicalCategory, DATE as _CT_DATE, TIMESTAMP as _TIMESTAMP_factory
-from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us as _ts_to_us
-from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
+from opteryx.exceptions import ColumnReferencedBeforeEvaluationError, IncompatibleTypesError, NotSupportedError
+from opteryx.types.logical_type import LogicalCategory as _LogicalCategory, TIMESTAMP as _TIMESTAMP_factory
 
 
 # Imports from draken are safe at module level — draken does not import opteryx.expression.
 from draken.vectors.bool_vector import BoolVector as _BoolVector
 from draken.morsels.morsel import Morsel as _Morsel
 import draken.draken_native as _draken_native
-from opteryx.compiled.nanobind.vectors import vector_uint64_eq_scalar as _vector_uint64_eq_scalar
-from draken.draken_native import vector_array_map_access as _vector_array_map_access
 
 # ---------------------------------------------------------------------------
 # C-level imports needed by the native bitmap helpers and unary operators.
@@ -105,56 +89,6 @@ DEF _BV_IS_NOT_FALSE = 3
 # ColumnType instances for temporal coercion — passed to _coerce_temporal_scalar_for_arrow
 # to disambiguate DATE vs TIMESTAMP from the BC_TYPE_* int codes on the AnyOp paths.
 _CT_TIMESTAMP = _TIMESTAMP_factory()
-
-def _is_scalar_value(obj):
-    """Deprecated: use is_scalar() from opteryx.utils.vector_types instead."""
-    return is_scalar(obj)
-
-
-cdef _unary_op_kernel(int op_code, vec):
-    """Apply a unary op to a pre-evaluated vector (bytecode executor path).
-
-    op_code is a BCUnaryOpCode integer — no Python string comparison.
-    """
-    cdef DrakenVector* vec_dv
-    cdef BoolVector _tt_bv
-    cdef DrakenVector* _tt_dv
-    cdef uint32_t _tt_rows
-    cdef Py_ssize_t _tt_nbytes
-    if op_code == UOP_IS_NULL:
-        vec_dv = <DrakenVector*>(<Vector>vec)._dv
-        if vec_dv == NULL:
-            raise TypeError(f"_unary_op_kernel: IS NULL requires a Vector with valid _dv; got {type(vec).__name__!r}")
-        return _is_null_from_dv(vec_dv, 0)
-    if op_code == UOP_IS_NOT_NULL:
-        vec_dv = <DrakenVector*>(<Vector>vec)._dv
-        if vec_dv == NULL:
-            raise TypeError(f"_unary_op_kernel: IS NOT NULL requires a Vector with valid _dv; got {type(vec).__name__!r}")
-        return _is_null_from_dv(vec_dv, 1)
-    if op_code == UOP_IS_EMPTY:
-        return _BoolVector(_vector_string_is_empty(_nb_vec_unwrap(vec)))
-    if op_code == UOP_IS_NOT_EMPTY:
-        return _BoolVector(_vector_string_is_not_empty(_nb_vec_unwrap(vec)))
-    if op_code == UOP_BITWISE_NOT:
-        return Vector(_vector_bitwise_not(_nb_vec_unwrap(vec)))
-    if op_code == UOP_IS_TRUE or op_code == UOP_IS_NOT_FALSE or op_code == UOP_IS_FALSE or op_code == UOP_IS_NOT_TRUE:
-        if get_vector_type(vec) != VectorType.BOOL:
-            raise TypeError(
-                f"IS TRUE/IS FALSE requires a boolean expression; got {vec.__class__.__name__!r}"
-            )
-        _tt_bv = <BoolVector>vec
-        _tt_dv = _tt_bv.unified()
-        _tt_rows = _tt_dv.length
-        _tt_nbytes = (<Py_ssize_t>_tt_rows + 7) >> 3
-        if op_code == UOP_IS_TRUE:
-            return _bv_truth_test_native(_tt_bv, _BV_IS_TRUE, _tt_nbytes, _tt_rows)
-        if op_code == UOP_IS_NOT_FALSE:
-            return _bv_truth_test_native(_tt_bv, _BV_IS_NOT_FALSE, _tt_nbytes, _tt_rows)
-        if op_code == UOP_IS_FALSE:
-            return _bv_truth_test_native(_tt_bv, _BV_IS_FALSE, _tt_nbytes, _tt_rows)
-        return _bv_truth_test_native(_tt_bv, _BV_IS_NOT_TRUE, _tt_nbytes, _tt_rows)
-    raise NotImplementedError(f"_unary_op_kernel: unsupported unary op code {op_code!r}")
-
 
 cdef bint _is_temporal_type(column_type):
     """Check if a ColumnType is DATE or TIMESTAMP."""
@@ -384,30 +318,6 @@ cdef inline void _fill_is_null_bits(
         out[nbytes - 1] &= <uint8_t>((1u << (num_rows & 7u)) - 1u)
 
 
-cdef BoolVector _is_null_from_dv(DrakenVector* dv, bint negate) noexcept:
-    """Produce a BoolVector of IS NULL (negate=0) / IS NOT NULL (negate=1) from a
-    DrakenVector's validity bitmap — see _fill_is_null_bits."""
-    cdef uint32_t num_rows = dv.length
-    cdef Py_ssize_t nbytes = (<Py_ssize_t>num_rows + 7) >> 3
-    cdef uint8_t* out_data = <uint8_t*>malloc(<size_t>nbytes)
-    cdef object result_obj
-
-    if out_data == NULL:
-        raise MemoryError("_is_null_from_dv: malloc failed")
-
-    cdef PyObject* raw
-    try:
-        _fill_is_null_bits(dv, not negate, out_data, nbytes, num_rows)
-        # Result has no nulls — IS NULL/NOT NULL always yields a definite answer
-        raw = bool_vector_from_bits(out_data, NULL, num_rows)
-    finally:
-        free(out_data)
-
-    result_obj = <object>raw
-    _eval_decref(raw)
-    return _BoolVector(result_obj)
-
-
 cdef BoolVector _bv_truth_test_native(
     BoolVector bv, int op, Py_ssize_t nbytes, uint32_t num_rows,
 ):
@@ -548,11 +458,7 @@ cpdef execute_and_append(list compiled_evals, morsel):
 from opteryx.compiled.expression.compiled_expression cimport (
     BC_AND,
     BC_BINARY_OP,
-    BC_CASE,
     BC_CAST,
-    BC_CMP_LEFT_TEMPORAL,
-    BC_CMP_RIGHT_TEMPORAL,
-    BC_CMP_INLIST_INLINE,
     BC_CNF,
     BC_COMPARE,
     BC_DNF,
@@ -564,7 +470,6 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_LOAD_COL,
     BC_LOAD_LIT_BOOL,
     BC_LOAD_LIT_CONST,
-    BC_LOAD_LIT_SCALAR,
     BC_NOT,
     BC_OR,
     BC_UNARY_OP,
@@ -682,6 +587,7 @@ ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) noexcept nogil
 # bare arena DV* cannot carry (string consolidated block / timestamp unit descriptor).
 cdef extern from "vectors/_vector_bridge.h":
     object draken_vecresult_own_c(VecResult res)
+    const DrakenVector* draken_array_child_unwrap(object obj)
 
 cdef extern from "core/draken_capi.h":
     void draken_vecresult_discard_c(VecResult* res) noexcept nogil
@@ -1172,8 +1078,10 @@ cpdef object evaluate_bitmap(CompiledBytecode bc, Morsel morsel):
             )
 
         if rc != 0:
-            # Unexpected opcode — fall back (shouldn't happen if is_pure_bitmap is correct)
-            return execute_bytecode(bc, morsel)
+            # Unexpected opcode: is_pure_bitmap was wrong. Re-dispatching would loop
+            # straight back here, so fail loud.
+            raise NotSupportedError(
+                f"evaluate_bitmap: unexpected opcode in a pure-bitmap program (rc={rc})")
 
         result = _execute_bytecode_postpass(
             bitmaps[0],
@@ -1215,8 +1123,7 @@ cdef inline uint8_t* _ensure_dense_bitmap_c(
     Constant: expands to a dense arena allocation.
     Dict or permuted: scatters per-code bits dense.
 
-    Shared by the GIL VM (via the raising wrapper below) and the nogil DV* inner
-    (S2) — one source of expansion logic, no duplication.
+    Used by the nogil DV* inner (S2).
     """
     cdef uint8_t fill
     cdef uint8_t* out
@@ -1255,29 +1162,14 @@ cdef inline uint8_t* _ensure_dense_bitmap_c(
     return out
 
 
-cdef inline uint8_t* _ensure_dense_bitmap(
-    DrakenVector* dv,
-    Py_ssize_t nbytes,
-    uint32_t num_rows,
-    DrakenFrameArena* arena,
-) except NULL:
-    """GIL-path raising wrapper over _ensure_dense_bitmap_c (NULL → MemoryError)."""
-    cdef uint8_t* out = _ensure_dense_bitmap_c(dv, nbytes, num_rows, arena)
-    if out == NULL:
-        raise MemoryError("_ensure_dense_bitmap: arena alloc failed")
-    return out
-
-
 # ---------------------------------------------------------------------------
 # S2 — shared nogil VM op helpers.
 #
 # Each operates purely on the DV* operand stack (dv_stack), the inline result
 # store (dv_store), the frame arena, and sp (in/out) — NO PyObject, NO anchor.
-# Called from BOTH the GIL VM (execute_bytecode) and the nogil DV* inner (S2.2),
-# so the C-native op logic lives ONCE (architect structure decision b).
+# Called from the nogil DV* inner (S2.2) and the engine's eval spans.
 # Return code: 0 = ok, 1 = NULL operand (→ TypeError at the GIL edge),
-# 2 = arena-alloc failure (→ MemoryError). The GIL caller sets anchor[result]
-# to None after a 0 return (the result is an arena DV*, never a Python object).
+# 2 = arena-alloc failure (→ MemoryError).
 # ---------------------------------------------------------------------------
 cdef inline int _dv_bool_binop_c(
     int op,                       # 0 = AND, 1 = OR, 2 = XOR
@@ -1528,23 +1420,13 @@ cdef inline int _dv_function_kernel_c(
     const DrakenVector* const* fargs,
     uint32_t arity,
     DrakenVector* dv_store, DrakenVector** dv_stack, Py_ssize_t slot_idx,
-    DrakenFrameArena* arena, VecResult* out_vr, bint own_array_result,
+    DrakenFrameArena* arena, VecResult* out_vr,
 ) noexcept nogil:
     """Phase 9a-fn: C-ABI scalar function dispatch (func_fn_t) — the kernel is
     called DIRECTLY from the nogil VM, no Python/nanobind between them. rc 0 =
     fixed-width or canonical-string result folded and pushed; rc 4 = kernel error
-    sentinel; rc 5 = descriptor-carrying result the arena DV cannot hold; rc 6 =
-    ARRAY result the CALLER must own (see own_array_result).
-
-    ``own_array_result`` is set by the GIL VM only. An ARRAY result carries its
-    elements on VecResult.child, and the frame arena has nowhere to put a child —
-    _dv_vecresult_adopt_c would fold the offsets and silently drop the elements,
-    leaving an ARRAY pointing at nothing (which `arr[i]` then reports as "DRAKEN_ARRAY
-    vector has no child"). The engine VM solves this with its out_child
-    out-parameter; the GIL VM has none, so it instead owns the whole result as a
-    Vector via draken_vecresult_own_c, whose vecresult_to_owner adopts the child
-    recursively. Returning BEFORE the adopt is the point: once the arena has
-    registered the buffers, owning them too would double-free."""
+    sentinel; rc 5 = descriptor-carrying result the arena DV cannot hold. An ARRAY
+    result's elements ride VecResult.child, which the caller captures (out_child)."""
     cdef VecResult vr = (<func_fn_t>kernel_fn)(ctx_ptr, fargs, arity)
     out_vr[0] = vr
     if vr.data == NULL:
@@ -1566,8 +1448,6 @@ cdef inline int _dv_function_kernel_c(
             out_vr[0].error_msg = b"C-native kernel returned an arena borrow that does not match its operand"
             out_vr[0].data_error = 0
             return 4
-    if own_array_result and vr.child != NULL:
-        return 6
     return _dv_vecresult_adopt_c(out_vr, dv_store, dv_stack, slot_idx, arena)
 
 
@@ -1650,19 +1530,14 @@ cdef inline int _dv_cast_kernel_c(
     Py_ssize_t slot_idx,          # result slot (== sp after the one pop)
     DrakenFrameArena* arena,
     VecResult* out_vr,
-    bint own_array_result,
 ) noexcept nogil:
     """C-native BC_CAST kernel dispatch (unary; mirrors _dv_binop_kernel_c).
     rc 0 = fixed-width result folded into the arena and pushed; rc 4 = kernel
-    error; rc 5 = string result in out_vr (GIL caller wraps as a Vector); rc 6 =
-    ARRAY result the caller must own — see _dv_function_kernel_c for why
-    (CAST(json AS ARRAY<T>) is the one cast that returns a child)."""
+    error; rc 5 = string result in out_vr (the caller folds it)."""
     cdef VecResult vr = (<cast_fn_t>kernel_fn)(ctx_ptr, dv_left_ptr)
     out_vr[0] = vr
     if vr.data == NULL:
         return 4
-    if own_array_result and vr.child != NULL:
-        return 6
     if (vr.type == DRAKEN_VARCHAR or vr.type == DRAKEN_NVARCHAR
             or vr.type == DRAKEN_VARBINARY):
         return 5
@@ -1810,6 +1685,11 @@ cdef int _dv_native_prepass(
         elif slot.opcode == BC_LOAD_LIT_CONST:
             scalar_obj = <object>slot.literal_obj
             dv_cache[k] = (<Vector>scalar_obj).unified()
+        elif (slot.flags & BC_C_NATIVE_CHILD) != 0 and slot.column_identity == NULL \
+                and slot.literal_obj != NULL:
+            # an ARRAY literal's child (see _dv_cxx_resolve_caches)
+            dv_cache[k] = <DrakenVector*>draken_array_child_unwrap(
+                (<Vector>(<object>slot.literal_obj))._nb)
     return 0
 
 
@@ -2007,8 +1887,7 @@ cdef int c_execute_dv_inner(
     is not a number, a value outside the target's range. The kernel classified it
     (VecResult.data_error) and the message is complete user-facing text, so every
     consumer must raise it VERBATIM — no operator name, no opcode — and none may
-    treat it as a decline and fall back to the GIL VM, which would re-run the same
-    bad values through a different implementation. It is deliberately NOT in the
+    treat it as a decline. It is deliberately NOT in the
     0-5 band: 5 and 6 are already taken inside this rc space, and rc 5's
     fall-back-to-the-VM arm is exactly the treatment a data error must not get.
 
@@ -2158,11 +2037,11 @@ cdef int c_execute_dv_inner(
                     return 4
                 fargs[arity] = dv_cache[i]
                 _eff_nargs = <uint32_t>(arity + 1)
-            # own_array_result=0: the engine VM captures an ARRAY's child in
-            # out_child below, so the arena fold is correct here.
+            # The ARRAY child (if any) is captured in out_child below, so the
+            # arena fold is correct here.
             rc = _dv_function_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr, fargs,
                                        _eff_nargs, dv_store, dv_stack, sp,
-                                       arena, &vr, 0)
+                                       arena, &vr)
             if rc == 0:
                 sp += 1
                 if vr.child != NULL:
@@ -2223,7 +2102,7 @@ cdef int c_execute_dv_inner(
                 rc = 4 if vr.data == NULL else 5
             else:
                 rc = _dv_cast_kernel_c(slot.kernel_fn, <void*>slot.ctx_ptr,
-                                       dv_left_ptr, dv_store, dv_stack, sp, arena, &vr, 0)
+                                       dv_left_ptr, dv_store, dv_stack, sp, arena, &vr)
             if rc == 5:
                 # canonical-block string result (`*_to_string` casts) — fold nogil
                 rc = _dv_vecresult_string_fold_c(&vr, dv_store, dv_stack, sp, arena)
@@ -2265,24 +2144,6 @@ cdef int c_execute_dv_inner(
     return 0
 
 
-cdef object _vecresult_error_exc(VecResult* vr, str fallback):
-    """The exception for an error sentinel the GIL Morsel VM holds in hand.
-
-    Same classification as _kernel_error_exc, read straight off the sentinel
-    (VecResult.data_error) because this path never converts it to an rc: a kernel
-    that says the DATA failed gets DataError with its message verbatim, anything
-    else stays a ValueError."""
-    cdef object msg = (
-        vr.error_msg.decode("utf-8", "replace")
-        if vr.error_msg != NULL else fallback
-    )
-    if vr.data_error != 0:
-        from opteryx.exceptions import DataError
-
-        return DataError(msg)
-    return ValueError(msg)
-
-
 cdef object _kernel_error_exc(int rc, const char* err_msg_ptr):
     """The exception for a kernel error out of the DV* VM — rc 4 or rc 96.
 
@@ -2306,16 +2167,14 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
     """Whole-bytecode nogil DV* path for is_all_c_native predicates/expressions.
 
     Resolve loads (GIL) → run the entire dispatch under ONE `with nogil` block
-    via the shared _dv_* helpers → materialize the arena result (GIL). On any
-    nogil-inner shortfall that the GIL VM can still handle (compare fast path
-    declined / unexpected string), permanently clear the flag and fall back to
-    execute_bytecode — mirrors evaluate_bitmap's fall-back contract.
+    via the shared _dv_* helpers → materialize the arena result (GIL). A
+    nogil-inner shortfall is refused — there is no other evaluator to fall back to.
     """
-    # Bytecodes longer than the stack cache fall back to the GIL VM (rare; keeps
-    # the per-morsel path alloc-free — no malloc, no Python anchor list).
+    # The per-morsel path is alloc-free: the caches are 256-slot stack arrays.
     if bc.count > 256:
-        bc.is_all_c_native = False
-        return execute_bytecode(bc, morsel)
+        raise NotSupportedError(
+            f"evaluate_c_native: expression of {bc.count} operations exceeds the 256 the "
+            "native evaluator holds")
     cdef const CxxMorsel* m = morsel._cxx_ptr
     cdef Py_ssize_t num_rows = morsel.ptr.num_rows
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
@@ -2380,10 +2239,10 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
             raise TypeError("evaluate_c_native: NULL operand")
         if rc == 2:
             raise MemoryError("evaluate_c_native: arena alloc failed")
-        # rc 3 (compare fast path declined) / 5 (unexpected string) / 99 (unknown):
-        # the GIL VM handles these — clear the flag and fall back.
-        bc.is_all_c_native = False
-        return execute_bytecode(bc, morsel)
+        # rc 3 (compare declined) / 5 (unexpected string) / 99 (unknown): no other
+        # evaluator exists to hand these to — refuse, naming the code.
+        raise NotSupportedError(
+            f"evaluate_c_native: the native evaluator declined this expression (rc={rc})")
     finally:
         draken_frame_arena_destroy(arena)
 
@@ -2417,8 +2276,12 @@ cdef void _dv_fill_cache_cxx(
             # ARRAY child element vector, held by the column's VectorOwner —
             # NULL when the column has no child (kernel then fails loud).
             # BC_FUNCTION here is SORT's single-array-arg case, BC_EXTRACTION is
-            # arr[i] (compiled_expression.pyx).
-            dv_cache[k] = <DrakenVector*>cxx_column_child_vec(m, <uint32_t>col_idx[k])
+            # arr[i] (compiled_expression.pyx). No column = an ARRAY literal's child,
+            # resolved into lit_dv[k].
+            if col_idx[k] < 0:
+                dv_cache[k] = lit_dv[k]
+            else:
+                dv_cache[k] = <DrakenVector*>cxx_column_child_vec(m, <uint32_t>col_idx[k])
         else:
             dv_cache[k] = NULL
 
@@ -2443,11 +2306,17 @@ cdef int _dv_cxx_resolve_caches(
         col_idx[k] = -1
         lit_dv[k] = NULL
         if slot.opcode == BC_LOAD_COL or (
-                (slot.opcode == BC_CAST or slot.opcode == BC_FUNCTION)
+                (slot.opcode == BC_CAST or slot.opcode == BC_FUNCTION
+                 or slot.opcode == BC_EXTRACTION)
                 and (slot.flags & BC_C_NATIVE_CHILD) != 0):
             # BC_C_NATIVE_CHILD instructions (ARRAY->VARCHAR cast, SORT) carry
             # the ARRAY operand's identity so the cache fill can resolve the
-            # owner-held child element vector.
+            # owner-held child element vector — or, for an ARRAY literal, the
+            # literal itself, whose child is resolved here.
+            if slot.opcode != BC_LOAD_COL and slot.column_identity == NULL:
+                lit_dv[k] = <DrakenVector*>draken_array_child_unwrap(
+                    (<Vector>(<object>slot.literal_obj))._nb)
+                continue
             ident = <bytes>slot.column_identity
             for ci in range(nn):
                 nm = m.names[ci]          # libcpp string → bytes (auto-convert)
@@ -3940,839 +3809,22 @@ cdef int _dv_eval_span_cxx(
     return rc
 
 
-cdef Py_ssize_t _gil_run(
-    CompiledBytecode bc, Py_ssize_t start, Py_ssize_t end, Morsel morsel,
-    DrakenFrameArena* arena, DrakenVector** dv_stack, DrakenVector* dv_store,
-    list anchor, Py_ssize_t sp,
-) except -1:
-    """Run bc.instrs[start:end] against `morsel` on the caller's operand stack, from
-    stack height `sp`; return the stack height afterwards.
-
-    Split out of execute_bytecode so a BC_LAZY region can re-enter it over a NARROWED
-    sub-morsel on the SAME stack, anchor list and frame arena — the region's result
-    then sits on the stack exactly where an eagerly-evaluated branch would have."""
-    cdef Py_ssize_t num_rows = morsel.ptr.num_rows
-    cdef Py_ssize_t nbytes = (<Py_ssize_t>num_rows + 7) >> 3
-    cdef Py_ssize_t skip_to = 0     # a BC_LAZY region is consumed whole by its handler
-    cdef uint32_t lz_k
-    cdef uint32_t* lz_rows
-    cdef const DrakenVector* lz_guards[16]
-    cdef Py_ssize_t lz_j, lz_g0
-    cdef object lz_sub
-    cdef DrakenVector lz_compact
-
-    cdef Py_ssize_t i, j, base
-    cdef int opcode
-    cdef int arity
-    cdef int flags
-    cdef BytecodeInstr* slot
-    cdef BoolVector b_result
-    cdef Vector v_result
-    cdef object scalar_obj
-    cdef object compare_result
-    cdef object legacy_result
-    cdef object py_left
-    cdef object py_right
-    cdef int16_t left_type_code
-    cdef int16_t right_type_code
-    cdef object func_args
-    cdef Py_ssize_t func_base
-    cdef object callable_obj
-    cdef bint is_nb_callable
-    cdef object inlist_right
-    # DV fast-path variables
-    cdef DrakenVector* dv_left_ptr
-    cdef DrakenVector* dv_right_ptr
-    cdef DrakenVector* dv_result_ptr
-    cdef void* result_data_ptr
-    cdef uint8_t* result_val_ptr
-    cdef uint8_t* left_data
-    cdef uint8_t* left_null
-    cdef uint8_t* right_data
-    cdef uint8_t* right_null
-    cdef uint32_t result_len_u32
-    cdef DrakenType result_dtype
-    cdef VecResult cast_vr
-    cdef VecResult binop_vr
-    cdef VecResult extr_vr
-    cdef const DrakenVector* cfargs[16]   # C-native BC_FUNCTION operand scratch
-    cdef Py_ssize_t _fj
-    # Row-count carrier for arity-0 C-native functions (RANDOM/NORMAL): the func_fn_t
-    # ABI passes only operand vectors, so a nullary kernel has no way to learn the
-    # morsel row count. We hand it a synthetic length-only operand whose `length` IS
-    # num_rows; the kernel reads ONLY .length (never .data/.selection/.validity — all
-    # NULL here, which is why this stays confined to the arity-0 path).
-    cdef DrakenVector _zeroarg_rowcount
-    cdef uint32_t _eff_nargs
-    cdef int dv_op
-    cdef int had_null
-    cdef int rc
-    cdef uint8_t* cur_data
-    cdef uint8_t* cur_null
-    cdef uint8_t* next_data
-    cdef uint8_t* next_null
-    # Phase 9c: C kernel ABI dispatch
-    cdef VecResult c_result
-    cdef const char* error_msg
-
-    for i in range(start, end):
-        if i < skip_to:
-            continue
-        slot = &bc.instrs[i]
-        opcode = slot.opcode
-
-        # ----------------------------------------------------------
-        # BC_LAZY — a guarded branch region. Runs the branch ONLY on the rows the
-        # guard admits (see _dv_lazy_region_c, the nogil twin): every row -> the
-        # branch runs as it always did; no row -> a typed NULL is pushed and the
-        # branch skipped; otherwise the branch runs over a NARROWED sub-morsel and its
-        # result is scattered back to full length, excluded rows NULL.
-        # ----------------------------------------------------------
-        if opcode == BC_LAZY:
-            lz_g0 = sp - slot.bool_value
-            if slot.flags < 1 or slot.flags > 16 or lz_g0 < 0:
-                raise ValueError("execute_bytecode: malformed BC_LAZY")
-            for lz_j in range(slot.flags):
-                if dv_stack[lz_g0 + lz_j] == NULL:
-                    raise TypeError("BC_LAZY: guard is not a vector (NULL slot)")
-                lz_guards[lz_j] = dv_stack[lz_g0 + lz_j]
-            lz_rows = <uint32_t*>draken_frame_arena_alloc(
-                arena, <size_t>(num_rows if num_rows > 0 else 1) * sizeof(uint32_t))
-            if lz_rows == NULL:
-                raise MemoryError("execute_bytecode: BC_LAZY row list alloc failed")
-            lz_k = draken_lz_rows(slot.op_code, lz_guards, <uint32_t>slot.flags,
-                                  <uint32_t>num_rows, lz_rows)
-            if lz_k == <uint32_t>num_rows:
-                skip_to = i + 2          # every row admitted: the branch runs as usual
-                continue
-            if lz_k == 0:
-                scalar_obj = <object>bc.instrs[i + 1].literal_obj     # the typed NULL
-                dv_store[sp] = (<Vector>scalar_obj).unified()[0]
-                dv_store[sp].length = <uint32_t>num_rows
-                dv_store[sp].selection = draken_zero_sel(<uint32_t>num_rows)
-                dv_store[sp].flags = 0   # restamped constant: no layout hint survives the length change
-                if dv_store[sp].validity != NULL:
-                    dv_store[sp].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
-                dv_stack[sp] = &dv_store[sp]
-                anchor[sp] = scalar_obj
-                sp += 1
-                skip_to = i + 1 + slot.arity
-                continue
-            lz_sub = morsel.take([lz_rows[lz_j] for lz_j in range(lz_k)])
-            lz_g0 = sp                   # where the branch result lands
-            sp = _gil_run(bc, i + 2, i + 1 + slot.arity, <Morsel>lz_sub,
-                          arena, dv_stack, dv_store, anchor, sp)
-            if sp != lz_g0 + 1 or dv_stack[lz_g0] == NULL:
-                raise TypeError(
-                    "BC_LAZY: the branch did not produce a vector result "
-                    "(a lazy branch must yield a DrakenVector)")
-            lz_compact = dv_stack[lz_g0][0]
-            if lz_compact.type == DRAKEN_NULL:
-                dv_store[lz_g0] = lz_compact
-                dv_store[lz_g0].length = <uint32_t>num_rows
-                dv_store[lz_g0].selection = draken_zero_sel(<uint32_t>num_rows)
-                dv_store[lz_g0].flags = 0   # restamped constant: no layout hint survives the length change
-                if dv_store[lz_g0].validity != NULL:
-                    dv_store[lz_g0].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
-                dv_stack[lz_g0] = &dv_store[lz_g0]
-            else:
-                binop_vr = draken_lz_scatter(&lz_compact, lz_rows, lz_k, <uint32_t>num_rows)
-                if binop_vr.data == NULL:
-                    raise _vecresult_error_exc(&binop_vr, "lazy branch scatter failed")
-                _dv_vecresult_adopt_c(&binop_vr, dv_store, dv_stack, lz_g0, arena)
-            anchor[lz_g0] = None
-            skip_to = i + 1 + slot.arity
-            continue
-
-        # ----------------------------------------------------------
-        # BC_LOAD_COL — typed Morsel.column dispatch (cpdef)
-        # ----------------------------------------------------------
-        if opcode == BC_LOAD_COL:
-            v_result = morsel._cxx_column(
-                <bytes>slot.column_identity, <bytes>slot.column_name
-            )
-            if v_result is None:
-                raise ColumnReferencedBeforeEvaluationError(
-                    column=(<bytes>slot.column_name).decode()
-                )
-            anchor[sp] = v_result
-            # Use _dv directly — avoids calling unified() on types (e.g. ARRAY)
-            # whose Cython shim has _dv == NULL.  _slot_to_pyobj returns the
-            # Python anchor directly when anc is not None, so NULL here is safe.
-            # Cast away const: dv_stack holds mutable DV* but we only read
-            # through it when anc is None (arena slots); borrowed slots (anc
-            # is not None) are returned via anchor, never via dv_stack.
-            dv_stack[sp] = <DrakenVector*>(<Vector>v_result)._dv
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_LOAD_LIT_BOOL — dense bitmap materialized in arena.
-        # Avoids constant-shape BoolVector; c_and_bitmap requires dense.
-        # ----------------------------------------------------------
-        if opcode == BC_LOAD_LIT_BOOL:
-            result_data_ptr = draken_frame_arena_alloc(arena, <size_t>nbytes)
-            if result_data_ptr == NULL:
-                raise MemoryError("execute_bytecode: BC_LOAD_LIT_BOOL alloc failed")
-            if slot.bool_value != 0:
-                memset(<uint8_t*>result_data_ptr, 0xFF, <size_t>nbytes)
-                if num_rows & 7:
-                    (<uint8_t*>result_data_ptr)[nbytes - 1] = <uint8_t>((1 << (num_rows & 7)) - 1)
-            else:
-                memset(<uint8_t*>result_data_ptr, 0x00, <size_t>nbytes)
-            dv_store[sp] = draken_vector_from_dense(
-                result_data_ptr, <uint32_t>num_rows, DRAKEN_BOOL, NULL
-            )
-            dv_stack[sp] = &dv_store[sp]
-            anchor[sp] = None
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_LOAD_LIT_SCALAR — IN-list collection / set literal.
-        #
-        # Genuine scalar literals are pre-materialised at bind time and use
-        # BC_LOAD_LIT_CONST. Only set/list/tuple membership literals remain
-        # here: they are never DrakenVector* and are pushed as a Python anchor
-        # for a downstream BC_COMPARE. Anything else is an internal invariant
-        # violation — fail fast (CLAUDE.md §1).
-        # ----------------------------------------------------------
-        if opcode == BC_LOAD_LIT_SCALAR:
-            scalar_obj = <object>slot.literal_obj
-            if isinstance(scalar_obj, (list, tuple, set, frozenset)):
-                anchor[sp] = scalar_obj
-                dv_stack[sp] = NULL
-                sp += 1
-                continue
-            raise TypeError(
-                "execute_bytecode: BC_LOAD_LIT_SCALAR expected an in-list "
-                f"collection/set literal, got {type(scalar_obj).__name__}"
-            )
-
-        # ----------------------------------------------------------
-        # BC_LOAD_LIT_CONST — pre-materialised scalar constant.
-        #
-        # The cached Vector is constant-shape (data_length==1), built ONCE at
-        # bind time. Re-stamp ONLY the logical length onto a stack-local DV
-        # copy — zero alloc, no Python object, no isinstance, no re-encode.
-        # selection/validity are refreshed to the shared globals sized for N
-        # rows (the bind-time pointers were sized for length 1). The cached
-        # Vector anchors the borrowed data; _slot_to_pyobj lazily builds a
-        # length-N view if a Python-fallback kernel needs the object.
-        # ----------------------------------------------------------
-        if opcode == BC_LOAD_LIT_CONST:
-            scalar_obj = <object>slot.literal_obj
-            dv_store[sp] = (<Vector>scalar_obj).unified()[0]
-            dv_store[sp].length = <uint32_t>num_rows
-            dv_store[sp].selection = draken_zero_sel(<uint32_t>num_rows)
-            dv_store[sp].flags = 0   # restamped constant: no layout hint survives the length change
-            if dv_store[sp].validity != NULL:
-                dv_store[sp].validity = <uint8_t*>draken_zero_validity(<uint32_t>num_rows)
-            dv_stack[sp] = &dv_store[sp]
-            anchor[sp] = scalar_obj
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # Boolean combinators — C-level bitmap kernels.
-        #
-        # _ensure_dense_bitmap handles dense (no-copy) and constant-shape
-        # (expand in arena) inputs.  Non-dense non-constant shapes raise —
-        # fail fast per CLAUDE.md §1.  No Python fallback.
-        # ----------------------------------------------------------
-        if opcode == BC_AND:
-            rc = _dv_bool_binop_c(0, dv_stack, dv_store, &sp, arena, nbytes, <uint32_t>num_rows)
-            if rc == 1:
-                raise TypeError("BC_AND: operand is not a boolean DV* (NULL slot)")
-            if rc == 2:
-                raise MemoryError("execute_bytecode: BC_AND alloc failed")
-            anchor[sp - 1] = None
-            continue
-
-        if opcode == BC_OR:
-            rc = _dv_bool_binop_c(1, dv_stack, dv_store, &sp, arena, nbytes, <uint32_t>num_rows)
-            if rc == 1:
-                raise TypeError("BC_OR: operand is not a boolean DV* (NULL slot)")
-            if rc == 2:
-                raise MemoryError("execute_bytecode: BC_OR alloc failed")
-            anchor[sp - 1] = None
-            continue
-
-        if opcode == BC_XOR:
-            rc = _dv_bool_binop_c(2, dv_stack, dv_store, &sp, arena, nbytes, <uint32_t>num_rows)
-            if rc == 1:
-                raise TypeError("BC_XOR: operand is not a boolean DV* (NULL slot)")
-            if rc == 2:
-                raise MemoryError("execute_bytecode: BC_XOR alloc failed")
-            anchor[sp - 1] = None
-            continue
-
-        if opcode == BC_NOT:
-            rc = _dv_not_c(dv_stack, dv_store, &sp, arena, nbytes, <uint32_t>num_rows)
-            if rc == 1:
-                raise TypeError("BC_NOT: operand is not a boolean DV* (NULL slot)")
-            if rc == 2:
-                raise MemoryError("execute_bytecode: BC_NOT alloc failed")
-            anchor[sp - 1] = None
-            continue
-
-        # ----------------------------------------------------------
-        # Variadic AND/OR — DNF (AND-of-terms) / CNF (OR-of-terms).
-        #
-        # Native bitmap loop: no Python objects.  Ping-pong between
-        # two arena buffer pairs — cur_{data,null} accumulates the
-        # result; next_{data,null} is the per-step output.
-        # After the loop the final pair is stored in dv_store[base].
-        # ----------------------------------------------------------
-        if opcode == BC_DNF:
-            rc = _dv_variadic_bool_c(0, slot.arity, dv_stack, dv_store, &sp, arena, nbytes, <uint32_t>num_rows)
-            if rc == 1:
-                raise TypeError("BC_DNF: operand is NULL")
-            if rc == 2:
-                raise MemoryError("BC_DNF: alloc failed")
-            anchor[sp - 1] = None
-            continue
-
-        if opcode == BC_CNF:
-            rc = _dv_variadic_bool_c(1, slot.arity, dv_stack, dv_store, &sp, arena, nbytes, <uint32_t>num_rows)
-            if rc == 1:
-                raise TypeError("BC_CNF: operand is NULL")
-            if rc == 2:
-                raise MemoryError("BC_CNF: alloc failed")
-            anchor[sp - 1] = None
-            continue
-
-        # ----------------------------------------------------------
-        # BC_COMPARE — typed draken_compare (cpdef)
-        #
-        # Two shapes:
-        #   Normal (flags & BC_CMP_INLIST_INLINE == 0):
-        #     pop right DV*, pop left DV*, compare, push result DV*.
-        #     Phase 4/5 fast path: draken_compare_dv for EQ/NE/LT/GT/LE/GE;
-        #     result DV* stored in dv_stack — no from_decoded until needed.
-        #   Inline IN-list (flags & BC_CMP_INLIST_INLINE != 0):
-        #     right operand folded into slot.literal_obj — pop left DV* only.
-        # ----------------------------------------------------------
-        if opcode == BC_COMPARE:
-            flags = slot.flags
-            left_type_code = slot.left_type_code
-            right_type_code = slot.right_type_code
-
-            if flags & BC_CMP_INLIST_INLINE:
-                # Right is an inline set literal — pop ONE item.
-                sp -= 1
-                dv_left_ptr = dv_stack[sp]
-                py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-                inlist_right = <object>slot.literal_obj
-                if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(py_left):
-                    py_left = _coerce_temporal_scalar_for_arrow(
-                        py_left,
-                        _CT_DATE if left_type_code == BC_TYPE_DATE else _CT_TIMESTAMP,
-                    )
-                compare_result = draken_compare_int(
-                    slot.op_code, py_left, inlist_right, left_type_code, right_type_code
-                )
-            else:
-                # Normal case — C-level fast path for ordinal EQ/NE/LT/GT/LE/GE
-                # via the shared nogil helper (_dv_compare_c → draken_compare_dv,
-                # no Python objects). rc 0 = result pushed; rc 3 = fast path N/A,
-                # sp left decremented so the Python fallback re-reads operands.
-                dv_op = -1
-                if 0 < slot.op_code < 19:
-                    dv_op = _DRAKEN_CMP_OP[slot.op_code]
-                rc = _dv_compare_c(
-                    dv_op, dv_stack, &sp,
-                    slot.left_type_code, slot.right_type_code,
-                    <uint32_t>num_rows, arena)
-                if rc == 0:
-                    anchor[sp - 1] = None
-                    continue
-
-                # Python fallback (unsupported types, LIKE/RLIKE/IN_LIST).
-                dv_left_ptr = dv_stack[sp]
-                dv_right_ptr = dv_stack[sp + 1]
-                py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-                py_right = _slot_to_pyobj(dv_right_ptr, anchor[sp + 1], arena)
-                if flags != 0:
-                    if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(py_left):
-                        py_left = _coerce_temporal_scalar_for_arrow(
-                            py_left,
-                            _CT_DATE if left_type_code == BC_TYPE_DATE else _CT_TIMESTAMP,
-                        )
-                    if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(py_right):
-                        py_right = _coerce_temporal_scalar_for_arrow(
-                            py_right,
-                            _CT_DATE if right_type_code == BC_TYPE_DATE else _CT_TIMESTAMP,
-                        )
-                compare_result = draken_compare_int(
-                    slot.op_code, py_left, py_right, left_type_code, right_type_code
-                )
-            anchor[sp] = compare_result
-            dv_stack[sp] = (<Vector>compare_result).unified()
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_BINARY_OP — arithmetic / string / date ops on two vecs.
-        #
-        # Phase 4/5 fast path: draken_arithmetic_dv for PLUS..MODULO.
-        # Result DV* stored in dv_stack — no vec_from_decoded until needed.
-        # ----------------------------------------------------------
-        if opcode == BC_BINARY_OP:
-            sp -= 1
-            dv_right_ptr = dv_stack[sp]
-            sp -= 1
-            dv_left_ptr = dv_stack[sp]
-
-            # P9.1 C-native binop: when the binder routed this (op, types) to the
-            # unified draken_binop kernel (BC_INSTR_C_NATIVE), dispatch it directly
-            # — no closure, no Python objects. Fixed-width result folds into the
-            # frame arena as a dense DV* (mirrors the BC_CAST C-native path). On a
-            # kernel error sentinel we raise (fail-loud, no silent fallback).
-            if ((slot.flags & BC_INSTR_C_NATIVE) != 0
-                    and dv_left_ptr != NULL and dv_right_ptr != NULL):
-                rc = _dv_binop_kernel_c(
-                    slot.kernel_fn, <void*>slot.ctx_ptr,
-                    dv_left_ptr, dv_right_ptr,
-                    dv_store, dv_stack, sp, arena, &binop_vr)
-                if rc == 4:
-                    raise _vecresult_error_exc(&binop_vr, "C binop kernel error")
-                if rc == 5:
-                    # String result (e.g. ||): consolidated block with embedded
-                    # validity — own it as a Vector (the canonical owner). Stays
-                    # on the GIL path (string ownership can't fold into the arena).
-                    legacy_result = Vector(draken_vecresult_own_c(binop_vr))
-                    anchor[sp] = legacy_result
-                    dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-                else:
-                    # rc == 0: fixed-width result already folded into the arena.
-                    anchor[sp] = None
-                sp += 1
-                continue
-
-            # `/` (BOP_DIVIDE) is TRUE division: when either operand is an
-            # integer, skip the native (truncating) path and fall through to
-            # the resolved kernel, which promotes integers to FLOAT64 so
-            # int / int yields a float. Float / float stays on the fast path.
-            if (BOP_PLUS <= slot.op_code <= BOP_MODULO
-                    and dv_left_ptr != NULL and dv_right_ptr != NULL
-                    and not (slot.op_code == BOP_DIVIDE
-                             and (dv_left_ptr.type == DRAKEN_INT8
-                                  or dv_left_ptr.type == DRAKEN_INT16
-                                  or dv_left_ptr.type == DRAKEN_INT32
-                                  or dv_left_ptr.type == DRAKEN_INT64
-                                  or dv_right_ptr.type == DRAKEN_INT8
-                                  or dv_right_ptr.type == DRAKEN_INT16
-                                  or dv_right_ptr.type == DRAKEN_INT32
-                                  or dv_right_ptr.type == DRAKEN_INT64))):
-                # Executor short-circuit: detect all-null inputs (DRAKEN_NULL constant)
-                # and return null result without calling kernel (Defect 2 fix).
-                if (dv_left_ptr.type == DRAKEN_NULL or dv_right_ptr.type == DRAKEN_NULL):
-                    dv_result_ptr = Vector(_draken_native.vector_null_from_length(num_rows)).unified()
-                    dv_stack[sp] = dv_result_ptr
-                    anchor[sp] = None
-                    sp += 1
-                    continue
-
-                dv_result_ptr = draken_arithmetic_dv(
-                    slot.op_code,
-                    dv_left_ptr, dv_right_ptr,
-                    <uint32_t>num_rows, arena,
-                )
-                if dv_result_ptr != NULL:
-                    dv_stack[sp] = dv_result_ptr
-                    anchor[sp] = None
-                    sp += 1
-                    continue
-
-            # Single path: Phase 6 Python kernel (pre-9c, last-correct state).
-            # CAST and EXTRACTION retain C-native dispatch; binop reverts to resolved kernel.
-            py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-            py_right = _slot_to_pyobj(dv_right_ptr, anchor[sp + 1], arena)
-            legacy_result = (<object>slot.callable_ref)(py_left, py_right)
-
-            # Phase 1 result-wrap pattern: check flags set at bind time.
-            if slot.flags & BC_RESULT_NEEDS_NB_WRAP:
-                if slot.flags & BC_RESULT_WRAP_AS_BOOL:
-                    legacy_result = BoolVector(legacy_result)
-                else:
-                    legacy_result = Vector(legacy_result)
-
-            anchor[sp] = legacy_result
-            if isinstance(legacy_result, Vector):
-                dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-            else:
-                dv_stack[sp] = NULL
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_UNARY_OP — IS NULL / IS NOT NULL / bitwise-not / etc.
-        # ----------------------------------------------------------
-        if opcode == BC_UNARY_OP:
-            sp -= 1
-            dv_left_ptr = dv_stack[sp]
-            py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-            legacy_result = _unary_op_kernel(slot.op_code, py_left)
-            anchor[sp] = legacy_result
-            dv_stack[sp] = (<Vector>legacy_result).unified()
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_FUNCTION — call pre-resolved kernel callable.
-        #
-        # nb_func callables receive raw nanobind Vectors (_nb unwrapped
-        # via typed (<Vector>item)._nb — C-level struct access).
-        # Non-nb callables receive Cython Vector shims.
-        # _slot_to_pyobj materializes arena DV* slots on demand; zero
-        # cost when anchor is not None (the common case).
-        # ----------------------------------------------------------
-        if opcode == BC_FUNCTION:
-            arity = slot.arity
-
-            # C-native function kernel (func_fn_t): the compiler lowered this
-            # to a draken_* kernel (EXTRACT / LIKE / IN-list / CASE-blend) with
-            # NO callable_ref. Dispatch it directly — mirrors the BC_BINARY_OP
-            # C-native path above. A fixed-width/BOOL result folds into the
-            # arena; a canonical-string result is owned as a Vector.
-            if (slot.flags & BC_INSTR_C_NATIVE) != 0:
-                if arity < 0 or arity > 16:
-                    raise ValueError("BC_FUNCTION: bad arity for C-native kernel")
-                func_base = sp - arity
-                for _fj in range(arity):
-                    if dv_stack[func_base + _fj] == NULL:
-                        raise ValueError("BC_FUNCTION: NULL operand for C-native kernel")
-                    cfargs[_fj] = dv_stack[func_base + _fj]
-                sp = func_base
-                _eff_nargs = <uint32_t>arity
-                if arity == 0:
-                    # Nullary C-native function (RANDOM/NORMAL): synthesize a
-                    # length-only operand carrying num_rows so the kernel can size
-                    # its output. data/selection/validity stay NULL — the kernel
-                    # contract for arity-0 functions is to read ONLY .length.
-                    _zeroarg_rowcount.data = NULL
-                    _zeroarg_rowcount.selection = NULL
-                    _zeroarg_rowcount.validity = NULL
-                    _zeroarg_rowcount.data_length = num_rows
-                    _zeroarg_rowcount.length = num_rows
-                    _zeroarg_rowcount.type = DRAKEN_FLOAT64
-                    cfargs[0] = &_zeroarg_rowcount
-                    _eff_nargs = 1
-                rc = _dv_function_kernel_c(
-                    slot.kernel_fn, <void*>slot.ctx_ptr, cfargs,
-                    _eff_nargs, dv_store, dv_stack, sp, arena, &binop_vr, 1)
-                if rc == 4:
-                    raise _vecresult_error_exc(&binop_vr, "C function kernel error")
-                if rc == 5 or rc == 6:
-                    # rc 6 = ARRAY result: owned rather than arena-folded so the
-                    # elements on VecResult.child survive (vecresult_to_owner
-                    # adopts the child recursively). Anchoring the Vector is what
-                    # lets a following arr[i] reach them — an arena DV* cannot
-                    # carry a child. Identical handling to rc 5, which likewise
-                    # owns rather than folds.
-                    legacy_result = Vector(draken_vecresult_own_c(binop_vr))
-                    anchor[sp] = legacy_result
-                    dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-                else:
-                    anchor[sp] = None   # rc 0: folded into the arena
-                sp += 1
-                continue
-
-            callable_obj = <object>slot.callable_ref
-            is_nb_callable = slot.bool_value != 0
-
-            if arity == 0:
-                legacy_result = callable_obj(num_rows)
-            else:
-                func_base = sp - arity
-                sp = func_base
-
-                if is_nb_callable:
-                    # CHECKED cast (<Vector?>): an nb kernel operand must be a
-                    # materialized Vector. A constant ARRAY/collection literal is
-                    # NOT materialized into a DrakenVector (there is no ARRAY case
-                    # in _materialise_constant_literal), so it arrives here as a
-                    # bare Python list. The old unchecked <Vector> cast then read
-                    # ._nb off list memory and handed garbage to the kernel —
-                    # SIGSEGV (e.g. GREATEST([1,5,3]) folded at plan time). The
-                    # checked cast fails loud with TypeError instead of corrupting
-                    # memory. (Making such a literal actually evaluate needs a new
-                    # ARRAY-literal constant path — an architect decision.)
-                    if arity == 1:
-                        legacy_result = callable_obj(
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
-                        )
-                    elif arity == 2:
-                        legacy_result = callable_obj(
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena))._nb,
-                        )
-                    elif arity == 3:
-                        legacy_result = callable_obj(
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena))._nb,
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena))._nb,
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base + 2], anchor[func_base + 2], arena))._nb,
-                        )
-                    else:
-                        func_args = [
-                            (<Vector?>_slot_to_pyobj(dv_stack[func_base + j], anchor[func_base + j], arena))._nb
-                            for j in range(arity)
-                        ]
-                        legacy_result = callable_obj(*func_args)
-                else:
-                    if arity == 1:
-                        legacy_result = callable_obj(
-                            _slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena)
-                        )
-                    elif arity == 2:
-                        legacy_result = callable_obj(
-                            _slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena),
-                            _slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena),
-                        )
-                    elif arity == 3:
-                        legacy_result = callable_obj(
-                            _slot_to_pyobj(dv_stack[func_base], anchor[func_base], arena),
-                            _slot_to_pyobj(dv_stack[func_base + 1], anchor[func_base + 1], arena),
-                            _slot_to_pyobj(dv_stack[func_base + 2], anchor[func_base + 2], arena),
-                        )
-                    else:
-                        func_args = [
-                            _slot_to_pyobj(dv_stack[func_base + j], anchor[func_base + j], arena)
-                            for j in range(arity)
-                        ]
-                        legacy_result = callable_obj(*func_args)
-
-            # Wrap nanobind result based on flags set at bind time.
-            # BC_RESULT_NEEDS_NB_WRAP: result is raw nanobind Vector → wrap.
-            # BC_RESULT_WRAP_AS_BOOL: wrap as BoolVector (else Vector).
-            if slot.flags & BC_RESULT_NEEDS_NB_WRAP:
-                if slot.flags & BC_RESULT_WRAP_AS_BOOL:
-                    legacy_result = BoolVector(legacy_result)
-                else:
-                    legacy_result = Vector(legacy_result)
-            anchor[sp] = legacy_result
-            if slot.flags & BC_RESULT_NO_DV:
-                dv_stack[sp] = NULL
-            else:
-                dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_EXTRACTION — the bind-time-resolved C-ABI kernel, called
-        # directly, exactly as the engine VM calls it (c_execute_dv_inner).
-        # `->`, `->>` and str[i] consume ONE operand — the path/index rides
-        # in extraction_ctx — so there is nothing to marshal: no nanobind
-        # wrapper, no Python Vector per morsel. Mirrors the BC_CAST arm below.
-        #
-        # arr[i] is the one sub-op that still needs a Python object here.
-        # Its element vector hangs off the column owner, not off
-        # DrakenVector, and this VM has no dv_cache to resolve it from
-        # (the reason BC_CAST's ARRAY->VARCHAR arm refuses outright); only
-        # the anchor's nanobind Vector can reach the child.
-        # ----------------------------------------------------------
-        if opcode == BC_EXTRACTION:
-            sp -= 1
-            dv_left_ptr = dv_stack[sp]
-
-            if slot.op_code == BC_EXTR_MAP_ARRAY:
-                py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-                # Unwrap Cython shim to nanobind Vector for the native call.
-                if isinstance(py_left, Vector):
-                    py_left_nb = (<Vector>py_left)._nb
-                else:
-                    py_left_nb = py_left
-                legacy_result = _vector_array_map_access(py_left_nb, <int64_t>slot.bool_value)
-                if not isinstance(legacy_result, Vector):
-                    legacy_result = Vector(legacy_result)
-                anchor[sp] = legacy_result
-                dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-                sp += 1
-                continue
-
-            # Every other sub-op is resolved to a kernel at bind time or the
-            # lowering raises (compiled_expression.pyx), so a missing kernel
-            # here is a compiler bug — fail loud, never marshal a fallback.
-            if (slot.flags & BC_INSTR_C_NATIVE) == 0:
-                raise ValueError(
-                    f"execute_bytecode: BC_EXTRACTION sub-op {slot.op_code} carries "
-                    "no resolved kernel"
-                )
-            if dv_left_ptr == NULL:
-                raise ValueError(
-                    "execute_bytecode: BC_EXTRACTION operand is not a vector"
-                )
-            rc = _dv_extraction_kernel_c(
-                slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr, NULL,
-                dv_store, dv_stack, sp, arena, &extr_vr)
-            if rc == 4:
-                raise _vecresult_error_exc(&extr_vr, "C extraction kernel error")
-            # rc 0: the result (string canonical block or element-typed) is
-            # adopted into the frame arena; _slot_to_pyobj builds a Vector
-            # lazily only if something downstream consumes the object.
-            anchor[sp] = None
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_CAST — pre-resolved kernel/closure, pop 1 push 1
-        # Phase 5: no per-morsel dispatch; kernel return type is deterministic.
-        # ----------------------------------------------------------
-        if opcode == BC_CAST:
-            sp -= 1
-            dv_left_ptr = dv_stack[sp]
-            # Y (executor flip): when a C-native kernel is wired (fixed-width
-            # result) and the input is a real DV*, call it directly — no closure
-            # call, no input/output Python Vector. The kernel's draken_malloc'd
-            # buffers are adopted into the frame arena and exposed as a dense
-            # DV*; the result Vector is materialized lazily only if consumed at
-            # frame exit (_slot_to_pyobj). Zero Python objects per morsel.
-            if (slot.flags & BC_C_NATIVE_CHILD) != 0:
-                # ARRAY->VARCHAR is engine-only: this VM evaluates Python
-                # Morsels and cannot resolve the owner-held child vector.
-                raise ValueError(
-                    "ARRAY->VARCHAR cast reached the Morsel VM — engine-only "
-                    "instruction (BC_C_NATIVE_CHILD); fail loud")
-            if (slot.flags & BC_INSTR_C_NATIVE) != 0 and dv_left_ptr != NULL:
-                rc = _dv_cast_kernel_c(
-                    slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr,
-                    dv_store, dv_stack, sp, arena, &cast_vr, 1)
-                if rc == 4:
-                    raise _vecresult_error_exc(&cast_vr, "C cast kernel error")
-                if rc == 5 or rc == 6:
-                    # String result: consolidated block with embedded validity —
-                    # own it as a Vector (the canonical owner; carries the block).
-                    # Stays on the GIL path (string ownership can't fold to arena).
-                    # rc 6 = CAST(json AS ARRAY<T>): owned for the same reason, so
-                    # the elements on VecResult.child survive the arena boundary
-                    # and a following arr[i] can reach them.
-                    legacy_result = Vector(draken_vecresult_own_c(cast_vr))
-                    anchor[sp] = legacy_result
-                    dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-                else:
-                    # rc == 0: fixed-width result already folded into the arena.
-                    anchor[sp] = None
-                sp += 1
-                continue
-            py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
-            # X (thin closures): when the resolved kernel is a raw-nanobind cast
-            # fn (slot.bool_value != 0), hand it the unwrapped ._nb directly —
-            # no Python getattr, mirrors the BC_EXTRACTION unwrap.
-            if slot.bool_value != 0 and isinstance(py_left, Vector):
-                py_left = (<Vector>py_left)._nb
-            legacy_result = (<object>slot.callable_ref)(py_left)
-            # Phase 5: wrap based on flags set at bind time.
-            if slot.flags & BC_RESULT_NEEDS_NB_WRAP:
-                if slot.flags & BC_RESULT_WRAP_AS_BOOL:
-                    legacy_result = BoolVector(legacy_result)
-                else:
-                    legacy_result = Vector(legacy_result)
-            anchor[sp] = legacy_result
-            if isinstance(legacy_result, Vector):
-                dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-            else:
-                dv_stack[sp] = NULL
-            sp += 1
-            continue
-
-        # ----------------------------------------------------------
-        # BC_CASE — pre-compiled CASE WHEN closure, push 1.
-        # callable_ref holds the closure built by build_case_fn at bind
-        # time; conditions and results are already CompiledBytecode.
-        # ----------------------------------------------------------
-        if opcode == BC_CASE:
-            legacy_result = (<object>slot.callable_ref)(morsel)
-            # See BC_EXTRACTION above: CASE assemble return type is not
-            # reliably nanobind.  TODO(Phase-7): delete the gate; trust the flag.
-            if (slot.flags & BC_RESULT_NEEDS_NB_WRAP) and not isinstance(legacy_result, Vector):
-                if slot.flags & BC_RESULT_WRAP_AS_BOOL:
-                    legacy_result = BoolVector(legacy_result)
-                else:
-                    legacy_result = Vector(legacy_result)
-            anchor[sp] = legacy_result
-            if isinstance(legacy_result, Vector):
-                dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-            else:
-                dv_stack[sp] = NULL
-            sp += 1
-            continue
-
-        raise NotImplementedError(
-            f"execute_bytecode: unknown opcode {opcode}"
-        )
-
-    return sp
-
-
 cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
-    """Execute a typed bytecode against `morsel`. Returns a Vector.
+    """Execute a typed bytecode against `morsel` natively. Returns a Vector.
 
-    If bc.is_pure_bitmap, delegates to evaluate_bitmap (nogil bitmap path).
-    Otherwise uses a C-array DV* operand stack backed by a parallel Python
-    anchor list. CLAUDE.md §2/§3.
-
-    Phase 5 — DV* stack: every stack slot is a (DrakenVector*, Python anchor) pair.
-    - dv_stack[sp]: raw DrakenVector* — borrowed (from Python Vector.unified()) or
-      arena-allocated (from draken_compare_dv / draken_arithmetic_dv / combinator).
-      NULL for non-vector slots (IN-list collections).
-    - anchor[sp]: Python object keeping the vector alive (None for arena results).
-
-    Boolean combinators (BC_AND/OR/XOR/NOT) call the C-level bitmap kernels
-    (c_and_bitmap etc.) directly on dv->data, avoiding intermediate Python
-    BoolVector object creation. BC_COMPARE and BC_BINARY_OP fast paths push
-    DV* from draken_compare_dv/draken_arithmetic_dv without from_decoded.
-    BC_DNF/CNF use a native ping-pong bitmap loop (no Python objects).
-
-    Promoted to cpdef so callers within the _operators compilation unit dispatch
-    at C level — no Python function call boundary.
-    """
+    Pure-bitmap programs run on the nogil bitmap VM, the rest on the nogil DV*
+    path. There is no other evaluator: a program neither can run is refused, never
+    answered some other way (CLAUDE.md §2). Constant folding — the only production
+    caller — admits only programs the native path runs (bytecode_is_all_c_native)."""
     if bc.is_pure_bitmap:
         return evaluate_bitmap(bc, morsel)
-
-    # S2: whole-bytecode nogil DV* path (numeric/bool arith + compare + cast).
-    # Guarded num_rows > 0 (the empty-morsel zero-byte arena edge stays on the
-    # GIL loop, which already handles it).
     if bc.is_all_c_native and morsel.ptr.num_rows > 0:
         return evaluate_c_native(bc, morsel)
-
-    cdef Py_ssize_t n_instrs = bc.count
-    cdef Py_ssize_t cap = bc.max_stack_depth
-    if cap < 1:
-        cap = 1
-    if cap > 64:
-        raise ValueError(
-            f"execute_bytecode: expression stack depth {cap} exceeds maximum 64"
-        )
-
-    # DV* operand stack — C array of pointers.
-    # dv_store: inline DrakenVector struct storage for combinator results
-    # (bitmap data/validity are arena-allocated; the struct lives here).
-    cdef DrakenVector* dv_stack[64]
-    cdef DrakenVector  dv_store[64]
-    cdef list anchor = [None] * cap
-    cdef Py_ssize_t ki
-    for ki in range(64):
-        dv_stack[ki] = NULL
-
-    cdef Py_ssize_t sp = 0
-    cdef DrakenFrameArena* arena = NULL
-
-    arena = draken_frame_arena_create()
-    if arena == NULL:
-        raise MemoryError("execute_bytecode: failed to create DrakenFrameArena")
-
-    try:
-        sp = _gil_run(bc, 0, n_instrs, morsel, arena, dv_stack, dv_store, anchor, 0)
-        if sp != 1:
-            raise ValueError(
-                f"execute_bytecode: expected 1 result on stack, got {sp}"
-            )
-
-        return _slot_to_pyobj(dv_stack[0], anchor[0], arena)
-
-    finally:
-        draken_frame_arena_destroy(arena)
+    raise NotSupportedError(
+        "execute_bytecode: this expression has no native evaluation path"
+        + ("" if bc.is_all_c_native else " (an operation outside the c-native kernel set)")
+        + ("" if morsel.ptr.num_rows > 0 else " (an empty morsel)")
+    )
 
 
 # Wire the trampoline into the global function pointer so C++ worker threads

@@ -50,7 +50,6 @@ include "intervals.pyx"
 include "casts.pyx"
 include "formatter.pyx"
 include "binary_operators.pyx"
-include "unary_operations.pyx"
 include "operator_catalog.pyx"
 
 __all__ = ("NodeType", "get_all_nodes_of_type")
@@ -409,7 +408,6 @@ for _leaf in (
     "formatter",
     "intervals",
     "operator_catalog",
-    "unary_operations",
 ):
     globals()[_leaf] = _self
     _sys.modules[f"{__name__}.{_leaf}"] = _self

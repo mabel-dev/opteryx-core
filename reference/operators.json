@@ -3248,7 +3248,7 @@
             "timestamp"
         ],
         "has_dynamic_result": false,
-        "signature_count": 18,
+        "signature_count": 16,
         "signatures": [
             {
                 "left_type": "date",
@@ -3336,22 +3336,8 @@
             },
             {
                 "left_type": "interval",
-                "right_type": "date",
-                "result_type": "timestamp",
-                "result_type_is_dynamic": false,
-                "cost_estimate": 100.0
-            },
-            {
-                "left_type": "interval",
                 "right_type": "interval",
                 "result_type": "interval",
-                "result_type_is_dynamic": false,
-                "cost_estimate": 100.0
-            },
-            {
-                "left_type": "interval",
-                "right_type": "timestamp",
-                "result_type": "timestamp",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
             },

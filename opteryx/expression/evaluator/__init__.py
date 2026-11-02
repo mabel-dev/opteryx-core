@@ -1,18 +1,14 @@
 """Expression evaluation engine — package marker.
 
 The evaluator implementation is compiled into _impl.so (this package).
-Leaf .pyx files (type_coercion / function_execution / temporal_ops /
-string_ops / json_ops / case_eval / arithmetic / comparisons / evaluation)
-are textually included by _impl.pyx into a single extension module.
-Phase 6: arithmetic_dispatch deleted — dispatch now at bind time via resolve_binary_op.
+Leaf .pyx files (function_execution / evaluation) are textually included by _impl.pyx into a single extension module.
 
 This file re-exports the public API and registers legacy submodule aliases
-(`opteryx.expression.evaluator.case_eval`, `.evaluation`, etc.) so callers
+(`opteryx.expression.evaluator.evaluation`, etc.) so callers
 doing `from opteryx.expression.evaluator.LEAF import name` keep working.
 """
 
 from opteryx.expression.evaluator._impl import (
-    draken_compare_int,
     evaluate_bitmap,
     execute_and_append,
     execute_bytecode,
@@ -44,15 +40,8 @@ import sys as _sys
 import opteryx.expression.evaluator._impl as _impl_module
 
 for _leaf in (
-    "arithmetic",
-    "case_eval",
-    "comparisons",
     "evaluation",
     "function_execution",
-    "json_ops",
-    "string_ops",
-    "temporal_ops",
-    "type_coercion",
 ):
     _sys.modules[f"{__name__}.{_leaf}"] = _impl_module
 del _leaf
@@ -60,7 +49,6 @@ del _leaf
 
 __all__ = [
     "compile_eval_nodes",
-    "draken_compare_int",
     "evaluate_bitmap",
     "execute_and_append",
     "execute_bytecode",
