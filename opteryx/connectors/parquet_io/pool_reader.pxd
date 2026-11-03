@@ -282,6 +282,11 @@ cdef class NativeScanPlan:
     # Python only after the driver has finished.
     cdef vector[ParquetBloomProbe] bloom_probes
     cdef int64_t row_groups_pruned_bloom
+    # The bloom bytes those probes read (distinct filters), and the remote files
+    # left without probes because theirs would take the scan past
+    # REMOTE_BLOOM_ROUND_PERCENT. Written at plan time only.
+    cdef int64_t remote_bloom_bytes
+    cdef int remote_bloom_files_over_budget
     # C7 scan-resistant admission: the bytes this scan would add to the chunk
     # cache if it filled every chunk it can fill — the projected chunks' footer
     # total_uncompressed_size (the size of a cached chunk image), counting only

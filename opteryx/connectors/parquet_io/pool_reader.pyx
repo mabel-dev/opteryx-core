@@ -30,6 +30,13 @@ from cython.operator cimport dereference as deref
 import time
 import struct
 
+from opteryx.utils.cancellation import raise_if_cancelled
+
+# Remote footers fetched per `_fetch_footers_many` batch in `_acquire_remote_footers`;
+# the statement's cancel request is checked between batches. Large enough that the
+# per-batch tail (one round trip) is noise against the batch itself.
+_FOOTER_FETCH_CHUNK = 1024
+
 # Gap #3 Phase 2b: shares the exec pool with a scan's decode pool instead of two
 # uncoordinated ones — see open_native_scan_plan's `pool` parameter.
 from opteryx.compiled.thread_pool cimport CppThreadPool, PriorityPool
@@ -1689,6 +1696,22 @@ cdef tuple _bloom_probe_list(const FileStats& fs, list keep, list predicates):
 # / flag predicates of Q37-Q43, which reject nothing, at 0.000-0.154.
 cdef double _REMOTE_BLOOM_MAX_COST_RATIO = 0.25
 
+# The per-scan cap on planned remote bloom bytes (config.REMOTE_BLOOM_ROUND_PERCENT); 0 = uncapped.
+from opteryx.compiled.platform import cgroup_memory_limit_bytes as _cgroup_bytes
+from opteryx.compiled.platform import physical_memory_total_bytes as _physical_bytes
+
+cdef int64_t _REMOTE_BLOOM_ROUND_MAX_BYTES = (
+    (_cgroup_bytes() or _physical_bytes()) * _config.REMOTE_BLOOM_ROUND_PERCENT // 100)
+
+
+def configure_remote_bloom_round(int64_t max_bytes):
+    """Set the per-scan cap on planned remote bloom bytes (0 = uncapped); returns the
+    previous cap. Import sets it from REMOTE_BLOOM_ROUND_PERCENT; tests pin it."""
+    global _REMOTE_BLOOM_ROUND_MAX_BYTES
+    previous = _REMOTE_BLOOM_ROUND_MAX_BYTES
+    _REMOTE_BLOOM_ROUND_MAX_BYTES = max_bytes
+    return previous
+
 
 cdef list _remote_bloom_probes(const FileStats& fs, list keep, list predicates, set projected):
     """[(row group, offset, length, needles)] the native scan should test for the
@@ -2794,19 +2817,27 @@ cdef tuple _acquire_remote_footers(
         batch_orig.append(path)
         batch_urls.append(fetch_url)
         batch_sizes.append(size)
-    if batch_urls:
-        envelopes = _fetch_footers_many(batch_urls, batch_sizes, auth_header)
+    # In chunks, with a cancel check between them: one batch over a cold table of many
+    # files is minutes inside C++ with nothing to stop it. Each chunk is cached as it
+    # lands, so a cancelled statement leaves the footers it did fetch for the next one.
+    cdef Py_ssize_t chunk_start
+    for chunk_start in range(0, len(batch_urls), _FOOTER_FETCH_CHUNK):
+        raise_if_cancelled()
+        chunk_urls = batch_urls[chunk_start:chunk_start + _FOOTER_FETCH_CHUNK]
+        envelopes = _fetch_footers_many(
+            chunk_urls, batch_sizes[chunk_start:chunk_start + _FOOTER_FETCH_CHUNK], auth_header)
         pending_remote = []
-        for bi in range(len(batch_orig)):
+        for bi in range(len(chunk_urls)):
+            path = batch_orig[chunk_start + bi]
             envelope = envelopes[bi]
             if footer_bytes_cache is not None:
-                footer_bytes_cache.put(batch_urls[bi], envelope)
-            _parse_and_cache_footer(batch_orig[bi], envelope, footer_map)
+                footer_bytes_cache.put(chunk_urls[bi], envelope)
+            _parse_and_cache_footer(path, envelope, footer_map)
             # Write back only AFTER a successful parse, so a cross-instance reader never
             # receives bytes that fail to decode here.
             if footer_disk is not None:
-                footer_disk.put(batch_orig[bi], envelope)
-            pending_remote.append((batch_orig[bi], envelope))
+                footer_disk.put(path, envelope)
+            pending_remote.append((path, envelope))
         if footer_remote is not None and pending_remote:
             footer_remote.put_many(pending_remote)
 
@@ -3412,6 +3443,8 @@ cdef class NativeScanPlan:
         self.row_groups_pruned_runtime = -1
         # -1 = no bloom probe planned (see the pxd). Only the Source overwrites it.
         self.row_groups_pruned_bloom = -1
+        self.remote_bloom_bytes = 0
+        self.remote_bloom_files_over_budget = 0
         self.cache_fill_bytes = 0
         self.scan_identity = None
         self._closed = False
@@ -3548,6 +3581,10 @@ cdef class NativeScanPlan:
             "bloom_cache_hits": self.pipeline_ptr.bloom_cache_hits(),
             "bloom_cache_misses": self.pipeline_ptr.bloom_cache_misses(),
             "bloom_cache_bytes": self.pipeline_ptr.bloom_cache_bytes(),
+            # The bloom bytes this scan planned to read, and the remote files left
+            # unprobed by REMOTE_BLOOM_ROUND_PERCENT.
+            "remote_bloom_bytes": self.remote_bloom_bytes,
+            "remote_bloom_files_over_budget": self.remote_bloom_files_over_budget,
             # Scan prefilter: rows reaching the worker-side predicate / surviving it.
             "prefilter_rows_in": self.pipeline_ptr.prefilter_rows_in(),
             "prefilter_rows_out": self.pipeline_ptr.prefilter_rows_out(),
@@ -3908,6 +3945,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef bint _remote_scan = False
     cdef list remote_work_items = []
     for path in paths:
+        # Per file: pruning and probe planning over a large table is minutes of plan time.
+        raise_if_cancelled()
         fetch_url = orig_to_cpp.get(path, path)
         path_bytes_cpp = fetch_url.encode('utf-8')
         if plan.footer_map[0].count(path_bytes_cpp) == 0:
@@ -3941,8 +3980,19 @@ cpdef NativeScanPlan open_native_scan_plan(
         # the native scan issues them in its first fetch round.
         remote_probes = None
         if predicates and _is_remote_url(fetch_url):
-            for rg_b, b_off, b_len, b_needles in _remote_bloom_probes(
-                    deref(fsp), kept, predicates, bloom_projected):
+            file_probes = _remote_bloom_probes(deref(fsp), kept, predicates, bloom_projected)
+            # Every planned bloom is read in one round, on no memory account: a file
+            # whose blooms would take the scan past the cap is scanned unprobed.
+            file_bloom_bytes = 0
+            for b_off, b_len in {(p[1], p[2]) for p in file_probes}:
+                file_bloom_bytes += b_len
+            if (file_probes and _REMOTE_BLOOM_ROUND_MAX_BYTES > 0 and
+                    plan.remote_bloom_bytes + file_bloom_bytes > _REMOTE_BLOOM_ROUND_MAX_BYTES):
+                plan.remote_bloom_files_over_budget += 1
+                file_probes = []
+            else:
+                plan.remote_bloom_bytes += file_bloom_bytes
+            for rg_b, b_off, b_len, b_needles in file_probes:
                 if remote_probes is None:
                     remote_probes = {}
                 remote_probes.setdefault(rg_b, []).append((b_off, b_len, b_needles))

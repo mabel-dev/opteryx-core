@@ -44,6 +44,8 @@ from opteryx.models import rewrite_children
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.utils.cancellation import cancellable
+from opteryx.utils.cancellation import raise_if_cancelled
 
 # Kind code -> function name, INVERTED from the single registry the plan node and the
 # native sink already agree on — so an operand-type refusal here names the function the
@@ -2406,6 +2408,7 @@ class _Compiler:
     def compile_node(self, nid):
         """Compile the subplan rooted at ``nid``. Returns ``(pipeline_idx, layout)``
         where layout is the identity list of the pipeline's stream, in column order."""
+        raise_if_cancelled()
         node = self.plan[nid]
         if len(list(self.plan.outgoing_edges(nid))) > 1:
             _unsupported(
@@ -7760,8 +7763,11 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     # reports actual compile cost, and time_engine_footer_fetch reports the IO
     # separately instead of one hiding inside the other's name.
     _compile0 = _t.perf_counter_ns()
-    (nplan, out_q, scan_sources, scan_facts,
-     _footer_fetch_ns, _runtime_bounds_wired) = compile_to_native(plan, pool=pool)
+    # The engine's own cancel checks start with the run; compiling can take minutes on a
+    # cold scan of many files, so it answers to the same token at its own checkpoints.
+    with cancellable(cancel):
+        (nplan, out_q, scan_sources, scan_facts,
+         _footer_fetch_ns, _runtime_bounds_wired) = compile_to_native(plan, pool=pool)
     nplan.set_measure_operator_cpu(measure_operator_cpu)
     nplan.set_cancel(cancel)
     _compile_ns = _t.perf_counter_ns() - _compile0 - _footer_fetch_ns

@@ -596,6 +596,19 @@ read-backs per scan are `memory_budget_bytes`, `memory_held_high_watermark`,
 if not 0 <= IO_BUDGET_PERCENT <= 100:
     raise ValueError(f"IO_BUDGET_PERCENT must be 0-100, not {IO_BUDGET_PERCENT}")
 
+REMOTE_BLOOM_ROUND_PERCENT: int = int(get("REMOTE_BLOOM_ROUND_PERCENT", 5))
+"""The most bloom-filter bytes one scan may plan to read from REMOTE files, as a percent of the
+container (the cgroup limit when set, else physical RAM). The native scan reads every planned
+bloom in one concurrent round before its first fetch, and those bytes are on no memory account,
+so the round has to be bounded here: files are planned in order, and a file whose blooms would
+take the scan past the cap is scanned without bloom probes (a probe only prunes - leaving one out
+never changes an answer). Without it a selective string lookup over a wide table fetched every
+file's blooms at once - 80 files x 168 MB of l_comment blooms on tpch_sf1000.lineitem OOM-killed
+a 14.5 GiB worker (2026-11-03). The read-backs per scan are `remote_bloom_bytes` and
+`remote_bloom_files_over_budget`. Read at import. 0 = uncapped."""
+if not 0 <= REMOTE_BLOOM_ROUND_PERCENT <= 100:
+    raise ValueError(f"REMOTE_BLOOM_ROUND_PERCENT must be 0-100, not {REMOTE_BLOOM_ROUND_PERCENT}")
+
 HTTP_MAX_REQUESTS_IN_FLIGHT: int = int(get("HTTP_MAX_REQUESTS_IN_FLIGHT", 0))
 """The most remote range reads (REST GETs and DirectPath streams) the parquet IO pipelines may
 have on the wire together, process-wide; a fetch waits for room before it is issued. Read at

@@ -159,3 +159,25 @@ static inline size_t draken_vector_owner_nbytes(const VectorOwner* owner) noexce
     }
     return total;
 }
+
+// Bytes of a VectorOwner's OWN buffers that the process account does not see: the
+// allocator charges a block only when the slab pool does not hold it and its usable
+// size is at least DRAKEN_MEM_ACCOUNT_MIN (alloc.h), so this sums exactly the blocks
+// that test leaves out. Borrowed payloads (data_source / arena_source) own no buffer
+// here and contribute nothing. For a holder that retains many small vectors (a join
+// build of filtered morsels) and must charge them with a draken::MemCharge.
+static inline size_t draken_vector_owner_uncharged_bytes(const VectorOwner* owner) noexcept {
+    size_t total = 0u;
+    auto small = [](const void* p) -> size_t {
+        if (p == nullptr || draken_slab_owns(p)) return 0u;
+        const size_t n = DRAKEN_USABLE_SIZE(const_cast<void*>(p));
+        return n < static_cast<size_t>(DRAKEN_MEM_ACCOUNT_MIN) ? n : 0u;
+    };
+    while (owner != nullptr) {
+        total += small(owner->data_buf.get()) + small(owner->validity_buf.get()) +
+                 small(owner->codes_buf.get()) + small(owner->arena_buf.get()) +
+                 small(owner->keyhash_buf.get());
+        owner = owner->child_owner.get();
+    }
+    return total;
+}

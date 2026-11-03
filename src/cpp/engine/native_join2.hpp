@@ -131,6 +131,10 @@ struct Join2BuildLocal : LocalSinkState {
     // these charge their capacity so the chunk cache's give-way does (see
     // draken::MemCharge). Handed to the global state with the vectors in combine().
     draken::MemCharge rows_charge, hashes_charge;
+    // The retained payload's buffers below DRAKEN_MEM_ACCOUNT_MIN, which no allocator
+    // charges: a filtered build arrives as thousands of small morsels (TPC-H SF100 Q9:
+    // 32.6M rows in ~3.5k-row morsels, ~3 GB unseen), so the cache never gave way.
+    draken::MemCharge payload_charge;
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
     // ASOF with a STRING match column: parallel to asof_keys, pointing into the
     // retained morsel's arena (see AsofKey). Empty for a numeric/temporal key.
@@ -376,6 +380,7 @@ struct Join2BuildGlobal : GlobalSinkState {
     // Charges for the queued per-worker chunks (adopted in combine(), released when
     // finalize frees them) and for row_m/row_r once merged. See draken::MemCharge.
     draken::MemCharge row_chunks_charge, hash_chunks_charge, rows_charge;
+    draken::MemCharge payload_charge;  // every worker's payload_charge: lives as long as `morsels`
     std::vector<uint32_t> chunk_morsel_off;
     // Zero-row, plan-typed payload columns. Used ONLY when no build morsel was ever
     // retained (a build side that streamed zero rows): gather_rows takes its column
@@ -1183,8 +1188,14 @@ struct Join2BuildSink : Sink {
         // Nothing addresses this morsel (no keyed row and — under FULL OUTER —
         // no retained NULL-keyed row either): don't pin its buffers for the
         // lifetime of the build table.
-        if (l.next_row == rows_before && l.null_row_m.size() == nulls_before)
+        if (l.next_row == rows_before && l.null_row_m.size() == nulls_before) {
             l.morsels.pop_back();
+        } else {
+            int64_t small = 0;
+            for (const CxxColumn& c : l.morsels.back()->columns)
+                if (c.own) small += static_cast<int64_t>(draken_vector_owner_uncharged_bytes(c.own.get()));
+            l.payload_charge.set(l.payload_charge.bytes() + small);
+        }
         l.rows_charge.set(static_cast<int64_t>((l.row_m.capacity() + l.row_r.capacity()) * sizeof(uint32_t)));
         l.hashes_charge.set(static_cast<int64_t>(l.row_hashes.capacity() * sizeof(uint64_t)));
         return SinkResult::CONTINUE;
@@ -1235,6 +1246,7 @@ struct Join2BuildSink : Sink {
         g.row_m_chunks.push_back(std::move(l.row_m));
         g.row_r_chunks.push_back(std::move(l.row_r));
         g.row_chunks_charge.adopt(l.rows_charge);
+        g.payload_charge.adopt(l.payload_charge);
         g.chunk_morsel_off.push_back(morsel_off);
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
         g.asof_str_ptr.insert(g.asof_str_ptr.end(),

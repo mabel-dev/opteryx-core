@@ -33,6 +33,7 @@ from draken.morsels.morsel import Morsel
 from opteryx import config
 from opteryx.compiled.platform import cgroup_memory_limit_bytes, physical_memory_total_bytes
 from opteryx.compiled.structures.memory_pool import configure_chunk_cache
+from opteryx.connectors.parquet_io.pool_reader import configure_remote_bloom_round
 from rugo import parquet as rp
 
 from tests.unit.connectors.parquet_io.test_fetch_blocks import _register_http_workspace
@@ -180,6 +181,52 @@ def test_bloom_bytes_over_the_cap_plan_no_probe(served):
     rows, _, reading, _ = _run(sql.format(rel="rb_bloomed.bloomed"))
     assert rows == [("key-000150017",)]
     assert "row_groups_pruned_bloom" not in reading, reading
+
+
+def _scan_diag(sql):
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for m in session.execute_to_morsels(sql):
+        rows.extend(zip(*[m.column(n).to_pylist() for n in m.column_names]))
+    (diag,) = session.telemetry.get("io_scan_diagnostics")
+    readings = [r for r in session.telemetry.get("operations", {}).values()
+                if "row_groups_read" in r]
+    session.close()
+    return sorted(rows), diag, readings[0]
+
+
+def test_bloom_round_within_the_scan_cap_is_planned_and_reported(served):
+    previous = configure_remote_bloom_round(1 << 40)
+    try:
+        rows, diag, reading = _scan_diag(
+            "SELECT k, p FROM rb_bloomed.bloomed WHERE k = " + str(TARGET))
+    finally:
+        configure_remote_bloom_round(previous)
+    assert rows == [(TARGET, TARGET_ROW * 7)]
+    # One k bloom per row group, each read once.
+    assert diag["remote_bloom_bytes"] > 0, diag
+    assert diag["remote_bloom_bytes"] % N_RG == 0, diag
+    assert diag["remote_bloom_files_over_budget"] == 0, diag
+    assert reading.get("row_groups_pruned_bloom", 0) > N_RG // 2, reading
+
+
+def test_bloom_round_over_the_scan_cap_leaves_the_file_unprobed(served):
+    # Every file's blooms are read in one round on no memory account, so a scan
+    # stops planning them at the cap (sf1000 lineitem's l_comment blooms, 80 files
+    # x 168 MB, OOM-killed a 14.5 GiB worker). Same answer, nothing skipped.
+    previous = configure_remote_bloom_round(1)
+    try:
+        rows, diag, reading = _scan_diag(
+            "SELECT k, p FROM rb_bloomed.bloomed WHERE k = " + str(TARGET))
+    finally:
+        configure_remote_bloom_round(previous)
+    assert rows == [(TARGET, TARGET_ROW * 7)]
+    assert diag["remote_bloom_bytes"] == 0, diag
+    assert diag["remote_bloom_files_over_budget"] == 1, diag
+    assert "row_groups_pruned_bloom" not in reading, reading
+    assert reading["row_groups_read"] == N_RG, reading
 
 
 def test_local_scan_plans_no_remote_probe(served):
