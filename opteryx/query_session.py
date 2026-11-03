@@ -233,6 +233,13 @@ class Session(DataFrame):
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
+        # Planning time is the tree's strongest feature, so this goes after it is
+        # recorded. `source` (the whole submitted text) for the statement verb: the
+        # tree was fitted one row per job, keyed on the job's text.
+        from opteryx.planner.time_estimate import record_time_estimate
+
+        record_time_estimate(self._telemetry, source or operation)
+
         # Read fresh per statement (not once per _execute_statements() batch): a
         # `SET trace TO true` earlier in the same semicolon-separated batch must
         # be visible to this statement's execute() call, not just to the next
