@@ -101,7 +101,7 @@ void     draken_io_wait(uint64_t seen);
 // one count for every extension, like the IO budget. acquire(n) blocks until n
 // more fit under the cap and returns the permits it took - n clamped to the cap,
 // so a request batch wider than the cap still runs, alone. Cap 0 = off: acquire
-// takes nothing and never blocks. *waited_ns gets the time spent blocked (0 when
+// never blocks, but still counts n so in_flight and peak are reported. *waited_ns gets the time spent blocked (0 when
 // it did not block). release(n) returns what acquire took.
 void     draken_io_requests_configure(int64_t cap);
 int64_t  draken_io_requests_cap(void);

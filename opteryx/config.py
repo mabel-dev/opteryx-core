@@ -596,10 +596,11 @@ read-backs per scan are `memory_budget_bytes`, `memory_held_high_watermark`,
 if not 0 <= IO_BUDGET_PERCENT <= 100:
     raise ValueError(f"IO_BUDGET_PERCENT must be 0-100, not {IO_BUDGET_PERCENT}")
 
-HTTP_MAX_REQUESTS_IN_FLIGHT: int = int(get("HTTP_MAX_REQUESTS_IN_FLIGHT", 64))
+HTTP_MAX_REQUESTS_IN_FLIGHT: int = int(get("HTTP_MAX_REQUESTS_IN_FLIGHT", 0))
 """The most remote range reads (REST GETs and DirectPath streams) the parquet IO pipelines may
 have on the wire together, process-wide; a fetch waits for room before it is issued. Read at
-import (draken_io_requests_*), so a sweep is a restart per value. 0 = no cap. Read-backs:
+import (draken_io_requests_*), so a sweep is a restart per value. 0 = no cap (the default
+until a fleet sweep shows a value that helps). Read-backs:
 per scan `request_cap` and `request_cap_wait_ns`; per query `io_requests_cap` and
 `io_requests_peak`."""
 if HTTP_MAX_REQUESTS_IN_FLIGHT < 0:

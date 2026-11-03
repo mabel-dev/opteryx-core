@@ -238,9 +238,10 @@ int64_t draken_io_requests_acquire(int64_t n, int64_t* waited_ns) {
     *waited_ns = 0;
     std::unique_lock<std::mutex> lk(g_req_mu);
     const int64_t cap = g_req_cap.load(std::memory_order_relaxed);
-    if (cap <= 0 || n <= 0) return 0;
-    const int64_t take = n < cap ? n : cap;
-    if (g_req_in_flight + take > cap) {
+    if (n <= 0) return 0;
+    // Cap 0 still counts, so the peak is reported uncapped; it just never waits.
+    const int64_t take = (cap <= 0 || n < cap) ? n : cap;
+    if (cap > 0 && g_req_in_flight + take > cap) {
         const auto t0 = std::chrono::steady_clock::now();
         g_req_cv.wait(lk, [take, cap] { return g_req_in_flight + take <= cap; });
         *waited_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(

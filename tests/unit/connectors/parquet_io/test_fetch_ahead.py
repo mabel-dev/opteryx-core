@@ -199,7 +199,9 @@ def test_the_process_request_cap_binds_and_is_reported():
         url = f"http://127.0.0.1:{port}/{name}"
         try:
             configure_io_request_cap(0)
+            reset_io_request_peak()
             rows_off, diag_off = _scan(url, fetch_ahead=6)
+            stats_off = io_request_stats()
             configure_io_request_cap(2)
             reset_io_request_peak()
             rows_on, diag_on = _scan(url, fetch_ahead=6)
@@ -210,6 +212,8 @@ def test_the_process_request_cap_binds_and_is_reported():
     assert sorted(rows_off) == sorted(rows_on) == list(range(N))
     assert diag_off["request_cap"] == 0 and diag_off["request_cap_wait_ns"] == 0
     assert diag_off["fetch_in_flight_peak"] > 2, diag_off
+    # Uncapped still counts: the process peak is the scan's, and every permit came back.
+    assert stats_off["cap"] == 0 and stats_off["peak"] > 2 and stats_off["in_flight"] == 0, stats_off
     assert diag_on["request_cap"] == 2
     assert stats["cap"] == 2 and 1 <= stats["peak"] <= 2 and stats["in_flight"] == 0, stats
     assert diag_on["request_cap_wait_ns"] > 0, diag_on

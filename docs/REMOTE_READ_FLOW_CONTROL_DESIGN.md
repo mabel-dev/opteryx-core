@@ -243,7 +243,7 @@ The orders and part scans' requests went from mostly < 50 ms to 100–500 ms, wi
 in flight across the three scans. The byte gate's removal had left no limit on reads in flight.
 Ruled: cap the number of reads.
 
-- `HTTP_MAX_REQUESTS_IN_FLIGHT` (config, default 64, 0 = no cap; variable
+- `HTTP_MAX_REQUESTS_IN_FLIGHT` (config, default 0 = no cap, so the release changes nothing; variable
   `http_max_requests_in_flight`, SERVER/RESTRICTED per the 2026-08-28 ruling that process-wide
   properties are not SET-able). Read at import, so a sweep is one restart per value.
 - One count per process in draken (`draken_io_requests_*`, `core/mem_account.cpp`, single home in
@@ -254,5 +254,7 @@ Ruled: cap the number of reads.
   `io_requests_peak`.
 - Test: `test_the_process_request_cap_binds_and_is_reported` (uncapped peak > 2; capped at 2 the
   process peak is ≤ 2 and the scan waits).
-- Sweep owed on the fleet after release: cold Q8 at 32 / 64 / 128 / 0, interleaved. Target: back
-  near 15.9 s. If no value gets there, the cause is elsewhere and the cap comes out.
+- Sweep owed on the fleet after release: cold Q8 at 32 / 64 / 128 / 0, interleaved.
+- ⚠ The premise did not hold: at 22:14 the same 0.9.185 gRPC build ran cold Q8 in 16.6 s with the
+  same ~36 reads in flight on the orders scan, requests back under 50 ms. The 21:00–21:20 slowness
+  came from outside the engine. The cap ships OFF, for the sweep only (architect: "I'd rather have the info").
