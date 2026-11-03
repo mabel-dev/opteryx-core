@@ -343,6 +343,10 @@ class RemoteConnectionError(ExecutionError):
     """Exception raised when remote systems don't repond in a timely manner"""
 
 
+class QueryCancelledError(ExecutionError):
+    """The caller cancelled the query (Session.cancel) before it finished."""
+
+
 # ======================== Begin SQL-Specific Exceptions ========================
 class ColumnNotFoundError(SqlError):
     """Exception raised for Column Not Found errors."""

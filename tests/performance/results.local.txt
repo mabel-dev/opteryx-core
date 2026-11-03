@@ -18,7 +18,7 @@ make ssb-sf100                5525.1ms (30-OCT) [0.70x]
 make medicare1                 114.1ms (27-OCT) [0.66x]
 make job                      3709.9ms (18-OCT) [0.55x]
 make h2o                     11380.0ms (22-OCT) [0.43x] [MEDIUM]
-make jsonbench-10-jsonl        862.8ms (22-OCT) [0.33x] [? @ 909.0ms last JSONBench]
+make jsonbench-10-jsonl        862.8ms (22-OCT) [0.33x] [0.9.187 @ 954.0ms last JSONBench]
 make jsonbench-10-zstd        1624.0ms (27-OCT) [0.63x]
 make dash                       71.6ms (01-NOV) [0.82x]
 make signals                   168.1ms (18-OCT)

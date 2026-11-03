@@ -27,7 +27,7 @@ def _with_optional_gc_disabled(
             gc.enable()
 
 
-def execute(plan, telemetry, trace_sink=None):
+def execute(plan, telemetry, trace_sink=None, *, cancel):
     # trace_sink: an optional opteryx.models.trace_bundle.TraceBundle the native
     # engine populates as a side effect of teardown, when tracing is armed — see
     # docs/EXECUTION_TRACING_DESIGN.md. Deliberately NOT part of telemetry (see
@@ -61,11 +61,13 @@ def execute(plan, telemetry, trace_sink=None):
     # no operator for raises NotSupportedError at compile time (hard-cutover posture;
     # see the engine_cutover_decisions memory).
     if is_special_op(plan[plan.exit_point()]):
-        results, result_type = serial_execute(plan, telemetry=telemetry)
+        results, result_type = serial_execute(plan, telemetry=telemetry, cancel=cancel)
     else:
         from .compiler import execute_native
 
-        results, result_type = execute_native(plan, telemetry=telemetry, trace_sink=trace_sink)
+        results, result_type = execute_native(
+            plan, telemetry=telemetry, trace_sink=trace_sink, cancel=cancel
+        )
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type

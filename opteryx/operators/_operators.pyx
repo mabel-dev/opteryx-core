@@ -519,6 +519,13 @@ cdef extern from "engine/native_parquet_scan_source.hpp" namespace "opteryx::eng
     cdef cppclass RowAdmission:
         pass
 
+cdef extern from "engine/operator.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass CancelFlag:
+        pass
+    shared_ptr[CancelFlag] cancel_flag_new()
+    void cancel_flag_raise(CancelFlag* f)
+    bint cancel_flag_is_set(const CancelFlag* f)
+
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
         string identity
@@ -569,6 +576,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_current_display_name(string s)
         void set_measure_operator_cpu(bint on)
         bint measures_operator_cpu()
+        void set_cancel_flag(shared_ptr[CancelFlag] f)
         cppvector[OpReading] collect_op_stats()
         cppvector[PipelineReading] collect_pipeline_stats()
         cppvector[LoopReading] collect_loop_stats()
@@ -3006,6 +3014,11 @@ cdef class NativePlan:
         execution."""
         self._e.set_measure_operator_cpu(on)
 
+    def set_cancel(self, CancelToken token not None):
+        """Make this run stoppable by ``token.cancel()``: the workers stop at their
+        next morsel and the run ends with QueryCancelledError. Call before execution."""
+        self._e.set_cancel_flag(token._flag)
+
     def collect_op_stats(self):
         """Harvest the per-operator execution telemetry accumulated during ``run``.
         Returns a list of dicts, one per source/operator/sink; callers sum by
@@ -4613,6 +4626,24 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
     return out
 
 
+cdef class CancelToken:
+    """A session's cancel request. ``cancel()`` may be called from any thread while a
+    statement runs: every native run the token is attached to (NativePlan.set_cancel)
+    stops at its next morsel. Once raised it stays raised - the session it belongs to
+    runs no further statements."""
+    cdef shared_ptr[CancelFlag] _flag
+
+    def __cinit__(self):
+        self._flag = cancel_flag_new()
+
+    def cancel(self):
+        cancel_flag_raise(self._flag.get())
+
+    @property
+    def cancelled(self):
+        return cancel_flag_is_set(self._flag.get())
+
+
 cdef class NativeErrorSlot:
     """Native terminal-error channel for the plan driver — replaces the borrowed
     Python ``errors`` list the detached driver used to append to. The driver records
@@ -4673,6 +4704,10 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
             "Unable to read data from storage, the read did not complete. "
             "The cause has been logged."
         )
+    # Code 4 (kErrCodeCancelled, operator.hpp): the caller cancelled the query.
+    if errslot.code == 4:
+        from opteryx.exceptions import QueryCancelledError
+        return QueryCancelledError("The query was cancelled.")
     return RuntimeError(
         "[%d]: %s" % (errslot.code, errslot.message() or "unknown")
     )

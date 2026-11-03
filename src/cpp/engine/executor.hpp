@@ -264,6 +264,13 @@ inline void run_worker_body(WorkerCtx* ctx) {
             if (e.code != 0) return;
             if (orr == OpResult::EMIT) return;              // this input is drained
             // HAVE_MORE: loop — re-call execute() with the SAME `m` for the next batch.
+            // One input can fan out for the whole query (a cross join of one-morsel
+            // inputs), so cancel is checked here as well as between source morsels.
+            if (p.cancel != nullptr && cancel_flag_is_set(p.cancel)) {
+                e.code = kErrCodeCancelled;
+                e.msg = "query cancelled";
+                return;
+            }
         }
     };
 
@@ -271,6 +278,11 @@ inline void run_worker_body(WorkerCtx* ctx) {
     MorselPtr in;
     while (true) {
         if (p.halt != nullptr && p.halt->load(std::memory_order_relaxed)) break;
+        if (p.cancel != nullptr && cancel_flag_is_set(p.cancel)) {
+            e.code = kErrCodeCancelled;
+            e.msg = "query cancelled";
+            return;
+        }
         uint64_t c0 = kMeasureCpu ? telem_cpu_now_ns() : 0;  // read order is fixed — see telem_cpu_now_ns
         // TC_SOURCE_PULL: same gap-closing rationale as TC_SINK above — this
         // is the ONLY per-morsel timing signal for a scan whose predicate is

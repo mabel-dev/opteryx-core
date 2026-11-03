@@ -845,6 +845,9 @@ def execute_logical_plan(
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
     # Execute the physical plan and return the executor's generator and ResultType.
-    results_generator, result_type = execute_plan(physical_plan, telemetry=telemetry)
+    from opteryx.operators._operators import CancelToken
+
+    cancel = connection.cancel_token if connection is not None else CancelToken()
+    results_generator, result_type = execute_plan(physical_plan, telemetry=telemetry, cancel=cancel)
 
     return results_generator, result_type

@@ -7666,7 +7666,7 @@ def _chunk_cache_admission(fill_bytes, headroom):
 
 
 def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=True,
-                   measure_operator_cpu=False):
+                   measure_operator_cpu=False, *, cancel):
     """THE data executor: compile to the native pipeline graph and run it. Returns the
     ``(generator, ResultType)`` contract the cursor consumes. The generator drains the
     engine's output queue; the engine runs on its own native driver + worker pool.
@@ -7684,8 +7684,16 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     ``trace_sink``: an optional opteryx.models.trace_bundle.TraceBundle. When
     tracing is armed (config.OPTERYX_TRACE), the drained span blob and symbol
     tables are written onto it at teardown — NOT onto ``telemetry`` (see
-    TraceBundle's docstring for why trace data must not live in telemetry)."""
+    TraceBundle's docstring for why trace data must not live in telemetry).
+
+    ``cancel``: the session's CancelToken. Raised before this starts, the statement
+    never compiles; raised during the run, the engine stops at its next morsel and
+    the generator raises QueryCancelledError."""
     from opteryx import config
+    from opteryx.exceptions import QueryCancelledError
+
+    if cancel.cancelled:
+        raise QueryCancelledError("The query was cancelled.")
     from opteryx.compiled.morsel_queue import MQ_FINISHED
     from opteryx.operators._operators import NativeErrorSlot
     from opteryx.operators._operators import build_terminal_exc
@@ -7755,6 +7763,7 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
     (nplan, out_q, scan_sources, scan_facts,
      _footer_fetch_ns, _runtime_bounds_wired) = compile_to_native(plan, pool=pool)
     nplan.set_measure_operator_cpu(measure_operator_cpu)
+    nplan.set_cancel(cancel)
     _compile_ns = _t.perf_counter_ns() - _compile0 - _footer_fetch_ns
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
     # fact — recorded whether or not the GIL instrumentation is armed; the dict is

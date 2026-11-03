@@ -45,6 +45,22 @@ inline constexpr int kErrCodeDataError = 2;
 // depend on which reader happened to run.
 inline constexpr int kErrCodeReadError = 3;
 
+// kErrCodeCancelled: the CALLER stopped the query (CancelFlag below). Not a fault:
+// build_terminal_exc raises it as opteryx QueryCancelledError.
+inline constexpr int kErrCodeCancelled = 4;
+
+// A query's cancel request, raised from any thread (the caller's), read by the
+// workers between morsels and by the driver between pipelines. Shared ownership:
+// the engine holds it for the run, the caller's token holds it for the session.
+struct CancelFlag {
+    std::atomic<bool> set{false};
+};
+inline std::shared_ptr<CancelFlag> cancel_flag_new() { return std::make_shared<CancelFlag>(); }
+inline void cancel_flag_raise(CancelFlag* f) noexcept { f->set.store(true, std::memory_order_release); }
+inline bool cancel_flag_is_set(const CancelFlag* f) noexcept {
+    return f->set.load(std::memory_order_acquire);
+}
+
 // ---- Per-operator telemetry (basic, always-on) -----------------------------------
 // One Source/Operator/Sink instance serves EVERY worker thread, so these counters are
 // shared and therefore atomic. Accumulation is PER-MORSEL (never per-row): the atomic
@@ -175,6 +191,12 @@ struct Pipeline {
     // new morsels when set. Checked between morsels only — never mid-push, so no
     // partial results. nullptr = no early termination possible.
     std::atomic<bool>*     halt   = nullptr;
+    // The query's cancel request: workers stop at their next morsel with
+    // kErrCodeCancelled. Same between-morsels granularity as `halt`.
+    // shortcut: a worker blocked inside one get_morsel (a scan waiting on IO) sees it
+    // only when that morsel arrives; cancel the scans' IO pipelines too if that wait
+    // proves long in practice.
+    const CancelFlag*      cancel = nullptr;
     // Read the per-thread CPU clock around every source/operator/sink call into
     // OpStats::cpu_ns. That clock is a real syscall on x86 under PTI (~800 ns a read,
     // two per call; ~6% of a short query's CPU), so it is armed only for EXPLAIN

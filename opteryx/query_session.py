@@ -171,12 +171,26 @@ class Session(DataFrame):
         self._owns_connection = False
         self._closed = False
         self._executed = False
+        # Native cancel request shared with every run this session starts; cancel()
+        # may be called from any thread while a statement runs.
+        from opteryx.operators._operators import CancelToken
+
+        self._cancel = CancelToken()
 
         DataFrame.__init__(self, rows=[], schema=[])
 
     @property
     def query_id(self) -> str:
         return self._query_id
+
+    @property
+    def cancel_token(self):
+        return self._cancel
+
+    def cancel(self) -> None:
+        """Stop the running statement: it ends with QueryCancelledError at its next
+        morsel. Safe from any thread. The session runs no further statements."""
+        self._cancel.cancel()
 
     def _inner_execute(
         self,
@@ -229,6 +243,7 @@ class Session(DataFrame):
             self._plan,
             telemetry=self._telemetry,
             trace_sink=self._trace if self._trace_armed else None,
+            cancel=self._cancel,
         )
 
         write_billing_event(

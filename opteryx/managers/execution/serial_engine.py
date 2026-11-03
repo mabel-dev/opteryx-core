@@ -82,7 +82,7 @@ def is_special_op(node) -> bool:
 
 
 def execute(
-    plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
+    plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None, *, cancel
 ) -> Tuple[Generator[Morsel, Any, Any], ResultType]:
     from opteryx.operators.explain import ExplainNode
     from opteryx.operators.set_variable import SetVariableNode
@@ -109,7 +109,7 @@ def execute(
     # ── Non-pipeline special cases ───────────────────────────────────────────
     if isinstance(head_node, ExplainNode):
         return (
-            explain(plan, analyze=head_node.analyze, telemetry=telemetry),
+            explain(plan, analyze=head_node.analyze, telemetry=telemetry, cancel=cancel),
             ResultType.TABULAR,
         )
     if isinstance(head_node, SetVariableNode):
@@ -144,6 +144,7 @@ def execute(
             subplan,
             telemetry=telemetry,
             admit_to_chunk_cache=not isinstance(head_node, CompactionCommitNode),
+            cancel=cancel,
         )
         for morsel in generator:
             head_node._push_impl(morsel)
@@ -173,7 +174,7 @@ def execute(
             # sink.
             from opteryx.managers.execution.compiler import execute_native
 
-            generator, _ = execute_native(subplan, telemetry=telemetry)
+            generator, _ = execute_native(subplan, telemetry=telemetry, cancel=cancel)
             for morsel in generator:
                 head_node._push_impl(morsel)
             head_node._push_impl(EOS)
@@ -243,6 +244,8 @@ def explain(
     plan: PhysicalPlan,
     analyze: bool,
     telemetry: QueryTelemetry = None,
+    *,
+    cancel,
 ) -> Generator[Morsel, None, None]:
     from opteryx.operators import BasePlanNode
 
@@ -295,7 +298,7 @@ def explain(
             subplan = plan.shallow_copy()  # structure only: the operators are shared
             subplan.remove_node(head_nid, heal=True)
             generator, _ = execute_native(
-                subplan, telemetry=telemetry, measure_operator_cpu=True
+                subplan, telemetry=telemetry, measure_operator_cpu=True, cancel=cancel
             )
             for _ in generator:
                 pass

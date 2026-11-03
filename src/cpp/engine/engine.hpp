@@ -344,6 +344,11 @@ public:
     void set_measure_operator_cpu(bool on) { measure_operator_cpu_ = on; }
     bool measures_operator_cpu() const { return measure_operator_cpu_; }
 
+    // The caller's cancel request for this run (operator.hpp CancelFlag). Set before
+    // run(); null = not cancellable.
+    std::shared_ptr<CancelFlag> cancel_;
+    void set_cancel_flag(std::shared_ptr<CancelFlag> f) { cancel_ = std::move(f); }
+
     // Monotonic per-Engine (i.e. per-query) counter for OpStats.node_id — see
     // trace.hpp. Starts at 1; 0 is reserved for "untagged".
     uint32_t next_trace_node_id_ = 1;
@@ -1914,6 +1919,11 @@ public:
         // Consumer abandoned: stop between pipelines. Not an error; matches QueueSink's
         // dropped-put contract.
         if (out_q != nullptr && out_q->closed()) return Step::STOP;
+        if (cancel_ != nullptr && cancel_flag_is_set(cancel_.get())) {
+            err.code = kErrCodeCancelled;
+            err.msg = "query cancelled";
+            return Step::FAILED;
+        }
         auto& pn = pipelines[idx];
         Pipeline p;
         p.source = pn->source.get();
@@ -1922,6 +1932,7 @@ public:
         p.sink = pn->sink.get();
         p.halt = &pn->halt;
         p.measure_cpu = measure_operator_cpu_;
+        p.cancel = cancel_.get();
         int pdop = (pn->dop_override > 0 && pn->dop_override < dop)
                        ? pn->dop_override : dop;
         pn->dop_used = pdop;
