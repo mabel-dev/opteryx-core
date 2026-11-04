@@ -70,6 +70,8 @@ from parquet_writer cimport (
     StrSlice,
     WriteParquet,
     PatchParquetColumnsByName,
+    AppendSegment,
+    AppendParquetRowGroups,
     StreamingParquetWriter,
     PT_INT32,
     PT_INT64,
@@ -1671,4 +1673,37 @@ def patch_columns(bytes source not None, drop=None, rename=None, add=None,
         out = PatchParquetColumnsByName(src_ptr, src_len, c_drop, c_rename, c_add,
                                         c_retype)
 
+    return PyBytes_FromStringAndSize(<const char*>out.data(), out.size())
+
+
+def append_row_groups(list segments not None):
+    """Concatenate row groups of same-schema parquet files without decoding them.
+
+    `segments` is a list of `(source_bytes, row_group_indices)`; the result holds
+    those row groups in the order given, each chunk copied byte-for-byte. Every
+    source must declare the first source's schema exactly. The result carries no
+    PageIndex and no file-level NDV.
+
+    Raises:
+        RuntimeError: a source is not parquet, schemas differ, or an index names
+            a row group the source does not have.
+    """
+    cdef vector[AppendSegment] c_segments
+    cdef AppendSegment seg
+    cdef vector[uint8_t] out
+    cdef bytes data
+    if not segments:
+        raise ValueError("append_row_groups: there is nothing to append")
+    for source, row_groups in segments:
+        if type(source) is not bytes:
+            raise TypeError("append_row_groups: each source must be parquet bytes")
+        data = <bytes>source  # `segments` keeps it alive for the call
+        seg.src = <const uint8_t*><const char*>data
+        seg.len = len(data)
+        seg.row_groups.clear()
+        for rg in row_groups:
+            seg.row_groups.push_back(<int64_t>rg)
+        c_segments.push_back(seg)
+    with nogil:
+        out = AppendParquetRowGroups(c_segments)
     return PyBytes_FromStringAndSize(<const char*>out.data(), out.size())

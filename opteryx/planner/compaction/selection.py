@@ -25,6 +25,9 @@ Three rule families, tried in the order ``compact()`` used:
 A dataset whose manifest holds a SINGLE file is rejected unless rule C fires:
 there is nothing to merge it with, so only a rewrite-in-place to shed delete
 debt is worth a pass.
+
+``OPTIMIZE TABLE x FINAL`` uses ``select_final_compaction_plan`` instead: one
+contiguous key window, as large as the disk budget allows, in a single pass.
 """
 
 import random
@@ -399,6 +402,16 @@ def _select_sort_aware(
 # --- Rule C: delete debt -----------------------------------------------------
 
 
+def _delete_debt_ratio(entry: CompactionFile) -> float:
+    """Deleted rows over physical rows; 0.0 when either count is absent."""
+    deleted = int(entry.deleted_record_count or 0)
+    records = entry.record_count
+    if not deleted or not records or records <= 0:
+        return 0.0
+    return deleted / records
+
+
+
 def _select_delete_debt(
     entries: Sequence[CompactionFile],
     sort_column: Optional[str],
@@ -418,13 +431,7 @@ def _select_delete_debt(
     worst_ratio = 0.0
 
     for entry in entries:
-        deleted = int(entry.deleted_record_count or 0)
-        if not deleted:
-            continue
-        records = entry.record_count
-        if not records or records <= 0:
-            continue
-        ratio = deleted / records
+        ratio = _delete_debt_ratio(entry)
         if ratio >= threshold and ratio > worst_ratio:
             worst = entry
             worst_ratio = ratio
@@ -506,4 +513,204 @@ def select_compaction_plan(
             detail="no rule selected files: nothing small, overlapping or heavily deleted",
         )
 
+    return SelectionResult(SelectionOutcome.PLANNED, plan=plan, detail=plan.reason)
+
+
+# --- FINAL -------------------------------------------------------------------
+
+
+def _overlap_components(ranges: Sequence[FileRange]) -> List[List[FileRange]]:
+    """Group files into maximal runs whose key ranges overlap, in key order.
+
+    Overlap is the same relation rule B uses: strict interval overlap, except
+    that a degenerate (min == max) file touching an edge is genuine overlap.
+    A boundary shared by two non-degenerate files is a clean prior split.
+
+    Raises TypeError when sort-key values are not mutually comparable.
+    """
+    components: List[List[FileRange]] = []
+    high: Any = None
+    degenerate_at_high = False
+    for candidate in sorted(ranges, key=lambda r: (r.low, r.high)):
+        joins = bool(components) and (
+            candidate.low < high
+            or (candidate.low == high and (candidate.is_degenerate or degenerate_at_high))
+        )
+        if not joins:
+            components.append([candidate])
+            high, degenerate_at_high = candidate.high, candidate.is_degenerate
+            continue
+        components[-1].append(candidate)
+        if candidate.high > high:
+            high, degenerate_at_high = candidate.high, candidate.is_degenerate
+        elif candidate.high == high:
+            degenerate_at_high = degenerate_at_high or candidate.is_degenerate
+    return components
+
+
+def _select_final_window(
+    key_ranges: Sequence[Tuple[CompactionFile, Any, Any]],
+    sort_column: str,
+    disk_budget: int,
+    threshold: float,
+) -> Optional[CompactionPlan]:
+    """The contiguous run of overlap components, within ``disk_budget``, that
+    rewrites the most bytes needing work - or, when it fixes more, part of one
+    component too large for any window.
+
+    A component needs work when it overlaps (two or more files), is unsettled
+    (a file under ``MIN_SIZE_BYTES``) or carries delete debt. A settled lone
+    file inside the window is rewritten too: it is the bridge that keeps the
+    window contiguous, which is what lets one global sort, rolled at TARGET,
+    produce outputs disjoint from every file left alone - so no group
+    boundaries ever reach the writer.
+
+    A component larger than the budget cannot sit in any window. It is offered
+    instead as its smallest files up to the budget: sorted, they still collapse
+    many files into a few, though the outputs overlap the files it leaves. The
+    smallest are the cheapest to fix and stop being smallest once merged, so the
+    next pass moves on - the starvation that makes rule B seed at random does
+    not arise. Files with no known key extent are not in ``key_ranges`` and so
+    never selected here.
+    """
+    components = _overlap_components(
+        [FileRange(entry=entry, low=low, high=high) for entry, low, high in key_ranges]
+    )
+
+    costs = [sum(member.size for member in component) for component in components]
+    needs_work = [
+        len(component) > 1
+        or any(
+            member.size < MIN_SIZE_BYTES or _delete_debt_ratio(member.entry) >= threshold
+            for member in component
+        )
+        for component in components
+    ]
+    # Ranked by bytes needing work, then by files needing work - the second so
+    # files of unknown size (which weigh 0 bytes) still count.
+    values = [cost if work else 0 for cost, work in zip(costs, needs_work)]
+    work_files = [len(c) if work else 0 for c, work in zip(components, needs_work)]
+
+    # Costs are non-negative, so the cheapest-feasible start for each end is
+    # also the most valuable: one two-pointer sweep finds the best window.
+    best: Optional[Tuple[int, int, int, int]] = None  # (value, files, start, end)
+    start = 0
+    cost = value = files = 0
+    for end in range(len(components)):
+        cost += costs[end]
+        value += values[end]
+        files += work_files[end]
+        while start <= end and cost > disk_budget:
+            cost -= costs[start]
+            value -= values[start]
+            files -= work_files[start]
+            start += 1
+        if start > end or files == 0:
+            continue
+        if best is None or (value, files) > best[:2]:
+            best = (value, files, start, end)
+
+    # Candidates as (value, files, entries, reason), ranked like the window.
+    candidates = []
+    if best is not None:
+        _, _, start, end = best
+        # Trim settled components off both ends: they cost bytes and fix nothing.
+        while not needs_work[start]:
+            start += 1
+        while not needs_work[end]:
+            end -= 1
+        window = [m.entry for component in components[start : end + 1] for m in component]
+        # A lone file without debt has nothing to merge with.
+        if len(window) > 1 or _delete_debt_ratio(window[0]) >= threshold:
+            candidates.append(
+                (best[0], best[1], window, f"final-window {end - start + 1} component(s)")
+            )
+
+    for component, component_cost in zip(components, costs):
+        if component_cost <= disk_budget:
+            continue
+        partial = []
+        total = 0
+        for member in sorted(component, key=lambda m: m.size):
+            if total + member.size > disk_budget:
+                break
+            partial.append(member.entry)
+            total += member.size
+        if len(partial) >= 2:
+            candidates.append(
+                (total, len(partial), partial, f"final-partial {len(partial)} of {len(component)}")
+            )
+
+    if not candidates:
+        return None
+
+    _, _, chosen, reason = max(candidates, key=lambda candidate: candidate[:2])
+    total = sum(entry_size(entry) for entry in chosen)
+    return CompactionPlan(
+        strategy="combine-split",
+        mode="sort-aware",
+        files=chosen,
+        reason=reason,
+        sort_column=sort_column,
+        expected_outputs=max(1, -(-total // TARGET_SIZE_BYTES)),
+    )
+
+
+def select_final_compaction_plan(
+    entries: Sequence[CompactionFile],
+    sort_column: Optional[str],
+    key_ranges: Optional[Sequence[Tuple[CompactionFile, Any, Any]]],
+    disk_budget: int,
+    delete_debt_threshold: float = DELETE_DEBT_THRESHOLD,
+) -> SelectionResult:
+    """Choose the one pass ``OPTIMIZE TABLE x FINAL`` runs.
+
+    With a sort key: one contiguous key window (``_select_final_window``),
+    sorted and rolled at TARGET in a single commit, bounded by ``disk_budget``
+    in the uncompressed-estimate unit - an upper bound on the lz4 sort spill.
+
+    Without one: every unsettled file and every file with delete debt,
+    concatenated. A brute merge never sorts, so it spills nothing and the disk
+    budget does not apply.
+    """
+    if not entries:
+        return SelectionResult(SelectionOutcome.NO_SNAPSHOT, detail="manifest is empty")
+
+    if len(entries) == 1:
+        return select_compaction_plan(
+            entries, sort_column=sort_column, delete_debt_threshold=delete_debt_threshold
+        )
+
+    plan: Optional[CompactionPlan] = None
+    if sort_column is None:
+        selected = [
+            entry
+            for entry in entries
+            if entry_size(entry) < SMALL_FILE_BYTES
+            or _delete_debt_ratio(entry) >= delete_debt_threshold
+        ]
+        if len(selected) >= 2:
+            plan = CompactionPlan(
+                strategy="combine", mode="brute", files=selected, reason="final-brute"
+            )
+        elif selected and _delete_debt_ratio(selected[0]) >= delete_debt_threshold:
+            plan = _select_delete_debt(selected, None, threshold=delete_debt_threshold)
+    elif key_ranges:
+        try:
+            plan = _select_final_window(
+                key_ranges, sort_column, disk_budget, delete_debt_threshold
+            )
+        except TypeError:
+            return SelectionResult(
+                SelectionOutcome.NOTHING_TO_DO,
+                detail=f"values of sort key {sort_column} are not mutually comparable",
+            )
+
+    if plan is None:
+        detail = (
+            f"no file has a known extent on sort key {sort_column}"
+            if sort_column is not None and not key_ranges
+            else "no contiguous window within the disk budget needs work"
+        )
+        return SelectionResult(SelectionOutcome.NOTHING_TO_DO, detail=detail)
     return SelectionResult(SelectionOutcome.PLANNED, plan=plan, detail=plan.reason)

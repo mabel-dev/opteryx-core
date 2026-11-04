@@ -514,6 +514,172 @@ struct PatchColumn {
   bool reencode = false;
 };
 
+// Copy, byte for byte, the chunks (and bloom filters) of every column of `cols`
+// that is carried from the source - `src_index` set and not `reencode` - out of
+// row group `src_rg` of `src` onto the end of `out`, and describe them in
+// `meta` (re-pointed at their new offsets) and `rg_cols` (a LIST chunk's level
+// count). Columns that are synthesised or re-encoded are left untouched for the
+// caller. `meta` must already be `init_columns`'d. Shared by the column patcher
+// and the row-group appender, which differ only in which chunks they copy.
+inline void copy_row_group_chunks(const uint8_t *src, size_t src_len,
+                                  const RowGroupStats &src_rg,
+                                  const std::vector<PatchColumn> &cols,
+                                  std::vector<ColumnInput> &rg_cols, RGMeta &meta,
+                                  std::vector<uint8_t> &out) {
+  const size_t ncols = cols.size();
+  // Where each surviving column's bytes live in the SOURCE, filled in below
+  // and then copied in source order (see the sort that follows).
+  std::vector<int64_t> src_chunk_start(ncols, -1);
+  std::vector<int64_t> src_bloom_start(ncols, -1);
+
+  for (size_t j = 0; j < ncols; j++) {
+    const int s = cols[j].src_index;
+    if (s < 0 || cols[j].reencode)
+      continue;  // synthesised or re-encoded further down, not copied
+    if ((size_t)s >= src_rg.columns.size())
+      throw std::runtime_error("parquet patch: source column index out of range");
+
+    const ::ColumnStats &cs = src_rg.columns[(size_t)s];
+
+    // The footer we are about to write DECLARES a type over bytes we are not
+    // decoding. If the declaration and the bytes disagree the result is a file
+    // that lies about itself and reads back as garbage, so this is fatal.
+    const PType declared = cols[j].shape.is_array ? cols[j].shape.elem_type
+                                                  : cols[j].shape.type;
+    if (cs.physical_type != ptype_reader_name(declared))
+      throw std::runtime_error(
+          "parquet patch: column '" + cols[j].shape.name + "' is declared " +
+          ptype_reader_name(declared) + " but its pages hold " + cs.physical_type);
+
+    // A chunk starts at its dictionary page when it has one, otherwise at its
+    // first data page, and spans total_compressed_size bytes (every page of
+    // the chunk, dictionary included).
+    const int64_t chunk_start = cs.dictionary_page_offset >= 0
+                                    ? cs.dictionary_page_offset
+                                    : cs.data_page_offset;
+    const int64_t chunk_len = cs.total_compressed_size;
+    if (chunk_start < 0 || chunk_len < 0 ||
+        (uint64_t)chunk_start + (uint64_t)chunk_len > (uint64_t)src_len)
+      throw std::runtime_error("parquet patch: column chunk runs past the end of the file");
+    if (cs.data_page_offset < chunk_start)
+      throw std::runtime_error("parquet patch: data page precedes its own chunk");
+
+    // A null_count the source does not carry cannot be invented: claiming 0
+    // would tell a reader the chunk has no nulls, and an IS NULL predicate
+    // would then prune a row group that does have them - a wrong answer, not
+    // a lost optimisation.
+    //
+    // A LIST column is exempt because it has no statistics to carry either
+    // way: nested null semantics have no single leaf null_count, so neither
+    // the writer nor the footer emitted below records Statistics for one
+    // (write_column_chunk skips them when is_array). Demanding one here would
+    // reject every array column over a fact that is not missing, just absent
+    // by design.
+    if (!cols[j].shape.is_array && cs.null_count < 0)
+      throw std::runtime_error(
+          "parquet patch: column '" + cols[j].shape.name +
+          "' has no null_count in its source statistics; refusing to fabricate one");
+
+    // A LIST chunk's num_values counts LEVELS, not rows - one row expands to
+    // as many entries as it has elements. Carry the source's own count so the
+    // new footer describes the copied pages exactly; deriving it from
+    // row_count would under-declare every row holding more than one element
+    // and the reader would stop short.
+    if (rg_cols[j].is_array) {
+      if (cs.num_values < 0)
+        throw std::runtime_error(
+            "parquet patch: list column '" + cols[j].shape.name +
+            "' has no num_values in its source metadata; its levels cannot be "
+            "re-declared");
+      rg_cols[j].num_levels = (size_t)cs.num_values;
+    }
+
+    src_chunk_start[j] = chunk_start;
+    meta.sizes[j] = (size_t)chunk_len;
+    meta.uncompressed[j] = (size_t)(cs.total_uncompressed_size > 0
+                                        ? cs.total_uncompressed_size
+                                        : 0);
+    meta.codecs[j] = cs.codec >= 0 ? cs.codec : CODEC_UNCOMPRESSED;
+
+    ColumnStats st;
+    st.has_minmax = cs.has_min && cs.has_max;
+    if (st.has_minmax) {
+      st.min_bytes.assign(cs.min.begin(), cs.min.end());
+      st.max_bytes.assign(cs.max.begin(), cs.max.end());
+      // The source's bounds may be truncated; restating them as exact would
+      // make the patched file lie about itself.
+      st.min_exact = cs.min_exact;
+      st.max_exact = cs.max_exact;
+    }
+    st.null_count = cs.null_count;
+    st.distinct_count = cs.distinct_count;
+    // The pages are copied byte-for-byte, so the source's page census and
+    // payload size still describe them — carried verbatim.
+    st.unencoded_ba_bytes = cs.unencoded_byte_array_data_bytes;
+    for (const ::PageEncodingStat &e : cs.encoding_stats)
+      meta.encoding_stats[j].push_back(PageEncStat{e.page_type, e.encoding, e.count});
+    // The pages are copied byte-for-byte, so the source's `rugo.sum` is still
+    // the chunk's sum (cs.has_sum is only ever set in a file rugo wrote) -
+    // kept when the column, as re-declared, is one that carries a sum.
+    st.has_sum = cs.has_sum && chunk_has_sum(cols[j].shape);
+    st.sum = st.has_sum ? cs.sum : 0;
+    meta.stats[j] = st;
+
+    // The bloom filter is a region of its own, outside the chunk's pages.
+    // Dropping it instead would keep the file correct but silently cost every
+    // future reader the probe it was built for.
+    if (cs.bloom_offset >= 0 && cs.bloom_length > 0) {
+      if ((uint64_t)cs.bloom_offset + (uint64_t)cs.bloom_length > (uint64_t)src_len)
+        throw std::runtime_error("parquet patch: bloom filter runs past the end of the file");
+      src_bloom_start[j] = cs.bloom_offset;
+      meta.bloom_length[j] = (int32_t)cs.bloom_length;
+    }
+
+    meta.total_byte_size += meta.uncompressed[j];
+  }
+
+  // Copy every surviving extent IN SOURCE ORDER, not in column order.
+  //
+  // The two differ: a file may group all its bloom filters after all its
+  // column chunks, and emitting each column's bloom straight after its own
+  // chunk would reshuffle the region into a different - still valid, still
+  // correct - arrangement. Preserving source order means a patch that removes
+  // nothing (a pure RENAME) reproduces the page region byte-for-byte, which
+  // is the strongest available statement that no data was touched, and is
+  // asserted directly by the tests.
+  struct Extent { int64_t start; int64_t len; size_t col; bool is_bloom; };
+  std::vector<Extent> extents;
+  extents.reserve(ncols * 2);
+  for (size_t j = 0; j < ncols; j++) {
+    if (cols[j].src_index < 0 || cols[j].reencode)
+      continue;
+    extents.push_back({src_chunk_start[j], (int64_t)meta.sizes[j], j, false});
+    if (src_bloom_start[j] >= 0)
+      extents.push_back({src_bloom_start[j], (int64_t)meta.bloom_length[j], j, true});
+  }
+  std::sort(extents.begin(), extents.end(),
+            [](const Extent &a, const Extent &b) { return a.start < b.start; });
+
+  std::vector<int64_t> new_chunk_start(ncols, -1);
+  for (const Extent &e : extents) {
+    const int64_t new_off = (int64_t)out.size();
+    out.insert(out.end(), src + e.start, src + e.start + e.len);
+    if (e.is_bloom)
+      meta.bloom_offset[e.col] = new_off;
+    else
+      new_chunk_start[e.col] = new_off;
+  }
+
+  for (size_t j = 0; j < ncols; j++) {
+    if (cols[j].src_index < 0 || cols[j].reencode)
+      continue;
+    const ::ColumnStats &cs = src_rg.columns[(size_t)cols[j].src_index];
+    meta.data_offsets[j] =
+        new_chunk_start[j] + (cs.data_page_offset - src_chunk_start[j]);
+    meta.dict_offsets[j] = cs.dictionary_page_offset >= 0 ? new_chunk_start[j] : -1;
+  }
+}
+
 // Produce a new parquet file from `src`, laid out per `cols`.
 //
 // Each entry of `cols` either copies a source column's pages verbatim
@@ -567,157 +733,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
     meta.row_count = (size_t)src_rg.num_rows;
     meta.total_byte_size = 0;
 
-    // Where each surviving column's bytes live in the SOURCE, filled in below
-    // and then copied in source order (see the sort that follows).
-    std::vector<int64_t> src_chunk_start(ncols, -1);
-    std::vector<int64_t> src_bloom_start(ncols, -1);
-
-    for (size_t j = 0; j < ncols; j++) {
-      const int s = cols[j].src_index;
-      if (s < 0 || cols[j].reencode)
-        continue;  // synthesised or re-encoded further down, not copied
-      if ((size_t)s >= src_rg.columns.size())
-        throw std::runtime_error("parquet patch: source column index out of range");
-
-      const ::ColumnStats &cs = src_rg.columns[(size_t)s];
-
-      // The footer we are about to write DECLARES a type over bytes we are not
-      // decoding. If the declaration and the bytes disagree the result is a file
-      // that lies about itself and reads back as garbage, so this is fatal.
-      const PType declared = cols[j].shape.is_array ? cols[j].shape.elem_type
-                                                    : cols[j].shape.type;
-      if (cs.physical_type != ptype_reader_name(declared))
-        throw std::runtime_error(
-            "parquet patch: column '" + cols[j].shape.name + "' is declared " +
-            ptype_reader_name(declared) + " but its pages hold " + cs.physical_type);
-
-      // A chunk starts at its dictionary page when it has one, otherwise at its
-      // first data page, and spans total_compressed_size bytes (every page of
-      // the chunk, dictionary included).
-      const int64_t chunk_start = cs.dictionary_page_offset >= 0
-                                      ? cs.dictionary_page_offset
-                                      : cs.data_page_offset;
-      const int64_t chunk_len = cs.total_compressed_size;
-      if (chunk_start < 0 || chunk_len < 0 ||
-          (uint64_t)chunk_start + (uint64_t)chunk_len > (uint64_t)src_len)
-        throw std::runtime_error("parquet patch: column chunk runs past the end of the file");
-      if (cs.data_page_offset < chunk_start)
-        throw std::runtime_error("parquet patch: data page precedes its own chunk");
-
-      // A null_count the source does not carry cannot be invented: claiming 0
-      // would tell a reader the chunk has no nulls, and an IS NULL predicate
-      // would then prune a row group that does have them - a wrong answer, not
-      // a lost optimisation.
-      //
-      // A LIST column is exempt because it has no statistics to carry either
-      // way: nested null semantics have no single leaf null_count, so neither
-      // the writer nor the footer emitted below records Statistics for one
-      // (write_column_chunk skips them when is_array). Demanding one here would
-      // reject every array column over a fact that is not missing, just absent
-      // by design.
-      if (!cols[j].shape.is_array && cs.null_count < 0)
-        throw std::runtime_error(
-            "parquet patch: column '" + cols[j].shape.name +
-            "' has no null_count in its source statistics; refusing to fabricate one");
-
-      // A LIST chunk's num_values counts LEVELS, not rows - one row expands to
-      // as many entries as it has elements. Carry the source's own count so the
-      // new footer describes the copied pages exactly; deriving it from
-      // row_count would under-declare every row holding more than one element
-      // and the reader would stop short.
-      if (rg_cols[j].is_array) {
-        if (cs.num_values < 0)
-          throw std::runtime_error(
-              "parquet patch: list column '" + cols[j].shape.name +
-              "' has no num_values in its source metadata; its levels cannot be "
-              "re-declared");
-        rg_cols[j].num_levels = (size_t)cs.num_values;
-      }
-
-      src_chunk_start[j] = chunk_start;
-      meta.sizes[j] = (size_t)chunk_len;
-      meta.uncompressed[j] = (size_t)(cs.total_uncompressed_size > 0
-                                          ? cs.total_uncompressed_size
-                                          : 0);
-      meta.codecs[j] = cs.codec >= 0 ? cs.codec : CODEC_UNCOMPRESSED;
-
-      ColumnStats st;
-      st.has_minmax = cs.has_min && cs.has_max;
-      if (st.has_minmax) {
-        st.min_bytes.assign(cs.min.begin(), cs.min.end());
-        st.max_bytes.assign(cs.max.begin(), cs.max.end());
-        // The source's bounds may be truncated; restating them as exact would
-        // make the patched file lie about itself.
-        st.min_exact = cs.min_exact;
-        st.max_exact = cs.max_exact;
-      }
-      st.null_count = cs.null_count;
-      st.distinct_count = cs.distinct_count;
-      // The pages are copied byte-for-byte, so the source's page census and
-      // payload size still describe them — carried verbatim.
-      st.unencoded_ba_bytes = cs.unencoded_byte_array_data_bytes;
-      for (const ::PageEncodingStat &e : cs.encoding_stats)
-        meta.encoding_stats[j].push_back(PageEncStat{e.page_type, e.encoding, e.count});
-      // The pages are copied byte-for-byte, so the source's `rugo.sum` is still
-      // the chunk's sum (cs.has_sum is only ever set in a file rugo wrote) -
-      // kept when the column, as re-declared, is one that carries a sum.
-      st.has_sum = cs.has_sum && chunk_has_sum(cols[j].shape);
-      st.sum = st.has_sum ? cs.sum : 0;
-      meta.stats[j] = st;
-
-      // The bloom filter is a region of its own, outside the chunk's pages.
-      // Dropping it instead would keep the file correct but silently cost every
-      // future reader the probe it was built for.
-      if (cs.bloom_offset >= 0 && cs.bloom_length > 0) {
-        if ((uint64_t)cs.bloom_offset + (uint64_t)cs.bloom_length > (uint64_t)src_len)
-          throw std::runtime_error("parquet patch: bloom filter runs past the end of the file");
-        src_bloom_start[j] = cs.bloom_offset;
-        meta.bloom_length[j] = (int32_t)cs.bloom_length;
-      }
-
-      meta.total_byte_size += meta.uncompressed[j];
-    }
-
-    // Copy every surviving extent IN SOURCE ORDER, not in column order.
-    //
-    // The two differ: a file may group all its bloom filters after all its
-    // column chunks, and emitting each column's bloom straight after its own
-    // chunk would reshuffle the region into a different - still valid, still
-    // correct - arrangement. Preserving source order means a patch that removes
-    // nothing (a pure RENAME) reproduces the page region byte-for-byte, which
-    // is the strongest available statement that no data was touched, and is
-    // asserted directly by the tests.
-    struct Extent { int64_t start; int64_t len; size_t col; bool is_bloom; };
-    std::vector<Extent> extents;
-    extents.reserve(ncols * 2);
-    for (size_t j = 0; j < ncols; j++) {
-      if (cols[j].src_index < 0 || cols[j].reencode)
-        continue;
-      extents.push_back({src_chunk_start[j], (int64_t)meta.sizes[j], j, false});
-      if (src_bloom_start[j] >= 0)
-        extents.push_back({src_bloom_start[j], (int64_t)meta.bloom_length[j], j, true});
-    }
-    std::sort(extents.begin(), extents.end(),
-              [](const Extent &a, const Extent &b) { return a.start < b.start; });
-
-    std::vector<int64_t> new_chunk_start(ncols, -1);
-    for (const Extent &e : extents) {
-      const int64_t new_off = (int64_t)out.size();
-      out.insert(out.end(), src + e.start, src + e.start + e.len);
-      if (e.is_bloom)
-        meta.bloom_offset[e.col] = new_off;
-      else
-        new_chunk_start[e.col] = new_off;
-    }
-
-    for (size_t j = 0; j < ncols; j++) {
-      if (cols[j].src_index < 0 || cols[j].reencode)
-        continue;
-      const ::ColumnStats &cs = src_rg.columns[(size_t)cols[j].src_index];
-      meta.data_offsets[j] =
-          new_chunk_start[j] + (cs.data_page_offset - src_chunk_start[j]);
-      meta.dict_offsets[j] = cs.dictionary_page_offset >= 0 ? new_chunk_start[j] : -1;
-    }
+    copy_row_group_chunks(src, src_len, src_rg, cols, rg_cols, meta, out);
 
     // ---- build the chunks that are not copied, after the copied bytes ----
     //
@@ -985,6 +1001,117 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
     throw std::runtime_error("parquet patch: dropping every column would leave no relation");
 
   return PatchParquetColumns(src, src_len, cols, consts);
+}
+
+// ---------------------------------------------------------------------------
+// Row-group append
+//
+// Concatenates row groups of files that share one schema into a new file,
+// copying every chunk byte for byte - the same copy the patcher makes for a
+// column it keeps. The cost is the SIZE of the copied bytes; no value is
+// decoded. A cumulative file that grows by appending (a catalog manifest) is
+// therefore rewritten in time and memory proportional to its compressed size,
+// not to its decoded size, which for statistics-heavy rows is ~40x larger.
+//
+// The result carries no PageIndex (the chunks move) and no file-level NDV
+// (`rugo.ndv`), which describes one file's column and is not additive across
+// files - absent means "not stated", never zero.
+// ---------------------------------------------------------------------------
+
+// Whether two column shapes describe the same bytes the same way. Every field
+// write_schema/write_column_chunk reads to annotate a column is compared, so a
+// footer declaring the first can be laid over chunks written as the second.
+inline bool same_column_shape(const ColumnInput &a, const ColumnInput &b) {
+  return a.name == b.name && a.type == b.type && a.is_utf8 == b.is_utf8 &&
+         a.logical == b.logical && a.dec_width == b.dec_width &&
+         a.dec_scale == b.dec_scale && a.dec_precision == b.dec_precision &&
+         a.ts_unit == b.ts_unit && a.ts_utc == b.ts_utc &&
+         a.is_unsigned == b.is_unsigned && a.int_bit_width == b.int_bit_width &&
+         a.is_array == b.is_array && a.array_depth == b.array_depth &&
+         a.elem_type == b.elem_type && a.elem_is_utf8 == b.elem_is_utf8 &&
+         a.draken_logical_kind == b.draken_logical_kind;
+}
+
+// One source of an append: a complete parquet file and which of its row groups
+// to carry, in the order given.
+struct AppendSegment {
+  const uint8_t *src = nullptr;
+  size_t len = 0;
+  std::vector<int64_t> row_groups;
+};
+
+inline std::vector<uint8_t> AppendParquetRowGroups(const std::vector<AppendSegment> &segments) {
+  if (segments.empty())
+    throw std::runtime_error("parquet append: there is nothing to append");
+
+  MetadataParseOptions opts;
+  opts.include_statistics = true;
+  std::vector<FileStats> files;
+  files.reserve(segments.size());
+  for (const AppendSegment &seg : segments) {
+    if (seg.src == nullptr || seg.len < 8)
+      throw std::runtime_error("parquet append: a source is too small to be a parquet file");
+    files.push_back(ReadParquetMetadataFromBuffer(seg.src, seg.len, opts));
+  }
+
+  // The first file's schema is the result's; every other file must declare the
+  // same columns, in the same order, the same way - the footer written below
+  // describes all of their chunks with one schema.
+  std::vector<ColumnInput> shapes;
+  std::vector<PatchColumn> cols;
+  for (size_t i = 0; i < files[0].schema.size(); i++) {
+    PatchColumn pc;
+    pc.shape = shape_from_schema_element(files[0].schema[i]);
+    pc.src_index = (int)i;
+    shapes.push_back(pc.shape);
+    cols.push_back(std::move(pc));
+  }
+  if (cols.empty())
+    throw std::runtime_error("parquet append: the first source has no columns");
+  for (size_t f = 1; f < files.size(); f++) {
+    if (files[f].schema.size() != shapes.size())
+      throw std::runtime_error("parquet append: source " + std::to_string(f) + " has " +
+                               std::to_string(files[f].schema.size()) + " columns, the first has " +
+                               std::to_string(shapes.size()));
+    for (size_t i = 0; i < shapes.size(); i++) {
+      const ColumnInput other = shape_from_schema_element(files[f].schema[i]);
+      if (!same_column_shape(shapes[i], other))
+        throw std::runtime_error("parquet append: column " + std::to_string(i) + " ('" +
+                                 shapes[i].name + "') of source " + std::to_string(f) +
+                                 " is not declared the way the first source declares it");
+    }
+  }
+
+  std::vector<uint8_t> out;
+  size_t total_bytes = 0;
+  for (const AppendSegment &seg : segments) total_bytes += seg.len;
+  out.reserve(total_bytes);
+  const char *MAGIC = "PAR1";
+  out.insert(out.end(), MAGIC, MAGIC + 4);
+
+  std::vector<RGMeta> rg_metas;
+  std::vector<std::vector<ColumnInput>> all_rg_cols;
+  size_t total_rows = 0;
+  for (size_t f = 0; f < segments.size(); f++) {
+    for (int64_t rg : segments[f].row_groups) {
+      if (rg < 0 || (size_t)rg >= files[f].row_groups.size())
+        throw std::runtime_error("parquet append: source " + std::to_string(f) +
+                                 " has no row group " + std::to_string(rg));
+      const RowGroupStats &src_rg = files[f].row_groups[(size_t)rg];
+      std::vector<ColumnInput> rg_cols = shapes;
+      RGMeta meta;
+      meta.init_columns(cols.size(), CODEC_UNCOMPRESSED);
+      meta.row_count = (size_t)src_rg.num_rows;
+      meta.total_byte_size = 0;
+      copy_row_group_chunks(segments[f].src, segments[f].len, src_rg, cols, rg_cols, meta, out);
+      total_rows += (size_t)src_rg.num_rows;
+      rg_metas.push_back(std::move(meta));
+      all_rg_cols.push_back(std::move(rg_cols));
+    }
+  }
+
+  write_parquet_footer(out, shapes, total_rows, rg_metas, all_rg_cols);
+  return out;
 }
 
 } // namespace rugo_pq_write

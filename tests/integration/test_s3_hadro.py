@@ -336,6 +336,7 @@ def _catalog_table(s3, s3_root, tmp_path_factory):
     class _ManifestWriterCatalog:
         io = _LocalDiskIO()
         write_parquet_manifest = OpteryxCatalog.write_parquet_manifest
+        write_manifest_bytes = OpteryxCatalog.write_manifest_bytes
 
     snapshot_id = 1000
     manifest_path = _ManifestWriterCatalog().write_parquet_manifest(snapshot_id, entries, location)

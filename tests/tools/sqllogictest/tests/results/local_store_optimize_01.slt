@@ -42,6 +42,10 @@ SELECT a, b FROM ws.opt_small_files ORDER BY a
 statement ok
 OPTIMIZE TABLE ws.opt_small_files
 
+# FINAL is the aggressive pass; on files already compacted it is a no-op too
+statement ok
+OPTIMIZE TABLE ws.opt_small_files FINAL
+
 statement ok
 INSERT INTO ws.opt_small_files VALUES (5, 'e')
 
@@ -98,3 +102,24 @@ OPTIMIZE TABLE ws.opt_does_not_exist
 
 statement error
 OPTIMIZE ws.opt_small_files
+
+# OPTIMIZE ... FINAL merges every small file in one pass
+statement ok
+CREATE TABLE ws.opt_final (a BIGINT)
+
+statement ok
+INSERT INTO ws.opt_final VALUES (1)
+
+statement ok
+INSERT INTO ws.opt_final VALUES (2)
+
+statement ok
+INSERT INTO ws.opt_final VALUES (3)
+
+statement ok
+OPTIMIZE TABLE ws.opt_final FINAL
+
+query II
+SELECT count(*), sum(a) FROM ws.opt_final
+----
+3 6

@@ -261,6 +261,33 @@ which buys convergence speed, linearly. Today more memory means a larger selecti
 and quadratically more work per pass, which is why the answer to "should we add
 memory" was "not yet".
 
+### 4.1 `OPTIMIZE TABLE x FINAL` (ruled 2026-11-04)
+
+The regular pass stays as above — it is right for the scheduled 90%. `FINAL`
+(ClickHouse's keyword, already parsed by the grammar) is the occasional heavy pass,
+weekly or after a large change: it rewrites as much of the dataset as one commit can.
+
+- **Bound: `COMPACTION_DISK_BYTES`** (config, default 25 GiB), in the uncompressed
+  estimate. Sort spill (§4 above, relaxed by `SORT_RUN_BYTES` runs) lands on local
+  disk as lz4, which the estimate bounds from above, so the pass never overfills the
+  disk. Memory is bounded by the sort's run size, not by this.
+- **Selection: one contiguous key window.** Files are grouped into overlap components
+  (rule B's overlap relation), and the pass takes the contiguous run of components
+  within the budget that rewrites the most bytes needing work (overlapping, under
+  `MIN_SIZE_BYTES`, or delete debt), trimmed of settled files at either end. A
+  settled file *inside* the window is rewritten as a bridge. Contiguity is what lets
+  one global sort, rolled at TARGET, produce outputs disjoint from every file left
+  alone — the writer needs no group boundaries.
+- A component larger than the budget fits no window. It is offered instead as its
+  smallest files up to the budget, ranked against the window the same way: sorted,
+  300 overlapping files become ~6, even though those outputs still overlap the files
+  left behind. Smallest-first does not starve (the reason rule B seeds at random):
+  merged files stop being smallest, so the next pass moves on.
+- No sort key: every unsettled and every indebted file, concatenated (brute — no
+  spill, so the disk budget does not apply).
+- Single commit. Time cap: OPEN — a planning-time cap needs a bytes-to-time model
+  (proposed: planned bytes ÷ throughput measured on the production worker), not ruled.
+
 ---
 
 ## 5. EXPLAIN as preflight

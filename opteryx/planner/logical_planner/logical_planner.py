@@ -6493,15 +6493,17 @@ def plan_optimize_table(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for OPTIMIZE statement.
 
-    OPTIMIZE TABLE table_name
+    OPTIMIZE TABLE table_name [FINAL]
 
-    Opteryx only supports this exact form: the TABLE keyword is required
-    (unlike Databricks, which allows `OPTIMIZE table_name`), and strategy is
+    Opteryx only supports this form: the TABLE keyword is required (unlike
+    Databricks, which allows `OPTIMIZE table_name`), and strategy is
     auto-detected from the table's stored CLUSTER BY / sort order, same as
-    the scheduled compaction job. ClickHouse's ON CLUSTER/PARTITION/FINAL/
-    DEDUPLICATE and Databricks's WHERE/ZORDER BY are all parsed by the
-    grammar but have no equivalent here yet, so they are rejected rather
-    than silently ignored.
+    the scheduled compaction job. FINAL (ClickHouse's spelling for "merge
+    harder") asks for the aggressive pass - see
+    `opteryx.planner.compaction.selection.select_final_compaction_plan`.
+    ClickHouse's ON CLUSTER/PARTITION/DEDUPLICATE and Databricks's
+    WHERE/ZORDER BY are all parsed by the grammar but have no equivalent here
+    yet, so they are rejected rather than silently ignored.
     """
     root = "OptimizeTable"
     optimize_stmt = statement[root]
@@ -6514,14 +6516,13 @@ def plan_optimize_table(statement, *, plan_context, **kwargs):
     for clause, label in (
         ("on_cluster", "ON CLUSTER"),
         ("partition", "PARTITION"),
-        ("include_final", "FINAL"),
         ("deduplicate", "DEDUPLICATE"),
         ("predicate", "WHERE"),
         ("zorder", "ZORDER BY"),
     ):
         if optimize_stmt.get(clause):
             raise UnsupportedSyntaxError(
-                f"**OPTIMIZE** does not support {label}. Only `OPTIMIZE TABLE <table>` is supported."
+                f"**OPTIMIZE** does not support {label}. Only `OPTIMIZE TABLE <table> [FINAL]` is supported."
             )
 
     relation_name = extract_variable(optimize_stmt["name"])
@@ -6624,6 +6625,7 @@ def plan_optimize_table(statement, *, plan_context, **kwargs):
     sink = CompactionCommitStep()
     sink.relation_name = relation_name
     sink.row_origins = row_origins
+    sink.final = bool(optimize_stmt.get("include_final"))
     return _attach_sink(plan, sink)
 
 

@@ -122,6 +122,7 @@ def dataset(tmp_path_factory):
     class _ManifestWriterCatalog:
         io = disk_io
         write_parquet_manifest = OpteryxCatalog.write_parquet_manifest
+        write_manifest_bytes = OpteryxCatalog.write_manifest_bytes
 
         def save_snapshot(self, identifier, snapshot):
             pass

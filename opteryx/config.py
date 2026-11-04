@@ -226,6 +226,11 @@ starting the next (docs/SORT_SPILL_DESIGN.md; ruled 2026-11-01). Counted as the 
 receives its input, so ~1 GiB of dictionary-shaped strings is several GiB once sorted.
 A sort that reaches it with spill unconfigured (KVSTORE_LOCATION) fails loud."""
 
+COMPACTION_DISK_BYTES: int = int(get("COMPACTION_DISK_BYTES", 25 * 1024 * 1024 * 1024))
+"""How much an `OPTIMIZE TABLE x FINAL` pass may sort, in the manifest's uncompressed
+estimate - an upper bound on the lz4 sort spill that pass writes to local disk
+(ruled 2026-11-04, sized for the 4 vCPU / 16 GB / 25 GB-disk worker)."""
+
 KVSTORE_KEY_PREFIX: str = str(get("KVSTORE_KEY_PREFIX", "")).strip()
 """Optional global key prefix applied to configured KV stores."""
 

@@ -630,7 +630,7 @@ def read_rowgroup_stats(data):
         data: bytes, bytearray, or memoryview holding the full parquet file.
 
     Returns a list with one entry per row group:
-        {"num_rows": int,
+        {"num_rows": int, "total_byte_size": int,
          "file_offset": int|None, "total_compressed_size": int|None,
          "columns": [
              {"name": str, "physical_type": str, "logical_type": str,
@@ -700,6 +700,8 @@ def read_rowgroup_stats(data):
             })
         row_groups.append({
             "num_rows": fs.row_groups[rg_i].num_rows,
+            # RowGroup.total_byte_size: the row group's UNCOMPRESSED bytes.
+            "total_byte_size": fs.row_groups[rg_i].total_byte_size,
             # RowGroup.file_offset / total_compressed_size as the footer states
             # them (None when the writer omitted the optional fields). rugo
             # writes the row group's FIRST byte and the SUM of its chunks; under

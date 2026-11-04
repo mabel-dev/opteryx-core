@@ -56,10 +56,12 @@ through their `should_i_run` gate (D-10).
 
 from typing import Optional
 
+from opteryx import config
 from opteryx.planner.compaction import CompactionPlan
 from opteryx.planner.compaction import SelectionOutcome
 from opteryx.planner.compaction import compaction_files
 from opteryx.planner.compaction import select_compaction_plan
+from opteryx.planner.compaction import select_final_compaction_plan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -205,9 +207,23 @@ class CompactionPlanningStrategy(OptimizationStrategy):
         from its inputs', so its inputs must all be indexed - by the same indexes - or all
         not. A relation with no index is one group. Each group is selected on its own and
         the pass takes the group whose plan rewrites the most bytes; the others wait for a
-        later pass."""
+        later pass.
+
+        `OPTIMIZE TABLE x FINAL` (`sink.final`) selects one contiguous key window under
+        COMPACTION_DISK_BYTES instead of one regular pass."""
+        if sink.final:
+
+            def select(members, ranges):
+                return select_final_compaction_plan(
+                    members, sort_column, ranges, disk_budget=config.COMPACTION_DISK_BYTES
+                )
+        else:
+
+            def select(members, ranges):
+                return select_compaction_plan(members, sort_column=sort_column, key_ranges=ranges)
+
         if not sink.row_origins:
-            return select_compaction_plan(files, sort_column=sort_column, key_ranges=key_ranges)
+            return select(files, key_ranges)
         coverage = sink.connector.vector_index_coverage(
             sink.relation_name, scan.connector.snapshot_id
         )
@@ -221,9 +237,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             ranges = (
                 [r for r in key_ranges if id(r[0]) in in_group] if key_ranges is not None else None
             )
-            results.append(
-                select_compaction_plan(members, sort_column=sort_column, key_ranges=ranges)
-            )
+            results.append(select(members, ranges))
         planned = [r for r in results if r.outcome is SelectionOutcome.PLANNED]
         if not planned:
             return results[0]

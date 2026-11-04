@@ -121,3 +121,12 @@ cdef extern from "_parquet_patch.hpp" namespace "rugo_pq_write":
         const vector[pair[string, string]]& rename,
         const vector[string]& add,
         const vector[pair[string, string]]& retype) except + nogil
+
+    # Concatenate row groups of same-schema files, chunks copied byte-for-byte.
+    cdef cppclass AppendSegment:
+        const uint8_t* src
+        size_t len
+        vector[int64_t] row_groups
+
+    vector[uint8_t] AppendParquetRowGroups(
+        const vector[AppendSegment]& segments) except + nogil

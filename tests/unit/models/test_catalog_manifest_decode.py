@@ -60,6 +60,7 @@ class _CaptureIO:
 
 class _ManifestWriter:
     write_parquet_manifest = OpteryxCatalog.write_parquet_manifest
+    write_manifest_bytes = OpteryxCatalog.write_manifest_bytes
 
     def __init__(self):
         self.io = _CaptureIO()

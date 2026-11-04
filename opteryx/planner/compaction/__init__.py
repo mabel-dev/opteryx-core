@@ -40,6 +40,7 @@ from .selection import SelectionResult
 from .selection import compaction_files
 from .selection import entry_size
 from .selection import select_compaction_plan
+from .selection import select_final_compaction_plan
 
 __all__ = [
     "CompactionFile",
@@ -50,6 +51,7 @@ __all__ = [
     "SelectionResult",
     "entry_size",
     "select_compaction_plan",
+    "select_final_compaction_plan",
     "DELETE_DEBT_THRESHOLD",
     "MAX_FILE_SIZE_BYTES",
     "MIN_FILE_SIZE_BYTES",

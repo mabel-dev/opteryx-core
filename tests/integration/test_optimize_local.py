@@ -251,3 +251,22 @@ def test_optimize_never_fills_the_chunk_cache(optimize_env):
 def target_snapshot_is_compaction(env):
     target, _ = env
     return target.snapshot(None).operation_type == "compact"
+
+
+def test_optimize_final_sorts_a_clustered_dataset_in_one_pass(optimize_env):
+    """FINAL on a clustered dataset takes the whole key window and sorts it: three
+    seed files out, one file in, its row groups claiming the sort key."""
+    target, _ = optimize_env
+    target.metadata.sort_orders = ["k"]
+    total = SEED_FILES * ROWS_PER_SEED_FILE
+
+    list(opteryx.session(user="tester").execute_to_morsels(f"OPTIMIZE TABLE {TARGET} FINAL"))
+
+    snap = target.snapshot(None)
+    assert snap.operation_type == "compact"
+    assert snap.summary["deleted-data-files"] == SEED_FILES
+    assert snap.summary["added-data-files"] == 1
+    (out,) = _current_entries(target)
+    assert out["record_count"] == total
+    assert list(out["min_values"]) == [0] and list(out["max_values"]) == [total - 1]
+    assert _scalar(f"SELECT SUM(k) FROM {TARGET}") == total * (total - 1) // 2

@@ -5451,7 +5451,9 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts,
 // type was never resolved) is simply skipped from the child concat. The concrete
 // element type is therefore adopted from the parts that do carry data, and the
 // skipped part's rows survive as null/empty in the offsets+validity (offsets[i]
-// == offsets[i+1]). If no part carries any element the result has no child.
+// == offsets[i+1]). If no part carries any element the result keeps an EMPTY
+// child taken from the parts' children; only when no part has a child at all
+// does the result have none.
 static VectorOwner concat_array(const std::vector<const VectorOwner*>& parts) {
     uint64_t total = 0u;
     bool any_null = false;
@@ -5520,6 +5522,21 @@ static VectorOwner concat_array(const std::vector<const VectorOwner*>& parts) {
         for (VectorOwner& g : gathered)
             child_parts.push_back(&g);
         child = std::make_unique<VectorOwner>(concat_owners(child_parts));
+    } else {
+        // No part contributes an element (every row null or empty), but the
+        // result must still carry an EMPTY child of the element type: a nested
+        // ARRAY whose child is dropped here loses its grandchild type and cannot
+        // be written. Adopt the type from the first resolved (non-NULL) child.
+        const VectorOwner* typed = nullptr;
+        for (const VectorOwner* p : parts) {
+            if (!p->child_owner) continue;
+            if (!typed || (typed->child_owner->vec.type == DRAKEN_NULL &&
+                           p->child_owner->vec.type != DRAKEN_NULL))
+                typed = p;
+        }
+        if (typed)
+            child = std::make_unique<VectorOwner>(
+                take_child(*typed->child_owner, std::vector<int32_t>()));
     }
 
     DrakenVector vr = draken_vector_from_dense(new_offsets, n, DRAKEN_ARRAY, validity);

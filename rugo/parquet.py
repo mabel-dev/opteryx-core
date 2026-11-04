@@ -54,6 +54,7 @@ __all__ = [
     "write_parquet_fast",
     "write_parquet_with_bounds",
     "patch_columns",
+    "append_row_groups",
     "decode_value",
     "_make_scan_row_group",
 ]
@@ -1230,3 +1231,105 @@ def patch_columns(source: bytes, drop=None, rename=None, add=None, retype=None) 
     return _native.patch_columns(
         source, drop=drop, rename=rename, add=add, retype=retype
     )
+
+
+#: A row group whose uncompressed size is under this is SMALL - a fragment.
+APPEND_TARGET_ROW_GROUP_BYTES = 64 * 1024 * 1024
+#: The fragmentation threshold: more small row groups than this and the append
+#: coalesces them.
+APPEND_MAX_SMALL_ROW_GROUPS = 16
+
+
+def append_row_groups(
+    base: bytes,
+    addition: bytes,
+    *,
+    target_row_group_bytes: int = APPEND_TARGET_ROW_GROUP_BYTES,
+    max_small_row_groups: int = APPEND_MAX_SMALL_ROW_GROUPS,
+    **write_options,
+) -> bytes:
+    """`base` with `addition`'s rows after it, without decoding `base`.
+
+    Both files must declare the same schema. Every row group of both is copied
+    byte for byte (see the native `append_row_groups`), so the cost tracks the
+    files' compressed size, not their decoded size.
+
+    Each append adds `addition`'s row groups, so a file grown this way fragments.
+    A row group under `target_row_group_bytes` (uncompressed) is a fragment; when
+    the result would hold more than `max_small_row_groups` of them, each run of
+    consecutive fragments is coalesced - decoded and re-written by
+    `write_parquet(**write_options)` in groups of at least
+    `target_row_group_bytes` - and every other row group is still copied.
+    Coalescing decodes only the fragments, one output group at a time, so its
+    memory is bounded by about one target row group, never by the whole file.
+    Row order is preserved.
+
+    `write_options` must be the options the files were written with, so a
+    coalesced row group is written the way its neighbours were.
+
+    Returns:
+        The appended parquet file.
+
+    Raises:
+        RuntimeError: the files' schemas differ.
+    """
+    sources = (base, addition)
+    groups = [
+        (s, i, rg["total_byte_size"])
+        for s, data in enumerate(sources)
+        for i, rg in enumerate(_native.read_rowgroup_stats(data))
+    ]
+    small = sum(1 for _, _, size in groups if size < target_row_group_bytes)
+    if small <= max_small_row_groups:
+        return _native.append_row_groups(
+            [(data, [i for s, i, _ in groups if s == n]) for n, data in enumerate(sources)]
+        )
+
+    # Contiguous segments of the result, in order: (source bytes, [row groups]).
+    segments = []
+
+    def emit(data, row_groups):
+        if segments and segments[-1][0] is data:
+            segments[-1][1].extend(row_groups)
+        else:
+            segments.append((data, list(row_groups)))
+
+    def coalesce(batch):
+        if len(batch) == 1:
+            s, i, _ = batch[0]
+            emit(sources[s], [i])
+            return
+        from draken.morsels import Morsel
+
+        morsels = []
+        for n, data in enumerate(sources):
+            mask = [0] * len(_native.read_rowgroup_stats(data))
+            for s, i, _ in batch:
+                if s == n:
+                    mask[i] = 1
+            if any(mask):
+                # As read_parquet yields them, so they re-write as they were written.
+                unit_map, date_set, _ = _schema_column_maps(data)
+                morsels.extend(
+                    _coerce_temporal_columns(m, unit_map, date_set)
+                    for m in _native.stream_parquet(data, row_group_mask=mask)
+                )
+        merged = write_parquet(Morsel.combine(morsels), **write_options)
+        emit(merged, range(len(_native.read_rowgroup_stats(merged))))
+
+    batch, batch_bytes = [], 0
+    for s, i, size in groups:
+        if size >= target_row_group_bytes:
+            if batch:
+                coalesce(batch)
+                batch, batch_bytes = [], 0
+            emit(sources[s], [i])
+            continue
+        batch.append((s, i, size))
+        batch_bytes += size
+        if batch_bytes >= target_row_group_bytes:
+            coalesce(batch)
+            batch, batch_bytes = [], 0
+    if batch:
+        coalesce(batch)
+    return _native.append_row_groups(segments)

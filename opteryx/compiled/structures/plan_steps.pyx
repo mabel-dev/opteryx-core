@@ -2823,9 +2823,13 @@ cdef class CompactionCommitStep(PlanStep):
 
     `row_origins` is set when OPTIMIZE asked its scan for row identity (the relation has a
     vector index): every row reaching the sink carries its input file and ordinal, which
-    the sink records natively and strips, to carry the inputs' vectors (§5.6)."""
+    the sink records natively and strips, to carry the inputs' vectors (§5.6).
+
+    `final` is set by `OPTIMIZE TABLE x FINAL`: selection rewrites one contiguous key
+    window under COMPACTION_DISK_BYTES rather than a single regular pass."""
 
     cdef object _baseline_snapshot_id
+    cdef object _final
     cdef object _row_origins
     cdef object _write_coalesce_rows
     cdef object _connector
@@ -2834,7 +2838,7 @@ cdef class CompactionCommitStep(PlanStep):
     cdef object _sorted_by
     cdef object _source_tail_id
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None, row_origins=None, write_coalesce_rows=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None, row_origins=None, write_coalesce_rows=None, final=None):
         self.node_type = _step_types().CompactionCommit
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.baseline_snapshot_id = baseline_snapshot_id
@@ -2845,6 +2849,7 @@ cdef class CompactionCommitStep(PlanStep):
         self.source_tail_id = source_tail_id
         self.row_origins = row_origins
         self.write_coalesce_rows = write_coalesce_rows
+        self.final = final
 
     @property
     def row_origins(self):
@@ -2855,6 +2860,16 @@ cdef class CompactionCommitStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CompactionCommitStep.row_origins", value)
         self._row_origins = value
+
+    @property
+    def final(self):
+        return self._final
+
+    @final.setter
+    def final(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("CompactionCommitStep.final", value)
+        self._final = value
 
     @property
     def baseline_snapshot_id(self):
@@ -2941,6 +2956,7 @@ cdef class CompactionCommitStep(PlanStep):
         out["source_tail_id"] = self._source_tail_id
         out["row_origins"] = self._row_origins
         out["write_coalesce_rows"] = self._write_coalesce_rows
+        out["final"] = self._final
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -2961,6 +2977,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._source_tail_id = _copy_field(self._source_tail_id, memo)
         new._row_origins = _copy_field(self._row_origins, memo)
         new._write_coalesce_rows = _copy_field(self._write_coalesce_rows, memo)
+        new._final = _copy_field(self._final, memo)
         new._sync_row()
         return new
 
@@ -2976,6 +2993,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._source_tail_id = self._source_tail_id
         new._row_origins = self._row_origins
         new._write_coalesce_rows = self._write_coalesce_rows
+        new._final = self._final
         new._row[0] = self._row[0]
         return new
 
@@ -11285,6 +11303,7 @@ cpdef frozenset steps_with(str field):
             "explicit_columns": frozenset({T.Insert}),
             "extended": frozenset({T.ShowColumns}),
             "file_paths": frozenset({T.Merge}),
+            "final": frozenset({T.CompactionCommit}),
             "filter_conditions": frozenset({T.Unnest}),
             "for_manifest_only": frozenset({T.Scan}),
             "for_snapshots_only": frozenset({T.Scan}),
