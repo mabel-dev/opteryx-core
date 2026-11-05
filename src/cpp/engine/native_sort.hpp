@@ -390,7 +390,8 @@ struct TopNSink : Sink, EmitSubset {
     // ORDER BY key here would leave nothing to sort by.
     //
     // Width 1: this runs ON an execution worker, which must not fan out threads of its
-    // own. It is also always a partial sort (rows > n_limit), which never threads.
+    // own. Width 1 keeps both sort_perm paths (partial, or full for a large n_limit)
+    // on this thread.
     void compact(TopNLocal& l, ErrCtx& err) {
         MorselBuffer tmp;
         sort_and_emit(l.morsels, spec, n_limit, n_limit == 0 ? 1 : n_limit, 1u, &tmp, err);

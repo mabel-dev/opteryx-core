@@ -2690,6 +2690,15 @@ cdef tuple _sign_paths(object filesystem, object paths):
     return orig_to_cpp, cpp_to_orig
 
 
+cdef class ScanFooters:
+    """One scan's parsed footers, keyed by ORIGINAL path: the gate fills it and
+    `open_native_scan_plan` reads it. Both walk every file after acquiring every
+    footer, so a table whose footers outgrow `_PARSED_FOOTER_CACHE` had evicted
+    each footer before its walk reached it — and each walk then re-fetched every
+    file serially (measured 2026-11-05: 429 footers, 2 x 32 s on the fleet). The
+    shared references here pin them for the scan's planning instead."""
+
+
 cdef tuple _acquire_remote_footers(
     object paths,
     dict orig_to_cpp,
@@ -2763,6 +2772,10 @@ cdef tuple _acquire_remote_footers(
         if not _is_remote_url(fetch_url):
             continue
         remote_files_seen += 1
+        # Already held by the caller's map (the gate filled it for this plan).
+        if footer_map != NULL and footer_map[0].count(path.encode('utf-8')) != 0:
+            process_hits += 1
+            continue
         # Parsed-struct cache hit → nothing to parse. Probing the cache (not
         # footer_map[key]) keeps a MISS from inserting an empty reference into the
         # map. On a hit the map takes a SHARED reference — no copy — which keeps the
@@ -3723,8 +3736,13 @@ cpdef NativeScanPlan open_native_scan_plan(
     http_tuning=None,
     coalesce_tuning=None,
     coverage=None,
+    ScanFooters footers=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
+
+    ``footers``: the scan's footers as the gate (`native_scan_rejection`) acquired
+    them; read before any cache, and filled with any this call acquires. None: a
+    fresh holder, so this call's own walk still never relies on the evicting cache.
 
     ``coverage`` (P3/P4, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7):
     ``(terms, aggs, keys)`` asking which kept row groups the aggregate above this
@@ -3765,6 +3783,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     that call this directly, or any caller outside the main query-execution path."""
     cdef NativeScanPlan plan = NativeScanPlan()
     plan.footer_map = new ParquetFooterMap()
+    if footers is None:
+        footers = ScanFooters()
     plan.column_names = [c.encode('utf-8') for c in column_names]
     # Per-column declared string DrakenType (0 = non-string). Kept parallel to
     # column_names so the native Source tags each string column and routes DK_POOL
@@ -3851,14 +3871,14 @@ cpdef NativeScanPlan open_native_scan_plan(
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
     plan.fetch_paths = orig_to_cpp
 
-    # Batched, shared-tier remote footer acquisition. footer_map is NULL here because
-    # this plan keys it by FETCH url while the helper keys by original path; the
-    # postcondition we use is the parsed cache, which the loop below reads by original
-    # path. Without this pre-pass the loop would fall into the serial, GIL-held
-    # `_read_footer_payload` once per remote file.
+    # Batched, shared-tier remote footer acquisition into `footers` (ORIGINAL-path
+    # keyed; plan.footer_map is FETCH-url keyed), which the loop below reads first.
+    # The parsed cache cannot be the hand-off: it evicts. Without this pre-pass the
+    # loop would fall into the serial, GIL-held `_read_footer_payload` once per
+    # remote file.
     _footer_t0 = time.perf_counter_ns()
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            NULL, None, _native_auth_header(filesystem))
+                            &footers.footers, None, _native_auth_header(filesystem))
     plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers the
@@ -3877,6 +3897,9 @@ cpdef NativeScanPlan open_native_scan_plan(
             continue
         path_bytes_cpp = fetch_url.encode('utf-8')
         if plan.footer_map[0].count(path_bytes_cpp) != 0:
+            continue
+        if footers.footers.count(path.encode('utf-8')) != 0:
+            plan.footer_map[0][path_bytes_cpp] = footers.footers[path.encode('utf-8')]
             continue
         footer = _PARSED_FOOTER_CACHE.get(path)
         if footer.get() != NULL:
@@ -3951,12 +3974,15 @@ cpdef NativeScanPlan open_native_scan_plan(
         path_bytes_cpp = fetch_url.encode('utf-8')
         if plan.footer_map[0].count(path_bytes_cpp) == 0:
             # Cache key is the ORIGINAL path (stable); map key is the FETCH url.
-            footer = _PARSED_FOOTER_CACHE.get(path)
+            if footers.footers.count(path.encode('utf-8')) != 0:
+                footer = footers.footers[path.encode('utf-8')]
+            else:
+                footer = _PARSED_FOOTER_CACHE.get(path)
             if footer.get() == NULL:
                 # Not "compile" — a real network round-trip (cold cache), timed on its
                 # own so it cannot hide inside whatever span calls this function. Only
                 # LOCAL files reach here: `_acquire_remote_footers` above has already
-                # parsed every remote footer into the cache.
+                # put every remote footer in `footers`.
                 _footer_t0 = time.perf_counter_ns()
                 envelope, _ = _read_footer_payload(
                     fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None,
@@ -4248,7 +4274,7 @@ cdef vector[DeclaredNode] _declared_nodes(list flat):
 
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=None,
                                 filesystem=None, footer_bytes_cache=None, dict absent=None,
-                                declared_shapes=None):
+                                declared_shapes=None, ScanFooters footers=None):
     """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
 
     Returns None when the scan is admitted, otherwise a one-line reason naming what
@@ -4306,10 +4332,11 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     pipeline - its rewrite of gs:// to storage.googleapis.com is native). A remote path
     with neither is rejected: its fetch would carry no credential and 401 at execution
     time. This gate is the
-    FIRST thing to touch footers — it warms `_PARSED_FOOTER_CACHE` (keyed by original
-    path), which is why `open_native_scan_plan` afterwards does no network — so it
+    FIRST thing to touch footers — it fills `footers` (keyed by original path), which
+    the caller hands to `open_native_scan_plan` so that does no network — so it
     acquires remote footers through the batched, shared-tier `_acquire_remote_footers`
-    rather than the serial per-file path.
+    rather than the serial per-file path. None: a fresh holder, which the gate's own
+    walk still needs (the parsed cache evicts on a table whose footers outgrow it).
     """
     cdef ParquetFooterRef footer
     cdef const FileStats* fsp = NULL   # held alive by `footer` for the iteration
@@ -4420,12 +4447,14 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             return (f"remote file {path} can be neither signed nor bearer-authenticated by "
                     f"filesystem {type(filesystem).__name__}")
 
-    # Batched, shared-tier acquisition for every remote footer, so the per-path loop
-    # below only ever hits the parsed cache for them. Skipping this would make this
-    # gate — the first toucher of remote footers — pay one serial, GIL-held
+    # Batched, shared-tier acquisition for every remote footer into `footers`, so the
+    # per-path loop below only ever reads them from there. Skipping this would make
+    # this gate — the first toucher of remote footers — pay one serial, GIL-held
     # round-trip per file.
+    if footers is None:
+        footers = ScanFooters()
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            NULL, None, auth_header)
+                            &footers.footers, None, auth_header)
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers.
     # This gate is the FIRST toucher of local footers on the native path (it
@@ -4433,13 +4462,14 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     # sees warm caches), and the serial loop below pays ~3ms per cold local
     # footer — a fixed ~0.3s plan-time tax on a 100-file cold scan.
     # `_fetch_footers_many` fans the local reads across threads in C++ with the
-    # GIL released; parses land in `_PARSED_FOOTER_CACHE` so the loop below
-    # borrows them exactly as it would any warm footer.
+    # GIL released; parses land in `footers` (and the parsed cache) so the loop
+    # below borrows them exactly as it would any warm footer.
     _local_miss_paths = []
     _local_miss_urls = []
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
-        if _is_local_path(fetch_url) and _PARSED_FOOTER_CACHE.get(path).get() == NULL:
+        if (_is_local_path(fetch_url) and footers.footers.count(path.encode('utf-8')) == 0
+                and _PARSED_FOOTER_CACHE.get(path).get() == NULL):
             _local_miss_paths.append(path)
             _local_miss_urls.append(fetch_url)
     if len(_local_miss_paths) > 1:
@@ -4451,16 +4481,19 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             envelope = _local_envs[_lm_i]
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
-            _PARSED_FOOTER_CACHE.put(_local_miss_paths[_lm_i],
-                                     _parse_footer_nogil(buf_ptr, buf_size))
+            footers.footers[_local_miss_paths[_lm_i].encode('utf-8')] = _PARSED_FOOTER_CACHE.put(
+                _local_miss_paths[_lm_i], _parse_footer_nogil(buf_ptr, buf_size))
 
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
-        # A shared reference to the parsed footer (no copy); on a cold miss parse
-        # it into the cache and hold that. `footer` keeps it alive for this
-        # iteration whatever the cache evicts meanwhile. Cache key is the ORIGINAL
-        # path — a signed URL's signature expires, so it would never hit twice.
-        footer = _PARSED_FOOTER_CACHE.get(path)
+        # A shared reference to the parsed footer (no copy): from `footers`, else the
+        # cache, else a cold read parsed into the cache — and held in `footers` for
+        # the plan either way. Key is the ORIGINAL path — a signed URL's signature
+        # expires, so it would never hit twice.
+        if footers.footers.count(path.encode('utf-8')) != 0:
+            footer = footers.footers[path.encode('utf-8')]
+        else:
+            footer = _PARSED_FOOTER_CACHE.get(path)
         if footer.get() == NULL:
             envelope, _ = _read_footer_payload(
                 fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None, auth_header
@@ -4468,6 +4501,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
             footer = _PARSED_FOOTER_CACHE.put(path, _parse_footer_nogil(buf_ptr, buf_size))
+        footers.footers[path.encode('utf-8')] = footer
         fsp = footer.get()
         # A file already proven against THIS parsed footer for THIS request is
         # admitted without the walk. `lock()` yields NULL once the footer is freed,

@@ -32,6 +32,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/mem_account.h"
@@ -599,21 +600,24 @@ static void test_aos_gate_does_not_change_the_answer() {
     CHECK(aos_build_worth_it(1000, SIZE_MAX), "full sort must build AoS");
     CHECK(!aos_build_worth_it(5'000'000, 100), "small TopN must skip the AoS build");
     CHECK(aos_build_worth_it(5'000'000, 100'000), "large TopN must build AoS");
-    CHECK(aos_build_worth_it(2000, 1500), "TopN over most of the input must build AoS");
 
-    const size_t n = 5000;
+    // A TopN over most of its input is a full sort, never a partial one.
+    CHECK(topn_full_sort_cheaper(2000, 1500, kSortThreads), "near-full TopN must take the full sort");
+    CHECK(!topn_full_sort_cheaper(5'000'000, 100, kSortThreads), "small TopN must stay a partial sort");
+
+    // Straddle the gate: k=10 skips the build, k=SORT_AOS_TOPN_MIN takes it, over enough
+    // rows that both stay partial sorts. Compare each against the general comparator's
+    // prefix for the same k: the same partial_sort over equivalent comparators.
     std::mt19937_64 rng(31);
     std::uniform_int_distribution<int64_t> d(0, 300);
-    std::vector<int64_t> a(n), b(n);
-    for (size_t i = 0; i < n; ++i) { a[i] = d(rng); b[i] = d(rng); }
-    std::vector<MorselPtr> ms{make_morsel({col_i64(a, std::vector<bool>(n, true)),
-                                           col_i64(b, std::vector<bool>(n, true))})};
-    auto keys = keys_of(ms, {{0, true, true}, {1, false, false}});
-    CHECK(aos_keys_eligible(keys), "expected AoS-eligible keys");
-
-    // Straddle the gate: k=10 skips the build, k=4000 takes it. Compare each against
-    // the general comparator's prefix for the same k.
-    for (size_t k : {size_t(10), size_t(4000)}) {
+    for (auto [n, k] : {std::pair<size_t, size_t>{5000, 10}, {5'000'000, SORT_AOS_TOPN_MIN}}) {
+        CHECK(!topn_full_sort_cheaper(n, k, kSortThreads), "gate case must stay a partial sort");
+        std::vector<int64_t> a(n), b(n);
+        for (size_t i = 0; i < n; ++i) { a[i] = d(rng); b[i] = d(rng); }
+        std::vector<MorselPtr> ms{make_morsel({col_i64(a, std::vector<bool>(n, true)),
+                                               col_i64(b, std::vector<bool>(n, true))})};
+        auto keys = keys_of(ms, {{0, true, true}, {1, false, false}});
+        CHECK(aos_keys_eligible(keys), "expected AoS-eligible keys");
         auto viad = sort_via_dispatch(keys, n, k);
         auto gen = sort_via_generic(keys, n, k);
         for (size_t i = 0; i < k; ++i)
@@ -657,8 +661,8 @@ static std::vector<int64_t> radix_case_values(std::mt19937_64& rng, size_t n, in
 template <int NP>
 static std::vector<uint32_t> radix_direct(const std::vector<SortKeyColumn>& keys,
                                           const std::vector<uint32_t>& start) {
-    std::vector<RowKeyN<NP>> rows;
-    std::vector<uint8_t> masks;
+    SortLane<RowKeyN<NP>> rows;
+    SortLane<uint8_t> masks;
     std::array<bool, NP> nf{};
     build_aos_keys<NP>(keys, start.size(), rows, masks, nf);
     std::vector<uint32_t> perm = start;
@@ -811,6 +815,39 @@ static void test_radix_scratch_is_charged() {
     std::vector<uint32_t> ref = start;
     std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
     CHECK(got == ref, "radix_sort_perm != std::stable_sort (charged run)");
+}
+
+// The sort's own working arrays are charged too: key lanes and packed keys through
+// SortLane, perm and the row maps through SortedRows' MemCharge. The peak is the radix
+// phase — radix scratch 20 B/row (packed keys a/b + src_perm) plus key lane 9, packed
+// key 9 and perm 4 = 42 B/row (the row maps come after it); with only the radix scratch
+// charged it read ~20. The account must be exactly where it started once the output
+// is dropped.
+static void test_sort_buffers_are_charged() {
+    const size_t n = 300000;
+    std::mt19937_64 rng(6);
+    std::vector<int64_t> vals(n);
+    for (size_t i = 0; i < n; ++i) vals[i] = static_cast<int64_t>(rng());
+    std::vector<MorselPtr> ms;
+    for (size_t off = 0; off < n; off += 50000) {
+        std::vector<int64_t> part(vals.begin() + off, vals.begin() + off + 50000);
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_i64(part, std::vector<bool>(part.size(), true)));
+        ms.push_back(make_morsel(std::move(cols)));
+    }
+    const int64_t before = draken_mem_charged();
+    draken_mem_reset_peak();
+    {
+        std::vector<MorselPtr> out;
+        ErrCtx err;
+        CHECK(sort_morsels(ms, {{0, true, true}}, SIZE_MAX, 65536, 4u, out, err), "sort_morsels failed");
+        size_t rows = 0;
+        for (const MorselPtr& m : out) rows += m->num_rows();
+        CHECK(rows == n, "sort_morsels lost rows");
+    }
+    const int64_t peak = draken_mem_peak() - before;
+    CHECK(draken_mem_charged() == before, "sort buffers not fully uncharged");
+    CHECK(peak >= static_cast<int64_t>(n * 40), "sort working arrays not charged");
 }
 
 // A wide radix team (16) takes the narrowest vergesort threshold (1): K=2 and K=4
@@ -995,6 +1032,153 @@ static void test_parallel_gather_matches_serial() {
                     for (uint32_t i = 0; i < serial[c]->num_rows(); ++i)
                         CHECK(cell_repr(a, i) == cell_repr(b, i), "parallel gather: cell differs");
                 }
+            }
+        }
+    }
+}
+
+// gather_rows against an independent per-cell reference: output cell i must be the
+// source cell order[first+i] names (through row_m/row_r), and a kGatherNullRow row
+// must be NULL in every column — over several morsels, sources with and without
+// validity, a dict-shaped source (non-identity selection), fixed widths 1/8/16,
+// BOOL, inline and arena strings, all-identity columns (the selection-skipping fast
+// path) and columns mixing identity and reversed-selection sources (which must not
+// take it), a window [first, first+count), and an emit subset.
+static CxxColumn col_fixed(DrakenType t, size_t es, const std::vector<uint64_t>& raw,
+                           const std::vector<bool>& valid, const std::vector<uint32_t>* codes) {
+    const uint32_t n = static_cast<uint32_t>(codes ? codes->size() : raw.size());
+    const uint32_t dl = static_cast<uint32_t>(raw.size());
+    auto* data = static_cast<uint8_t*>(draken_malloc(es * (dl ? dl : 1)));
+    for (uint32_t i = 0; i < dl; ++i)
+        for (size_t b = 0; b < es; ++b) data[i * es + b] = static_cast<uint8_t>(raw[i] >> ((b % 8) * 8));
+    uint8_t* vbits = nullptr;
+    if (std::any_of(valid.begin(), valid.end(), [](bool v) { return !v; })) {
+        const size_t vb = (static_cast<size_t>(n) + 7) / 8;
+        vbits = static_cast<uint8_t*>(draken_malloc(vb ? vb : 1));
+        std::memset(vbits, 0xFF, vb ? vb : 1);
+        for (uint32_t i = 0; i < n; ++i)
+            if (!valid[i]) vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+    }
+    if (codes == nullptr) {
+        DrakenVector v = draken_vector_from_dense(data, n, t, vbits);
+        CxxColumn c;
+        c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(vbits));
+        c.view = c.own->vec;
+        return c;
+    }
+    auto* sel = static_cast<uint32_t*>(draken_malloc(sizeof(uint32_t) * (n ? n : 1)));
+    for (uint32_t i = 0; i < n; ++i) sel[i] = (*codes)[i];
+    DrakenVector v;
+    v.data = data; v.selection = sel; v.data_length = dl; v.length = n;
+    v.validity = vbits; v.type = t; v.flags = 0;
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(vbits),
+                                          OwnedBuffer<void>(sel));
+    c.view = c.own->vec;
+    return c;
+}
+
+static CxxColumn col_bool(const std::vector<bool>& vals, const std::vector<bool>& valid) {
+    const uint32_t n = static_cast<uint32_t>(vals.size());
+    const size_t nb = (static_cast<size_t>(n) + 7) / 8;
+    auto* data = static_cast<uint8_t*>(draken_malloc(nb ? nb : 1));
+    std::memset(data, 0, nb ? nb : 1);
+    for (uint32_t i = 0; i < n; ++i)
+        if (vals[i]) data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    uint8_t* vbits = static_cast<uint8_t*>(draken_malloc(nb ? nb : 1));
+    std::memset(vbits, 0xFF, nb ? nb : 1);
+    for (uint32_t i = 0; i < n; ++i)
+        if (!valid[i]) vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+    DrakenVector v = draken_vector_from_dense(data, n, DRAKEN_BOOL, vbits);
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(vbits));
+    c.view = c.own->vec;
+    return c;
+}
+
+// `c`'s buffers read through a REVERSED selection (logical row i = physical row n-1-i,
+// a true non-identity permutation), borrowed through data_source. Validity is reused
+// as-is: it is per logical row, so it simply marks different values NULL — the
+// reference reads every cell through the same view, so any bitmap is a valid case.
+static CxxColumn reselect_reversed(const CxxColumn& c) {
+    const DrakenVector& src = c.view;
+    const uint32_t n = src.length;
+    auto* sel = static_cast<uint32_t*>(draken_malloc(sizeof(uint32_t) * (n ? n : 1)));
+    for (uint32_t i = 0; i < n; ++i) sel[i] = src.selection[n - 1 - i];
+    DrakenVector v = src;
+    v.selection = sel;
+    v.flags = DRAKEN_SEL_PERMUTATION;
+    auto own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(nullptr),
+                                             OwnedBuffer<uint8_t>(nullptr), OwnedBuffer<void>(sel));
+    own->data_source = c.own;   // keeps data, arena and validity alive
+    own->logical_type = c.own->logical_type;
+    CxxColumn out;
+    out.own = own;
+    out.view = own->vec;
+    return out;
+}
+
+static void test_gather_rows_matches_reference() {
+    std::mt19937_64 rng(4242);
+    std::vector<MorselPtr> ms;
+    for (int m = 0; m < 4; ++m) {
+        const uint32_t n = 500 + static_cast<uint32_t>(rng() % 700);
+        const bool nulls = m % 2 == 0;   // half the sources carry no validity at all
+        std::vector<uint64_t> i8(n), i64(n), d128(n), dict(7);
+        std::vector<uint32_t> codes(n);
+        std::vector<bool> valid(n, true), bools(n);
+        std::vector<std::string> str(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            i8[i] = rng(); i64[i] = rng(); d128[i] = rng();
+            codes[i] = static_cast<uint32_t>(rng() % 7);
+            bools[i] = (rng() & 1u) != 0;
+            if (nulls) valid[i] = rng() % 5 != 0;
+            const size_t len = rng() % 30;   // inline (<=12) and arena
+            for (size_t j = 0; j < len; ++j) str[i].push_back(static_cast<char>('a' + rng() % 26));
+        }
+        for (auto& d : dict) d = rng();
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_fixed(DRAKEN_INT8, 1, i8, valid, nullptr));
+        cols.push_back(col_fixed(DRAKEN_INT64, 8, i64, valid, nullptr));
+        cols.push_back(col_fixed(DRAKEN_DECIMAL128, 16, d128, valid, nullptr));
+        cols.push_back(col_fixed(DRAKEN_INT64, 8, dict, valid, &codes));
+        cols.push_back(col_str(str, valid));
+        cols.push_back(col_bool(bools, valid));
+        // Mixed shapes in ONE column: identity in even morsels, a reversed selection in
+        // odd ones — the identity fast path must not be taken for these columns.
+        CxxColumn mi = col_fixed(DRAKEN_INT64, 8, i64, valid, nullptr);
+        CxxColumn msr = col_str(str, valid);
+        cols.push_back(m % 2 == 0 ? mi : reselect_reversed(mi));
+        cols.push_back(m % 2 == 0 ? msr : reselect_reversed(msr));
+        ms.push_back(make_morsel(std::move(cols)));
+    }
+    std::vector<uint32_t> row_m, row_r;
+    const size_t total = flatten_rows(ms, row_m, row_r);
+    std::vector<uint32_t> order(total);
+    std::iota(order.begin(), order.end(), 0u);
+    std::shuffle(order.begin(), order.end(), rng);
+    for (size_t i = 0; i < order.size(); i += 37) order[i] = kGatherNullRow;
+    const std::vector<std::string> names{"i8", "i64", "d128", "dict", "s", "b", "mix_i64", "mix_s"};
+    const std::vector<uint32_t> subset{4, 3, 0, 7};
+    // The shapes this test relies on: dense columns flagged identity, the rest not.
+    CHECK((ms[0]->columns[1].view.flags & DRAKEN_SEL_IDENTITY) != 0, "dense source lost its identity flag");
+    CHECK((ms[0]->columns[4].view.flags & DRAKEN_SEL_IDENTITY) != 0, "string source lost its identity flag");
+    CHECK((ms[1]->columns[6].view.flags & DRAKEN_SEL_IDENTITY) == 0, "reversed source flagged identity");
+    CHECK(ms[1]->columns[6].view.selection[0] != 0, "reversed source has an identity selection");
+    for (const std::vector<uint32_t>* emit : {static_cast<const std::vector<uint32_t>*>(nullptr), &subset}) {
+        const size_t first = 101, count = total - 300;
+        ErrCtx err;
+        MorselPtr out = gather_rows(ms, order, first, count, row_m, row_r, names, err, emit);
+        CHECK(err.code == 0 && out != nullptr, "gather_rows failed");
+        const size_t ncol = emit ? emit->size() : names.size();
+        CHECK(out->columns.size() == ncol && out->num_rows() == count, "gather_rows: wrong shape");
+        for (size_t c = 0; c < ncol; ++c) {
+            const size_t ci = emit ? (*emit)[c] : c;
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint32_t g = order[first + i];
+                const std::string want = g == kGatherNullRow
+                    ? "N" : cell_repr(ms[row_m[g]]->columns[ci], row_r[g]);
+                CHECK(cell_repr(out->columns[c], i) == want, "gather_rows: cell differs from its source");
             }
         }
     }
@@ -1239,6 +1423,88 @@ static void test_string_radix_deep_prefix() {
     }
 }
 
+// The common-prefix skip: string_key_skip must be the bytes every VALID value shares
+// (NULLs ignored, bounded by the shortest valid value, 0 with an empty string, found
+// across team slices past the probe), or 0 when the probe says skipping cannot pay
+// (under SORT_STRING_SKIP_MIN shared bytes, or every probed value within 8 bytes). The
+// radix keyed after it must still land on std::stable_sort's permutation — shared
+// prefixes around the 8-byte part boundary, values equal to the prefix itself, ties,
+// NULLs, both directions and null placements, the string as first or second key, a
+// team of 4 and of 16.
+static void test_string_common_prefix_skip() {
+    auto skip_of = [](const std::vector<std::string>& v, const std::vector<bool>& valid,
+                      unsigned nt) {
+        std::vector<CxxColumn> cols;
+        cols.push_back(col_str(v, valid));
+        std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+        auto keys = keys_of(ms, {{0, true, true}});
+        return string_key_skip(keys[0], v.size(), nt);
+    };
+    CHECK(skip_of({"abcdefX-long", "abcdefY-long"}, {true, true}, 4) == 6, "skip: differing byte");
+    CHECK(skip_of({"abcdef-long-value", "abcde"}, {true, true}, 4) == 5, "skip: shorter value bounds it");
+    CHECK(skip_of({"zz", "abcdef-long", "abcdxyz-long"}, {false, true, true}, 4) == 4,
+          "skip: NULL must not bound it");
+    CHECK(skip_of({"abcdef-long", ""}, {true, true}, 4) == 0, "skip: empty string");
+    CHECK(skip_of({"abc", "abd"}, {false, false}, 4) == 0, "skip: all NULL");
+    CHECK(skip_of({"hello-long-value"}, {true}, 4) == 16, "skip: one value");
+    CHECK(skip_of({"abcX-long-value", "abcY-long-value"}, {true, true}, 4) == 0,
+          "skip: under SORT_STRING_SKIP_MIN shared bytes must not skip");
+    CHECK(skip_of({"abcdefg1", "abcdefg2"}, {true, true}, 4) == 0,
+          "skip: values within the 8-byte key must not skip");
+    {
+        std::vector<std::string> v(400000, "prefix/same/value");
+        v[399999] = "prefXx";   // past the probe; the last team slice alone sees it
+        CHECK(skip_of(v, std::vector<bool>(v.size(), true), 16) == 4, "skip: across team slices");
+        v[399999] = "pr";       // past the probe, below the minimum: still exact
+        CHECK(skip_of(v, std::vector<bool>(v.size(), true), 16) == 2, "skip: shrinks below the minimum past the probe");
+    }
+
+    std::mt19937_64 rng(1105);
+    int cases = 0;
+    for (size_t plen : {size_t(3), size_t(7), size_t(8), size_t(9), size_t(16), size_t(17), size_t(33)}) {
+        std::string pre;
+        for (size_t k = 0; k < plen; ++k) pre.push_back(static_cast<char>('a' + rng() % 26));
+        for (size_t n : {size_t(5000), size_t(200000)}) {
+            std::vector<std::string> v(n);
+            std::vector<bool> valid(n, true);
+            std::vector<int64_t> b(n);
+            for (size_t i = 0; i < n; ++i) {
+                v[i] = pre;
+                const size_t extra = rng() % 21;   // 0 = the prefix itself
+                for (size_t k = 0; k < extra; ++k) v[i].push_back(static_cast<char>('a' + rng() % 3));
+                valid[i] = rng() % 19 != 0;
+                b[i] = static_cast<int64_t>(rng() % 5);
+            }
+            for (int shape = 0; shape < 4; ++shape) {
+                const bool asc = shape % 2 == 0;
+                const bool str_first = shape < 2;
+                std::vector<CxxColumn> cols;
+                cols.push_back(col_str(v, valid));
+                cols.push_back(col_i64(b, std::vector<bool>(n, true)));
+                std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+                std::vector<SortKeySpec> spec = str_first
+                    ? std::vector<SortKeySpec>{{0, asc, asc}, {1, true, true}}
+                    : std::vector<SortKeySpec>{{1, false, false}, {0, asc, !asc}};
+                auto keys = keys_of(ms, spec);
+                CHECK(string_key_skip(keys[str_first ? 0 : 1], n, 4) ==
+                          (plen >= SORT_STRING_SKIP_MIN ? plen : 0),
+                      "skip: generated column has the wrong skip");
+                std::vector<uint32_t> ref(n);
+                std::iota(ref.begin(), ref.end(), 0u);
+                std::stable_sort(ref.begin(), ref.end(), SortKeyCmp{keys});
+                for (unsigned nt : {4u, 16u}) {
+                    std::vector<uint32_t> via(n);
+                    std::iota(via.begin(), via.end(), 0u);
+                    sort_perm(keys, via, SIZE_MAX, nt);
+                    CHECK(via == ref, "common-prefix string radix != stable_sort");
+                    ++cases;
+                }
+            }
+        }
+    }
+    std::printf("  common-prefix string radix vs stable_sort: %d cases\n", cases);
+}
+
 int main() {
     test_aos_matches_generic();
     test_matches_independent_reference();
@@ -1256,11 +1522,14 @@ int main() {
     test_radix_matches_stable_sort();
     test_run_census_routes();
     test_radix_scratch_is_charged();
+    test_sort_buffers_are_charged();
     test_wide_team_threshold_routes();
     test_census_runs_match_vergesort();
     test_parallel_gather_matches_serial();
+    test_gather_rows_matches_reference();
     test_string_radix_matches_stable_sort();
     test_string_radix_deep_prefix();
+    test_string_common_prefix_skip();
     test_decimal128_radix_matches_stable_sort();
     test_wide_keys_match_stable_sort();
     std::printf("test_sort_unified: all %d checks passed\n", g_checks);

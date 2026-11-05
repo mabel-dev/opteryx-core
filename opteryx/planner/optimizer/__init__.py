@@ -60,6 +60,7 @@ from opteryx.planner.optimizer.strategies import (
     JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
+    JoinDisjunctTaggingStrategy,
     JoinAlgorithmStrategy,
     ExplicitJoinChainLoweringStrategy,
     JoinPlanningStrategy,
@@ -125,6 +126,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "JoinConditionHoistStrategy": lambda: config.features.disable_join_condition_hoist,
     "JoinEliminationStrategy": lambda: config.features.disable_join_elimination,
     "JoinKeyMaterializationStrategy": lambda: config.features.disable_join_key_materialization,
+    "JoinDisjunctTaggingStrategy": lambda: config.features.disable_join_disjunct_tagging,
     "JoinAlgorithmStrategy": lambda: config.features.disable_join_algorithm,
     "ExplicitJoinChainLoweringStrategy": lambda: config.features.disable_explicit_join_chain_lowering,
     "JoinPlanningStrategy": lambda: config.features.disable_join_planning,
@@ -300,6 +302,11 @@ class OptimizerVisitor:
             CrossJoinFilterPushdownStrategy(
                 telemetry
             ),  # Convert CROSS JOIN + filters to INNER JOIN
+            # An OR above an INNER join whose branches each read one leg: project
+            # each branch as a bool on its leg so only bits cross the join. After
+            # the two pushdowns above (the OR is what they could not place), before
+            # ProjectionPushdown so the branch's source columns drop out of the scan.
+            JoinDisjunctTaggingStrategy(telemetry),
             # Runs after pushdown so join-key ranges (from scan predicates) are
             # propagated; pushes the realized range onto the opposite scan.
             CorrelatedFiltersStrategy(telemetry),

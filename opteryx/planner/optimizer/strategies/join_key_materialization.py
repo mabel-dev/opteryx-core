@@ -84,42 +84,86 @@ def passthrough_column(schema_column, source: Optional[str] = None, *, arena) ->
     )
 
 
-def materialize_operand_as_column(
-    plan: LogicalPlan, child_id: str, expr: Expression, relation_names: List[str]
-) -> Optional[Expression]:
-    """Insert a Project above `child_id` that emits everything it already
-    emits PLUS `expr` as a new column. Returns a passthrough IDENTIFIER
-    referencing that new column, or None if `child_id`'s output schema
-    isn't available (defensive -- leaves the plan untouched).
+def _emitted_schema_columns(plan: LogicalPlan, nid: str) -> Optional[List]:
+    """The schema columns the subtree at `nid` emits, or None when a node on the
+    way does not say (an Aggregate, a set operation, a Limit: not needed yet).
 
-    `expr` keeps the `schema_column` it was bound with -- no new identity is
-    minted here, so every downstream consumer keyed by that identity (join-key
+    A leg root is not always a scan: a pushed predicate leaves a Filter there, a
+    planned join chain leaves a Join. A Filter emits its child's columns, a Project
+    its `columns ∪ passthrough_columns`, a Join both legs' — the same reading
+    predicate_pushdown's `_emitted_identities` takes.
+    """
+    node = plan[nid]
+    kind = node.node_type
+    if kind in steps_with("schema"):
+        schema = node.schema
+        return list(schema.columns) if schema is not None else None
+    if kind == LogicalPlanStepType.Project:
+        cols = list(node.columns or []) + list(node.passthrough_columns or [])
+        return [c.schema_column for c in cols if c.schema_column is not None]
+    if kind == LogicalPlanStepType.Filter:
+        children = plan.ingoing_edges(nid)
+        return _emitted_schema_columns(plan, children[0][0]) if len(children) == 1 else None
+    if kind == LogicalPlanStepType.Join:
+        left, right = plan.legs(nid)
+        left_cols = _emitted_schema_columns(plan, left)
+        right_cols = _emitted_schema_columns(plan, right)
+        if left_cols is None or right_cols is None:
+            return None
+        return left_cols + right_cols
+    return None
+
+
+def materialize_operands_as_columns(
+    plan: LogicalPlan, child_id: str, exprs: List[Expression], relation_names: List[str]
+) -> Optional[List[Expression]]:
+    """Insert ONE Project above `child_id` that emits everything it already
+    emits PLUS each of `exprs` as a new column. Returns a passthrough IDENTIFIER
+    per expression, in order, or None if `child_id`'s emitted columns cannot be
+    resolved (`_emitted_schema_columns`; leaves the plan untouched).
+
+    One Project for all of a leg's expressions, never one per expression: a second
+    Project stacked above the first is built from the CHILD's schema and does not
+    pass the first's new column through.
+
+    Each expression keeps the `schema_column` it was bound with -- no new identity
+    is minted here, so every downstream consumer keyed by that identity (join-key
     extraction, statistics) resolves to the same column this projects.
 
-    The returned reference's `.source` is pinned to `relation_names[0]` --
+    The returned references' `.source` is pinned to `relation_names[0]` --
     any member of the join leg's own relation-name list is a valid match for
     `extract_join_fields`'s `source in left/right_relation_names` check;
     which specific member is irrelevant, only set membership is.
 
-    TRAP: the column this projects carries the leg's relation name as `.source`
-    while its identity is produced HERE, above the scan -- not by the scan. A
+    TRAP: the columns this projects carry the leg's relation name as `.source`
+    while their identity is produced HERE, above the scan -- not by the scan. A
     consumer that pushes something keyed by that identity down onto the scan asks
     a reader for a column it never emits. `correlated_filters`' IDENTITY GUARD is
     the worked example; it tests the identity against the scan's own output schema
     rather than trusting the relation name.
     """
-    child = plan[child_id]
-    schema = child.schema if child.node_type in steps_with("schema") else None
-    columns = schema.columns if schema is not None else None
-    if not columns or not relation_names:
+    columns = _emitted_schema_columns(plan, child_id)
+    if not columns or not relation_names or not exprs:
         return None
-    project_columns: List[Expression] = [passthrough_column(col, arena=expr.arena) for col in columns]
-    project_columns.append(expr)
+    arena = exprs[0].arena
+    project_columns: List[Expression] = [passthrough_column(col, arena=arena) for col in columns]
+    project_columns.extend(exprs)
     project_node = ProjectStep()
     project_node.columns = project_columns
     project_node.passthrough_columns = []
     plan.insert_node_after(project_node, child_id)
-    return passthrough_column(expr.schema_column, source=relation_names[0], arena=expr.arena)
+    return [
+        passthrough_column(expr.schema_column, source=relation_names[0], arena=arena)
+        for expr in exprs
+    ]
+
+
+def materialize_operand_as_column(
+    plan: LogicalPlan, child_id: str, expr: Expression, relation_names: List[str]
+) -> Optional[Expression]:
+    """`materialize_operands_as_columns` for one expression."""
+    references = materialize_operands_as_columns(plan, child_id, [expr], relation_names)
+    return None if references is None else references[0]
 
 
 def split_and_conditions(node: Optional[Expression]) -> List[Expression]:

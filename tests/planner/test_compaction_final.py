@@ -126,3 +126,21 @@ def test_without_a_sort_key_every_unsettled_and_indebted_file_is_concatenated():
     result = select_final_compaction_plan(entries, None, None, disk_budget=0)
     assert result.plan.mode == "brute"
     assert _rows(result) == [0, 1, 3]
+
+
+def test_a_partial_of_at_target_files_is_refused():
+    # The 2026-11-05 common_crawl loop: every file at TARGET, all spanning the key
+    # range, component far over budget. Sorting the six smallest among themselves
+    # gives six at-target files back - the same six next pass, forever.
+    entries, ranges = _files([(SETTLED, 0, 100)] * 40)
+    result = select_final_compaction_plan(entries, "k", ranges, disk_budget=6 * SETTLED)
+    assert result.outcome is SelectionOutcome.NOTHING_TO_DO
+    assert "exceeds the disk budget" in result.detail
+
+
+def test_a_partial_with_delete_debt_is_still_rewritten():
+    entries, ranges = _files([(SETTLED, 0, 100, 50)] + [(SETTLED, 0, 100)] * 39)
+    result = select_final_compaction_plan(entries, "k", ranges, disk_budget=6 * SETTLED)
+    assert result.outcome is SelectionOutcome.PLANNED
+    assert 0 in _rows(result)
+    assert result.plan.reason.startswith("final-partial")

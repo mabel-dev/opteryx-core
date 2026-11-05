@@ -864,6 +864,7 @@ class Features:
     disable_join_key_materialization = get_bool(
         "FEATURE_DISABLE_JOIN_KEY_MATERIALIZATION", False
     )
+    disable_join_disjunct_tagging = get_bool("FEATURE_DISABLE_JOIN_DISJUNCT_TAGGING", False)
     disable_explicit_join_chain_lowering = get_bool(
         "FEATURE_DISABLE_EXPLICIT_JOIN_CHAIN_LOWERING", False
     )

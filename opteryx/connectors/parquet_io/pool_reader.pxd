@@ -326,6 +326,13 @@ cdef class NativeScanPlan:
     cpdef void close(self)
 
 
+# One scan's parsed footers, keyed by ORIGINAL path, held by reference from the
+# footer gate to `open_native_scan_plan` so neither depends on the evicting
+# `_PARSED_FOOTER_CACHE` to hand footers on.
+cdef class ScanFooters:
+    cdef ParquetFooterMap footers
+
+
 cpdef NativeScanPlan open_native_scan_plan(
     paths,
     column_names,
@@ -350,6 +357,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     http_tuning=*,
     coalesce_tuning=*,
     coverage=*,
+    ScanFooters footers=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed
@@ -359,6 +367,7 @@ cpdef NativeScanPlan open_native_scan_plan(
 # `declared_shapes`, when given, is {column: NestedField.flatten()} each nested column of each file
 # is verified against.
 # `filesystem` supplies the signed-URL rewrite that makes a remote path eligible.
+# `footers`, when given, receives every footer the gate parsed, for the plan.
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=*,
                                 filesystem=*, footer_bytes_cache=*, dict absent=*,
-                                declared_shapes=*)
+                                declared_shapes=*, ScanFooters footers=*)

@@ -17,7 +17,8 @@
 //      normalizes to one uint64 (radix_sort_perm), otherwise a parallel stable
 //      comparison sort.
 //   The LIMIT/TopN case skips both and uses std::partial_sort — O(n log k) is already
-//   cheaper than either stage when k is small.
+//   cheaper than either stage when k is small. A large k takes the full sort and
+//   reads its first k rows instead (topn_full_sort_cheaper).
 //
 // KEYS: each ORDER BY column is normalized to an order-preserving scalar
 // (sort_num_key), so the comparator never re-interprets raw types. Where every key
@@ -174,18 +175,24 @@ inline uint64_t sort_num_key(const DrakenVector& v, uint32_t row) {
 
 // ---- normalized key columns over a flattened morsel list -------------------------
 
+// A sort's per-row working arrays (key lanes, packed keys): charged to the process
+// memory account (tracked_allocator.h) so the charged figure and the chunk cache's
+// give-way see them. Same value-initialising semantics as std::vector.
+template <class T>
+using SortLane = std::vector<T, draken::TrackedAllocator<T>>;
+
 struct SortKeyColumn {
     bool asc = true;
     bool nulls_first = true;
     bool is_str = false;
     bool is_i128 = false;
     bool is_uuid = false;                   // is_i128 lane holding a UUID order key
-    std::vector<uint8_t> valid;
-    std::vector<uint64_t> num;              // fixed-width path
-    std::vector<__int128> num128;           // DECIMAL128 path (raw ordering == value
+    SortLane<uint8_t> valid;
+    SortLane<uint64_t> num;                 // fixed-width path
+    SortLane<__int128> num128;              // DECIMAL128 path (raw ordering == value
                                             //  ordering at one scale)
-    std::vector<const uint8_t*> sptr;       // string path (points into source buffers,
-    std::vector<uint32_t> slen;             //  which the caller keeps alive)
+    SortLane<const uint8_t*> sptr;          // string path (points into source buffers,
+    SortLane<uint32_t> slen;                //  which the caller keeps alive)
 };
 
 // Rows each team member must own before another member is worth spawning. Matches the
@@ -509,6 +516,11 @@ inline bool aos_keys_eligible(const std::vector<SortKeyColumn>& keys) {
 // 0%, h2o id3 68%, TPC-H comments 42-43%, Title 55%, Referer 67%, URL 88%. Long text
 // needs the next bytes (MSD recursion inside the fix-up) to gain much; short strings
 // are settled by the radix alone.
+//
+// The 8 bytes start AFTER the column's common prefix (string_key_skip): bytes
+// every valid value shares carry no order, so a URL column keys on its path, not on
+// "https://". Order is unchanged — with equal leading bytes, memcmp-then-length order
+// is the suffixes' order — and the fix-up continues from the same offset.
 inline constexpr unsigned SORT_STRING_PREFIX_BYTES = 8;
 
 inline uint64_t string_prefix_key(const uint8_t* p, uint32_t len) {
@@ -516,6 +528,69 @@ inline uint64_t string_prefix_key(const uint8_t* p, uint32_t len) {
     const uint32_t m = len < SORT_STRING_PREFIX_BYTES ? len : SORT_STRING_PREFIX_BYTES;
     for (uint32_t i = 0; i < m; ++i) k |= static_cast<uint64_t>(p[i]) << (56 - 8 * i);
     return k;
+}
+
+// How many leading bytes string key `c`'s radix prefix skips: the bytes every VALID
+// value shares (NULLs carry none), or 0 when skipping cannot pay. A serial probe of
+// the first SORT_SKIP_PROBE_ROWS rows decides: under SORT_STRING_SKIP_MIN shared bytes
+// the unskipped 8-byte key already varies enough (and a longer key only adds radix
+// passes), and with every probed value within 8 bytes the key already holds them
+// whole. MEASURED 2026-11-05 (1M rows): without the probe, random text, 3-byte and
+// 2-byte prefixes ran 3-8% slower on the scan and team start alone.
+// shortcut: decided on the first rows; a column whose shared prefix or long values only
+// show past the probe keeps 0 — correct, just unskipped; widen the probe if that shows up.
+// Past the probe each team member shrinks the bound over its slice and stops at 0.
+inline constexpr size_t SORT_SKIP_PROBE_ROWS = 4096;
+inline constexpr uint32_t SORT_STRING_SKIP_MIN = 4;
+
+inline uint32_t string_key_skip(const SortKeyColumn& c, size_t n, unsigned nthreads) {
+    size_t ref = 0;
+    while (ref < n && !c.valid[ref]) ++ref;
+    if (ref == n) return 0;
+    const uint8_t* rp = c.sptr[ref];
+    // Shrink bound `k` to the bytes row i shares with the reference row.
+    auto shared = [&](size_t i, uint32_t k) {
+        const uint32_t m = c.slen[i] < k ? c.slen[i] : k;
+        const uint8_t* q = c.sptr[i];
+        uint32_t j = 0;
+        while (j < m && q[j] == rp[j]) ++j;
+        return j;
+    };
+    uint32_t k = c.slen[ref];
+    uint32_t longest = 0;
+    const size_t pe = n - ref < SORT_SKIP_PROBE_ROWS ? n : ref + SORT_SKIP_PROBE_ROWS;
+    for (size_t i = ref; i < pe && k >= SORT_STRING_SKIP_MIN; ++i) {
+        if (!c.valid[i]) continue;
+        k = shared(i, k);
+        longest = c.slen[i] > longest ? c.slen[i] : longest;
+    }
+    if (k < SORT_STRING_SKIP_MIN || longest <= SORT_STRING_PREFIX_BYTES) return 0;
+    const size_t rest = n - pe;
+    const unsigned nt = sort_team_width(rest, nthreads);
+    std::vector<uint32_t> part(nt, k);
+    sort_team_run(nt, [&](unsigned t) {
+        const size_t lo = pe + rest * t / nt, hi = pe + rest * (t + 1) / nt;
+        uint32_t b = k;
+        for (size_t i = lo; i < hi && b > 0; ++i)
+            if (c.valid[i]) b = shared(i, b);
+        part[t] = b;
+    });
+    for (uint32_t v : part) k = v < k ? v : k;
+    return k;
+}
+
+// Per PART: the bytes the string part's key skips (string_key_skip; 0 for every
+// other part). NPARTS is sort_part_count(keys).
+template <int NPARTS>
+inline std::array<uint32_t, NPARTS> string_key_skips(const std::vector<SortKeyColumn>& keys,
+                                                     size_t n, unsigned nthreads) {
+    std::array<uint32_t, NPARTS> skip{};
+    int k = 0;
+    for (const SortKeyColumn& c : keys) {
+        if (c.is_str) skip[k] = string_key_skip(c, n, nthreads);
+        k += sort_key_two_parts(c) ? 2 : 1;
+    }
+    return skip;
 }
 
 // The radix accepts strings (as prefix parts) and DECIMAL128 (two parts); UUID and
@@ -550,18 +625,16 @@ inline bool keys_have_string(const std::vector<SortKeyColumn>& keys) {
 inline constexpr size_t SORT_AOS_TOPN_MIN = 16384;
 
 // Build the AoS keys only when the sort will do enough comparisons to earn the O(n)
-// build. The `take_first * 2 >= n` arm catches a TopN that is really most of the
-// input (small n, large limit), where the absolute threshold alone would wrongly
-// send a near-full sort down the slow path.
+// build. A TopN that is most of its input never reaches here as a partial sort:
+// sort_perm sends it down the full path first (topn_full_sort_cheaper).
 inline bool aos_build_worth_it(size_t n, size_t take_first) {
-    if (take_first >= n) return true;                     // full sort
-    return take_first >= SORT_AOS_TOPN_MIN || take_first * 2 >= n;
+    return take_first >= n || take_first >= SORT_AOS_TOPN_MIN;
 }
 
 template <int NPARTS>
 inline void build_aos_keys(const std::vector<SortKeyColumn>& keys, size_t n,
-                           std::vector<RowKeyN<NPARTS>>& rows_out,
-                           std::vector<uint8_t>& masks_out,
+                           SortLane<RowKeyN<NPARTS>>& rows_out,
+                           SortLane<uint8_t>& masks_out,
                            std::array<bool, NPARTS>& nulls_first_out) {
     rows_out.resize(n);
     masks_out.resize(n);
@@ -588,12 +661,14 @@ inline void build_aos_keys(const std::vector<SortKeyColumn>& keys, size_t n,
 // (sort_i128_parts), both carrying its validity bit and NULL placement. Kept apart
 // from build_aos_keys so the numeric build carries no per-row string test: folding
 // them measured the 100M-row int ORDER BY 6.6% slower end to end. NPARTS is the PART
-// count (sort_part_count), not keys.size().
+// count (sort_part_count), not keys.size(). `skip[k]`: the string part's common prefix
+// (string_key_skips), which its key starts after; 0 everywhere else.
 template <int NPARTS>
 inline void build_aos_keys_by_column(const std::vector<SortKeyColumn>& keys, size_t n,
-                                     std::vector<RowKeyN<NPARTS>>& rows_out,
-                                     std::vector<uint8_t>& masks_out,
-                                     std::array<bool, NPARTS>& nulls_first_out) {
+                                     SortLane<RowKeyN<NPARTS>>& rows_out,
+                                     SortLane<uint8_t>& masks_out,
+                                     std::array<bool, NPARTS>& nulls_first_out,
+                                     const std::array<uint32_t, NPARTS>& skip) {
     rows_out.resize(n);
     masks_out.resize(n);
     for (size_t i = 0; i < n; ++i) masks_out[i] = 0;
@@ -623,8 +698,9 @@ inline void build_aos_keys_by_column(const std::vector<SortKeyColumn>& keys, siz
         if (c.is_str) {
             const uint8_t* const* sp = c.sptr.data();
             const uint32_t* sl = c.slen.data();
+            const uint32_t sk = skip[k];   // every valid value is at least this long
             for (size_t i = 0; i < n; ++i) {
-                const uint64_t v = valid[i] ? string_prefix_key(sp[i], sl[i]) : 0;
+                const uint64_t v = valid[i] ? string_prefix_key(sp[i] + sk, sl[i] - sk) : 0;
                 rows[i].parts[k] = asc ? v : ~v;
                 if (valid[i]) masks[i] |= bit;
             }
@@ -1194,7 +1270,7 @@ inline constexpr size_t SORT_FIXUP_PARALLEL_MIN = 2 * SORT_TEAM_ROWS_PER_THREAD;
 struct RadixFixupTask {
     size_t i, j;    // the run, positions in perm
     int s;          // the string part being resolved
-    uint32_t depth; // 8*depth leading bytes of column s already equal across the run
+    uint32_t depth; // skip[s] + 8*depth leading bytes of column s already equal across the run
 };
 
 struct RadixFixupScratch {
@@ -1215,6 +1291,8 @@ struct RadixFixup {
     // key_of[p]: the key column part p belongs to. NOT the identity once a DECIMAL128
     // (two parts) precedes it. A string is always exactly one part.
     std::array<int, NPARTS> key_of;
+    // skip[p]: string part p's common prefix (string_key_skips) — its keys start there.
+    std::array<uint32_t, NPARTS> skip;
 
     int first_string_from(int k0) const {
         for (int k = k0; k < NPARTS; ++k)
@@ -1257,7 +1335,7 @@ struct RadixFixup {
     }
     uint64_t level_key(uint32_t r, int s, uint32_t depth) const {
         const SortKeyColumn& c = (*keys)[key_of[s]];
-        const uint64_t off = static_cast<uint64_t>(depth) * SORT_STRING_PREFIX_BYTES;
+        const uint64_t off = skip[s] + static_cast<uint64_t>(depth) * SORT_STRING_PREFIX_BYTES;
         const uint32_t len = c.slen[r];
         const uint64_t k = len > off ? string_prefix_key(c.sptr[r] + off, static_cast<uint32_t>(len - off)) : 0;
         return c.asc ? k : ~k;
@@ -1267,7 +1345,7 @@ struct RadixFixup {
     void step(uint32_t* p, const RadixFixupTask& t, unsigned nt, RadixFixupScratch& sc,
               Push& push) const {
         const size_t len = t.j - t.i;
-        const uint64_t cover = static_cast<uint64_t>(t.depth) * SORT_STRING_PREFIX_BYTES;
+        const uint64_t cover = skip[t.s] + static_cast<uint64_t>(t.depth) * SORT_STRING_PREFIX_BYTES;
         int ends;
         if (nt <= 1) {
             ends = ends_within(p, t.i, t.j, t.s, cover);
@@ -1347,6 +1425,7 @@ struct RadixFixup {
 template <int NPARTS>
 inline void radix_fixup_ties(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
                              const std::vector<SortKeyColumn>& keys,
+                             const std::array<uint32_t, NPARTS>& skip,
                              std::vector<uint32_t>& perm, unsigned nthreads) {
     const size_t n = perm.size();
     if (n < 2) return;
@@ -1360,7 +1439,7 @@ inline void radix_fixup_ties(const RowKeyN<NPARTS>* rows, const uint8_t* masks,
         }
         if (k != NPARTS) std::abort();   // NPARTS must be sort_part_count(keys)
     }
-    const RadixFixup<NPARTS> fx{rows, masks, &keys, key_of};
+    const RadixFixup<NPARTS> fx{rows, masks, &keys, key_of, skip};
     uint32_t* p = perm.data();
     // Level 0: the top-level runs (parts 0..first string part), found by the team —
     // a read-only pass over perm with random reads of the keys; serial, it measured
@@ -1510,6 +1589,20 @@ inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_firs
     });
 }
 
+// std::partial_sort is serial and O(n log k); once k is a large enough share of n the
+// full path (census, parallel radix) is cheaper, and its first k rows are the top k.
+// MEASURED 2026-11-05 (int, string and 2-int keys; 65536 / 1M / 10M rows; Mac M5 Pro):
+// partial and full break even at 0.6-2% of n on one thread and 0.07-0.3% on a team of
+// 16. The divisors sit at or above every measured break-even: never measured slower.
+inline constexpr size_t SORT_TOPN_FULL_DIV_SERIAL = 64;
+inline constexpr size_t SORT_TOPN_FULL_DIV_TEAM = 256;
+
+inline bool topn_full_sort_cheaper(size_t n, size_t take_first, unsigned nthreads) {
+    const size_t div = sort_team_width(n, nthreads) > 1 ? SORT_TOPN_FULL_DIV_TEAM
+                                                        : SORT_TOPN_FULL_DIV_SERIAL;
+    return take_first < n && take_first * div >= n;
+}
+
 // Stable multi-key permutation over `perm`, dispatching to the AoS comparator when
 // the key shape allows it and to SortKeyCmp otherwise. Both produce the same order.
 // A full sort over AoS keys falls back to the radix sort instead of the comparison
@@ -1517,6 +1610,7 @@ inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_firs
 inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
                       size_t take_first, unsigned nthreads) {
     const size_t n = perm.size();
+    if (topn_full_sort_cheaper(n, take_first, nthreads)) take_first = SIZE_MAX;
     if (take_first >= n && n >= SORT_RADIX_MIN && keys_have_string(keys) &&
         radix_keys_eligible(keys)) {
         // String key(s), full sort: every comparison stage uses the EXACT comparator;
@@ -1533,16 +1627,19 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
                 const std::vector<SortKeyColumn>* keys_p = &keys;                \
                 sort_perm_full(exact, perm, nthreads, threshold,                 \
                                [keys_p, n, nthreads](std::vector<uint32_t>& p) { \
-                                   std::vector<RowKeyN<NP>> rows;                \
-                                   std::vector<uint8_t> masks;                   \
+                                   SortLane<RowKeyN<NP>> rows;                   \
+                                   SortLane<uint8_t> masks;                      \
                                    std::array<bool, NP> nf{};                    \
+                                   const std::array<uint32_t, NP> skip =         \
+                                       string_key_skips<NP>(*keys_p, n, nthreads);\
                                    build_aos_keys_by_column<NP>(*keys_p, n,      \
-                                       rows, masks, nf);                         \
+                                       rows, masks, nf, skip);                   \
                                    const RowKeyN<NP>* rows_p = rows.data();      \
                                    const uint8_t* masks_p = masks.data();        \
                                    radix_sort_perm<NP>(rows_p, masks_p, nf, p,   \
                                                        nthreads);                \
                                    radix_fixup_ties<NP>(rows_p, masks_p, *keys_p,\
+                                                        skip,                    \
                                                         p, nthreads);            \
                                });                                               \
                 return;                                                          \
@@ -1564,11 +1661,12 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
         switch (sort_part_count(keys)) {
 #define DRAKEN_SORT_AOS_ARM(NP)                                                  \
             case NP: {                                                           \
-                std::vector<RowKeyN<NP>> rows;                                   \
-                std::vector<uint8_t> masks;                                      \
+                SortLane<RowKeyN<NP>> rows;                                      \
+                SortLane<uint8_t> masks;                                         \
                 std::array<bool, NP> nf{};                                       \
                 if (by_column)                                                   \
-                    build_aos_keys_by_column<NP>(keys, n, rows, masks, nf);      \
+                    build_aos_keys_by_column<NP>(keys, n, rows, masks, nf,       \
+                                                 std::array<uint32_t, NP>{});    \
                 else                                                             \
                     build_aos_keys<NP>(keys, n, rows, masks, nf);                \
                 /* Raw pointers, captured BY VALUE below: a [&] capture of the */ \
@@ -1697,6 +1795,39 @@ inline size_t gather_elem_size(DrakenType t, const LogicalType* lt) {
     return draken_type_itemsize(t, lt);
 }
 
+// One fixed-width column's cells, from per-morsel tables built once per column.
+// ES is the element width when it is a compile-time constant (a constant-size memcpy
+// is one load and one store); ES == 0 takes the runtime width `es`. `check_nulls`
+// is false only when no output row is a NULL row and no source carries validity —
+// then every cell is a plain copy. IDENT: every source carries DRAKEN_SEL_IDENTITY
+// (selection[r] == r), so the selection read is skipped; same cells either way.
+template <size_t ES, bool IDENT, class MarkNull>
+inline void gather_fixed_cells(uint8_t* data, size_t es, uint32_t n, const uint32_t* gm,
+                               const uint32_t* gr, const uint8_t* const* base,
+                               const uint32_t* const* sel, const uint8_t* const* val,
+                               bool check_nulls, MarkNull& mark_null) {
+    const size_t w = ES != 0 ? ES : es;
+    if (!check_nulls) {
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t m = gm[i];
+            const size_t p = IDENT ? gr[i] : sel[m][gr[i]];
+            std::memcpy(data + static_cast<size_t>(i) * w, base[m] + p * w, ES != 0 ? ES : es);
+        }
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t m = gm[i];
+        const uint32_t r = gr[i];
+        if (m == kGatherNullRow || (val[m] != nullptr && !((val[m][r >> 3] >> (r & 7)) & 1u))) {
+            std::memset(data + static_cast<size_t>(i) * w, 0, w);
+            mark_null(i);
+            continue;
+        }
+        const size_t p = IDENT ? r : sel[m][r];
+        std::memcpy(data + static_cast<size_t>(i) * w, base[m] + p * w, ES != 0 ? ES : es);
+    }
+}
+
 // `emit_cols`, when non-null, is the subset of INPUT column indices to materialize,
 // in output order — the gather is where a column costs (a two-pass arena rebuild for
 // a string), so a column whose purpose is spent by the time we get here must not be
@@ -1752,6 +1883,28 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
     out->columns.reserve(nemit);
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
 
+    // Resolve every output row to its (source morsel, source row) ONCE, not once per
+    // column: re-reading order -> row_m/row_r -> ms[m]->columns[ci] for every cell
+    // made the gather cache-miss bound (audit 2026-11-05: 45-80% of ORDER BY time).
+    // gm[i] == kGatherNullRow marks a NULL row; gr[i] is then unused.
+    std::unique_ptr<uint32_t[]> gm(new uint32_t[n == 0 ? 1 : n]);
+    std::unique_ptr<uint32_t[]> gr(new uint32_t[n == 0 ? 1 : n]);
+    bool any_null_row = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t g = order[first + i];
+        if (g == kGatherNullRow) {
+            gm[i] = kGatherNullRow;
+            gr[i] = 0;
+            any_null_row = true;
+            continue;
+        }
+        gm[i] = row_m[g];
+        gr[i] = row_r[g];
+    }
+    // Per-column source views, one per input morsel, indexed by gm[i].
+    const size_t nm = ms.size();
+    std::vector<const DrakenVector*> src(nm);
+
     for (size_t ei = 0; ei < nemit; ++ei) {
         size_t ci = emit_cols == nullptr ? ei : static_cast<size_t>((*emit_cols)[ei]);
         if (ci >= ncols) {
@@ -1767,6 +1920,7 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
         const LogicalType* src_lt =
             ms.front()->columns[ci].own ? ms.front()->columns[ci].own->logical_type
                                         : nullptr;
+        for (size_t m = 0; m < nm; ++m) src[m] = &ms[m]->columns[ci].view;
 
         // Validity: allocate lazily on the first NULL encountered.
         uint8_t* vbits = nullptr;
@@ -1822,13 +1976,19 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             // value's length is known and its bytes were never materialized.
             size_t total_arena = 0;
             bool any_elided = false;
+            std::vector<const DrakenStringArena*> sarena(nm);
+            bool ident = true;   // every source selection[r] == r: skip the selection read
+            for (size_t m = 0; m < nm; ++m) {
+                sarena[m] = string_arena_of(*src[m]);
+                ident = ident && (src[m]->flags & DRAKEN_SEL_IDENTITY) != 0;
+            }
             for (uint32_t i = 0; i < n; ++i) {
-                uint32_t g = order[first + i];
-                if (g == kGatherNullRow) continue;   // NULL row: no arena bytes
-                const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
-                uint32_t r = row_r[g];
+                const uint32_t m = gm[i];
+                if (m == kGatherNullRow) continue;   // NULL row: no arena bytes
+                const DrakenVector& v = *src[m];
+                const uint32_t r = gr[i];
                 if (!sort_row_valid(v, r)) continue;
-                const DrakenStringSlot* slot = &string_arena_of(v)->slots[v.selection[r]];
+                const DrakenStringSlot* slot = &sarena[m]->slots[ident ? r : v.selection[r]];
                 if (str_is_inline(slot)) continue;
                 if (slot->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) any_elided = true;
                 else total_arena += str_length(slot);
@@ -1850,21 +2010,21 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             sa_out->type = t;
             size_t arena_pos = 0;
             for (uint32_t i = 0; i < n; ++i) {
-                uint32_t g = order[first + i];
-                if (g == kGatherNullRow) {
+                const uint32_t m = gm[i];
+                if (m == kGatherNullRow) {
                     std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
                     mark_null(i);
                     continue;
                 }
-                const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
-                uint32_t r = row_r[g];
+                const DrakenVector& v = *src[m];
+                const uint32_t r = gr[i];
                 if (!sort_row_valid(v, r)) {
                     std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
                     mark_null(i);
                     continue;
                 }
-                const DrakenStringArena* sa = string_arena_of(v);
-                const DrakenStringSlot* slot = &sa->slots[v.selection[r]];
+                const DrakenStringArena* sa = sarena[m];
+                const DrakenStringSlot* slot = &sa->slots[ident ? r : v.selection[r]];
                 if (str_is_inline(slot)) {
                     dst[i] = *slot;
                 } else if (slot->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
@@ -1879,17 +2039,13 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                     arena_pos += slen;
                 }
             }
-            uint32_t* sel = static_cast<uint32_t*>(
-                draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-            for (uint32_t i = 0; i < n; ++i) sel[i] = i;
             DrakenVector v;
-            v.data = sa_out; v.selection = sel; v.data_length = n; v.length = n;
+            v.data = sa_out; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
             v.validity = vbits; v.type = t;
             v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             CxxColumn c;
             c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
-                                                  OwnedBuffer<uint8_t>(vbits),
-                                                  OwnedBuffer<void>(sel));
+                                                  OwnedBuffer<uint8_t>(vbits));
             c.own->logical_type = src_lt;
             c.view = c.own->vec;
             out->columns.push_back(std::move(c));
@@ -1902,27 +2058,23 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             uint8_t* data = static_cast<uint8_t*>(draken_malloc(dbytes == 0 ? 1 : dbytes));
             std::memset(data, 0, dbytes == 0 ? 1 : dbytes);
             for (uint32_t i = 0; i < n; ++i) {
-                uint32_t g = order[first + i];
-                if (g == kGatherNullRow) { mark_null(i); continue; }  // data bit stays 0
-                const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
-                uint32_t r = row_r[g];
+                const uint32_t m = gm[i];
+                if (m == kGatherNullRow) { mark_null(i); continue; }  // data bit stays 0
+                const DrakenVector& v = *src[m];
+                const uint32_t r = gr[i];
                 if (!sort_row_valid(v, r)) { mark_null(i); continue; }
                 uint32_t phys = v.selection[r];
                 if ((static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u) {
                     data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
                 }
             }
-            uint32_t* sel = static_cast<uint32_t*>(
-                draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-            for (uint32_t i = 0; i < n; ++i) sel[i] = i;
             DrakenVector v;
-            v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+            v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
             v.validity = vbits; v.type = t;
             v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             CxxColumn c;
             c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                                  OwnedBuffer<uint8_t>(vbits),
-                                                  OwnedBuffer<void>(sel));
+                                                  OwnedBuffer<uint8_t>(vbits));
             c.own->logical_type = src_lt;
             c.view = c.own->vec;
             out->columns.push_back(std::move(c));
@@ -1941,15 +2093,15 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                 draken_malloc((static_cast<size_t>(n) + 1) * sizeof(int32_t)));
             offsets[0] = 0;
             for (uint32_t i = 0; i < n; ++i) {
-                uint32_t g = order[first + i];
-                if (g == kGatherNullRow) {   // empty element range + NULL parent
+                const uint32_t m = gm[i];
+                if (m == kGatherNullRow) {   // empty element range + NULL parent
                     offsets[i + 1] = offsets[i];
                     mark_null(i);
                     continue;
                 }
-                const CxxColumn& sc = ms[row_m[g]]->columns[ci];
+                const CxxColumn& sc = ms[m]->columns[ci];
                 const DrakenVector& v = sc.view;
-                uint32_t r = row_r[g];
+                const uint32_t r = gr[i];
                 if (!sort_row_valid(v, r)) {
                     offsets[i + 1] = offsets[i];
                     mark_null(i);
@@ -1968,7 +2120,7 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                 int32_t s0 = soff[phys], s1 = soff[phys + 1];
                 for (int32_t j = s0; j < s1; ++j) {
                     c_order.push_back(static_cast<uint32_t>(c_row_m.size()));
-                    c_row_m.push_back(row_m[g]);
+                    c_row_m.push_back(m);
                     c_row_r.push_back(static_cast<uint32_t>(j));
                 }
                 offsets[i + 1] = offsets[i] + (s1 - s0);
@@ -2001,17 +2153,13 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                 return nullptr;
             }
 
-            uint32_t* sel = static_cast<uint32_t*>(
-                draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-            for (uint32_t i = 0; i < n; ++i) sel[i] = i;
             DrakenVector av;
-            av.data = offsets; av.selection = sel; av.data_length = n; av.length = n;
+            av.data = offsets; av.selection = draken_identity_sel(n); av.data_length = n; av.length = n;
             av.validity = vbits; av.type = DRAKEN_ARRAY;
             av.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
             CxxColumn c;
             c.own = std::make_shared<VectorOwner>(av, OwnedBuffer<void>(offsets),
-                                                  OwnedBuffer<uint8_t>(vbits),
-                                                  OwnedBuffer<void>(sel));
+                                                  OwnedBuffer<uint8_t>(vbits));
             c.own->logical_type = src_lt;
             // child_out's column owner was just built here (use_count()==1), so its
             // VectorOwner can be moved into sole ownership under this parent.
@@ -2032,36 +2180,43 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
         }
         uint8_t* data = static_cast<uint8_t*>(
             draken_malloc((n == 0 ? 1 : static_cast<size_t>(n)) * es));
-        for (uint32_t i = 0; i < n; ++i) {
-            uint32_t g = order[first + i];
-            if (g == kGatherNullRow) {
-                std::memset(data + static_cast<size_t>(i) * es, 0, es);
-                mark_null(i);
-                continue;
-            }
-            const DrakenVector& v = ms[row_m[g]]->columns[ci].view;
-            uint32_t r = row_r[g];
-            if (!sort_row_valid(v, r)) {
-                std::memset(data + static_cast<size_t>(i) * es, 0, es);
-                mark_null(i);
-                continue;
-            }
-            std::memcpy(data + static_cast<size_t>(i) * es,
-                        static_cast<const uint8_t*>(v.data)
-                            + static_cast<size_t>(v.selection[r]) * es,
-                        es);
+        std::vector<const uint8_t*> fbase(nm), fval(nm);
+        std::vector<const uint32_t*> fsel(nm);
+        bool check_nulls = any_null_row;
+        bool ident = true;
+        for (size_t m = 0; m < nm; ++m) {
+            fbase[m] = static_cast<const uint8_t*>(src[m]->data);
+            fsel[m] = src[m]->selection;
+            fval[m] = src[m]->validity;
+            check_nulls = check_nulls || fval[m] != nullptr;
+            ident = ident && (src[m]->flags & DRAKEN_SEL_IDENTITY) != 0;
         }
-        uint32_t* sel = static_cast<uint32_t*>(
-            draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-        for (uint32_t i = 0; i < n; ++i) sel[i] = i;
+        switch (es) {
+#define DRAKEN_GATHER_FIXED(ES)                                                         \
+            if (ident)                                                                  \
+                gather_fixed_cells<ES, true>(data, es, n, gm.get(), gr.get(),           \
+                                             fbase.data(), fsel.data(), fval.data(),    \
+                                             check_nulls, mark_null);                   \
+            else                                                                        \
+                gather_fixed_cells<ES, false>(data, es, n, gm.get(), gr.get(),          \
+                                              fbase.data(), fsel.data(), fval.data(),   \
+                                              check_nulls, mark_null);                  \
+            break;
+            case 1:  DRAKEN_GATHER_FIXED(1)
+            case 2:  DRAKEN_GATHER_FIXED(2)
+            case 4:  DRAKEN_GATHER_FIXED(4)
+            case 8:  DRAKEN_GATHER_FIXED(8)
+            case 16: DRAKEN_GATHER_FIXED(16)
+            default: DRAKEN_GATHER_FIXED(0)
+#undef DRAKEN_GATHER_FIXED
+        }
         DrakenVector v;
-        v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+        v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
         v.validity = vbits; v.type = t;
         v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
         CxxColumn c;
         c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                              OwnedBuffer<uint8_t>(vbits),
-                                              OwnedBuffer<void>(sel));
+                                              OwnedBuffer<uint8_t>(vbits));
         c.own->logical_type = src_lt;
         c.view = c.own->vec;
         out->columns.push_back(std::move(c));
@@ -2156,6 +2311,9 @@ struct SortedRows {
     std::vector<MorselPtr> src;
     std::vector<uint32_t> row_m, row_r, perm;
     size_t total = 0;
+    // perm, row_m and row_r are std::vectors (every sort_perm / gather_rows caller's
+    // type); this charges their capacity to the process account while they live.
+    draken::MemCharge charge;
 };
 
 inline bool sort_rows(const std::vector<MorselPtr>& ms, const std::vector<SortKeySpec>& spec,
@@ -2163,12 +2321,21 @@ inline bool sort_rows(const std::vector<MorselPtr>& ms, const std::vector<SortKe
     s.src.reserve(ms.size());
     for (const MorselPtr& m : ms) if (m->num_rows() > 0) s.src.push_back(m);
     if (s.src.empty()) return true;
-    size_t n = flatten_rows(s.src, s.row_m, s.row_r);
-    std::vector<SortKeyColumn> keys;
-    if (!build_sort_keys(s.src, spec, keys, err)) return false;
-    s.perm.resize(n);
-    for (size_t i = 0; i < n; ++i) s.perm[i] = static_cast<uint32_t>(i);
-    sort_perm(keys, s.perm, take_first, nthreads);
+    size_t n = 0;
+    for (const MorselPtr& m : s.src) n += m->num_rows();
+    {
+        // Keys live only for the sort: freed before the row maps the gather needs are
+        // built, so neither coexists with the sort's own scratch (peak RSS, not time).
+        std::vector<SortKeyColumn> keys;
+        if (!build_sort_keys(s.src, spec, keys, err)) return false;
+        s.perm.resize(n);
+        for (size_t i = 0; i < n; ++i) s.perm[i] = static_cast<uint32_t>(i);
+        s.charge.set(static_cast<int64_t>(s.perm.capacity() * sizeof(uint32_t)));
+        sort_perm(keys, s.perm, take_first, nthreads);
+    }
+    flatten_rows(s.src, s.row_m, s.row_r);
+    s.charge.set(static_cast<int64_t>(
+        (s.perm.capacity() + s.row_m.capacity() + s.row_r.capacity()) * sizeof(uint32_t)));
     s.total = n < take_first ? n : take_first;
     return true;
 }

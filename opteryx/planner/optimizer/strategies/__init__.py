@@ -15,6 +15,7 @@ from .distinct_scan_pushdown import DistinctScanPushdownStrategy
 from .join_condition_hoist import JoinConditionHoistStrategy
 from .join_elimination import JoinEliminationStrategy
 from .join_key_materialization import JoinKeyMaterializationStrategy
+from .join_disjunct_tagging import JoinDisjunctTaggingStrategy
 from .join_algorithm import JoinAlgorithmStrategy
 from .explicit_join_chain_lowering import ExplicitJoinChainLoweringStrategy
 from .join_planning import JoinPlanningStrategy
@@ -65,6 +66,7 @@ __all__ = [
     "DistinctScanPushdownStrategy",
     "JoinConditionHoistStrategy",
     "JoinEliminationStrategy",
+    "JoinDisjunctTaggingStrategy",
     "JoinAlgorithmStrategy",
     "ExplicitJoinChainLoweringStrategy",
     "JoinPlanningStrategy",

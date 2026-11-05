@@ -553,10 +553,10 @@ def _select_final_window(
     sort_column: str,
     disk_budget: int,
     threshold: float,
-) -> Optional[CompactionPlan]:
+) -> Tuple[Optional[CompactionPlan], str]:
     """The contiguous run of overlap components, within ``disk_budget``, that
     rewrites the most bytes needing work - or, when it fixes more, part of one
-    component too large for any window.
+    component too large for any window. ``(None, why)`` when nothing qualifies.
 
     A component needs work when it overlaps (two or more files), is unsettled
     (a file under ``MIN_SIZE_BYTES``) or carries delete debt. A settled lone
@@ -566,12 +566,15 @@ def _select_final_window(
     boundaries ever reach the writer.
 
     A component larger than the budget cannot sit in any window. It is offered
-    instead as its smallest files up to the budget: sorted, they still collapse
-    many files into a few, though the outputs overlap the files it leaves. The
-    smallest are the cheapest to fix and stop being smallest once merged, so the
-    next pass moves on - the starvation that makes rule B seed at random does
-    not arise. Files with no known key extent are not in ``key_ranges`` and so
-    never selected here.
+    instead as its smallest files up to the budget, but only when that makes
+    progress: its outputs overlap the files it leaves, so the pass must either
+    collapse the files into fewer or shed delete debt. Sub-target files do
+    collapse and stop being smallest once merged, so the next pass moves on.
+    At-target files sorted among themselves come back as the same number of
+    at-target files - the same smallest files next pass, forever (seen on
+    common_crawl_one_crawl, 2026-11-05: 21 passes of 6 -> 6) - so that partial
+    is refused and the pass reports what the budget cannot hold. Files with no
+    known key extent are not in ``key_ranges`` and so never selected here.
     """
     components = _overlap_components(
         [FileRange(entry=entry, low=low, high=high) for entry, low, high in key_ranges]
@@ -626,6 +629,7 @@ def _select_final_window(
                 (best[0], best[1], window, f"final-window {end - start + 1} component(s)")
             )
 
+    refused = []
     for component, component_cost in zip(components, costs):
         if component_cost <= disk_budget:
             continue
@@ -636,13 +640,24 @@ def _select_final_window(
                 break
             partial.append(member.entry)
             total += member.size
-        if len(partial) >= 2:
+        if len(partial) < 2:
+            continue
+        outputs = max(1, -(-total // TARGET_SIZE_BYTES))
+        if outputs < len(partial) or any(
+            _delete_debt_ratio(entry) >= threshold for entry in partial
+        ):
             candidates.append(
                 (total, len(partial), partial, f"final-partial {len(partial)} of {len(component)}")
             )
+        else:
+            refused.append(
+                f"a component of {len(component)} files ({component_cost >> 30} GB) exceeds "
+                f"the disk budget ({disk_budget >> 30} GB) and its {len(partial)} smallest "
+                f"would sort back into {outputs} files"
+            )
 
     if not candidates:
-        return None
+        return None, "; ".join(refused) or "no contiguous window within the disk budget needs work"
 
     _, _, chosen, reason = max(candidates, key=lambda candidate: candidate[:2])
     total = sum(entry_size(entry) for entry in chosen)
@@ -653,7 +668,7 @@ def _select_final_window(
         reason=reason,
         sort_column=sort_column,
         expected_outputs=max(1, -(-total // TARGET_SIZE_BYTES)),
-    )
+    ), reason
 
 
 def select_final_compaction_plan(
@@ -682,6 +697,11 @@ def select_final_compaction_plan(
         )
 
     plan: Optional[CompactionPlan] = None
+    detail = (
+        f"no file has a known extent on sort key {sort_column}"
+        if sort_column is not None and not key_ranges
+        else "no contiguous window within the disk budget needs work"
+    )
     if sort_column is None:
         selected = [
             entry
@@ -697,7 +717,7 @@ def select_final_compaction_plan(
             plan = _select_delete_debt(selected, None, threshold=delete_debt_threshold)
     elif key_ranges:
         try:
-            plan = _select_final_window(
+            plan, detail = _select_final_window(
                 key_ranges, sort_column, disk_budget, delete_debt_threshold
             )
         except TypeError:
@@ -707,10 +727,5 @@ def select_final_compaction_plan(
             )
 
     if plan is None:
-        detail = (
-            f"no file has a known extent on sort key {sort_column}"
-            if sort_column is not None and not key_ranges
-            else "no contiguous window within the disk budget needs work"
-        )
         return SelectionResult(SelectionOutcome.NOTHING_TO_DO, detail=detail)
     return SelectionResult(SelectionOutcome.PLANNED, plan=plan, detail=plan.reason)

@@ -4105,6 +4105,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
         from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
+        from opteryx.connectors.parquet_io.pool_reader import ScanFooters
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.pool_reader import range_conjuncts_exact
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -4300,11 +4301,13 @@ class _Compiler:
         # about which filesystem a scan has.
         filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
         absent = {}
+        footers = ScanFooters()
         rejection = native_scan_rejection(paths, names, kinds, file_sizes or None,
                                           filesystem=filesystem,
                                           footer_bytes_cache=scan_footer_bytes_cache(),
                                           absent=absent,
-                                          declared_shapes=self._declared_nested_shapes(scan, read_scs))
+                                          declared_shapes=self._declared_nested_shapes(scan, read_scs),
+                                          footers=footers)
         if rejection is not None:
             # R7b: the footer gate (native_scan_rejection) rejected the scan — a row
             # group whose types are not all eligible, or a remote path the filesystem
@@ -4432,6 +4435,7 @@ class _Compiler:
             http_tuning=resolve_http_tuning(_scan_vars, _scan_overrides),
             coalesce_tuning=resolve_coalesce_tuning(_scan_vars, _scan_overrides),
             coverage=coverage,
+            footers=footers,
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
         if absent:
@@ -4575,6 +4579,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
         from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
+        from opteryx.connectors.parquet_io.pool_reader import ScanFooters
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.expression import get_all_nodes_of_type
@@ -4683,10 +4688,12 @@ class _Compiler:
         filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
         # One gate over BOTH read-sets: every column either pass touches has to be
         # provably decodable, and schema evolution disqualifies the scan outright.
+        footers = ScanFooters()
         rejection = native_scan_rejection(paths, p1_names + p2_names, p1_kinds + p2_kinds,
                                           file_sizes or None, filesystem=filesystem,
                                           footer_bytes_cache=scan_footer_bytes_cache(),
-                                          declared_shapes=self._declared_nested_shapes(scan, list(p1_scs) + list(p2_scs)))
+                                          declared_shapes=self._declared_nested_shapes(scan, list(p1_scs) + list(p2_scs)),
+                                          footers=footers)
         if rejection is not None:
             self.scan_residual_reasons[scan.identity] = "footer_gate: " + rejection
             return None
@@ -4753,6 +4760,7 @@ class _Compiler:
                 coalesce_tuning=coalesce_tuning,
                 filesystem=filesystem,
                 footer_bytes_cache=scan_footer_bytes_cache(),
+                footers=footers,
             )
 
         p1_plan = _open(p1_names, p1_scs, p1_string_types, p1_decimals, p1_coerce, pruning)
@@ -5207,6 +5215,7 @@ class _Compiler:
         NativeScanPlan over the predicate columns and the predicate lowered to the
         latmat pass-1 C ABI. Refused loudly when it cannot run natively - the search
         never falls back to filtering its candidates afterwards."""
+        from opteryx.connectors.parquet_io.pool_reader import ScanFooters
         from opteryx.connectors.parquet_io.pool_reader import native_scan_rejection
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -5242,9 +5251,11 @@ class _Compiler:
         manifest = scan.manifest
         paths = manifest.get_file_paths()
         filesystem, _connector_type = resolve_scan_filesystem(scan.connector, paths)
+        footers = ScanFooters()
         rejection = native_scan_rejection(paths, names, kinds, None, filesystem=filesystem,
                                           footer_bytes_cache=scan_footer_bytes_cache(),
-                                          declared_shapes=self._declared_nested_shapes(scan, p1_scs))
+                                          declared_shapes=self._declared_nested_shapes(scan, p1_scs),
+                                          footers=footers)
         if rejection is not None:
             raise UnsupportedSyntaxError(f"{refusal}: {rejection}.")
         plan = open_native_scan_plan(
@@ -5255,6 +5266,7 @@ class _Compiler:
             logical_coerce=coerce, pool=None, filesystem=filesystem,
             declared_shapes=self._declared_nested_shapes(scan, p1_scs),
             footer_bytes_cache=scan_footer_bytes_cache(),
+            footers=footers,
         )
         self.footer_fetch_ns += plan.footer_fetch_ns
         resolver = Pass1PredResolver(
