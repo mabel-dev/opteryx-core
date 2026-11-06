@@ -530,16 +530,23 @@ ignored."""
 
 PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS: int = int(get("PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS", 48))
 """Minimum number of REMOTE fetch blocks a scan must have (after pruning)
-before `PARQUET_IO_FETCH_AHEAD` is armed; 0 = no minimum.
+before `PARQUET_IO_FETCH_AHEAD` is armed; 0 = no minimum. Blocks are counted
+in 256k-ROW UNITS: a fetch block of up to 262,144 kept rows is one, a longer
+one is ceil(rows / 262,144).
 
 A fetch block is the unit the fetch stage issues — the kept row groups of one
 block of one file, fetched as one coalesced batch
 (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md). The production sweep that put the
 optimum at 48-64 was made when a fetch unit was one 256k-row row group; counting
-blocks keeps that calibration on files written with 64k row groups in blocks of
-four (which have four times the row groups for the same data). On a row-major
-file every row group is its own block, so the count is unchanged there. Tune
-per session with `SET parquet_io_fetch_ahead_min_blocks`."""
+in that unit keeps the calibration on every layout: a block of four 64k row
+groups is one unit, a row-major 64k file counts one per row group, and a file
+whose blocks are LONGER than 256k rows — the per-column layout's narrow runs
+(docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 items 3-4, §4.6) or 64-row-group
+blocks — counts the work it carries instead of looking like a handful of
+blocks. Counted as plain blocks, a scan of a few long runs ran the coupled path
+with at most `workers` requests in flight (hits Q01 at blocks of 64: 0.53 s
+coupled, 0.31 s armed; §4.4). Tune per session with
+`SET parquet_io_fetch_ahead_min_blocks`."""
 
 PARQUET_FOOTER_CACHE_BYTES: int = int(get("PARQUET_FOOTER_CACHE_BYTES", 256 * 1024 * 1024))
 """Byte budget for the process-wide cache of PARSED parquet footers, which lives

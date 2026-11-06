@@ -95,18 +95,23 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
                                  size_t max_page_bytes,
                                  bint page_index,
                                  size_t row_groups_per_block,
-                                 bint statistics) except + nogil
+                                 bint statistics,
+                                 size_t narrow_chunk_bytes,
+                                 size_t narrow_run_blocks) except + nogil
 
     cdef cppclass StreamingParquetWriter:
         StreamingParquetWriter(int codec, int profile,
                                size_t max_page_bytes,
                                bint page_index,
                                size_t row_groups_per_block,
-                               bint statistics) except +
+                               bint statistics,
+                               size_t narrow_chunk_bytes,
+                               size_t narrow_run_blocks) except +
         void add_row_group(const vector[ColumnInput]& rg_cols,
                            size_t rg_rows) except + nogil
         vector[uint8_t] take_pending() except + nogil
         vector[uint8_t] finish() except + nogil
+        size_t held_narrow_bytes()
 
 
 cdef extern from "_parquet_patch.hpp" namespace "rugo_pq_write":

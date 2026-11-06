@@ -952,7 +952,8 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                   sorted_by=None, sorted_descending: bool = False,
                   profile: str = "fast", page_index: bool = True,
                   row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK,
-                  alp=False, statistics: bool = True) -> bytes:
+                  alp=False, statistics: bool = True,
+                  narrow_chunk_bytes: int = 0, narrow_run_blocks: int = 0) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
@@ -977,6 +978,23 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
         file tail after the last block, column-major over the whole file.
         The row group stays the unit of decode, statistics and pruning. See
         docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md.
+    narrow_chunk_bytes: 0 (default) places every column in blocks of
+        row_groups_per_block. > 0 gives the file a PER-COLUMN block size
+        (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 item 3): a column whose
+        first block's mean encoded chunk is at or below this many bytes is
+        NARROW and is placed as a long byte-adjacent run (every row group's
+        chunk in order) after the wide columns' blocks instead of inside each
+        block; wider columns keep blocks of row_groups_per_block. Decided once
+        per file from the first block. A reader projecting narrow columns
+        alone fetches a run as one block; a projection with a wide column
+        falls back to blocks of row_groups_per_block (infer_fetch_blocks
+        splits wherever any projected column is not adjacent). Writer memory:
+        the held narrow chunks, about narrow columns × row groups per run ×
+        this threshold, on top of the one block already held.
+    narrow_run_blocks: with narrow_chunk_bytes > 0, how many blocks share one
+        narrow run (a run then holds narrow_run_blocks × row_groups_per_block
+        row groups and its boundaries fall on block boundaries); 0 (default)
+        = one run per file, placed before the bloom tail.
     max_page_bytes: split each column chunk into multiple data pages once its
         estimated size exceeds this many bytes (default 0 = single page per
         chunk). Independent per column. Dictionary-encoded chunks split on the
@@ -1035,7 +1053,9 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                                  sorted_descending=sorted_descending,
                                  profile=profile, page_index=page_index,
                                  row_groups_per_block=row_groups_per_block,
-                                 alp=alp, statistics=statistics)
+                                 alp=alp, statistics=statistics,
+                                 narrow_chunk_bytes=narrow_chunk_bytes,
+                                 narrow_run_blocks=narrow_run_blocks)
 
 
 def write_parquet_fast(morsel, compression: str = "zstd",
@@ -1082,12 +1102,13 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
                               sorted_by=None, sorted_descending: bool = False,
                               profile: str = "fast", page_index: bool = True,
                               row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK,
-                              alp=False):
+                              alp=False, narrow_chunk_bytes: int = 0,
+                              narrow_run_blocks: int = 0):
     """Like write_parquet but also returns {col_index: (min, max)} bounds.
 
     The bounds span the whole file (every row group).
-    sorted_by / sorted_descending / profile / row_groups_per_block / alp: see
-    write_parquet.
+    sorted_by / sorted_descending / profile / row_groups_per_block / alp /
+    narrow_chunk_bytes / narrow_run_blocks: see write_parquet.
     """
     return _native.write_parquet_with_bounds(morsel, compression=compression,
                                              bloom_filters=bloom_filters,
@@ -1098,7 +1119,9 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
                                              sorted_descending=sorted_descending,
                                              profile=profile, page_index=page_index,
                                              row_groups_per_block=row_groups_per_block,
-                                             alp=alp)
+                                             alp=alp,
+                                             narrow_chunk_bytes=narrow_chunk_bytes,
+                                             narrow_run_blocks=narrow_run_blocks)
 
 
 def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
@@ -1106,7 +1129,8 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                         sorted_by=None, sorted_descending: bool = False,
                         profile: str = "fast", page_index: bool = True,
                         row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK,
-                        alp=False, statistics: bool = True):
+                        alp=False, statistics: bool = True,
+                        narrow_chunk_bytes: int = 0, narrow_run_blocks: int = 0):
     """Open a streaming, bounded-memory Parquet writer.
 
     Unlike write_parquet (whole morsel in, whole file out), this writes one row
@@ -1132,6 +1156,11 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
         row_groups_per_block: as write_parquet. The caller controls the
             row-group size by how much it passes per call
             (DEFAULT_ROWS_PER_ROW_GROUP is the measured best).
+        narrow_chunk_bytes / narrow_run_blocks: as write_parquet (the
+            per-column block size). The writer then also holds the narrow
+            columns' chunks until their run is placed — about narrow columns
+            × row groups per run × narrow_chunk_bytes; the writer's
+            `held_narrow_bytes` reports the exact figure.
 
     Returns a context manager:
 
@@ -1149,7 +1178,9 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                                        sorted_descending=sorted_descending,
                                        profile=profile, page_index=page_index,
                                        row_groups_per_block=row_groups_per_block,
-                                       alp=alp, statistics=statistics)
+                                       alp=alp, statistics=statistics,
+                                       narrow_chunk_bytes=narrow_chunk_bytes,
+                                       narrow_run_blocks=narrow_run_blocks)
 
 
 def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
@@ -1158,14 +1189,15 @@ def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                          sorted_by=None, sorted_descending: bool = False,
                          profile: str = "fast", page_index: bool = True,
                          row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK,
-                         alp=False, statistics: bool = True) -> int:
+                         alp=False, statistics: bool = True,
+                         narrow_chunk_bytes: int = 0, narrow_run_blocks: int = 0) -> int:
     """Stream an iterable of Morsels to a byte-chunk `sink` as one Parquet file.
 
     Thin wrapper over open_parquet_writer: one row group per yielded morsel,
     bounded memory. Empty morsels (no rows) are skipped. Returns the number of
     row groups written. See open_parquet_writer for the `sink` contract and
     write_parquet for sorted_by / sorted_descending / row_groups_per_block / alp /
-    statistics.
+    statistics / narrow_chunk_bytes / narrow_run_blocks.
     """
     return _native.write_parquet_stream(morsel_iter, sink, compression=compression,
                                         bloom_filters=bloom_filters,
@@ -1175,7 +1207,9 @@ def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                                         sorted_descending=sorted_descending,
                                         profile=profile, page_index=page_index,
                                         row_groups_per_block=row_groups_per_block,
-                                        alp=alp, statistics=statistics)
+                                        alp=alp, statistics=statistics,
+                                        narrow_chunk_bytes=narrow_chunk_bytes,
+                                        narrow_run_blocks=narrow_run_blocks)
 
 
 def patch_columns(source: bytes, drop=None, rename=None, add=None, retype=None) -> bytes:

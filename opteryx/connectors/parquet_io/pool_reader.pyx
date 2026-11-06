@@ -583,26 +583,60 @@ cdef int _validate_fetch_ahead(int remote_decode_workers, int fetch_ahead,
     return 0
 
 
-cdef int _count_remote_fetch_blocks(list work_items, list block_ids) except -1:
-    """How many FETCH BLOCKS of this scan are fetched over the wire.
+# The fetch-ahead gate's unit: the 256k-row fetch block the production sweep
+# that calibrated `PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS` was made on (one 256k-row
+# row group then; 4 × 64k row groups in one block since). A remote fetch block
+# counts as max(1, ceil(kept rows / this)) units — see _fetch_block_units.
+cdef int64_t _FETCH_AHEAD_GATE_UNIT_ROWS = 262144
+
+
+cdef int _fetch_block_units(dict rows_per_block) except -1:
+    """Gate units over the remote fetch blocks of a scan: `rows_per_block` maps
+    (path, block id) to the kept rows the block carries.
+
+    [D-1, ruled 2026-09-24] counted fetch blocks so that the production
+    calibration, made when a fetch unit was one 256k-row row group, carried over
+    to files written as 64k row groups in blocks of four. A block of four 64k
+    row groups is one unit here too, and a row-major 64k file still counts one
+    per row group — nothing moves on today's layout. What changes is a file
+    whose blocks are LONGER than the calibration unit: a per-column layout's
+    narrow run (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 items 3-4) or a
+    64-row-group block. Counted as one block each, a scan of a few long runs
+    looked tiny to the gate and ran coupled with ≤ workers requests in flight —
+    hits Q01 0.53 s coupled against 0.31 s armed at blocks of 64 (§4.4). Counted
+    in 256k-row units it is the same amount of work it always was, so the gate
+    keeps its calibration, its name and its default, and the knob still counts
+    blocks — of the size the calibration was made on."""
+    cdef int units = 0
+    cdef int64_t rows
+    for rows in rows_per_block.values():
+        if rows <= _FETCH_AHEAD_GATE_UNIT_ROWS:
+            units += 1
+        else:
+            units += <int>((rows + _FETCH_AHEAD_GATE_UNIT_ROWS - 1) // _FETCH_AHEAD_GATE_UNIT_ROWS)
+    return units
+
+
+cdef int _count_remote_fetch_blocks(list work_items, list block_ids, list rg_rows) except -1:
+    """How many FETCH BLOCKS of this scan are fetched over the wire, in the
+    gate's 256k-row units (_fetch_block_units).
 
     The fetch stage dispatches ONE task per remote fetch block (io_pipeline.hpp
     submit_block — the kept row groups of one block of one file, one coalesced
-    fetch), so this is the most concurrency the depth can ever use, and it is
-    what the gate is measured against [D-1, ruled 2026-09-24: blocks, so the
-    gate keeps the calibration made on 256k-row fetch units whatever the row-
-    group size]. Local items never enter the stage — they are mmap'd in decode
+    fetch); `rg_rows` is each work item's row-group row count, parallel to
+    `work_items`. Local items never enter the stage — they are mmap'd in decode
     — so they are not counted. The remote test is `_any_remote_path`'s,
     character for character, so the count and the arming condition can never
     disagree about what "remote" means."""
-    cdef set seen = set()
+    cdef dict rows_per_block = {}
     cdef Py_ssize_t i
-    cdef object p
+    cdef object p, key
     for i in range(len(work_items)):
         p = work_items[i][0]
         if p.startswith("gs://") or p.startswith("http://") or p.startswith("https://"):
-            seen.add((p, block_ids[i]))
-    return len(seen)
+            key = (p, block_ids[i])
+            rows_per_block[key] = rows_per_block.get(key, 0) + rg_rows[i]
+    return _fetch_block_units(rows_per_block)
 
 
 cdef int _count_remote_fetch_blocks_native(list work_items,
@@ -614,8 +648,8 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
     cdef vector[string] names, held
     cdef vector[int32_t] ids
     cdef dict per_file = {}
-    cdef set seen = set()
-    cdef object p
+    cdef dict rows_per_block = {}
+    cdef object p, key
     cdef string path_bytes_cpp
     cdef const FileStats* fsp
     cdef const RowGroupStats* rg0
@@ -626,9 +660,9 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
     for p, rg_idx in work_items:
         if not (p.startswith("gs://") or p.startswith("http://") or p.startswith("https://")):
             continue
+        path_bytes_cpp = p.encode('utf-8')
+        fsp = footer_map[0][path_bytes_cpp].get()
         if p not in per_file:
-            path_bytes_cpp = p.encode('utf-8')
-            fsp = footer_map[0][path_bytes_cpp].get()
             # Blocks are inferred over the columns the file HOLDS, exactly as the Source
             # assigns them (a schema-evolved file lacks some projected columns, and an
             # absent column has no chunk to be adjacent): the schema is per file, so
@@ -645,13 +679,15 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
                     held.push_back(names[k])
             ids = ParquetIOPipeline.infer_fetch_blocks(deref(fsp), held)
             per_file[p] = [ids[k] for k in range(ids.size())]
-        seen.add((p, per_file[p][rg_idx]))
-    return len(seen)
+        key = (p, per_file[p][rg_idx])
+        rows_per_block[key] = rows_per_block.get(key, 0) + fsp.row_groups[rg_idx].num_rows
+    return _fetch_block_units(rows_per_block)
 
 
 cdef int _gated_fetch_ahead(int fetch_ahead, int gate, int remote_blocks) except -1:
     """The depth this scan actually runs: the configured depth once the scan has
-    at least ``gate`` remote fetch blocks to fetch, otherwise 0 (coupled path).
+    at least ``gate`` remote fetch blocks to fetch — counted in the gate's
+    256k-row units (_fetch_block_units) — otherwise 0 (coupled path).
 
     The depth is a THREAD COUNT and `set_fetch_ahead` builds that pool eagerly,
     while the auto window widens to cover it and sizes the IO arena from the
@@ -3276,7 +3312,8 @@ cpdef IpcRowGroupSource open_ipc_source(
     _validate_fetch_ahead(remote_decode_workers, fetch_ahead, in_flight_limit_override)
     fetch_ahead = _gated_fetch_ahead(
         fetch_ahead, fetch_ahead_min_blocks,
-        _count_remote_fetch_blocks(work_items, src.block_ids),
+        _count_remote_fetch_blocks(work_items, src.block_ids,
+                                   [src._rg_num_rows(p, rg) for p, rg in work_items]),
     )
     in_flight_limit = _submission_window(
         decode_workers, remote_decode_workers, fetch_ahead, in_flight_limit_override)
@@ -3405,7 +3442,8 @@ cpdef IpcRowGroupSource open_pass2_source(
     _validate_fetch_ahead(remote_decode_workers, fetch_ahead, in_flight_limit_override)
     fetch_ahead = _gated_fetch_ahead(
         fetch_ahead, fetch_ahead_min_blocks,
-        _count_remote_fetch_blocks(wi, src.block_ids),
+        _count_remote_fetch_blocks(wi, src.block_ids,
+                                   [src._rg_num_rows(p, rg) for p, rg in wi]),
     )
     src.in_flight_limit = max(1, _submission_window(
         decode_workers, remote_decode_workers, fetch_ahead, in_flight_limit_override))
