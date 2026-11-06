@@ -568,7 +568,8 @@ decode. One block size per file cannot have both.
    does not see: a block is fetched whole before any of its row groups
    decodes, so block BYTES set the pipeline's granularity against the
    4-worker decode pool, while block COUNT sets the GETs.
-3. **Proposed — a per-COLUMN block size, chosen by chunk bytes.** The two
+3. **Proposed — a per-COLUMN block size, chosen by chunk bytes.** *(Superseded 2026-11-06: built and measured in §4.6-§4.7; once the
+   submission window counts bytes (§4.7.2) it does not pay, and it stays off.)* The two
    effects in (2) pull on different columns of the same file: a narrow
    column's cost is round trips (hits Q01: 1 MiB over 339 GETs), a wide
    column's is bytes (Q22: 1.98 GiB over 1,185 GETs, 1.7 MB each). So keep
@@ -1076,3 +1077,136 @@ is what catches it, and WindowName (0.3 KiB a chunk in the first block, 42 KiB
 mean over the file). The 364 MiB OriginalURL run of §4.6 item 6 is gone, and so
 is 40% of the held memory; the 256 MiB budget costs one extra run boundary
 per file.
+
+#### 4.7.2 Submission window in bytes (§4.6.2 item 5)
+
+The submission window in `NativeParquetScanSource` counted ROW GROUPS
+(`max(workers, fetch_ahead) + 2`), so a fetch block of 16 or 64 row groups was
+admitted one at a time and fetch-ahead serialised (§4.4's b64 loss, §4.6.2
+item 5). The window now has a second, byte side:
+
+- **Rule.** A block is admitted while EITHER the row-group window OR the byte
+  window has room. The byte window is the arena (`dyn_pool_size − est_rg`,
+  itself floored at 256 MiB) and a block costs 2 × its projected
+  `total_uncompressed_size` (fetched bytes plus decoded output), released when
+  its results are received. The row-group side is unchanged, so no shape
+  admits less than before.
+- **Scope.** Remote scans only; `PARQUET_IO_BYTE_WINDOW` (default true) turns
+  it off. Telemetry: `bytes_admitted`, `bytes_released`,
+  `bytes_in_flight_peak`.
+- **Bloom and Top-N.** The first build broke remote bloom skipping
+  (`test_remote_bloom_round`: 0 row groups skipped): the wider window had
+  admitted every block before the bloom round landed. The byte side is now off
+  while a bloom round is pending or a Top-N boundary is armed, so walk-time
+  skips see the same window as before (commit 93b21ef7).
+
+Hadro (30 ± 15 ms, 1.8 Gb/s per stream, 7 Gb/s total; 3 rounds; sum of
+per-query minimums; `-rgwin` = `PARQUET_IO_BYTE_WINDOW=false`):
+
+| hits arm | Σ min wall | vs b4-rgwin | range GETs | GiB | in-flight (median) |
+|---|---|---|---|---|---|
+| b4-rgwin (today) | 36.78 s | — | 16,980 | 13.84 | 21 |
+| b4 | 25.30 s | −31.2% | 16,948 | 13.83 | 60 |
+| pc32r16-rgwin | 38.04 s | +3.4% | 19,187 | 13.84 | 27 |
+| pc32r16 | 25.48 s | −30.7% | 19,188 | 13.84 | 60 |
+| pc32 | 26.18 s | −28.8% | 19,799 | 13.84 | 60 |
+| pc32b256 | 26.20 s | −28.8% | 19,681 | 13.83 | 60 |
+
+| hits query | b4-rgwin | b4 | pc32r16-rgwin | pc32r16 | pc32 |
+|---|---|---|---|---|---|
+| Q01 (narrow) | 0.67 s / 339 GETs | 0.29 s / 339 | 0.55 s / 25 | 0.11 s / 25 | 0.09 s / 2 |
+| Q04 (wide scan) | 1.07 s | 0.44 s | 1.06 s | 0.44 s | 0.45 s |
+| Q20 (wide scan) | 1.71 s | 1.35 s | 1.72 s | 1.34 s | 1.35 s |
+| Q23 (latmat `SELECT *`) | 0.63 s / 238 | 0.63 s / 226 | 0.94 s / 395 | 0.95 s / 401 | 1.45 s / 663 |
+
+| pypi arm | Σ min wall | vs b4-rgwin | range GETs | P1 | P4 | P8 |
+|---|---|---|---|---|---|---|
+| b4-rgwin (today) | 3.57 s | — | 1,347 | 0.49 s | 0.11 s | 0.10 s |
+| b4 | 1.89 s | −47.0% | 1,347 | 0.20 s | 0.10 s | 0.10 s |
+| pc64 | 1.90 s | −46.9% | 92 | 0.14 s | 0.27 s | 0.21 s |
+| pc32 | 1.96 s | −45.2% | 417 | 0.12 s | 0.29 s | 0.18 s |
+
+The phase's bar is met: pc32r16's Q01 is 0.107-0.108 s across rounds, inside
+pc32's own round-to-round spread (0.094-0.110 s); short runs now pipeline.
+Bytes read are equal in every arm. Eight hits queries (Q24, Q30-32, Q38-41)
+return different rows round to round within EVERY arm, the unchanged baseline
+included: ties under `ORDER BY … LIMIT`, not the change.
+
+VM (`worker-n4a-test`, real GCS, the production image with this branch's
+wheel layered on: manylinux aarch64, LTO, built from 30a3cf18 + the working
+tree with the bloom/Top-N fix and §4.7.3). Stopped on request after round 1
+of the b4 arms and round 0 of the others, so the pc arms are one round:
+
+| hits arm | Σ min wall | vs b4-rgwin | range GETs | in-flight (median) | Q01 | Q04 | Q23 |
+|---|---|---|---|---|---|---|---|
+| b4-rgwin (today) | 41.63 s | — | 17,078 | 17 | 0.48 s | 0.88 s | 0.55 s |
+| b4 | 37.33 s | −10.3% | 16,947 | 34 | 0.28 s | 0.55 s | 0.60 s |
+| pc32r16-rgwin | 42.91 s | +3.1% | 19,404 | 20 | 0.38 s | 0.86 s | 0.63 s |
+| pc32r16 | 38.21 s | −8.2% | 19,171 | 32 | 0.12 s | 0.56 s | 0.75 s |
+| pc32 | 40.38 s | −3.0% | 19,863 | 33 | 0.11 s | 0.86 s | 1.12 s |
+
+GCS gives a third of hadro's gain, in the same order: the byte window on
+today's files is the fastest arm, and both per-column layouts are slower than
+it (pc32r16 +2.4%, pc32 +8.2%) for 13-16% more GETs. pypi was not reached.
+
+**Decision (2026-11-06).** The byte window, not the layout, is the win. On
+today's files it is −10% on hits on GCS (−31% on hadro, −47% on pypi on
+hadro), with no rewrite and no extra GETs; the rgwin arms show the row-group
+window was what held b4 back. With it on, the per-column layouts gain only on
+narrow-only queries (Q01, P1-P2) and lose on `SELECT *` latmat (Q23) and on
+pypi's point lookups (P4, P8 roughly double), net slower than b4 on GCS. The
+§4.6 case for the layout rested on a window that no longer exists. So:
+
+1. The byte window ships on its own, on by default
+   (`PARQUET_IO_BYTE_WINDOW`), split out of this branch.
+2. The per-column layout stays OFF: `PARQUET_WRITE_NARROW_CHUNK_BYTES`
+   stays 0 and there is no fleet rollout (phase 4 dropped). The writer option,
+   sink wiring, footer stamp and compaction rule D stay in tree, inert at 0,
+   for a workload where narrow-only scans dominate.
+
+#### 4.7.3 Sink wiring and compaction (no default change)
+
+- **Knobs** (`opteryx/config.py`): `PARQUET_WRITE_NARROW_CHUNK_BYTES` (default
+  0 = off; the ruled value is 32768) and
+  `PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES` (default 256 MiB, read only when
+  the layout is on). `narrow_write_options()`
+  (`opteryx/connectors/parquet_io/parquet_writer.py`) is the one place they
+  become writer options: `LocalDataFileWriter` passes them to
+  `open_parquet_writer`, and the catalog connector
+  (`OpteryxConnector.open_data_file_writer`) adds them to a COPY of the
+  catalog's `WRITE_PARQUET_OPTIONS` / `COMPACTION_WRITE_PARQUET_OPTIONS`, which
+  opteryx-catalog hands to `open_parquet_writer` verbatim — so no catalog change
+  is needed, and the local store and the catalog write the same layout.
+- **Every write path takes it.** INSERT, CTAS and MERGE stream through
+  `DataFileStream` (write profile "fast"); OPTIMIZE's `CompactionCommit` sink is
+  a `DataFileStream` with profile "storage". Both open their files through
+  `connector.open_data_file_writer`, so a compaction rewrite writes the layout.
+- **Footer stamp.** With the layout on, rugo writes `rugo.narrow_chunk_bytes =
+  <threshold>` into the footer's key-value metadata — whether or not any column
+  turned out narrow — and nothing when it is off (default files byte-identical).
+  Deriving "has the layout" from chunk adjacency instead cannot tell a file with
+  no narrow column from a file written with the layout off, and would rewrite
+  the first on every pass.
+- **Compaction rule D, layout debt** (`opteryx/planner/compaction/selection.py`).
+  With the knob on, `CompactionPlanningStrategy` reads the stamp off the
+  relation's parquet footers in ONE batched acquisition
+  (`fetch_footer_key_values_many`, beside `fetch_column_stats_many`; fails open
+  — an unreadable footer leaves every file unflagged and says so) and marks a
+  file `layout_stale` when its stamp is not the current threshold. Regular
+  OPTIMIZE tries rule D last, after A-C: one stale file per pass, rewritten in
+  place (single-file brute combine, so its key range, size and order are kept),
+  the largest that fits the pass budget first; a single-file relation qualifies.
+  `OPTIMIZE … FINAL` counts a stale file as needing work, so a window of
+  already-compacted files is rewritten up to the disk budget in one pass
+  (without a sort key: every stale file). With the knob off nothing is read and
+  nothing changes. A threshold change makes every file stale again.
+- **Tests**: `tests/planner/test_compaction_layout_debt.py` (rule order, one per
+  pass, single-file, FINAL windows, nothing stale = nothing selected),
+  `tests/storage/test_narrow_layout_sink.py` (local store end to end: off = no
+  stamp and OPTIMIZE a no-op; on = OPTIMIZE rewrites the file with the stamp,
+  data unchanged, a second OPTIMIZE has nothing to do; a threshold change
+  re-stales it; an INSERT with the knob on writes the stamp itself), and the
+  stamp in `tests/rugo/test_per_column_layout.py`.
+- **Not done** (phase 4 dropped, see §4.7.2's decision): turning the knob on
+  anywhere. A migration of a large relation by regular
+  OPTIMIZE is one file per pass; FINAL moves a disk budget's worth per pass.
