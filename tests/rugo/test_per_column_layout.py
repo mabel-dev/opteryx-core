@@ -1,7 +1,7 @@
 """The per-column block size (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 item 3).
 
 `narrow_chunk_bytes` > 0 gives a rugo-written file two classes of column,
-decided once from the FIRST block's mean encoded chunk bytes: WIDE columns keep
+decided from the FIRST block's LARGEST encoded chunk: WIDE columns keep
 the grouped layout (column-major in blocks of `row_groups_per_block`, schema
 order); NARROW columns are held back and placed as one byte-adjacent RUN per
 column — every row group's chunk in order — after the wide blocks, either one
@@ -13,8 +13,13 @@ fetch blocks from adjacency alone (`infer_fetch_blocks`).
 Pinned here, with pyarrow as the metadata oracle:
   * the byte order: wide blocks, then the narrow runs (schema order, row-group
     order inside each), then the blooms; with N > 0 a run after every N blocks;
-  * the class is decided from the first block and kept — a column whose chunks
-    grow later in the file stays narrow;
+  * the class is decided from the first block's largest chunk (not its mean);
+    a narrow column whose later chunk exceeds 4 x the threshold is DEMOTED to
+    wide, its run so far placed at that block boundary;
+  * `narrow_held_budget_bytes` closes every run at a block boundary when the
+    held chunks would pass it — the same bytes as a fixed run length when the
+    budget falls on the same boundary — and the peak stays within the budget
+    plus one block;
   * a narrow-only projection is adjacent across the whole run (one fetch
     block under the reader's rule), a projection with a wide column breaks at
     every block boundary (blocks of G) — the rule reproduced here, the reader
@@ -49,11 +54,12 @@ NAMES = [b"a", b"s", b"lo", b"flag", b"f", b"grow"]
 NARROW = {"lo", "flag", "grow"}
 
 
-def _morsel(n, seed=7):
+def _morsel(n, seed=7, grow=False):
     """Uncompressed chunk sizes at R rows: a 8 KB, s ~16 KB, f 8 KB (wide);
-    lo (3 values, dictionary) and flag (bool) a few hundred bytes (narrow);
-    grow is one value for the first block's rows and random strings after —
-    tiny in block 0, ~16 KB per chunk later."""
+    lo (3 values, dictionary) and flag (bool) a few hundred bytes (narrow).
+    `grow` is one value throughout (narrow) unless grow=True, when it is one
+    value for the first block's rows and random strings after — tiny in block
+    0, ~20 KB per chunk later (the sorted-data case that demotes)."""
     rng = random.Random(seed)
     return Morsel.from_vectors(
         NAMES,
@@ -63,7 +69,7 @@ def _morsel(n, seed=7):
             vector_from_sequence([("x", "y", "z")[i % 3] for i in range(n)], DrakenType.VARCHAR),
             vector_from_sequence([i % 7 == 0 for i in range(n)], DrakenType.BOOL),
             vector_from_sequence([i * 0.25 for i in range(n)], DrakenType.FLOAT64),
-            vector_from_sequence(["same" if i < G * R else f"{rng.randrange(10**12):012d}-{i}"
+            vector_from_sequence(["same" if (not grow or i < G * R) else f"{rng.randrange(10**12):012d}-{i}"
                                   for i in range(n)], DrakenType.VARCHAR),
         ],
     )
@@ -95,10 +101,10 @@ def _names(data):
 
 
 def _classes(data, threshold=T):
-    """The writer's rule, from the footer: narrow = first block's mean chunk <= threshold."""
+    """The writer's rule, from the footer: narrow = first block's largest chunk <= threshold."""
     ch = _chunks(data)
     first = ch[:G]
-    return {name: (sum(e - s for s, e in (row[c] for row in first)) + len(first) - 1) // len(first) <= threshold
+    return {name: max(e - s for s, e in (row[c] for row in first)) <= threshold
             for c, name in enumerate(_names(data))}
 
 
@@ -167,15 +173,96 @@ def test_a_run_every_n_blocks(n_rg, run_blocks):
     _assert_layout(data, n_rg, run_blocks=run_blocks)
 
 
-def test_the_class_is_decided_from_the_first_block_and_kept():
-    """`grow` is one value for block 0 and ~16 KB a chunk after: it is narrow for
-    the whole file, and its later chunks exceed the threshold many times over."""
-    data = _write(_morsel(12 * R), narrow_chunk_bytes=T)
+def test_a_column_that_grows_is_demoted_at_the_block_boundary():
+    """`grow` is one value for block 0 and ~20 KB a chunk after: narrow on the
+    first block, demoted when block 1 shows a chunk over 4 x T. Its run so far
+    (row groups 0-3) is placed at the block-1 boundary, before block 1's wide
+    chunks, and from block 1 on it is placed with the wide columns in schema
+    order. The other narrow columns keep their whole-file runs."""
+    n_rg = 12
+    data = _write(_morsel(n_rg * R, grow=True), narrow_chunk_bytes=T)
     ch = _chunks(data)
-    g = _names(data).index("grow")
-    assert all(e - s <= T for s, e in (ch[rg][g] for rg in range(G)))
-    assert all(e - s > 4 * T for s, e in (ch[rg][g] for rg in range(G, 12)))
-    _assert_layout(data, 12, run_blocks=0)
+    names = _names(data)
+    c = {n: names.index(n) for n in names}
+    assert all(e - s <= T for s, e in (ch[rg][c["grow"]] for rg in range(G)))
+    assert all(e - s > 4 * T for s, e in (ch[rg][c["grow"]] for rg in range(G, n_rg)))
+    wide_after = [c["a"], c["s"], c["f"], c["grow"]]   # schema order
+    order = [(rg, col) for col in (c["a"], c["s"], c["f"]) for rg in range(0, 4)]
+    order += [(rg, c["grow"]) for rg in range(0, 4)]              # the demoted run
+    for block in ([4, 5, 6, 7], [8, 9, 10, 11]):
+        order += [(rg, col) for col in wide_after for rg in block]
+    order += [(rg, c["lo"]) for rg in range(n_rg)] + [(rg, c["flag"]) for rg in range(n_rg)]
+    cursor = 4
+    for rg, col in order:
+        assert ch[rg][col][0] == cursor, (rg, names[col], ch[rg][col][0], cursor)
+        cursor = ch[rg][col][1]
+    # What the reader infers: the demoted column is a run, then blocks of four.
+    assert _infer_blocks(ch, [c["grow"]]) == 3
+    assert _infer_blocks(ch, [c["lo"]]) == 1
+    assert _infer_blocks(ch, [c["lo"], c["grow"]]) == 3
+    # The streaming writer reports it, and writes the same bytes.
+    m = _morsel(n_rg * R, grow=True)
+    chunks = []
+    with rp.open_parquet_writer(chunks.append, compression="none", narrow_chunk_bytes=T) as w:
+        for rg in range(n_rg):
+            w.write_row_group(m.slice(rg * R, R))
+        assert w.narrow_demoted_columns == 1
+    assert b"".join(chunks) == data
+    assert pq.read_table(io.BytesIO(data)).equals(m.to_arrow())
+
+
+def test_a_column_is_classified_by_its_largest_first_block_chunk():
+    """`spike` is random strings for row group 0 and one value after: its first
+    block MEAN is under the threshold, its largest chunk is not — wide, placed
+    in blocks of four (rg 3 and rg 4 not adjacent)."""
+    import random as _r
+
+    rng = _r.Random(1)
+    n = 8 * R
+    m = Morsel.from_vectors(
+        [b"a", b"spike"],
+        [vector_from_sequence(list(range(n)), DrakenType.INT64),
+         vector_from_sequence([f"{rng.randrange(10**12):012d}-{i}" if i < R else "same"
+                               for i in range(n)], DrakenType.VARCHAR)])
+    big = 6 * 1024
+    data = _write(m, narrow_chunk_bytes=big)
+    ch = _chunks(data)
+    sizes = [e - s for s, e in (ch[rg][1] for rg in range(G))]
+    assert max(sizes) > big and sum(sizes) / len(sizes) <= big, sizes
+    assert ch[4][1][0] != ch[3][1][1], "spike must be wide: blocks of four, not a run"
+    assert _infer_blocks(ch, [1]) == 2
+
+
+@pytest.mark.parametrize("n_rg", [12, 16])
+def test_the_held_budget_closes_runs_at_block_boundaries(n_rg):
+    """A budget of 2.5 blocks of narrow chunks closes every run before the block
+    that would take the held bytes past it — here every two blocks, the same
+    bytes a fixed run of two blocks writes — and the peak held stays within the
+    budget plus one block."""
+    m = _morsel(n_rg * R)
+    whole = _write(m, narrow_chunk_bytes=T)
+    ch = _chunks(whole)
+    narrow_idx = [c for c, n in enumerate(_names(whole)) if n in NARROW]
+    per_block = sum(ch[rg][c][1] - ch[rg][c][0] for rg in range(G) for c in narrow_idx)
+    budget = int(per_block * 2.5)
+    data = _write(m, narrow_chunk_bytes=T, narrow_held_budget_bytes=budget)
+    assert data == _write(m, narrow_chunk_bytes=T, narrow_run_blocks=2)
+    _assert_layout(data, n_rg, run_blocks=2)
+    lo = _names(data).index("lo")
+    runs = -(-n_rg // (2 * G))   # a run per two blocks, the last may be partial
+    assert _infer_blocks(_chunks(data), [lo]) == runs
+    chunks = []
+    with rp.open_parquet_writer(chunks.append, compression="none", narrow_chunk_bytes=T,
+                                narrow_held_budget_bytes=budget) as w:
+        for rg in range(n_rg):
+            w.write_row_group(m.slice(rg * R, R))
+        assert w.peak_held_narrow_bytes == 2 * per_block
+        assert w.peak_held_narrow_bytes <= budget + per_block
+        assert w.narrow_budget_closes == runs - 1
+    assert b"".join(chunks) == data
+    # A budget under one block's narrow chunks degrades to a run per block.
+    tiny = _write(m, narrow_chunk_bytes=T, narrow_held_budget_bytes=1)
+    assert tiny == _write(m, narrow_chunk_bytes=T, narrow_run_blocks=1)
 
 
 def test_every_column_narrow_is_a_whole_file_column_major_layout():
@@ -190,8 +277,16 @@ def test_every_column_narrow_is_a_whole_file_column_major_layout():
 
 
 def test_threshold_zero_is_the_grouped_layout_byte_for_byte():
-    m = _morsel(10 * R)
-    assert _write(m) == _write(m, narrow_chunk_bytes=0) == _write(m, narrow_chunk_bytes=0, narrow_run_blocks=3)
+    m = _morsel(10 * R, grow=True)
+    assert (_write(m) == _write(m, narrow_chunk_bytes=0)
+            == _write(m, narrow_chunk_bytes=0, narrow_run_blocks=3)
+            == _write(m, narrow_chunk_bytes=0, narrow_held_budget_bytes=1))
+    chunks = []
+    with rp.open_parquet_writer(chunks.append, compression="none", narrow_held_budget_bytes=1) as w:
+        for rg in range(10):
+            w.write_row_group(m.slice(rg * R, R))
+        assert w.peak_held_narrow_bytes == w.narrow_demoted_columns == w.narrow_budget_closes == 0
+    assert b"".join(chunks) == _write(m)
 
 
 # ── what the reader will infer ────────────────────────────────────────────────
@@ -290,6 +385,8 @@ def test_options_are_validated():
         rp.write_parquet(m, narrow_chunk_bytes=T, narrow_run_blocks=-1)
     with pytest.raises(ValueError, match="narrow_chunk_bytes"):
         rp.open_parquet_writer(lambda b: None, narrow_chunk_bytes=-1)
+    with pytest.raises(ValueError, match="narrow_held_budget_bytes"):
+        rp.write_parquet(m, narrow_chunk_bytes=T, narrow_held_budget_bytes=-1)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -3315,57 +3315,69 @@ inline void write_block(std::vector<uint8_t> &out, int64_t base_offset,
 }
 
 // PER-COLUMN block size (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 item 3,
-// measured in §4.6). Off by default (chunk_bytes == 0): every column is placed
-// by write_block. On, a file has two classes of column, decided ONCE from the
-// first block and kept for the whole file:
+// measured in §4.6, hardened in §4.7). Off by default (chunk_bytes == 0): every
+// column is placed by write_block. On, a column is one of two classes:
 //
-//   WIDE   — mean encoded chunk bytes over the first block's row groups above
-//            `chunk_bytes`. Placed exactly as write_block places them: column-
-//            major in blocks of G, wide columns in schema order, so a reader's
-//            fetch block over a wide column stays a block of G and the decode
-//            pipeline keeps the granularity §4.4 showed it needs.
-//   NARROW — at or below the threshold. Their chunks are NOT placed with the
-//            block; they are held and placed later as one byte-adjacent RUN per
-//            column, in row-group order, narrow columns in schema order:
+//   WIDE   — placed exactly as write_block places it: column-major in blocks of
+//            G, wide columns in schema order, so a reader's fetch block over a
+//            wide column stays a block of G and the decode pipeline keeps the
+//            granularity §4.4 showed it needs.
+//   NARROW — its chunks are NOT placed with the block; they are held and placed
+//            later as one byte-adjacent RUN per column, in row-group order,
+//            narrow columns in schema order:
 //
 //     [wide blk1][wide blk2]..[wide blkN][c_a rg1..rgK][c_b rg1..rgK].. [blooms]
 //
-//            `run_blocks` N > 0 closes a run every N blocks (K = N × G row
-//            groups), so run boundaries fall on block boundaries and nest; 0
-//            holds every narrow chunk to the end of the file and places one run
-//            per column before the bloom tail.
+// Classification, decided from the FIRST block: a column is narrow when its
+// LARGEST encoded chunk in that block is at or below `chunk_bytes` (the max,
+// not the mean: §4.6 item 6 — one empty row group must not average a wide
+// column under the threshold).
+//
+// Demotion on growth: a narrow column whose chunk in a later block exceeds
+// `chunk_bytes × kDemoteFactor` is demoted to WIDE for the rest of the file. Its
+// held run is placed at that block boundary (before the block), and from that
+// block on its chunks go with the wide ones. Data sorted by one column can start
+// a file with a near-empty column that is wide everywhere else (hits OriginalURL:
+// 27 KiB a chunk in block 0, 379 KiB over the file, a 364 MiB run undemoted).
+// A demoted column's run sits earlier in the file than the remaining narrow
+// runs; the reader needs only adjacency within a run, and every chunk is located
+// by its own footer offsets.
+//
+// When runs close: every `run_blocks` blocks when that is > 0; before a block
+// whose narrow chunks would take the held bytes past `held_budget` when that is
+// > 0 (all runs close together, at the block boundary, and new ones start with
+// the block); and once at the end, before the bloom tail. So with a budget and
+// run_blocks 0, runs are whole-file when memory allows and degrade to shorter
+// runs when it does not. Run boundaries always fall on block boundaries.
 //
 // Why the reader needs no change: ParquetIOPipeline::infer_fetch_blocks joins
 // row group k+1 to k's fetch block only when EVERY projected column's chunk is
-// byte-adjacent to its predecessor. A projection of narrow columns alone
-// therefore reads a run as ONE fetch block (one coalesced batch of GETs for K
-// row groups); a projection that includes a wide column falls back to blocks of
-// G, because the wide column's chunks break adjacency at every block boundary,
-// and the narrow columns' chunks for those G row groups are fetched from the run
-// as extra ranges — what a narrow column already costs in a wide projection. Every
-// chunk is still located by its own footer offsets, so any reader reads the
-// file; RowGroup.file_offset / total_compressed_size stay honest in the sense
-// write_parquet_footer documents (they bracket more than the row group).
+// byte-adjacent to its predecessor. A projection of narrow columns alone reads a
+// run as ONE fetch block; a projection that includes a wide column falls back to
+// blocks of G, and the narrow columns' chunks for those G row groups are fetched
+// from their runs as extra ranges (§4.6.2 item 3). A demoted column reads as a
+// run up to its demotion and as blocks of G after.
 //
-// Memory: the held chunks. With chunk sizes at the threshold that is
-//
-//     narrow columns × row groups per run × chunk_bytes
-//
-// (run_blocks 0: row groups per run = the file's row-group count), on top of
-// the one block the writer already holds. Chunks are classified from the first
-// block's MEAN, so a column whose chunks grow later in the file can exceed the
-// threshold; `held_bytes` is the exact figure. For the fleet's 4 GiB
-// uncompressed sink files this is tens of MB (hits at 32 KiB: 70 narrow
-// columns × 816 row groups, 194 MB actual, 1.8 GB at the bound; pypi at 64 KiB:
-// all 19 columns × 188, 54 MB actual).
+// Memory: the held chunks — `held_bytes`, peak `peak_held_bytes`. Without a
+// budget that is narrow columns × row groups per run × up to kDemoteFactor ×
+// chunk_bytes; with one, at most the budget plus one block's narrow chunks (a
+// single block over the budget is held whole and placed at the next boundary).
 struct NarrowColumnRuns {
+  // A narrow chunk this many times over the threshold demotes its column.
+  static constexpr size_t kDemoteFactor = 4;
+
   size_t chunk_bytes = 0;   // 0 = off
-  size_t run_blocks = 0;    // blocks per run; 0 = one run per file
+  size_t run_blocks = 0;    // blocks per run; 0 = no fixed length
+  size_t held_budget = 0;   // bytes; 0 = no budget
   bool classified = false;
   std::vector<uint8_t> narrow;                                   // per column
   std::vector<std::vector<std::pair<size_t, EncodedChunk>>> held; // [col] -> (rg, chunk)
+  std::vector<size_t> held_col_bytes;                            // per column
   size_t blocks_in_run = 0;
-  size_t held_bytes = 0;    // bytes of held narrow chunks right now
+  size_t held_bytes = 0;      // bytes of held narrow chunks right now
+  size_t peak_held_bytes = 0; // the most ever held at once (after a block is held)
+  size_t demoted = 0;         // columns demoted to wide so far
+  size_t budget_closes = 0;   // runs closed early by the budget
 
   bool enabled() const { return chunk_bytes > 0; }
 
@@ -3375,56 +3387,92 @@ struct NarrowColumnRuns {
     const size_t ncols = block[0].chunks.size();
     narrow.assign(ncols, 0);
     held.assign(ncols, {});
+    held_col_bytes.assign(ncols, 0);
     for (size_t i = 0; i < ncols; i++) {
-      size_t total = 0;
-      for (const EncodedRowGroup &erg : block) total += erg.chunks[i].bytes.size();
-      // Mean, rounded up: a column is narrow when its chunks average at or
-      // below the threshold over the block.
-      const size_t mean = (total + block.size() - 1) / block.size();
-      narrow[i] = mean <= chunk_bytes ? 1 : 0;
+      size_t largest = 0;
+      for (const EncodedRowGroup &erg : block)
+        largest = std::max(largest, erg.chunks[i].bytes.size());
+      narrow[i] = largest <= chunk_bytes ? 1 : 0;
     }
     classified = true;
   }
 
-  // Place one block: wide columns as write_block would (column-major, schema
-  // order), narrow columns' chunks moved to `held`. `first_rg` is the file
-  // index of block[0]'s row group (held chunks are placed by it later).
+  // Place one block. In order: demote narrow columns this block shows to have
+  // grown (their runs placed now); close every run if this block's narrow chunks
+  // would take the held bytes past the budget; then wide columns as write_block
+  // would (column-major, schema order) and narrow columns' chunks moved to
+  // `held`. `first_rg` is the file index of block[0]'s row group; `rg_meta` is
+  // indexed by file row-group index and holds every PREVIOUS block's metadata
+  // (the callers move a block's metadata out right after this returns).
   void place_block(std::vector<uint8_t> &out, int64_t base_offset,
-                   std::vector<EncodedRowGroup> &block, size_t first_rg) {
+                   std::vector<EncodedRowGroup> &block, size_t first_rg,
+                   std::vector<RGMeta> &rg_meta) {
     if (block.empty()) return;
+    const bool first = !classified;
     classify(block);
     const size_t ncols = block[0].chunks.size();
     if (narrow.size() != ncols)
       throw std::logic_error("NarrowColumnRuns: blocks disagree on the column count");
+    if (!first) {
+      const size_t demote_above = chunk_bytes * kDemoteFactor;
+      for (size_t i = 0; i < ncols; i++) {
+        if (!narrow[i]) continue;
+        bool grew = false;
+        for (const EncodedRowGroup &erg : block)
+          if (erg.chunks[i].bytes.size() > demote_above) { grew = true; break; }
+        if (!grew) continue;
+        place_column_run(out, base_offset, rg_meta, i);
+        narrow[i] = 0;
+        demoted++;
+      }
+    }
+    if (held_budget > 0 && held_bytes > 0) {
+      size_t incoming = 0;
+      for (size_t i = 0; i < ncols; i++)
+        if (narrow[i])
+          for (const EncodedRowGroup &erg : block) incoming += erg.chunks[i].bytes.size();
+      if (held_bytes + incoming > held_budget) {
+        place_runs(out, base_offset, rg_meta);
+        budget_closes++;
+      }
+    }
     for (size_t i = 0; i < ncols; i++) {
       if (narrow[i]) {
         for (size_t k = 0; k < block.size(); k++) {
-          held_bytes += block[k].chunks[i].bytes.size();
+          const size_t n = block[k].chunks[i].bytes.size();
+          held_bytes += n;
+          held_col_bytes[i] += n;
           held[i].emplace_back(first_rg + k, std::move(block[k].chunks[i]));
         }
       } else {
         for (EncodedRowGroup &erg : block) place_chunk(out, base_offset, erg, i);
       }
     }
+    peak_held_bytes = std::max(peak_held_bytes, held_bytes);
     blocks_in_run++;
   }
 
   bool run_due() const { return run_blocks > 0 && blocks_in_run >= run_blocks; }
 
+  // Place column i's held chunks, in row-group order, byte-adjacent.
+  void place_column_run(std::vector<uint8_t> &out, int64_t base_offset,
+                        std::vector<RGMeta> &rg_meta, size_t i) {
+    for (auto &entry : held[i]) {
+      if (entry.first >= rg_meta.size())
+        throw std::logic_error("NarrowColumnRuns: held chunk precedes its row group's metadata");
+      place_chunk(out, base_offset, rg_meta[entry.first], entry.second, i);
+    }
+    held[i].clear();
+    held_bytes -= held_col_bytes[i];
+    held_col_bytes[i] = 0;
+  }
+
   // Place every held chunk: narrow columns in schema order, each column's
-  // chunks in row-group order, byte-adjacent. `rg_meta` is indexed by file
-  // row-group index and must already hold the metadata of every held row
-  // group (the callers move a block's metadata out right after place_block).
+  // chunks in row-group order, byte-adjacent. `rg_meta` must already hold the
+  // metadata of every held row group.
   void place_runs(std::vector<uint8_t> &out, int64_t base_offset,
                   std::vector<RGMeta> &rg_meta) {
-    for (size_t i = 0; i < held.size(); i++) {
-      for (auto &entry : held[i]) {
-        if (entry.first >= rg_meta.size())
-          throw std::logic_error("NarrowColumnRuns: held chunk precedes its row group's metadata");
-        place_chunk(out, base_offset, rg_meta[entry.first], entry.second, i);
-      }
-      held[i].clear();
-    }
+    for (size_t i = 0; i < held.size(); i++) place_column_run(out, base_offset, rg_meta, i);
     held_bytes = 0;
     blocks_in_run = 0;
   }
@@ -3779,8 +3827,11 @@ inline void require_statistics_for_outputs(bool statistics, bool want_index,
 //                        per-column block size: columns whose first-block mean
 //                        encoded chunk is at or below this many bytes are placed
 //                        as long runs instead (NarrowColumnRuns).
-//   narrow_run_blocks    blocks per narrow run; 0 = one run per file. Only read
+//   narrow_run_blocks    blocks per narrow run; 0 = no fixed length. Only read
 //                        when narrow_chunk_bytes > 0.
+//   narrow_held_budget   bytes of held narrow chunks before every run closes
+//                        at the next block boundary; 0 = no budget (one run
+//                        per file unless narrow_run_blocks says otherwise).
 //
 // out_stats, when given, receives whole-file per-column statistics (min/max/
 // null_count over EVERY row group, computed over the full columns by the same
@@ -3799,12 +3850,14 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t row_groups_per_block = 4,
                                          bool statistics = true,
                                          size_t narrow_chunk_bytes = 0,
-                                         size_t narrow_run_blocks = 0) {
+                                         size_t narrow_run_blocks = 0,
+                                         size_t narrow_held_budget = 0) {
   if (row_groups_per_block == 0)
     throw std::invalid_argument("WriteParquet: row_groups_per_block must be >= 1");
   NarrowColumnRuns runs;
   runs.chunk_bytes = narrow_chunk_bytes;
   runs.run_blocks = narrow_run_blocks;
+  runs.held_budget = narrow_held_budget;
   // A PageIndex over one page per chunk would describe the granularity the
   // footer's own Statistics already carry, so it rides on page splitting being
   // on — see write_page_index.
@@ -3857,7 +3910,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     // base_offset == 0: `file` already starts at absolute 0 and includes the
     // leading PAR1, so file.size() is the absolute position.
     if (runs.enabled())
-      runs.place_block(file, /*base_offset=*/0, block, block_first);
+      runs.place_block(file, /*base_offset=*/0, block, block_first, rg_meta);
     else
       write_block(file, /*base_offset=*/0, block);
     for (size_t k = 0; k < block.size(); k++) {
@@ -3926,8 +3979,9 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 // until finish() (they are written in the tail, after the last block — the
 // ruled placement, see write_bloom_tail). Peak = one block + the file's blooms.
 // With narrow_chunk_bytes > 0 (per-column block size, NarrowColumnRuns) add the
-// held narrow chunks: narrow columns × row groups per run × the threshold,
-// where a run is narrow_run_blocks blocks or, at 0, the whole file.
+// held narrow chunks: bounded by narrow_held_budget (plus one block's narrow
+// chunks) when that is set; otherwise narrow columns × row groups per run × up
+// to 4 × the threshold. held_narrow_bytes / peak_held_narrow_bytes report it.
 //
 // Every batch must share the same column schema (names/types); the schema is
 // captured from the first batch.
@@ -3936,7 +3990,7 @@ class StreamingParquetWriter {
   StreamingParquetWriter(int codec, int profile, size_t max_page_bytes,
                          bool page_index, size_t row_groups_per_block = 4,
                          bool statistics = true, size_t narrow_chunk_bytes = 0,
-                         size_t narrow_run_blocks = 0)
+                         size_t narrow_run_blocks = 0, size_t narrow_held_budget = 0)
       : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes),
         want_index_(page_index && max_page_bytes > 0),
         statistics_(statistics),
@@ -3946,6 +4000,7 @@ class StreamingParquetWriter {
           "StreamingParquetWriter: row_groups_per_block must be >= 1");
     runs_.chunk_bytes = narrow_chunk_bytes;
     runs_.run_blocks = narrow_run_blocks;
+    runs_.held_budget = narrow_held_budget;
     require_statistics_for_outputs(statistics, want_index_, /*want_bounds=*/false,
                                    "StreamingParquetWriter");
     const char *MAGIC = "PAR1";
@@ -4003,7 +4058,7 @@ class StreamingParquetWriter {
  private:
   void flush_block() {
     if (runs_.enabled())
-      runs_.place_block(buf_, abs_offset_, block_, rg_meta_.size());
+      runs_.place_block(buf_, abs_offset_, block_, rg_meta_.size(), rg_meta_);
     else
       write_block(buf_, abs_offset_, block_);
     for (EncodedRowGroup &erg : block_) {
@@ -4020,6 +4075,11 @@ class StreamingParquetWriter {
   // Bytes of narrow chunks held back for the current run (0 when the
   // per-column layout is off) — the writer's extra memory, exactly.
   size_t held_narrow_bytes() const { return runs_.held_bytes; }
+  // The most narrow-chunk bytes held at once so far, and how many columns were
+  // demoted to wide / how many times the budget closed the runs early.
+  size_t peak_held_narrow_bytes() const { return runs_.peak_held_bytes; }
+  size_t narrow_demoted_columns() const { return runs_.demoted; }
+  size_t narrow_budget_closes() const { return runs_.budget_closes; }
 
  private:
 

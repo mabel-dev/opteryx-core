@@ -1028,3 +1028,51 @@ Columns where the type rule and the bytes rule disagree: 37 at 32 KiB, 32 at 64 
 | file_filename | BYTE_ARRAY | dict | 32.1 KiB | 53.0 KiB | wide | narrow | wide (4) | **64** |
 
 Columns where the type rule and the bytes rule disagree: 14 at 32 KiB, 15 at 64 KiB (of 19).
+
+### 4.7 Hardening, window and sink wiring, 2026-11-06 [M]
+
+Rulings applied (architect, via the review session): threshold 32 KiB;
+whole-file runs under a memory budget rather than a fixed run length; schema
+order kept within blocks and among runs (narrow-first ruled out); no default
+layout change.
+
+#### 4.7.1 Classification hardened (§4.6 items 5-6)
+
+`NarrowColumnRuns` (`rugo/src/parquet/_parquet_writer.hpp`) now:
+
+1. **Classifies on the first block's LARGEST chunk**, not its mean, so one
+   near-empty row group cannot average a wide column under the threshold.
+2. **Demotes on growth**: a narrow column whose chunk in a later block exceeds
+   4 × the threshold is wide for the rest of the file; its run so far is placed
+   at that block boundary, before the block. Legal under the adjacency rule —
+   the reader sees the column as one run up to the demotion and as blocks of
+   four after.
+3. **Holds under a budget** (`narrow_held_budget_bytes`, 0 = none): before a
+   block whose narrow chunks would take the held bytes past the budget, every
+   run is placed and new ones start with that block — whole-file runs when they
+   fit, shorter runs when they do not, boundaries always on block boundaries.
+   The streaming writer reports `peak_held_narrow_bytes`,
+   `narrow_demoted_columns` and `narrow_budget_closes`; with a budget the peak
+   is at most the budget plus one block's narrow chunks.
+
+Pinned in `tests/rugo/test_per_column_layout.py` (demotion byte order and the
+blocks the reader infers on the result; the max rule against a column whose
+mean is under and max over; a budget of 2.5 blocks writing the same bytes as a
+fixed run of two; a budget under one block writing a run per block; threshold
+0 byte-identical with or without a budget).
+
+On hits at 32 KiB (`dev/rewrite_parquet_layout.py --narrow-bytes 32768
+[--narrow-budget B]`, the same 816 + 710 row groups):
+
+| Arm | Narrow at block 0 | Demoted (block) | Peak held, part-000 / part-001 | Budget closes |
+|---|---|---|---|---|
+| pc32 (§4.6, mean rule) | 88 | — | 774 / 674 MiB | — |
+| pc32m (max rule + demotion) | 88 | OriginalURL (1; 2), WindowName (58; 10) | 439 / 301 MiB | 0 |
+| pc32b256 (+ 256 MiB budget) | 88 | the same | 256 / 255 MiB | 1 / 1 |
+
+The max rule alone moves no hits column at 32 KiB (OriginalURL's first block
+is 26-28 KiB a chunk throughout; it grows to 285 KiB at row group 7); demotion
+is what catches it, and WindowName (0.3 KiB a chunk in the first block, 42 KiB
+mean over the file). The 364 MiB OriginalURL run of §4.6 item 6 is gone, and so
+is 40% of the held memory; the 256 MiB budget costs one extra run boundary
+per file.

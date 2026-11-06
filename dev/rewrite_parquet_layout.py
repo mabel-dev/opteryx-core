@@ -9,10 +9,11 @@ other defaults (zstd, bloom filters, dictionary, no page splitting);
 --no-dictionary forces PLAIN everywhere, --limit writes only the first N files
 in numeric order. Row counts are verified per file. Dev tooling only.
 
---narrow-bytes T [--narrow-run-blocks N] writes the PER-COLUMN block size
-(docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 item 3): columns whose first
-block's mean encoded chunk is at or below T bytes are placed as long runs (one
-per file, or one every N blocks), wider columns in blocks of --block. Works in
+--narrow-bytes T [--narrow-run-blocks N] [--narrow-budget B] writes the
+PER-COLUMN block size (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5-4.7): columns
+whose first block's largest encoded chunk is at or below T bytes are placed as
+long runs (one per file, one every N blocks, or closed whenever the held
+narrow chunks would pass B bytes), wider columns in blocks of --block. Works in
 both modes.
 
     python dev/rewrite_parquet_layout.py SRC_DIR DST_DIR --rows 65536 --block 4 \
@@ -104,7 +105,8 @@ def _verify_sorted(sources, outputs):
 
 
 def one(job):
-    src, dst, rows, block, dictionary, compression, retype, narrow_bytes, narrow_run_blocks = job
+    (src, dst, rows, block, dictionary, compression, retype, narrow_bytes, narrow_run_blocks,
+     narrow_budget) = job
     import rugo.parquet as rp
     from draken.morsels.morsel import Morsel
 
@@ -116,7 +118,8 @@ def one(job):
     m = Morsel.combine(morsels) if len(morsels) > 1 else morsels[0]
     data = rp.write_parquet(m, compression=compression, max_rows_per_row_group=rows,
                             row_groups_per_block=block, dictionary=dictionary,
-                            narrow_chunk_bytes=narrow_bytes, narrow_run_blocks=narrow_run_blocks)
+                            narrow_chunk_bytes=narrow_bytes, narrow_run_blocks=narrow_run_blocks,
+                            narrow_held_budget_bytes=narrow_budget)
     with open(dst + ".tmp", "wb") as f:
         f.write(data)
     os.replace(dst + ".tmp", dst)
@@ -139,7 +142,7 @@ def _numeric_order(paths):
 
 
 def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes, compression="zstd",
-           retype=False, narrow_bytes=0, narrow_run_blocks=0):
+           retype=False, narrow_bytes=0, narrow_run_blocks=0, narrow_budget=0):
     """Stream every source file, in numeric order, into files closed at the first
     BLOCK boundary at or past `file_bytes` - never mid-block, so every file but
     the last holds whole column-major blocks."""
@@ -153,7 +156,9 @@ def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes, compression="z
     print(f"{len(sources)} source files, {expected:,} rows -> {dst_dir} "
           f"({rows}-row row groups, blocks of {block}, files closed at {file_bytes:,} bytes"
           + (f", narrow columns <= {narrow_bytes:,} B in runs of "
-             f"{narrow_run_blocks or 'the whole file'} blocks" if narrow_bytes else "") + ")",
+             f"{narrow_run_blocks or 'the whole file'} blocks"
+             + (f", held budget {narrow_budget:,} B" if narrow_budget else "")
+             if narrow_bytes else "") + ")",
           flush=True)
 
     state = {"fh": None, "writer": None, "bytes": 0, "rgs": 0, "index": 0, "path": None,
@@ -172,7 +177,8 @@ def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes, compression="z
         state["writer"] = rp.open_parquet_writer(sink, compression=compression, dictionary=dictionary,
                                                  row_groups_per_block=block,
                                                  narrow_chunk_bytes=narrow_bytes,
-                                                 narrow_run_blocks=narrow_run_blocks)
+                                                 narrow_run_blocks=narrow_run_blocks,
+                                                 narrow_held_budget_bytes=narrow_budget)
 
     def close_file():
         state["writer"].close()
@@ -182,7 +188,9 @@ def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes, compression="z
         written.append(n)
         print(f"  {os.path.basename(state['path'])}: {n:,} rows, {state['rgs']} rg, "
               f"{os.path.getsize(state['path']) / 2**30:.2f} GiB"
-              + (f", held narrow peak {state['held_peak'] / 2**20:.1f} MiB" if narrow_bytes else ""),
+              + (f", held narrow peak {state['writer'].peak_held_narrow_bytes / 2**20:.1f} MiB, "
+                 f"{state['writer'].narrow_demoted_columns} demoted, "
+                 f"{state['writer'].narrow_budget_closes} budget closes" if narrow_bytes else ""),
               flush=True)
         state["held_peak"] = 0
         state["writer"] = None
@@ -252,7 +260,9 @@ def main():
                     help="per-column block size: columns whose first-block mean chunk is <= this many "
                          "bytes are written as long runs (0 = off, every column in blocks of --block)")
     ap.add_argument("--narrow-run-blocks", type=int, default=0,
-                    help="blocks per narrow run (0 = one run per file)")
+                    help="blocks per narrow run (0 = no fixed length)")
+    ap.add_argument("--narrow-budget", type=int, default=0,
+                    help="held narrow bytes before every run closes (0 = no budget)")
     args = ap.parse_args()
     os.makedirs(args.dst, exist_ok=True)
     if args.file_bytes:
@@ -262,7 +272,7 @@ def main():
             ap.error(f"{args.dst} is not empty - a repack never writes over a corpus")
         repack(args.src, args.dst, args.rows, args.block, not args.no_dictionary,
                args.file_bytes, args.compression, args.retype_clickbench,
-               args.narrow_bytes, args.narrow_run_blocks)
+               args.narrow_bytes, args.narrow_run_blocks, args.narrow_budget)
         return
     jobs = []
     for root, _dirs, files in os.walk(args.src):
@@ -277,7 +287,7 @@ def main():
                 continue
             jobs.append((os.path.join(root, f), dst, args.rows, args.block,
                          not args.no_dictionary, args.compression, args.retype_clickbench,
-                         args.narrow_bytes, args.narrow_run_blocks))
+                         args.narrow_bytes, args.narrow_run_blocks, args.narrow_budget))
     if args.limit:
         import re
 
