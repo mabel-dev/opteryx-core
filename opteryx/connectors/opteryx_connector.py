@@ -1652,14 +1652,24 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 execution_context=execution_context,
             )
 
-        # A record prefetched by relation resolution comes from the workspace's
-        # opteryx catalog entry. The METASTORE says whether that record can be
-        # read as the relation (`Metastore.serves_catalog_records`): for the
-        # native store it is the dataset; for an external one (Iceberg) it is a
-        # listing with no snapshot and no files, and reading it as the relation
-        # bound an empty one. Not served -> the table loads from this metastore.
-        if not catalog.serves_catalog_records:
-            kwargs.pop("prefetched_table", None)
+        # A record prefetched by relation resolution comes from the workspace's VIEW
+        # STORE, and only the native store's catalog records ARE the dataset
+        # (`Metastore.serves_catalog_records`). An external metastore's workspace entry
+        # is a listing with no snapshot and no files, and reading THAT as the relation
+        # bound an empty one - so it is dropped and the table loads from this metastore.
+        #
+        # That is not true of a record this connector resolved itself. Where the view
+        # store and the data connector are the same object, the prefetch is the dataset
+        # `get_relation` already loaded from THIS catalog, and dropping it made the
+        # binder re-load every table - once per scan node, so a CTE that names a table
+        # the outer query also names paid the catalog round trip three times for one
+        # statement. Two scans of one table in one query cannot legitimately see
+        # different snapshots, so the loaded dataset is reused.
+        if not catalog.serves_catalog_records and kwargs.get("prefetched_table") is not None:
+            from opteryx.connectors import view_store_connector
+
+            if view_store_connector(name, kwargs.get("telemetry")) is not self:
+                kwargs.pop("prefetched_table", None)
 
         # Merge stored kwargs with provided kwargs (provided takes precedence)
         merged_kwargs = {**self.kwargs, **kwargs}
