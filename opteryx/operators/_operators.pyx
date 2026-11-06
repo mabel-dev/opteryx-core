@@ -692,7 +692,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[uint8_t]* array_columns,
                                     const cppvector[int]* widen_types,
                                     int64_t row_limit,
-                                    const cppvector[cppvector[DeclaredNode]]* declared_shapes)
+                                    const cppvector[cppvector[DeclaredNode]]* declared_shapes,
+                                    int64_t window_bytes)
         void set_latmat_scan_source(size_t p, ParquetIOPipeline* p1_pipeline,
                                     const ParquetFooterMap* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -3398,7 +3399,8 @@ cdef class NativePlan:
                                        &splan.decimal_columns, &splan.logical_coerce,
                                        &splan.hash_key_columns, &splan.array_columns,
                                        &splan.widen_types,
-                                       c_row_limit, &splan.declared_shapes)
+                                       c_row_limit, &splan.declared_shapes,
+                                       splan.window_bytes)
         # Remote bloom membership: the probes planning attached to this plan's
         # remote work items, issued by the Source in its first fetch round.
         if not splan.bloom_probes.empty():

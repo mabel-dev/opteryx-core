@@ -123,6 +123,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             manifest = scan.manifest
             sort_column = self._sort_column(sink, scan)
             files = compaction_files(manifest)
+            self._mark_layout_debt(sink, scan, manifest, files)
             key_ranges = (
                 [(files[row], low, high) for row, low, high in manifest.file_key_ranges(sort_column)]
                 if sort_column
@@ -242,6 +243,60 @@ class CompactionPlanningStrategy(OptimizationStrategy):
         if not planned:
             return results[0]
         return max(planned, key=lambda r: r.plan.input_bytes)
+
+    def _mark_layout_debt(self, sink, scan, manifest, files) -> None:
+        """Flag the parquet files written without the per-column layout the
+        engine writes now (`CompactionFile.layout_stale`, rule D).
+
+        Only when PARQUET_WRITE_NARROW_CHUNK_BYTES is on — with it off nothing is
+        stale and no footer is read, so OPTIMIZE costs exactly what it did. On, it
+        is ONE batched footer acquisition over the relation's parquet files (the
+        footer cache usually holds them: the scan that follows reads the same
+        footers). The layout is not a manifest fact, so this is the one place
+        selection's inputs come from storage rather than the manifest.
+
+        Fails OPEN: a footer that cannot be read leaves every file unflagged and
+        says so, so a layout migration never blocks the compaction rules A-C."""
+        if config.PARQUET_WRITE_NARROW_CHUNK_BYTES <= 0:
+            return
+        from opteryx.connectors.parquet_io.parquet_writer import NARROW_CHUNK_BYTES_KEY
+        from opteryx.connectors.parquet_io.parquet_writer import layout_is_current
+        from opteryx.connectors.parquet_io.pool_reader import fetch_footer_key_values_many
+        from opteryx.operators._operators import resolve_scan_filesystem
+        from opteryx.operators._operators import scan_footer_bytes_cache
+
+        formats = list(manifest.file_formats())
+        parquet = [entry for entry, fmt in zip(files, formats, strict=True)
+                   if str(fmt).upper() == "PARQUET"]
+        if not parquet:
+            return
+        paths = [entry.file_path for entry in parquet]
+        sizes = {}
+        for path, size in zip(manifest.get_file_paths(), manifest.file_sizes(), strict=True):
+            if isinstance(size, int) and size > 0:
+                sizes[path] = size
+        try:
+            filesystem, _ = resolve_scan_filesystem(scan.connector, paths)
+            found = fetch_footer_key_values_many(
+                filesystem, paths, [NARROW_CHUNK_BYTES_KEY], sizes or None,
+                scan_footer_bytes_cache())
+        except Exception as exc:  # noqa: BLE001 - fail open, reported below
+            self.record_decision(
+                "compaction",
+                f"layout debt not assessed on {sink.relation_name}: footers unreadable "
+                f"({type(exc).__name__})",
+            )
+            return
+        stale = 0
+        for entry, key_values in zip(parquet, found, strict=True):
+            entry.layout_stale = not layout_is_current(key_values)
+            stale += entry.layout_stale
+        self.record_decision(
+            "compaction",
+            f"layout debt on {sink.relation_name}: {stale} of {len(parquet)} parquet "
+            f"file(s) written without narrow_chunk_bytes="
+            f"{config.PARQUET_WRITE_NARROW_CHUNK_BYTES}",
+        )
 
     def _sort_column(self, sink, scan) -> Optional[str]:
         """The relation's primary sort key, or None when it has none.

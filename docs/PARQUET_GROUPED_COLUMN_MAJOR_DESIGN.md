@@ -314,6 +314,16 @@ scratchpad and must be edited to re-run).
   `PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS`, variable
   `parquet_io_fetch_ahead_min_blocks` (default 48). On a row-major file every
   row group is its own block, so nothing moves there.
+  **Amended 2026-11-06 (with the per-column block size,
+  PARQUET_WRITE_FOR_READ_SPEED.md §4.5 items 3-4 and §4.6):** blocks are
+  counted in 256k-ROW UNITS — a fetch block of up to 262,144 kept rows is one,
+  a longer one ceil(rows / 262,144) — so a file whose blocks are longer than the
+  calibration unit (a narrow column's whole-file run, a 64-row-group block)
+  counts the work it carries instead of looking like a handful of blocks and
+  running coupled. A block of four 64k row groups is still one, a row-major
+  64k file still one per row group: the knob, its default and its calibration
+  are unchanged on the production layout. `_fetch_block_units` in
+  pool_reader.pyx; pinned in tests/unit/connectors/parquet_io/test_fetch_blocks_per_column.py.
 - **[D-2] RESOLVED — already true before this work.** Every writing sink
   (INSERT/CTAS, MERGE, OPTIMIZE) streams through `DataFileStream` →
   `open_parquet_writer` (2026-09-14) and produces multi-row-group files; the

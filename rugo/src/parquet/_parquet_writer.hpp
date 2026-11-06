@@ -3244,20 +3244,24 @@ inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
 // copied: a placed chunk is dead weight, and a block writer that kept them
 // would hold two copies of every block.
 inline void place_chunk(std::vector<uint8_t> &out, int64_t base_offset,
-                        EncodedRowGroup &erg, size_t i) {
-  EncodedChunk &ch = erg.chunks[i];
+                        RGMeta &meta, EncodedChunk &ch, size_t i) {
   const int64_t at = base_offset + (int64_t)out.size();
   if (ch.dict_len >= 0) {
-    erg.meta.dict_offsets[i] = at;
-    erg.meta.data_offsets[i] = at + ch.dict_len;
+    meta.dict_offsets[i] = at;
+    meta.data_offsets[i] = at + ch.dict_len;
   } else {
-    erg.meta.dict_offsets[i] = -1;
-    erg.meta.data_offsets[i] = at;
+    meta.dict_offsets[i] = -1;
+    meta.data_offsets[i] = at;
   }
   for (PageMeta &pm : ch.pages) pm.file_offset += at;
-  erg.meta.pages[i] = std::move(ch.pages);
+  meta.pages[i] = std::move(ch.pages);
   out.insert(out.end(), ch.bytes.begin(), ch.bytes.end());
   std::vector<uint8_t>().swap(ch.bytes);
+}
+
+inline void place_chunk(std::vector<uint8_t> &out, int64_t base_offset,
+                        EncodedRowGroup &erg, size_t i) {
+  place_chunk(out, base_offset, erg.meta, erg.chunks[i], i);
 }
 
 // Append one column's bloom filter (if it has one) and pin bloom_offset.
@@ -3309,6 +3313,170 @@ inline void write_block(std::vector<uint8_t> &out, int64_t base_offset,
     for (EncodedRowGroup &erg : block)
       place_chunk(out, base_offset, erg, i);
 }
+
+// PER-COLUMN block size (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 item 3,
+// measured in §4.6, hardened in §4.7). Off by default (chunk_bytes == 0): every
+// column is placed by write_block. On, a column is one of two classes:
+//
+//   WIDE   — placed exactly as write_block places it: column-major in blocks of
+//            G, wide columns in schema order, so a reader's fetch block over a
+//            wide column stays a block of G and the decode pipeline keeps the
+//            granularity §4.4 showed it needs.
+//   NARROW — its chunks are NOT placed with the block; they are held and placed
+//            later as one byte-adjacent RUN per column, in row-group order,
+//            narrow columns in schema order:
+//
+//     [wide blk1][wide blk2]..[wide blkN][c_a rg1..rgK][c_b rg1..rgK].. [blooms]
+//
+// Classification, decided from the FIRST block: a column is narrow when its
+// LARGEST encoded chunk in that block is at or below `chunk_bytes` (the max,
+// not the mean: §4.6 item 6 — one empty row group must not average a wide
+// column under the threshold).
+//
+// Demotion on growth: a narrow column whose chunk in a later block exceeds
+// `chunk_bytes × kDemoteFactor` is demoted to WIDE for the rest of the file. Its
+// held run is placed at that block boundary (before the block), and from that
+// block on its chunks go with the wide ones. Data sorted by one column can start
+// a file with a near-empty column that is wide everywhere else (hits OriginalURL:
+// 27 KiB a chunk in block 0, 379 KiB over the file, a 364 MiB run undemoted).
+// A demoted column's run sits earlier in the file than the remaining narrow
+// runs; the reader needs only adjacency within a run, and every chunk is located
+// by its own footer offsets.
+//
+// When runs close: every `run_blocks` blocks when that is > 0; before a block
+// whose narrow chunks would take the held bytes past `held_budget` when that is
+// > 0 (all runs close together, at the block boundary, and new ones start with
+// the block); and once at the end, before the bloom tail. So with a budget and
+// run_blocks 0, runs are whole-file when memory allows and degrade to shorter
+// runs when it does not. Run boundaries always fall on block boundaries.
+//
+// Why the reader needs no change: ParquetIOPipeline::infer_fetch_blocks joins
+// row group k+1 to k's fetch block only when EVERY projected column's chunk is
+// byte-adjacent to its predecessor. A projection of narrow columns alone reads a
+// run as ONE fetch block; a projection that includes a wide column falls back to
+// blocks of G, and the narrow columns' chunks for those G row groups are fetched
+// from their runs as extra ranges (§4.6.2 item 3). A demoted column reads as a
+// run up to its demotion and as blocks of G after.
+//
+// Memory: the held chunks — `held_bytes`, peak `peak_held_bytes`. Without a
+// budget that is narrow columns × row groups per run × up to kDemoteFactor ×
+// chunk_bytes; with one, at most the budget plus one block's narrow chunks (a
+// single block over the budget is held whole and placed at the next boundary).
+struct NarrowColumnRuns {
+  // A narrow chunk this many times over the threshold demotes its column.
+  static constexpr size_t kDemoteFactor = 4;
+
+  size_t chunk_bytes = 0;   // 0 = off
+  size_t run_blocks = 0;    // blocks per run; 0 = no fixed length
+  size_t held_budget = 0;   // bytes; 0 = no budget
+  bool classified = false;
+  std::vector<uint8_t> narrow;                                   // per column
+  std::vector<std::vector<std::pair<size_t, EncodedChunk>>> held; // [col] -> (rg, chunk)
+  std::vector<size_t> held_col_bytes;                            // per column
+  size_t blocks_in_run = 0;
+  size_t held_bytes = 0;      // bytes of held narrow chunks right now
+  size_t peak_held_bytes = 0; // the most ever held at once (after a block is held)
+  size_t demoted = 0;         // columns demoted to wide so far
+  size_t budget_closes = 0;   // runs closed early by the budget
+
+  bool enabled() const { return chunk_bytes > 0; }
+
+  // Decide the column classes from `block` — the file's FIRST block — once.
+  void classify(const std::vector<EncodedRowGroup> &block) {
+    if (classified || block.empty()) return;
+    const size_t ncols = block[0].chunks.size();
+    narrow.assign(ncols, 0);
+    held.assign(ncols, {});
+    held_col_bytes.assign(ncols, 0);
+    for (size_t i = 0; i < ncols; i++) {
+      size_t largest = 0;
+      for (const EncodedRowGroup &erg : block)
+        largest = std::max(largest, erg.chunks[i].bytes.size());
+      narrow[i] = largest <= chunk_bytes ? 1 : 0;
+    }
+    classified = true;
+  }
+
+  // Place one block. In order: demote narrow columns this block shows to have
+  // grown (their runs placed now); close every run if this block's narrow chunks
+  // would take the held bytes past the budget; then wide columns as write_block
+  // would (column-major, schema order) and narrow columns' chunks moved to
+  // `held`. `first_rg` is the file index of block[0]'s row group; `rg_meta` is
+  // indexed by file row-group index and holds every PREVIOUS block's metadata
+  // (the callers move a block's metadata out right after this returns).
+  void place_block(std::vector<uint8_t> &out, int64_t base_offset,
+                   std::vector<EncodedRowGroup> &block, size_t first_rg,
+                   std::vector<RGMeta> &rg_meta) {
+    if (block.empty()) return;
+    const bool first = !classified;
+    classify(block);
+    const size_t ncols = block[0].chunks.size();
+    if (narrow.size() != ncols)
+      throw std::logic_error("NarrowColumnRuns: blocks disagree on the column count");
+    if (!first) {
+      const size_t demote_above = chunk_bytes * kDemoteFactor;
+      for (size_t i = 0; i < ncols; i++) {
+        if (!narrow[i]) continue;
+        bool grew = false;
+        for (const EncodedRowGroup &erg : block)
+          if (erg.chunks[i].bytes.size() > demote_above) { grew = true; break; }
+        if (!grew) continue;
+        place_column_run(out, base_offset, rg_meta, i);
+        narrow[i] = 0;
+        demoted++;
+      }
+    }
+    if (held_budget > 0 && held_bytes > 0) {
+      size_t incoming = 0;
+      for (size_t i = 0; i < ncols; i++)
+        if (narrow[i])
+          for (const EncodedRowGroup &erg : block) incoming += erg.chunks[i].bytes.size();
+      if (held_bytes + incoming > held_budget) {
+        place_runs(out, base_offset, rg_meta);
+        budget_closes++;
+      }
+    }
+    for (size_t i = 0; i < ncols; i++) {
+      if (narrow[i]) {
+        for (size_t k = 0; k < block.size(); k++) {
+          const size_t n = block[k].chunks[i].bytes.size();
+          held_bytes += n;
+          held_col_bytes[i] += n;
+          held[i].emplace_back(first_rg + k, std::move(block[k].chunks[i]));
+        }
+      } else {
+        for (EncodedRowGroup &erg : block) place_chunk(out, base_offset, erg, i);
+      }
+    }
+    peak_held_bytes = std::max(peak_held_bytes, held_bytes);
+    blocks_in_run++;
+  }
+
+  bool run_due() const { return run_blocks > 0 && blocks_in_run >= run_blocks; }
+
+  // Place column i's held chunks, in row-group order, byte-adjacent.
+  void place_column_run(std::vector<uint8_t> &out, int64_t base_offset,
+                        std::vector<RGMeta> &rg_meta, size_t i) {
+    for (auto &entry : held[i]) {
+      if (entry.first >= rg_meta.size())
+        throw std::logic_error("NarrowColumnRuns: held chunk precedes its row group's metadata");
+      place_chunk(out, base_offset, rg_meta[entry.first], entry.second, i);
+    }
+    held[i].clear();
+    held_bytes -= held_col_bytes[i];
+    held_col_bytes[i] = 0;
+  }
+
+  // Place every held chunk: narrow columns in schema order, each column's
+  // chunks in row-group order, byte-adjacent. `rg_meta` must already hold the
+  // metadata of every held row group.
+  void place_runs(std::vector<uint8_t> &out, int64_t base_offset,
+                  std::vector<RGMeta> &rg_meta) {
+    for (size_t i = 0; i < held.size(); i++) place_column_run(out, base_offset, rg_meta, i);
+    held_bytes = 0;
+    blocks_in_run = 0;
+  }
+};
 
 // Every bloom filter of the file, after the last block and before the page
 // index. Column-major over the WHOLE file — column c's filter for row group k
@@ -3464,11 +3632,23 @@ inline void append_draken_logical_kv(
 
 // `file_ndv`: one `rugo.ndv` value per schema column ("" = not stated), from
 // FileNdv::values() or carried over by the patch path; nullptr = none.
+// The footer key that records a per-column-layout write: the writer's
+// narrow_chunk_bytes, in decimal. Stamped whenever the layout was ON for the file
+// (whether or not any column turned out narrow), absent otherwise, so compaction
+// can tell a file written under the current threshold from one that was not
+// without re-deriving the layout from chunk adjacency — which cannot tell "no
+// column was narrow" from "the layout was off" and would rewrite the first
+// forever (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.7.3).
+inline constexpr const char *kNarrowChunkBytesKey = "rugo.narrow_chunk_bytes";
+
 inline void write_file_kv(TCompactWriter &fm,
                           const std::vector<ColumnInput> &schema_cols,
-                          const std::vector<std::string> *file_ndv) {
+                          const std::vector<std::string> *file_ndv,
+                          size_t narrow_chunk_bytes = 0) {
   std::vector<std::pair<std::string, std::string>> kv;
   append_draken_logical_kv(kv, schema_cols);
+  if (narrow_chunk_bytes > 0)
+    kv.emplace_back(kNarrowChunkBytesKey, std::to_string(narrow_chunk_bytes));
   if (file_ndv != nullptr) {
     if (file_ndv->size() != schema_cols.size())
       throw std::logic_error("write_file_kv: file NDV values do not match the schema");
@@ -3558,7 +3738,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                                  size_t total_rows,
                                  const std::vector<RGMeta> &rg_meta,
                                  const std::vector<std::vector<ColumnInput>> &all_rg_cols,
-                                 const std::vector<std::string> *file_ndv = nullptr) {
+                                 const std::vector<std::string> *file_ndv = nullptr,
+                                 size_t narrow_chunk_bytes = 0) {
   const char *MAGIC = "PAR1";
   TCompactWriter fm;
   fm.structBegin();
@@ -3600,7 +3781,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     fm.writeI64Field(6, rg_compressed);                 // total_compressed_size
     fm.structEnd();
   }
-  write_file_kv(fm, schema_cols, file_ndv);        // key_value_metadata (field 5, optional)
+  write_file_kv(fm, schema_cols, file_ndv, narrow_chunk_bytes); // key_value_metadata (field 5, optional)
   fm.writeStringField(6, RUGO_PARQUET_CREATED_BY); // created_by
   // column_orders (field 7): one TypeDefinedOrder per leaf column.
   fm.writeFieldHeader(CT_LIST, 7);
@@ -3655,6 +3836,15 @@ inline void require_statistics_for_outputs(bool statistics, bool want_index,
 //                        contiguous, as parquet is conventionally written) —
 //                        still with tail blooms. The defaults (64k rows, 4 per
 //                        block) are the measured values in the design doc §3.
+//   narrow_chunk_bytes   0 (default) = every column in blocks of G. > 0 = a
+//                        per-column block size: columns whose first-block mean
+//                        encoded chunk is at or below this many bytes are placed
+//                        as long runs instead (NarrowColumnRuns).
+//   narrow_run_blocks    blocks per narrow run; 0 = no fixed length. Only read
+//                        when narrow_chunk_bytes > 0.
+//   narrow_held_budget   bytes of held narrow chunks before every run closes
+//                        at the next block boundary; 0 = no budget (one run
+//                        per file unless narrow_run_blocks says otherwise).
 //
 // out_stats, when given, receives whole-file per-column statistics (min/max/
 // null_count over EVERY row group, computed over the full columns by the same
@@ -3671,9 +3861,16 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t max_page_bytes = 0,
                                          bool page_index = true,
                                          size_t row_groups_per_block = 4,
-                                         bool statistics = true) {
+                                         bool statistics = true,
+                                         size_t narrow_chunk_bytes = 0,
+                                         size_t narrow_run_blocks = 0,
+                                         size_t narrow_held_budget = 0) {
   if (row_groups_per_block == 0)
     throw std::invalid_argument("WriteParquet: row_groups_per_block must be >= 1");
+  NarrowColumnRuns runs;
+  runs.chunk_bytes = narrow_chunk_bytes;
+  runs.run_blocks = narrow_run_blocks;
+  runs.held_budget = narrow_held_budget;
   // A PageIndex over one page per chunk would describe the granularity the
   // footer's own Statistics already carry, so it rides on page splitting being
   // on — see write_page_index.
@@ -3725,19 +3922,27 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
         encode_row_groups(jobs, codec, profile, max_page_bytes, want_index, statistics);
     // base_offset == 0: `file` already starts at absolute 0 and includes the
     // leading PAR1, so file.size() is the absolute position.
-    write_block(file, /*base_offset=*/0, block);
+    if (runs.enabled())
+      runs.place_block(file, /*base_offset=*/0, block, block_first, rg_meta);
+    else
+      write_block(file, /*base_offset=*/0, block);
     for (size_t k = 0; k < block.size(); k++) {
       ndv.add(block[k]);
       rg_meta[block_first + k] = std::move(block[k].meta);
       blooms[block_first + k]  = std::move(block[k].blooms);
     }
+    if (runs.enabled() && runs.run_due())
+      runs.place_runs(file, /*base_offset=*/0, rg_meta);
   }
+  if (runs.enabled())
+    runs.place_runs(file, /*base_offset=*/0, rg_meta); // the last (or only) run
 
   write_bloom_tail(file, /*base_offset=*/0, rg_meta, blooms);
   if (want_index)
     write_page_index(file, /*base_offset=*/0, rg_meta, all_rg_cols);
   const std::vector<std::string> ndv_values = ndv.values();
-  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, &ndv_values);
+  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, &ndv_values,
+                       runs.chunk_bytes);
 
   if (out_stats) {
     // One pool task per column: each is an independent pass over its whole
@@ -3787,6 +3992,10 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 // Memory: one block of encoded chunks, plus EVERY bloom filter of the file
 // until finish() (they are written in the tail, after the last block — the
 // ruled placement, see write_bloom_tail). Peak = one block + the file's blooms.
+// With narrow_chunk_bytes > 0 (per-column block size, NarrowColumnRuns) add the
+// held narrow chunks: bounded by narrow_held_budget (plus one block's narrow
+// chunks) when that is set; otherwise narrow columns × row groups per run × up
+// to 4 × the threshold. held_narrow_bytes / peak_held_narrow_bytes report it.
 //
 // Every batch must share the same column schema (names/types); the schema is
 // captured from the first batch.
@@ -3794,7 +4003,8 @@ class StreamingParquetWriter {
  public:
   StreamingParquetWriter(int codec, int profile, size_t max_page_bytes,
                          bool page_index, size_t row_groups_per_block = 4,
-                         bool statistics = true)
+                         bool statistics = true, size_t narrow_chunk_bytes = 0,
+                         size_t narrow_run_blocks = 0, size_t narrow_held_budget = 0)
       : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes),
         want_index_(page_index && max_page_bytes > 0),
         statistics_(statistics),
@@ -3802,6 +4012,9 @@ class StreamingParquetWriter {
     if (row_groups_per_block == 0)
       throw std::invalid_argument(
           "StreamingParquetWriter: row_groups_per_block must be >= 1");
+    runs_.chunk_bytes = narrow_chunk_bytes;
+    runs_.run_blocks = narrow_run_blocks;
+    runs_.held_budget = narrow_held_budget;
     require_statistics_for_outputs(statistics, want_index_, /*want_bounds=*/false,
                                    "StreamingParquetWriter");
     const char *MAGIC = "PAR1";
@@ -3843,6 +4056,8 @@ class StreamingParquetWriter {
   std::vector<uint8_t> finish() {
     if (!block_.empty())
       flush_block();
+    if (runs_.enabled())
+      runs_.place_runs(buf_, abs_offset_, rg_meta_); // the last (or only) run
     // abs_offset_ + buf_.size() is the absolute position whether or not the
     // caller has been draining as it goes.
     write_bloom_tail(buf_, abs_offset_, rg_meta_, blooms_);
@@ -3850,20 +4065,37 @@ class StreamingParquetWriter {
       write_page_index(buf_, abs_offset_, rg_meta_, all_rg_cols_);
     const std::vector<std::string> ndv_values = ndv_.values();
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
-                         all_rg_cols_, &ndv_values);
+                         all_rg_cols_, &ndv_values, runs_.chunk_bytes);
     return take_pending();
   }
 
  private:
   void flush_block() {
-    write_block(buf_, abs_offset_, block_);
+    if (runs_.enabled())
+      runs_.place_block(buf_, abs_offset_, block_, rg_meta_.size(), rg_meta_);
+    else
+      write_block(buf_, abs_offset_, block_);
     for (EncodedRowGroup &erg : block_) {
       ndv_.add(erg);
       rg_meta_.push_back(std::move(erg.meta));
       blooms_.push_back(std::move(erg.blooms));
     }
     block_.clear();
+    if (runs_.enabled() && runs_.run_due())
+      runs_.place_runs(buf_, abs_offset_, rg_meta_);
   }
+
+ public:
+  // Bytes of narrow chunks held back for the current run (0 when the
+  // per-column layout is off) — the writer's extra memory, exactly.
+  size_t held_narrow_bytes() const { return runs_.held_bytes; }
+  // The most narrow-chunk bytes held at once so far, and how many columns were
+  // demoted to wide / how many times the budget closed the runs early.
+  size_t peak_held_narrow_bytes() const { return runs_.peak_held_bytes; }
+  size_t narrow_demoted_columns() const { return runs_.demoted; }
+  size_t narrow_budget_closes() const { return runs_.budget_closes; }
+
+ private:
 
   // Copy ColumnInput vector with all data/level/offset pointers nulled — keeps
   // only the shape/schema (name is a self-owning std::string). Used for the
@@ -3887,6 +4119,7 @@ class StreamingParquetWriter {
   bool want_index_;
   bool statistics_;
   size_t row_groups_per_block_;
+  NarrowColumnRuns runs_;              // per-column block size; off by default
   bool have_schema_ = false;
   int64_t abs_offset_ = 0;             // bytes already drained via take_pending
   int64_t total_rows_ = 0;

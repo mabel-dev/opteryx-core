@@ -231,6 +231,34 @@ COMPACTION_DISK_BYTES: int = int(get("COMPACTION_DISK_BYTES", 25 * 1024 * 1024 *
 estimate - an upper bound on the lz4 sort spill that pass writes to local disk
 (ruled 2026-11-04, sized for the 4 vCPU / 16 GB / 25 GB-disk worker)."""
 
+PARQUET_WRITE_NARROW_CHUNK_BYTES: int = int(get("PARQUET_WRITE_NARROW_CHUNK_BYTES", 0))
+"""Per-column block size for every parquet data file the engine writes (INSERT,
+CTAS, MERGE, OPTIMIZE): columns whose first block's largest encoded chunk is at or
+below this many bytes are written as long byte-adjacent runs, the rest in blocks
+of four row groups (rugo `narrow_chunk_bytes`; docs/PARQUET_WRITE_FOR_READ_SPEED.md
+§4.5-4.7). 0 (default) = off, the grouped layout every file has today. The
+measured and ruled value is 32768. With it on, every file written carries the
+value in its footer (`rugo.narrow_chunk_bytes`), and OPTIMIZE treats a file whose
+footer does not carry the current value as needing a rewrite, so existing data
+moves to the layout one pass at a time (FINAL: as much as its disk budget
+holds). Must be >= 0."""
+if PARQUET_WRITE_NARROW_CHUNK_BYTES < 0:
+    raise ValueError(
+        f"PARQUET_WRITE_NARROW_CHUNK_BYTES must be >= 0, not {PARQUET_WRITE_NARROW_CHUNK_BYTES}")
+
+PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES: int = int(
+    get("PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES", 256 * 1024 * 1024))
+"""The writer's memory for held narrow chunks when PARQUET_WRITE_NARROW_CHUNK_BYTES
+is on (rugo `narrow_held_budget_bytes`): runs are whole-file while they fit and
+close at a block boundary when they would not. Peak held memory per open file is
+at most this plus one block's narrow chunks. 256 MiB holds a 4.6 GiB hits file to
+256 MiB with one extra run boundary (§4.7.1). 0 = no budget. Read only when the
+layout is on."""
+if PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES < 0:
+    raise ValueError(
+        "PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES must be >= 0, not "
+        f"{PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES}")
+
 KVSTORE_KEY_PREFIX: str = str(get("KVSTORE_KEY_PREFIX", "")).strip()
 """Optional global key prefix applied to configured KV stores."""
 
@@ -530,16 +558,39 @@ ignored."""
 
 PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS: int = int(get("PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS", 48))
 """Minimum number of REMOTE fetch blocks a scan must have (after pruning)
-before `PARQUET_IO_FETCH_AHEAD` is armed; 0 = no minimum.
+before `PARQUET_IO_FETCH_AHEAD` is armed; 0 = no minimum. Blocks are counted
+in 256k-ROW UNITS: a fetch block of up to 262,144 kept rows is one, a longer
+one is ceil(rows / 262,144).
 
 A fetch block is the unit the fetch stage issues — the kept row groups of one
 block of one file, fetched as one coalesced batch
 (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md). The production sweep that put the
 optimum at 48-64 was made when a fetch unit was one 256k-row row group; counting
-blocks keeps that calibration on files written with 64k row groups in blocks of
-four (which have four times the row groups for the same data). On a row-major
-file every row group is its own block, so the count is unchanged there. Tune
-per session with `SET parquet_io_fetch_ahead_min_blocks`."""
+in that unit keeps the calibration on every layout: a block of four 64k row
+groups is one unit, a row-major 64k file counts one per row group, and a file
+whose blocks are LONGER than 256k rows — the per-column layout's narrow runs
+(docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.5 items 3-4, §4.6) or 64-row-group
+blocks — counts the work it carries instead of looking like a handful of
+blocks. Counted as plain blocks, a scan of a few long runs ran the coupled path
+with at most `workers` requests in flight (hits Q01 at blocks of 64: 0.53 s
+coupled, 0.31 s armed; §4.4). Tune per session with
+`SET parquet_io_fetch_ahead_min_blocks`."""
+
+PARQUET_IO_BYTE_WINDOW: bool = str(get("PARQUET_IO_BYTE_WINDOW", "true")).strip().lower() in (
+    "1", "true", "yes", "on")
+"""Remote native scans admit fetch blocks against a BYTE window beside the
+row-group submission window (`max(workers, fetch_ahead) + 2` row groups): a block
+goes in while either has room. The byte window is the scan's own arena less one
+row group's estimate (the arena is `2 × largest projected row group × (window +
+1)`, floored at 256 MiB), so it never admits more than the arena was reserved
+for. Where the arena is not floored — a wide projection — the two windows agree
+and nothing changes. Where it is floored — a narrow projection — a fetch block of
+many byte-small row groups no longer fills the row-group count by itself: a
+narrow column's 64-row-group run used to be admitted one or two blocks at a
+time, so fetch-ahead ran one request per file whatever its depth
+(docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.6.2 item 5, measured in §4.7.2).
+False = the row-group window alone, as before. Read at import (env
+`PARQUET_IO_BYTE_WINDOW`); local scans never use it."""
 
 PARQUET_FOOTER_CACHE_BYTES: int = int(get("PARQUET_FOOTER_CACHE_BYTES", 256 * 1024 * 1024))
 """Byte budget for the process-wide cache of PARSED parquet footers, which lives

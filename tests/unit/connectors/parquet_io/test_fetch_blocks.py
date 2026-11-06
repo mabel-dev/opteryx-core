@@ -282,7 +282,9 @@ def test_fetch_ahead_gate_counts_blocks_not_row_groups(served):
     """[D-1, ruled 2026-09-24] `parquet_io_fetch_ahead_min_blocks` is measured
     against REMOTE FETCH BLOCKS: the grouped file has 8 row groups in 2 blocks,
     so a minimum of 3 leaves the depth off (read back 0) where the row-major
-    copy — 8 one-row-group blocks — arms it; a minimum of 2 arms both."""
+    copy — 8 one-row-group blocks — arms it; a minimum of 2 arms both. (Blocks
+    are counted in 256k-row units; these blocks are 8,000 rows, one unit each —
+    the long-run case is test_fetch_blocks_per_column.py.)"""
     from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
 
     def depth(subdir, gate):

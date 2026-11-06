@@ -150,7 +150,8 @@ def resolve_fetch_ahead(variables, overrides=None) -> int:
 
 def resolve_fetch_ahead_gate(variables, overrides=None) -> int:
     """Minimum REMOTE fetch blocks (post-pruning; the kept row groups of one
-    block of one file are one fetch) before the depth above is armed; 0 = no
+    block of one file are one fetch, counted in 256k-row units so a long run
+    counts the work it carries) before the depth above is armed; 0 = no
     minimum. A knob of its own, not derived from the depth or the worker count —
     tuning either through the other is what made the worker/window sweep
     unattributable."""
