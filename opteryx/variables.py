@@ -42,7 +42,7 @@ feature flag, name the variable for the state the user probably doesn't want -
 e.g. disable_optimizer (default to False)
 """
 
-import importlib.metadata
+import functools
 import sys
 import sysconfig
 from enum import Enum
@@ -168,6 +168,7 @@ def _python_version() -> str:
     return version
 
 
+@functools.cache
 def _installed_version(distribution: str) -> Optional[str]:
     """The installed version of a companion distribution, or None when it is absent.
 
@@ -175,9 +176,45 @@ def _installed_version(distribution: str) -> Optional[str]:
     engine - so absence is a legitimate answer, not a failure, and None says "not
     installed" rather than inventing a version. `distributions(name=...)` is a
     lookup that yields nothing for a missing name, where `version()` would raise.
+
+    Cached for the life of the process: the answer cannot change under a running
+    interpreter, and the lookup scans every distribution on `sys.path`.
     """
+    # Imported here, not at module level: `importlib.metadata` (and the `email` and
+    # `zipfile` packages it pulls in) cost ~9ms, plus ~5ms for the three scans, on
+    # the cold first query of every process — for three RESTRICTED variables almost
+    # no query reads.
+    import importlib.metadata
+
     found = next(iter(importlib.metadata.distributions(name=distribution)), None)
     return None if found is None else found.version
+
+
+class InstalledVersion:
+    """A default that is the installed version of a companion distribution,
+    looked up the first time the variable is READ.
+
+    Storing `_installed_version(...)` by value ran three site-packages scans while
+    this module loaded, which happens on the first query of every process — a
+    cold-start cost paid for variables that only a platform admin can read.
+
+    Unlike `FromConfig`, this is NOT resolved when a session container is built:
+    that would move the same cost to every first session instead of removing it.
+    `SystemVariablesContainer._entry` resolves it on the first read through any of
+    the container's read paths (`[]`, `details`, `as_column`) and stores the answer
+    in place, so the value a reader sees is always the resolved one.
+    """
+
+    __slots__ = ("distribution",)
+
+    def __init__(self, distribution: str):
+        self.distribution = distribution
+
+    def read(self) -> Optional[str]:
+        return _installed_version(self.distribution)
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return f"InstalledVersion({self.distribution!r})"
 
 # fmt: off
 SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
@@ -480,9 +517,10 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # answer "which access/catalog/iceberg code is this process running", which
     # neither of those can. RESTRICTED alongside `python_version`: they describe the
     # DEPLOYMENT. None when the distribution is not installed.
-    "opteryx_access_version": (VARCHAR, _installed_version("opteryx-access"), VariableOwner.SERVER, Visibility.RESTRICTED),
-    "opteryx_catalog_version": (VARCHAR, _installed_version("opteryx-catalog"), VariableOwner.SERVER, Visibility.RESTRICTED),
-    "opteryx_iceberg_version": (VARCHAR, _installed_version("opteryx-iceberg"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # Looked up when first READ, not here (see InstalledVersion).
+    "opteryx_access_version": (VARCHAR, InstalledVersion("opteryx-access"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "opteryx_catalog_version": (VARCHAR, InstalledVersion("opteryx-catalog"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "opteryx_iceberg_version": (VARCHAR, InstalledVersion("opteryx-iceberg"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # `sys.platform` rather than the native is_linux/is_macos probes in
     # opteryx.compiled.platform: those answer two yes/no questions and collapse
     # everything else (BSD, Windows) to a silent "neither", which would report a
@@ -607,10 +645,22 @@ class SystemVariablesContainer:
         self._variables = variables
         self._owner = owner
 
+    def _entry(self, key: str) -> VariableSchema:
+        """The stored entry for `key`, with a deferred default resolved in place.
+
+        Every read path goes through here, so no reader ever sees an
+        `InstalledVersion` placeholder. Callers check membership first.
+        """
+        entry = self._variables[key]
+        if isinstance(entry[1], InstalledVersion):
+            entry = (entry[0], entry[1].read(), entry[2], entry[3])
+            self._variables[key] = entry
+        return entry
+
     def __getitem__(self, key: str) -> Any:
         if key not in self._variables:
             raise VariableNotFoundError(key)
-        return self._variables[key][1]
+        return self._entry(key)[1]
 
     def __setitem__(self, key: str, value: Any) -> None:
         if key[0] == "@":
@@ -693,7 +743,7 @@ class SystemVariablesContainer:
     def details(self, key: str) -> VariableSchema:
         if key not in self._variables:
             raise VariableNotFoundError(key)
-        return self._variables[key]
+        return self._entry(key)
 
     def __contains__(self, key: str) -> bool:
         return key in self._variables
@@ -745,6 +795,9 @@ class SystemVariablesContainer:
                 f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this session "
                 f"does not hold."
             )
+        # Resolved only AFTER the visibility check: a caller refused the read does
+        # not get to trigger the lookup either.
+        variable = self._entry(name)
         return plan_context.columns.constant(
             key, column_type=variable[0], value=variable[1], aliases=aliases
         )

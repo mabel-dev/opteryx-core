@@ -217,6 +217,7 @@ __all__ = (
     "set_default_connector",
     "set_workspace_resolver",
     "resolution_scope",
+    "trust_cached_catalogs",
     "set_workspace_settings_resolver",
     "workspace_settings_connector",
     "view_store_connector",
@@ -528,6 +529,38 @@ def _build_connector(connector, entry: dict, telemetry):
         # A class is instantiated; a factory function is called - same shape.
         return connector(telemetry=telemetry, **entry)
     raise ValueError(f"Invalid connector type: {type(connector)}")
+
+
+#: The longest, in seconds, a cached catalog handle may go unverified in the current
+#: scope; None (the default) means verify on every use.
+_trust_cached_catalogs: ContextVar = ContextVar("opteryx_trust_cached_catalogs", default=None)
+
+
+@contextmanager
+def trust_cached_catalogs(max_age: float = float("inf")):
+    """Let connectors serve an already-built catalog handle without re-verifying it,
+    provided it was verified (or built) within `max_age` seconds.
+
+    A connector that holds a catalog handle for a workspace normally re-reads the
+    workspace's `$properties` document on every use, to notice a workspace dropped
+    from another process (see `OpteryxConnector._get_catalog`). That is the right
+    default for anything that writes. It is wasted work, per relation, for the
+    edit-time check - nothing it reports can be acted on destructively and it already
+    tolerates a catalog lookup being up to a TTL stale (see `opteryx.CatalogCache`) -
+    and mostly wasted for planning, which pays a Firestore round trip for it before
+    reading anything else. The check passes the default (never re-verify); planning
+    passes `config.CATALOG_LIVENESS_RECHECK_SECONDS`, so a dropped workspace is noticed
+    within that window rather than on the very next statement.
+
+    Opt-in and scoped: outside this block nothing changes. A handle that has not been
+    built yet is still built through the full existence gate - this only skips the
+    re-check of one that was. A `max_age` of 0 or less never trusts a handle.
+    """
+    token = _trust_cached_catalogs.set(max_age)
+    try:
+        yield
+    finally:
+        _trust_cached_catalogs.reset(token)
 
 
 @contextmanager

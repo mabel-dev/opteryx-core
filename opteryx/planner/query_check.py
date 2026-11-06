@@ -32,6 +32,7 @@ redraws completion from it; this returns the error and nothing else rather than
 guessing at a half-typed statement from a second, approximate parser.
 """
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 from typing import Dict
@@ -510,7 +511,7 @@ def _identities(bound_plan) -> Tuple[CheckedIdentity, ...]:
     return tuple(sorted(resolved, key=lambda i: (i.type, i.identity, i.source or "")))
 
 
-def check_statement(
+def _check_statement(
     operation: str,
     execution_context,
     query_id: str,
@@ -654,3 +655,22 @@ def check_statement(
         identities=_identities(bound_plan),
         **about,
     )
+
+
+@functools.wraps(_check_statement)
+def check_statement(*args, **kwargs) -> QueryCheck:
+    # Two scopes, both for the same reason: a check is called as a statement is typed,
+    # and a catalog round trip per relation is what made it slow.
+    #
+    # `resolution_scope` - this function calls the build and bind stages directly
+    # rather than through `bind_statement`, which is where the planner opens one, so
+    # without it each relation named re-resolves its workspace's binding.
+    #
+    # `trust_cached_catalogs` - skip re-verifying a cached catalog handle against the
+    # workspace's `$properties` document, once per relation. A check already accepts
+    # catalog answers up to a `CatalogCache` TTL stale.
+    from opteryx.connectors import resolution_scope
+    from opteryx.connectors import trust_cached_catalogs
+
+    with resolution_scope(), trust_cached_catalogs():
+        return _check_statement(*args, **kwargs)

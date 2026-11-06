@@ -34,6 +34,10 @@ surviving morsels.
      all predicates are included in the yielded Morsel.
 """
 
+# Python 3.15+ (PEP 810) defers this import until first use; earlier
+# versions ignore the name and import it eagerly as before.
+__lazy_modules__ = ["mmap"]
+
 import contextlib
 import decimal
 import functools

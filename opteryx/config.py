@@ -823,6 +823,16 @@ Must name a real disk (e.g. a Cloud Run ephemeral volume). The container
 filesystem is otherwise RAM-backed, where caching would consume the memory it
 is meant to conserve, so this has no default path."""
 
+CATALOG_LIVENESS_RECHECK_SECONDS: float = float(get("OPTERYX_CATALOG_LIVENESS_RECHECK_SECONDS", 5.0))
+"""How long planning trusts a cached catalog handle before re-reading the workspace's
+`$properties` document to confirm the workspace still exists.
+
+Each re-read is a Firestore round trip, and planning made two of them per relation
+before reading anything else. DROP WORKSPACE evicts the dropping process's own entry at
+once; this is the window other processes can take to notice. Applies to planning only:
+DDL and writes, and any caller outside planning, still re-check on every use. `0` turns
+the allowance off and restores a re-check per use everywhere."""
+
 MANIFEST_CACHE_BYTES: int = int(get("OPTERYX_MANIFEST_CACHE_BYTES", 1024 * 1024 * 1024))
 """Byte ceiling for the on-disk manifest cache."""
 

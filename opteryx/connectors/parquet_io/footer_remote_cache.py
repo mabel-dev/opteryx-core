@@ -41,6 +41,10 @@ opteryx-core does not depend on any KV client library; the store is built throug
 `remote_footer_cache()` is None and the scan path is exactly what it was before.
 """
 
+# Python 3.15+ (PEP 810) defers this import until first use; earlier
+# versions ignore the name and import it eagerly as before.
+__lazy_modules__ = ["hashlib"]
+
 import threading
 from hashlib import sha256
 from typing import Dict

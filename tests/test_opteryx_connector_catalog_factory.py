@@ -156,3 +156,173 @@ def test_normalize_external_schema_to_relation_descriptor():
     # JSONB resolves to NVARCHAR under the current type vocabulary
     # (_SQL_NAME_ALIASES["JSONB"] -> NVARCHAR; there is no JSONB physical type).
     assert schema.columns[2].category == LogicalCategory.NVARCHAR
+
+
+def test_cached_catalog_is_reverified_unless_trusted():
+    """A cache hit re-reads `$properties` to notice a dropped workspace - except under
+    `trust_cached_catalogs`, which the edit-time check opts into."""
+    from opteryx.connectors import trust_cached_catalogs
+
+    class DummyCatalog:
+        reads = 0
+
+        def __init__(self, workspace=None, **kwargs):
+            pass
+
+        def get_workspace_properties(self):
+            type(self).reads += 1
+            return {"name": "ws"}
+
+    conn = OpteryxConnector(catalog=DummyCatalog)
+    first = conn._get_catalog("ws3")
+    assert DummyCatalog.reads == 0  # built, not re-verified
+
+    assert conn._get_catalog("ws3") is first
+    assert DummyCatalog.reads == 1  # default: every hit is re-verified
+
+    with trust_cached_catalogs():
+        assert conn._get_catalog("ws3") is first
+    assert DummyCatalog.reads == 1  # trusted: no read
+
+    assert conn._get_catalog("ws3") is first
+    assert DummyCatalog.reads == 2  # and the opt-out does not leak past the block
+
+
+def _counting_catalog():
+    class CountingCatalog:
+        reads = 0
+        deleted = False
+
+        def __init__(self, workspace=None, **kwargs):
+            pass
+
+        def get_workspace_properties(self):
+            type(self).reads += 1
+            return {"deleted-at-ms": 123 if type(self).deleted else None}
+
+    return CountingCatalog
+
+
+def test_trust_window_is_bounded_by_max_age(monkeypatch):
+    """With a `max_age`, a cached handle is trusted until that long after it last passed
+    the existence check, then verified once and trusted again."""
+    import opteryx.connectors.opteryx_connector as oc
+    from opteryx.connectors import trust_cached_catalogs
+
+    now = [1000.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: now[0])
+
+    Catalog = _counting_catalog()
+    conn = OpteryxConnector(catalog=Catalog)
+    first = conn._get_catalog("ws")  # built through the gate at t=1000
+
+    with trust_cached_catalogs(5.0):
+        now[0] = 1003.0
+        assert conn._get_catalog("ws") is first
+        assert Catalog.reads == 0  # inside the window
+
+        now[0] = 1006.0
+        assert conn._get_catalog("ws") is first
+        assert Catalog.reads == 1  # window passed: one re-check...
+
+        now[0] = 1008.0
+        assert conn._get_catalog("ws") is first
+        assert Catalog.reads == 1  # ...which starts a new window
+
+
+def test_dropped_workspace_is_noticed_once_window_passes_and_never_when_untrusted(monkeypatch):
+    import opteryx.connectors.opteryx_connector as oc
+    from opteryx.connectors import trust_cached_catalogs
+
+    now = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: now[0])
+
+    Catalog = _counting_catalog()
+    conn = OpteryxConnector(catalog=Catalog)
+    first = conn._get_catalog("ws")
+    Catalog.deleted = True
+
+    # Outside any trust scope (DDL, writes, execution): noticed on the very next use.
+    assert conn._get_catalog("ws") is not first
+
+    # Inside the window the drop is not yet noticed; after it, it is.
+    Catalog.deleted = False
+    rebuilt = conn._get_catalog("ws")
+    Catalog.deleted = True
+    with trust_cached_catalogs(5.0):
+        now[0] = 2.0
+        assert conn._get_catalog("ws") is rebuilt
+        now[0] = 9.0
+        assert conn._get_catalog("ws") is not rebuilt
+
+
+def test_failed_properties_read_does_not_start_a_trust_window(monkeypatch):
+    import opteryx.connectors.opteryx_connector as oc
+    from opteryx.connectors import trust_cached_catalogs
+
+    now = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: now[0])
+
+    class Flaky:
+        reads = 0
+
+        def __init__(self, workspace=None, **kwargs):
+            pass
+
+        def get_workspace_properties(self):
+            type(self).reads += 1
+            raise RuntimeError("firestore unavailable")
+
+    conn = OpteryxConnector(catalog=Flaky)
+    first = conn._get_catalog("ws")
+    with trust_cached_catalogs(5.0):
+        now[0] = 6.0
+        assert conn._get_catalog("ws") is first  # kept: a blip is not a drop
+        assert Flaky.reads == 1
+        assert conn._get_catalog("ws") is first
+        assert Flaky.reads == 2  # but the blip bought no window: it looked again
+
+
+def test_zero_max_age_never_trusts():
+    from opteryx.connectors import trust_cached_catalogs
+
+    Catalog = _counting_catalog()
+    conn = OpteryxConnector(catalog=Catalog)
+    conn._get_catalog("ws")
+    with trust_cached_catalogs(0):
+        conn._get_catalog("ws")
+        conn._get_catalog("ws")
+    assert Catalog.reads == 2
+
+
+def test_query_planner_opens_the_trust_window(monkeypatch):
+    """Planning is the caller that wants the window; it takes its length from config."""
+    from opteryx import config
+    from opteryx import connectors
+    import opteryx.planner as planner
+
+    seen = []
+    original = connectors.trust_cached_catalogs
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def spy(max_age=float("inf")):
+        seen.append(max_age)
+        with original(max_age):
+            yield
+
+    monkeypatch.setattr(connectors, "trust_cached_catalogs", spy)
+    monkeypatch.setattr(config, "CATALOG_LIVENESS_RECHECK_SECONDS", 7.5)
+    try:
+        planner.query_planner(
+            operation="SELECT 1 AS one",
+            parameters=None,
+            visibility_filters=None,
+            execution_context=type("C", (), {"variables": None})(),
+            query_id="q",
+            telemetry=None,
+        )
+    except Exception:
+        pass  # planning itself needs a real context; only the scope is under test
+    assert seen and seen[0] == 7.5

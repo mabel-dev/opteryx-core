@@ -11,6 +11,10 @@ Recency survives the process. A hit stamps the entry's mtime (at most once per
 disk), and a new process seeds its LRU order from those mtimes.
 """
 
+# Python 3.15+ (PEP 810) defers this import until first use; earlier
+# versions ignore the name and import it eagerly as before.
+__lazy_modules__ = ["hashlib"]
+
 import os
 import threading
 import time

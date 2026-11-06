@@ -586,7 +586,9 @@ def query_planner(
     Takes no catalog cache, on purpose: a plan that reads rows is built against the
     catalog as it is now, not as it was up to a minute ago.
     """
+    from opteryx import config
     from opteryx.connectors import resolution_scope
+    from opteryx.connectors import trust_cached_catalogs
     from opteryx.models import QueryProperties
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
@@ -595,7 +597,12 @@ def query_planner(
     # around the WHOLE of planning, not just the bind: the optimizer and the
     # physical planner build connectors too, and each of those is another call
     # into the resolver. See `opteryx.connectors.resolution_scope`.
-    with resolution_scope():
+    # `trust_cached_catalogs` - a cached catalog handle is re-checked for its workspace
+    # having been dropped at most once per `CATALOG_LIVENESS_RECHECK_SECONDS`, not on
+    # every use: measured, that re-check was two of the three Firestore round trips a
+    # single-table plan made before any manifest was read. Only the planner's lookups
+    # fall inside this block; execution, writes and DDL re-check as before.
+    with resolution_scope(), trust_cached_catalogs(config.CATALOG_LIVENESS_RECHECK_SECONDS):
         # The query's planning context: its columns (minted by every phase, from the
         # AST builders on), its estimates and the scan base-statistics memo — shared
         # by the optimizer, the result-size guard and the billing meter, never across

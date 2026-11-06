@@ -13,6 +13,7 @@ Architecture:
 
 import logging
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -1460,6 +1461,10 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         # Ensure we have a per-connector cache for instantiated catalogs
         if getattr(self, "_catalog_cache", None) is None:
             self._catalog_cache = {}
+        # When each cached handle last passed the existence check (or was built through
+        # it): `trust_cached_catalogs` reads this to decide whether a re-check is due.
+        if getattr(self, "_catalog_verified_at", None) is None:
+            self._catalog_verified_at = {}
 
         # Return cached instance when available - but not blindly. This
         # connector (and the module-level cache in
@@ -1485,10 +1490,24 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         # hasn't been provisioned yet.
         if catalog_name in self._catalog_cache:
             cached = self._catalog_cache[catalog_name]
+            from opteryx.connectors import _trust_cached_catalogs
+
+            max_age = _trust_cached_catalogs.get()
+            if max_age is not None:
+                # The caller opted into a bounded-staleness re-check (see
+                # `trust_cached_catalogs`): the edit-time check never wants the
+                # read below, and planning only once its window has passed -
+                # otherwise a Firestore round trip per relation, up front, for
+                # an answer that almost always comes back "still there".
+                verified = self._catalog_verified_at.get(catalog_name)
+                if verified is not None and time.monotonic() - verified < max_age:
+                    return cached
+            props_read_ok = True
             try:
                 props = cached.get_workspace_properties()
                 still_live = bool(props) and props.get("deleted-at-ms") is None
             except Exception:
+                props_read_ok = False
                 # A transient read failure here must not evict a perfectly
                 # good cached handle over a blip - same conservative
                 # direction the constructor's own read-failure handling
@@ -1497,14 +1516,20 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 # missing when we simply couldn't look").
                 still_live = True
             if still_live:
+                # A failed read above also lands here (see its comment) - that is
+                # not a verification, so it must not start a trust window.
+                if props_read_ok:
+                    self._catalog_verified_at[catalog_name] = time.monotonic()
                 return cached
             del self._catalog_cache[catalog_name]
+            self._catalog_verified_at.pop(catalog_name, None)
 
         factory = self.catalog_factory
 
         # If an instance (non-callable, non-class) was provided, cache and return it
         if not isinstance(factory, type) and not callable(factory):
             self._catalog_cache[catalog_name] = factory
+            self._catalog_verified_at[catalog_name] = time.monotonic()
             return factory
 
         instance = None
@@ -1525,6 +1550,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             instance.io = CachingFileIO(instance.io, tiers)
 
         self._catalog_cache[catalog_name] = instance
+        self._catalog_verified_at[catalog_name] = time.monotonic()
         return instance
 
     def _parse_identifier(self, name) -> Tuple[str, str]:
@@ -2199,6 +2225,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace_name)
         catalog.drop_workspace(author=author)
         self._catalog_cache.pop(workspace_name, None)
+        self._catalog_verified_at.pop(workspace_name, None)
 
     def drop_secret(
         self,
