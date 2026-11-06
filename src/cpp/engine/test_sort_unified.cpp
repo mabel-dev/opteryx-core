@@ -847,7 +847,46 @@ static void test_sort_buffers_are_charged() {
     }
     const int64_t peak = draken_mem_peak() - before;
     CHECK(draken_mem_charged() == before, "sort buffers not fully uncharged");
-    CHECK(peak >= static_cast<int64_t>(n * 40), "sort working arrays not charged");
+    CHECK(peak >= static_cast<int64_t>(n * 28), "sort working arrays not charged");
+    // 33 B/row with the keys freed before the radix (42 with them kept through it).
+    CHECK(peak < static_cast<int64_t>(n * 38), "sort_rows keeps its key lanes through the sort");
+}
+
+// sort_perm(std::move(keys), ...) gives the const& order, and on the AoS arm frees the
+// key lanes before the sort's scratch exists: the charged peak drops by about their size.
+static void test_consumed_keys_are_released() {
+    const size_t n = 300000;
+    std::mt19937_64 rng(8);
+    std::vector<CxxColumn> cols;
+    for (int c = 0; c < 3; ++c) {
+        std::vector<int64_t> vals(n);
+        for (size_t i = 0; i < n; ++i) vals[i] = static_cast<int64_t>(rng() % (c == 2 ? n : 50));
+        std::vector<bool> valid(n, true);
+        for (size_t i = c; i < n; i += 11) valid[i] = false;
+        cols.push_back(col_i64(vals, valid));
+    }
+    std::vector<MorselPtr> ms{make_morsel(std::move(cols))};
+    const std::vector<SortKeySpec> spec{{0, true, true}, {1, false, false}, {2, true, true}};
+    for (size_t take : {SIZE_MAX, size_t(1000)}) {
+        auto keys = keys_of(ms, spec);
+        std::vector<uint32_t> ref(n), via(n);
+        std::iota(ref.begin(), ref.end(), 0u);
+        std::iota(via.begin(), via.end(), 0u);
+        int64_t base = draken_mem_charged();
+        draken_mem_reset_peak();
+        sort_perm(keys, ref, take, 4u);
+        const int64_t kept = draken_mem_peak() - base;
+        base = draken_mem_charged();
+        draken_mem_reset_peak();
+        sort_perm(std::move(keys), via, take, 4u);
+        const int64_t released = draken_mem_peak() - base;
+        const size_t m = take < n ? take : n;
+        CHECK(std::equal(ref.begin(), ref.begin() + m, via.begin()), "consumed keys changed the order");
+        if (take == SIZE_MAX) {   // a 1000-row Top-N stays on SortKeyCmp, which keeps them
+            CHECK(keys.empty(), "AoS arm did not release the consumed keys");
+            CHECK(kept - released >= static_cast<int64_t>(n * 20), "key lanes coexist with radix scratch");
+        }
+    }
 }
 
 // A wide radix team (16) takes the narrowest vergesort threshold (1): K=2 and K=4
@@ -1523,6 +1562,7 @@ int main() {
     test_run_census_routes();
     test_radix_scratch_is_charged();
     test_sort_buffers_are_charged();
+    test_consumed_keys_are_released();
     test_wide_team_threshold_routes();
     test_census_runs_match_vergesort();
     test_parallel_gather_matches_serial();
