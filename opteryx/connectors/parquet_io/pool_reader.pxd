@@ -263,6 +263,10 @@ cdef class NativeScanPlan:
     # skips copying long-value payloads. All-zero (the default) → decode unchanged.
     cdef vector[uint8_t] length_only_columns
     cdef int in_flight_limit
+    # Byte window beside the row-group window (NativeParquetScanSource::
+    # window_bytes): the arena less one row group's estimate on a scan with any
+    # remote work item when PARQUET_IO_BYTE_WINDOW is on; 0 = row-group window only.
+    cdef int64_t window_bytes
     cdef int n_items
     # WP-02: row groups excluded by pushed-predicate min/max + bloom pruning at
     # plan time. n_items is the SURVIVING (scanned) count; pruned + n_items ==

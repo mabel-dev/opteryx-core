@@ -3450,6 +3450,7 @@ cdef class NativeScanPlan:
         self.pipeline_ptr = NULL
         self.footer_map = NULL
         self.in_flight_limit = 0
+        self.window_bytes = 0
         self.n_items = 0
         self.pruned_items = 0
         # -1 = no runtime bound wired (see the pxd). Only the Source overwrites it.
@@ -4094,6 +4095,15 @@ cpdef NativeScanPlan open_native_scan_plan(
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
         dyn_pool_size = 256*1024*1024
+    # Byte window (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.7.2): beside the
+    # row-group window, admit a fetch block while the estimated bytes in flight
+    # fit the arena this scan reserves, less one row group. Where the arena is
+    # window × est_rg (a wide projection) the two windows agree; where it is the
+    # 256 MiB floor (a narrow one) the byte window lets a long run of byte-small
+    # row groups in without filling the row-group count. Remote scans only: the
+    # window exists to keep fetches in flight.
+    if remote_work_items and _config.PARQUET_IO_BYTE_WINDOW:
+        plan.window_bytes = dyn_pool_size - est_rg
     cdef shared_ptr[PriorityPool] _shared_handle
     # LOCAL scans decode on a process-lifetime pool (`_local_decode_pool`), so no
     # query constructs or joins threads; a scan with fewer work items than threads
