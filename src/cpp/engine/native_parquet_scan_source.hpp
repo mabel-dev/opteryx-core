@@ -860,7 +860,9 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // alone). A fetch block is admitted while EITHER window has room: the
     // row-group window keeps today's behaviour wherever it binds, the byte
     // window lets a block of many byte-small row groups (a narrow column's run)
-    // in without filling the row-group count. Set to the scan's own arena less
+    // in without filling the row-group count. Off while a remote bloom round is
+    // pending or a Top-N boundary is armed: their skips act only on units the walk
+    // has not admitted yet. Set to the scan's own arena less
     // one row group's estimate (pool_reader.pyx, the same `est_rg` the arena is
     // sized from), so admitted bytes never outgrow what was reserved for them.
     int64_t window_bytes = 0;
@@ -1849,8 +1851,14 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                     while (e < n_items && same_block(g, e - 1, e)) ++e;
                     const bool rg_room =
                         (submit_end - g.units_skipped - g.results_received) < in_flight_limit;
+                    // Not while a walk-time skip can still act: a pending bloom round
+                    // or an armed Top-N boundary only skips units the walk has NOT
+                    // yet admitted, so admitting hundreds ahead would read row groups
+                    // those would have skipped. Such scans keep the row-group window.
                     bool byte_room = false;
-                    if (!rg_room && window_bytes > 0) {
+                    const bool walk_skips_pending =
+                        topn_armed || (g.bloom && !g.bloom->applied);
+                    if (!rg_room && window_bytes > 0 && !walk_skips_pending) {
                         int64_t block_cost = 0;
                         for (int u = submit_end; u < e; ++u) block_cost += unit_cost(g, u);
                         byte_room = (g.bytes_admitted - g.bytes_released) + block_cost <= window_bytes;
