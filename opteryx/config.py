@@ -231,6 +231,34 @@ COMPACTION_DISK_BYTES: int = int(get("COMPACTION_DISK_BYTES", 25 * 1024 * 1024 *
 estimate - an upper bound on the lz4 sort spill that pass writes to local disk
 (ruled 2026-11-04, sized for the 4 vCPU / 16 GB / 25 GB-disk worker)."""
 
+PARQUET_WRITE_NARROW_CHUNK_BYTES: int = int(get("PARQUET_WRITE_NARROW_CHUNK_BYTES", 0))
+"""Per-column block size for every parquet data file the engine writes (INSERT,
+CTAS, MERGE, OPTIMIZE): columns whose first block's largest encoded chunk is at or
+below this many bytes are written as long byte-adjacent runs, the rest in blocks
+of four row groups (rugo `narrow_chunk_bytes`; docs/PARQUET_WRITE_FOR_READ_SPEED.md
+§4.5-4.7). 0 (default) = off, the grouped layout every file has today. The
+measured and ruled value is 32768. With it on, every file written carries the
+value in its footer (`rugo.narrow_chunk_bytes`), and OPTIMIZE treats a file whose
+footer does not carry the current value as needing a rewrite, so existing data
+moves to the layout one pass at a time (FINAL: as much as its disk budget
+holds). Must be >= 0."""
+if PARQUET_WRITE_NARROW_CHUNK_BYTES < 0:
+    raise ValueError(
+        f"PARQUET_WRITE_NARROW_CHUNK_BYTES must be >= 0, not {PARQUET_WRITE_NARROW_CHUNK_BYTES}")
+
+PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES: int = int(
+    get("PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES", 256 * 1024 * 1024))
+"""The writer's memory for held narrow chunks when PARQUET_WRITE_NARROW_CHUNK_BYTES
+is on (rugo `narrow_held_budget_bytes`): runs are whole-file while they fit and
+close at a block boundary when they would not. Peak held memory per open file is
+at most this plus one block's narrow chunks. 256 MiB holds a 4.6 GiB hits file to
+256 MiB with one extra run boundary (§4.7.1). 0 = no budget. Read only when the
+layout is on."""
+if PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES < 0:
+    raise ValueError(
+        "PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES must be >= 0, not "
+        f"{PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES}")
+
 KVSTORE_KEY_PREFIX: str = str(get("KVSTORE_KEY_PREFIX", "")).strip()
 """Optional global key prefix applied to configured KV stores."""
 

@@ -1818,6 +1818,16 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 f"got {write_profile!r}"
             )
 
+        # The per-column layout (PARQUET_WRITE_NARROW_CHUNK_BYTES, off by
+        # default): the catalog hands `write_options` to rugo's
+        # open_parquet_writer verbatim, so the engine adds the layout to a COPY
+        # of the catalog's option set rather than the catalog growing a knob.
+        from opteryx.connectors.parquet_io.parquet_writer import narrow_write_options
+
+        layout = narrow_write_options()
+        if layout:
+            options = {**options, **layout}
+
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         # statistics=False: the engine describes its own files natively

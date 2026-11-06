@@ -3632,11 +3632,23 @@ inline void append_draken_logical_kv(
 
 // `file_ndv`: one `rugo.ndv` value per schema column ("" = not stated), from
 // FileNdv::values() or carried over by the patch path; nullptr = none.
+// The footer key that records a per-column-layout write: the writer's
+// narrow_chunk_bytes, in decimal. Stamped whenever the layout was ON for the file
+// (whether or not any column turned out narrow), absent otherwise, so compaction
+// can tell a file written under the current threshold from one that was not
+// without re-deriving the layout from chunk adjacency — which cannot tell "no
+// column was narrow" from "the layout was off" and would rewrite the first
+// forever (docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.7.3).
+inline constexpr const char *kNarrowChunkBytesKey = "rugo.narrow_chunk_bytes";
+
 inline void write_file_kv(TCompactWriter &fm,
                           const std::vector<ColumnInput> &schema_cols,
-                          const std::vector<std::string> *file_ndv) {
+                          const std::vector<std::string> *file_ndv,
+                          size_t narrow_chunk_bytes = 0) {
   std::vector<std::pair<std::string, std::string>> kv;
   append_draken_logical_kv(kv, schema_cols);
+  if (narrow_chunk_bytes > 0)
+    kv.emplace_back(kNarrowChunkBytesKey, std::to_string(narrow_chunk_bytes));
   if (file_ndv != nullptr) {
     if (file_ndv->size() != schema_cols.size())
       throw std::logic_error("write_file_kv: file NDV values do not match the schema");
@@ -3726,7 +3738,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                                  size_t total_rows,
                                  const std::vector<RGMeta> &rg_meta,
                                  const std::vector<std::vector<ColumnInput>> &all_rg_cols,
-                                 const std::vector<std::string> *file_ndv = nullptr) {
+                                 const std::vector<std::string> *file_ndv = nullptr,
+                                 size_t narrow_chunk_bytes = 0) {
   const char *MAGIC = "PAR1";
   TCompactWriter fm;
   fm.structBegin();
@@ -3768,7 +3781,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     fm.writeI64Field(6, rg_compressed);                 // total_compressed_size
     fm.structEnd();
   }
-  write_file_kv(fm, schema_cols, file_ndv);        // key_value_metadata (field 5, optional)
+  write_file_kv(fm, schema_cols, file_ndv, narrow_chunk_bytes); // key_value_metadata (field 5, optional)
   fm.writeStringField(6, RUGO_PARQUET_CREATED_BY); // created_by
   // column_orders (field 7): one TypeDefinedOrder per leaf column.
   fm.writeFieldHeader(CT_LIST, 7);
@@ -3928,7 +3941,8 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   if (want_index)
     write_page_index(file, /*base_offset=*/0, rg_meta, all_rg_cols);
   const std::vector<std::string> ndv_values = ndv.values();
-  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, &ndv_values);
+  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, &ndv_values,
+                       runs.chunk_bytes);
 
   if (out_stats) {
     // One pool task per column: each is an independent pass over its whole
@@ -4051,7 +4065,7 @@ class StreamingParquetWriter {
       write_page_index(buf_, abs_offset_, rg_meta_, all_rg_cols_);
     const std::vector<std::string> ndv_values = ndv_.values();
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
-                         all_rg_cols_, &ndv_values);
+                         all_rg_cols_, &ndv_values, runs_.chunk_bytes);
     return take_pending();
   }
 

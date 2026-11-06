@@ -14,7 +14,37 @@ import os
 from typing import Optional
 
 from draken.morsels.morsel import Morsel
+from opteryx import config
 from opteryx.utils import unique_id
+
+# The footer key rugo stamps when a file was written with the per-column layout
+# (its narrow_chunk_bytes), read back by compaction to find files written before
+# the layout, or under another threshold.
+NARROW_CHUNK_BYTES_KEY = "rugo.narrow_chunk_bytes"
+
+
+def narrow_write_options() -> dict:
+    """The per-column layout options every engine-written data file takes:
+    nothing when PARQUET_WRITE_NARROW_CHUNK_BYTES is 0 (the default — the
+    grouped layout, byte for byte), else the threshold and the held-bytes
+    budget. One place, so the local store and the catalog write the same
+    layout from the same knobs."""
+    if config.PARQUET_WRITE_NARROW_CHUNK_BYTES <= 0:
+        return {}
+    return {
+        "narrow_chunk_bytes": config.PARQUET_WRITE_NARROW_CHUNK_BYTES,
+        "narrow_held_budget_bytes": config.PARQUET_WRITE_NARROW_HELD_BUDGET_BYTES,
+    }
+
+
+def layout_is_current(footer_key_values: dict) -> bool:
+    """Whether a file's footer says it was written with the layout the knob asks
+    for now. Always True with the layout off: a knob at 0 never makes a file
+    stale, whatever it was written with."""
+    wanted = config.PARQUET_WRITE_NARROW_CHUNK_BYTES
+    if wanted <= 0:
+        return True
+    return footer_key_values.get(NARROW_CHUNK_BYTES_KEY) == str(wanted)
 
 
 class LocalDataFileWriter:
@@ -49,6 +79,7 @@ class LocalDataFileWriter:
             sorted_by=sorted_by,
             sorted_descending=sorted_descending,
             profile=write_profile,
+            **narrow_write_options(),
         )
         self._rows = 0
         self._bytes = 0

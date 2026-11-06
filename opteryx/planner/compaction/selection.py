@@ -21,10 +21,15 @@ Three rule families, tried in the order ``compact()`` used:
   C  delete debt      one file rewritten purely to shed merge-on-read deletes.
                       The case A and B never reach: an at-target file that is
                       heavily deleted.
+  D  layout debt      one file rewritten purely because it was written without
+                      the per-column layout the engine now writes
+                      (PARQUET_WRITE_NARROW_CHUNK_BYTES). Last, and only when
+                      that knob is on: without it existing data never moves,
+                      because A-C (and FINAL on compacted files) select nothing.
 
-A dataset whose manifest holds a SINGLE file is rejected unless rule C fires:
-there is nothing to merge it with, so only a rewrite-in-place to shed delete
-debt is worth a pass.
+A dataset whose manifest holds a SINGLE file is rejected unless rule C or D
+fires: there is nothing to merge it with, so only a rewrite-in-place to shed
+delete or layout debt is worth a pass.
 
 ``OPTIMIZE TABLE x FINAL`` uses ``select_final_compaction_plan`` instead: one
 contiguous key window, as large as the disk budget allows, in a single pass.
@@ -65,6 +70,12 @@ class CompactionFile:
     """None for files written before it was recorded."""
 
     deleted_record_count: int = 0
+
+    layout_stale: bool = False
+    """Written without the per-column layout the engine writes now — its footer
+    does not carry the current ``rugo.narrow_chunk_bytes``. Not a manifest fact:
+    the planning strategy reads it off the footers, and only when the layout is
+    on, so it is False whenever it was not looked at."""
 
 
 def compaction_files(manifest) -> List[CompactionFile]:
@@ -448,6 +459,35 @@ def _select_delete_debt(
     )
 
 
+# --- Rule D: layout debt -----------------------------------------------------
+
+
+def _select_layout_debt(
+    entries: Sequence[CompactionFile],
+    sort_column: Optional[str],
+) -> Optional[CompactionPlan]:
+    """Rewrite one file written without the current per-column layout.
+
+    Rule C's shape: no size floor, no partner, one file per pass, rewritten in
+    place by a single-file ``combine`` that keeps its row order (a sorted file
+    stays sorted), so the file's key range and size are unchanged and only its
+    byte layout moves. The largest stale file that fits the pass budget goes
+    first (the most bytes moved per pass); when none fits, the smallest.
+    """
+    stale = [entry for entry in entries if entry.layout_stale]
+    if not stale:
+        return None
+    fitting = [entry for entry in stale if entry_size(entry) <= PASS_BUDGET_BYTES]
+    chosen = max(fitting, key=entry_size) if fitting else min(stale, key=entry_size)
+    return CompactionPlan(
+        strategy="combine",
+        mode="brute",
+        files=[chosen],
+        reason=f"layout-debt ({len(stale)} stale file(s))",
+        sort_column=sort_column,
+    )
+
+
 # --- Dispatch ----------------------------------------------------------------
 
 
@@ -482,9 +522,12 @@ def select_compaction_plan(
         # so it does not need a partner. A lone file with no debt is declined.
         plan = _select_delete_debt(entries, sort_column, threshold=delete_debt_threshold)
         if plan is None:
+            plan = _select_layout_debt(entries, sort_column)
+        if plan is None:
             return SelectionResult(
                 SelectionOutcome.SINGLE_FILE,
-                detail="manifest holds a single file with no delete debt: nothing to compact",
+                detail="manifest holds a single file with no delete or layout debt: "
+                "nothing to compact",
             )
         return SelectionResult(SelectionOutcome.PLANNED, plan=plan, detail=plan.reason)
 
@@ -507,10 +550,15 @@ def select_compaction_plan(
         if plan is None:
             plan = _select_delete_debt(entries, sort_column, threshold=delete_debt_threshold)
 
+    # Rule D, with or without a sort key: a rewrite in place needs neither.
+    if plan is None:
+        plan = _select_layout_debt(entries, sort_column)
+
     if plan is None:
         return SelectionResult(
             SelectionOutcome.NOTHING_TO_DO,
-            detail="no rule selected files: nothing small, overlapping or heavily deleted",
+            detail="no rule selected files: nothing small, overlapping, heavily deleted "
+            "or written without the current layout",
         )
 
     return SelectionResult(SelectionOutcome.PLANNED, plan=plan, detail=plan.reason)
@@ -559,7 +607,8 @@ def _select_final_window(
     component too large for any window. ``(None, why)`` when nothing qualifies.
 
     A component needs work when it overlaps (two or more files), is unsettled
-    (a file under ``MIN_SIZE_BYTES``) or carries delete debt. A settled lone
+    (a file under ``MIN_SIZE_BYTES``), carries delete debt or holds a file written
+    without the current per-column layout (``layout_stale``). A settled lone
     file inside the window is rewritten too: it is the bridge that keeps the
     window contiguous, which is what lets one global sort, rolled at TARGET,
     produce outputs disjoint from every file left alone - so no group
@@ -584,7 +633,9 @@ def _select_final_window(
     needs_work = [
         len(component) > 1
         or any(
-            member.size < MIN_SIZE_BYTES or _delete_debt_ratio(member.entry) >= threshold
+            member.size < MIN_SIZE_BYTES
+            or _delete_debt_ratio(member.entry) >= threshold
+            or member.entry.layout_stale
             for member in component
         )
         for component in components
@@ -624,7 +675,8 @@ def _select_final_window(
             end -= 1
         window = [m.entry for component in components[start : end + 1] for m in component]
         # A lone file without debt has nothing to merge with.
-        if len(window) > 1 or _delete_debt_ratio(window[0]) >= threshold:
+        if (len(window) > 1 or _delete_debt_ratio(window[0]) >= threshold
+                or window[0].layout_stale):
             candidates.append(
                 (best[0], best[1], window, f"final-window {end - start + 1} component(s)")
             )
@@ -684,7 +736,8 @@ def select_final_compaction_plan(
     sorted and rolled at TARGET in a single commit, bounded by ``disk_budget``
     in the uncompressed-estimate unit - an upper bound on the lz4 sort spill.
 
-    Without one: every unsettled file and every file with delete debt,
+    Without one: every unsettled file, every file with delete debt and every
+    file written without the current per-column layout,
     concatenated. A brute merge never sorts, so it spills nothing and the disk
     budget does not apply.
     """
@@ -708,6 +761,7 @@ def select_final_compaction_plan(
             for entry in entries
             if entry_size(entry) < SMALL_FILE_BYTES
             or _delete_debt_ratio(entry) >= delete_debt_threshold
+            or entry.layout_stale
         ]
         if len(selected) >= 2:
             plan = CompactionPlan(
@@ -715,6 +769,8 @@ def select_final_compaction_plan(
             )
         elif selected and _delete_debt_ratio(selected[0]) >= delete_debt_threshold:
             plan = _select_delete_debt(selected, None, threshold=delete_debt_threshold)
+        elif selected and selected[0].layout_stale:
+            plan = _select_layout_debt(selected, None)
     elif key_ranges:
         try:
             plan, detail = _select_final_window(

@@ -377,6 +377,24 @@ def test_with_bounds_and_stream_accept_the_option():
     assert pq.read_table(io.BytesIO(b"".join(chunks))).equals(m.to_arrow())
 
 
+def test_the_footer_records_the_threshold_the_file_was_written_with():
+    """`rugo.narrow_chunk_bytes` in the footer's key-value metadata whenever the
+    layout was on — even when no column turned out narrow — and absent when it
+    was off, so compaction can tell the two apart (§4.7.3)."""
+    m = _morsel(6 * R)
+    def stamp(data):
+        kv = pq.ParquetFile(io.BytesIO(data)).metadata.metadata or {}
+        v = kv.get(b"rugo.narrow_chunk_bytes")
+        return None if v is None else v.decode()
+    assert stamp(_write(m)) is None
+    assert stamp(_write(m, narrow_chunk_bytes=T)) == str(T)
+    assert stamp(_write(m, narrow_chunk_bytes=1)) == "1"   # nothing narrow, still stamped
+    chunks = []
+    with rp.open_parquet_writer(chunks.append, compression="none", narrow_chunk_bytes=T) as w:
+        w.write_row_group(m)
+    assert stamp(b"".join(chunks)) == str(T)
+
+
 def test_options_are_validated():
     m = _morsel(R)
     with pytest.raises(ValueError, match="narrow_chunk_bytes"):

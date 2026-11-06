@@ -3033,6 +3033,54 @@ cpdef list fetch_column_stats_many(
     return out
 
 
+cpdef list fetch_footer_key_values_many(
+    object filesystem,
+    list paths,
+    list keys,
+    dict file_sizes = None,
+    ParquetFooterBytesCache footer_bytes_cache = None,
+):
+    """Footer key-value metadata entries, for MANY files in ONE signed, concurrent
+    acquisition: [{key: value} for the requested `keys` a file's footer carries,
+    ...] parallel to `paths`. A key the footer does not carry is absent from that
+    file's dict.
+
+    The same acquisition `fetch_column_stats_many` makes (it says why it must be
+    one batch), for the facts a footer records about how the file was WRITTEN —
+    compaction reads `rugo.narrow_chunk_bytes` here to find the files written
+    without the current per-column layout (docs/PARQUET_WRITE_FOR_READ_SPEED.md
+    §4.7.3). All-or-nothing like its sibling: one unreadable footer raises for
+    the whole call."""
+    cdef list out = []
+    cdef dict orig_to_cpp
+    cdef ParquetFooterMap footer_map
+    cdef ParquetFooterRef footer
+    cdef str path
+    cdef dict found
+    cdef list wanted = [k.encode("utf-8") for k in keys]
+    cdef bytes key
+    cdef string value
+
+    if not paths:
+        return out
+
+    orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+                            &footer_map, None, _native_auth_header(filesystem))
+
+    for path in paths:
+        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
+                                       _native_auth_header(filesystem))
+        found = {}
+        for key in wanted:
+            if deref(footer).key_value_metadata.count(key) != 0:
+                value = deref(footer).key_value_metadata.at(key)
+                found[key.decode("utf-8")] = value.decode("utf-8")
+        out.append(found)
+
+    return out
+
+
 cdef extern from "metadata.hpp":
     bint StatsLogicalIsUnsigned(const string&)
 
