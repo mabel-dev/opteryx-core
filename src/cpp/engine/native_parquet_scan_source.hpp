@@ -823,6 +823,16 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     std::vector<int32_t> block_id;
     // Row admission's failure, raised by the first get_morsel (make_global cannot).
     std::string admission_error;
+    // Byte window (window_bytes > 0, docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.7.2):
+    // the estimated bytes of every SUBMITTED unit, in submission order (skipped
+    // units cost nothing and are not recorded), and the running totals admitted
+    // and released. A claimed result slot releases the next unit's estimate in
+    // submission order — results complete out of order, but the window only
+    // needs the outstanding TOTAL, and the units of one scan are near-uniform.
+    std::vector<int64_t> unit_cost_seq;
+    int64_t bytes_admitted = 0;
+    int64_t bytes_released = 0;
+    int64_t bytes_in_flight_peak = 0;
 
     // Work-item index for the i-th submittable unit.
     int item_index(int i) const {
@@ -846,6 +856,14 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     const std::vector<std::pair<std::string, int>>* work_items;
     const std::vector<std::string>* column_names;
     int in_flight_limit;
+    // Byte window beside the row-group window (0 = off, the row-group window
+    // alone). A fetch block is admitted while EITHER window has room: the
+    // row-group window keeps today's behaviour wherever it binds, the byte
+    // window lets a block of many byte-small row groups (a narrow column's run)
+    // in without filling the row-group count. Set to the scan's own arena less
+    // one row group's estimate (pool_reader.pyx, the same `est_rg` the arena is
+    // sized from), so admitted bytes never outgrow what was reserved for them.
+    int64_t window_bytes = 0;
     // R2: scan-pushed LIMIT — the maximum number of rows this scan may emit in
     // total, across every worker. -1 == unlimited (every pre-R2 caller).
     //
@@ -1506,6 +1524,25 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         }
     }
 
+    // The arena estimate for submittable unit u: twice its projected
+    // uncompressed bytes — per row group, the quantity pool_reader.pyx sizes the
+    // arena from (`est_rg` = 2 × the largest). 0 when the footer cannot say.
+    int64_t unit_cost(const NativeParquetScanGlobal& g, int u) const {
+        if (footer_map == nullptr) return 0;
+        const auto& wi = (*work_items)[static_cast<size_t>(g.item_index(u))];
+        auto fit = footer_map->find(wi.first);
+        if (fit == footer_map->end() || !fit->second) return 0;
+        const auto& rgs = fit->second->row_groups;
+        if (wi.second < 0 || static_cast<size_t>(wi.second) >= rgs.size()) return 0;
+        int64_t n = 0;
+        for (const auto& cs : rgs[static_cast<size_t>(wi.second)].columns) {
+            if (cs.total_uncompressed_size <= 0) continue;
+            for (const std::string& name : *column_names)
+                if (cs.name == name) { n += cs.total_uncompressed_size; break; }
+        }
+        return 2 * n;
+    }
+
     // Do submittable units a and b (a < b, consecutive) belong to one fetch block?
     bool same_block(const NativeParquetScanGlobal& g, int a, int b) const {
         const int ia = g.item_index(a), ib = g.item_index(b);
@@ -1803,10 +1840,22 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 }
                 const bool bloom_landed = !g.bloom_drop.empty() && g.bloom && g.bloom->applied;
                 int64_t bloom_skipped_now = 0;
-                while (!limit_met && submit_end < n_items &&
-                       (submit_end - g.units_skipped - g.results_received) < in_flight_limit) {
+                // Admission: the row-group window (today's) OR the byte window
+                // (window_bytes > 0) — see `window_bytes`. A block's byte cost is
+                // its units' estimates before skipping (conservative); only the
+                // units actually submitted are charged.
+                while (!limit_met && submit_end < n_items) {
                     int e = submit_end + 1;
                     while (e < n_items && same_block(g, e - 1, e)) ++e;
+                    const bool rg_room =
+                        (submit_end - g.units_skipped - g.results_received) < in_flight_limit;
+                    bool byte_room = false;
+                    if (!rg_room && window_bytes > 0) {
+                        int64_t block_cost = 0;
+                        for (int u = submit_end; u < e; ++u) block_cost += unit_cost(g, u);
+                        byte_room = (g.bytes_admitted - g.bytes_released) + block_cost <= window_bytes;
+                    }
+                    if (!rg_room && !byte_room) break;
                     for (int u = submit_end; u < e; ++u) {
                         const size_t su = static_cast<size_t>(u);
                         if (bloom_landed && g.bloom_drop[su] != 0u) {
@@ -1819,8 +1868,17 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                             g.unit_skip[su] = 1u;
                             g.units_skipped += 1;
                             topn_skipped_now += 1;
+                            continue;
+                        }
+                        if (window_bytes > 0) {
+                            const int64_t c = unit_cost(g, u);
+                            g.unit_cost_seq.push_back(c);
+                            g.bytes_admitted += c;
                         }
                     }
+                    if (window_bytes > 0)
+                        g.bytes_in_flight_peak = std::max(g.bytes_in_flight_peak,
+                                                          g.bytes_admitted - g.bytes_released);
                     submit_end = e;
                 }
                 if (bloom_skipped_now != 0) {
@@ -1840,6 +1898,9 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 if (g.results_received >= g.next_to_submit - g.units_skipped) {
                     return SourceResult::FINISHED;
                 }
+                if (window_bytes > 0 &&
+                    static_cast<size_t>(g.results_received) < g.unit_cost_seq.size())
+                    g.bytes_released += g.unit_cost_seq[static_cast<size_t>(g.results_received)];
                 g.results_received += 1;
             }
 

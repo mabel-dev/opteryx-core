@@ -1289,7 +1289,8 @@ public:
                                 const std::vector<uint8_t>* array_columns = nullptr,
                                 const std::vector<int>* widen_types = nullptr,
                                 int64_t row_limit = -1,
-                                const std::vector<std::vector<rugo::DeclaredNode>>* declared_shapes = nullptr) {
+                                const std::vector<std::vector<rugo::DeclaredNode>>* declared_shapes = nullptr,
+                                int64_t window_bytes = 0) {
         // docs/EXECUTION_TRACING_DESIGN.md: tag the rugo pipeline's trace spans
         // (TC_QUEUE_WAIT/TC_IO_REQUEST/TC_DECODE — currently node_id=0/untagged,
         // see io_pipeline.hpp's set_trace_node_id) with the SAME node_id this
@@ -1298,10 +1299,12 @@ public:
         // already constructed (in Python, before this call) with no node_id
         // available yet — this is the first point node_id exists, so it's set
         // here rather than threaded through the Cython/Python construction path.
-        uint32_t node_id = set_source_(p, std::make_unique<NativeParquetScanSource>(
+        auto src = std::make_unique<NativeParquetScanSource>(
             pipeline, footer_map, work_items, column_names, in_flight_limit,
             pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce,
-            hash_key_columns, array_columns, widen_types, row_limit, declared_shapes));
+            hash_key_columns, array_columns, widen_types, row_limit, declared_shapes);
+        src->window_bytes = window_bytes;
+        uint32_t node_id = set_source_(p, std::move(src));
         if (pipeline != nullptr) pipeline->set_trace_node_id(node_id);
     }
     // R3 (`fused_topn`): the two-pass late-materialization scan Source. Everything the

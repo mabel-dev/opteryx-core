@@ -548,6 +548,22 @@ with at most `workers` requests in flight (hits Q01 at blocks of 64: 0.53 s
 coupled, 0.31 s armed; §4.4). Tune per session with
 `SET parquet_io_fetch_ahead_min_blocks`."""
 
+PARQUET_IO_BYTE_WINDOW: bool = str(get("PARQUET_IO_BYTE_WINDOW", "true")).strip().lower() in (
+    "1", "true", "yes", "on")
+"""Remote native scans admit fetch blocks against a BYTE window beside the
+row-group submission window (`max(workers, fetch_ahead) + 2` row groups): a block
+goes in while either has room. The byte window is the scan's own arena less one
+row group's estimate (the arena is `2 × largest projected row group × (window +
+1)`, floored at 256 MiB), so it never admits more than the arena was reserved
+for. Where the arena is not floored — a wide projection — the two windows agree
+and nothing changes. Where it is floored — a narrow projection — a fetch block of
+many byte-small row groups no longer fills the row-group count by itself: a
+narrow column's 64-row-group run used to be admitted one or two blocks at a
+time, so fetch-ahead ran one request per file whatever its depth
+(docs/PARQUET_WRITE_FOR_READ_SPEED.md §4.6.2 item 5, measured in §4.7.2).
+False = the row-group window alone, as before. Read at import (env
+`PARQUET_IO_BYTE_WINDOW`); local scans never use it."""
+
 PARQUET_FOOTER_CACHE_BYTES: int = int(get("PARQUET_FOOTER_CACHE_BYTES", 256 * 1024 * 1024))
 """Byte budget for the process-wide cache of PARSED parquet footers, which lives
 across queries. Charged at each footer's parsed in-memory size, not its encoded
