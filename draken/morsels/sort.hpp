@@ -1607,8 +1607,11 @@ inline bool topn_full_sort_cheaper(size_t n, size_t take_first, unsigned nthread
 // the key shape allows it and to SortKeyCmp otherwise. Both produce the same order.
 // A full sort over AoS keys falls back to the radix sort instead of the comparison
 // sort once there are SORT_RADIX_MIN rows — again the same order.
-inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
-                      size_t take_first, unsigned nthreads) {
+// `release`, when set, is `keys` itself, handed over by the caller: the AoS arm frees
+// its lanes once they are packed, so they never coexist with the sort's scratch.
+inline void sort_perm_impl(const std::vector<SortKeyColumn>& keys,
+                           std::vector<SortKeyColumn>* release, std::vector<uint32_t>& perm,
+                           size_t take_first, unsigned nthreads) {
     const size_t n = perm.size();
     if (topn_full_sort_cheaper(n, take_first, nthreads)) take_first = SIZE_MAX;
     if (take_first >= n && n >= SORT_RADIX_MIN && keys_have_string(keys) &&
@@ -1669,6 +1672,7 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
                                                  std::array<uint32_t, NP>{});    \
                 else                                                             \
                     build_aos_keys<NP>(keys, n, rows, masks, nf);                \
+                if (release) release->clear();   /* keys is not read past here */ \
                 /* Raw pointers, captured BY VALUE below: a [&] capture of the */ \
                 /* vectors lets their addresses escape, and the uint8_t mask    */ \
                 /* stores in the inlined key build may then alias them — the    */ \
@@ -1703,6 +1707,18 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
         }
     }
     sort_perm_cmp(SortKeyCmp{keys}, perm, take_first, nthreads);
+}
+
+inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
+                      size_t take_first, unsigned nthreads) {
+    sort_perm_impl(keys, nullptr, perm, take_first, nthreads);
+}
+
+// The keys are consumed: on the AoS arm they are freed before the sort runs (9 B/row
+// per numeric key off the peak); afterwards `keys` is empty or unspecified.
+inline void sort_perm(std::vector<SortKeyColumn>&& keys, std::vector<uint32_t>& perm,
+                      size_t take_first, unsigned nthreads) {
+    sort_perm_impl(keys, &keys, perm, take_first, nthreads);
 }
 
 // One level of an ARRAY column's element subtree: the element's physical type plus
@@ -2331,7 +2347,7 @@ inline bool sort_rows(const std::vector<MorselPtr>& ms, const std::vector<SortKe
         s.perm.resize(n);
         for (size_t i = 0; i < n; ++i) s.perm[i] = static_cast<uint32_t>(i);
         s.charge.set(static_cast<int64_t>(s.perm.capacity() * sizeof(uint32_t)));
-        sort_perm(keys, s.perm, take_first, nthreads);
+        sort_perm(std::move(keys), s.perm, take_first, nthreads);
     }
     flatten_rows(s.src, s.row_m, s.row_r);
     s.charge.set(static_cast<int64_t>(
