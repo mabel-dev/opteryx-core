@@ -587,7 +587,7 @@
         "settable": false,
         "requires_entitlement": null,
         "set_by": "not settable via SQL",
-        "default": null,
+        "default": "InstalledVersion('opteryx-access')",
         "default_source": "literal"
     },
     "opteryx_catalog_version": {
@@ -598,7 +598,7 @@
         "settable": false,
         "requires_entitlement": null,
         "set_by": "not settable via SQL",
-        "default": null,
+        "default": "InstalledVersion('opteryx-catalog')",
         "default_source": "literal"
     },
     "opteryx_debug": {
@@ -621,7 +621,7 @@
         "settable": false,
         "requires_entitlement": null,
         "set_by": "not settable via SQL",
-        "default": null,
+        "default": "InstalledVersion('opteryx-iceberg')",
         "default_source": "literal"
     },
     "parquet_gcs_io_workers": {
