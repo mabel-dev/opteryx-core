@@ -292,5 +292,39 @@ def test_fetch_ahead_gate_counts_a_long_run_in_256k_row_units():
             proc.wait()
 
 
+def test_fetch_ahead_gate_counts_one_unit_per_block_of_four_on_todays_layout():
+    """Today's layout (64k row groups in blocks of four) is unchanged by the unit
+    rule: a full block is exactly 262,144 rows = ONE unit (the boundary is
+    inclusive), a partial block is one too, so nine row groups in blocks of
+    four are three blocks and three units — the count [D-1] gave them."""
+    from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+
+    n_rg = 9   # 4 + 4 + 1
+    with tempfile.TemporaryDirectory() as tmp:
+        d = os.path.join(tmp, "b4")
+        os.makedirs(d)
+        data = rp.write_parquet(_morsel(n_rg * RG64K), max_rows_per_row_group=RG64K,
+                                compression="none", row_groups_per_block=4)
+        with open(os.path.join(d, "part-0.parquet"), "wb") as f:
+            f.write(data)
+        proc, port = _server(tmp)
+        try:
+            def depth(gate):
+                plan = open_native_scan_plan([f"http://127.0.0.1:{port}/b4/part-0.parquet"], ["a"],
+                                             decode_workers=2, fetch_ahead=6,
+                                             fetch_ahead_min_blocks=gate, remote_decode_workers=2)
+                try:
+                    assert plan.row_group_count == n_rg
+                    return plan.diagnostics()["fetch_ahead_depth"]
+                finally:
+                    plan.close()
+
+            assert depth(3) == 6
+            assert depth(4) == 0
+        finally:
+            proc.kill()
+            proc.wait()
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
