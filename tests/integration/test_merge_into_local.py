@@ -159,13 +159,14 @@ def merge_env(tmp_path):
         [(2, 77), (2, 88)],
         disk_io,
     )
-    # Sixty new keys in small row groups, then cve 2 twice in the last one: the
-    # violation surfaces only after earlier batches were written to data files.
+    # cve 2 at both ENDS of sixty new keys in small row groups: the two copies land
+    # in different morsels, so whichever arrives first (scan order is unordered) is
+    # written to data files before the second one raises the violation.
     late_dup_source = _build_dataset(
         str(tmp_path / "latedup"),
         "col.latedup",
         ["cve", "details"],
-        [(100 + i, i) for i in range(60)] + [(2, 77), (2, 88)],
+        [(2, 77)] + [(100 + i, i) for i in range(60)] + [(2, 88)],
         disk_io,
         max_rows_per_row_group=10,
     )
