@@ -44,6 +44,9 @@ class _QueryTelemetry:
         # make the second statement of `A; B;` claim it read A.
         self._reading["relations"] = set()
         self._reading["statement_relations"] = []
+        # What the statement(s) read, as the BINDER saw it - see `add_reads`.
+        self._reading["scanned_relations"] = []
+        self._reading["read_sources"] = []
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
@@ -80,6 +83,41 @@ class _QueryTelemetry:
         relations = list(relations)
         self._reading["relations"].update(relations)
         self._reading["statement_relations"] = relations
+
+    def add_reads(self, scanned_relations, read_sources):
+        """Record what a bound statement reads, for a copy of its RESULT made
+        after it has run.
+
+        Two readings, both taken off the bound plan with the binder's own
+        walks (`binder.relation.scanned_relations` / `read_sources`):
+
+        * `scanned_relations` - every relation a Scan names, as bound. The
+          egress gate's input: filtered through `egress_sources` it is exactly
+          the list a CTAS of this statement would be judged on.
+        * `read_sources` - THE RECEIPT, `{dataset, snapshot-id, resolved-by}`
+          per catalog relation read, the provenance a CTAS of this statement
+          would commit.
+
+        Neither is `relations`. That one comes off the OPTIMIZED plan, for the
+        bill, and the optimizer can answer `COUNT(*)` from a manifest through
+        `$one_row` - so the relation answered from is not in it. A copy of that
+        count out of a protected workspace is still a copy, and the CTAS of it
+        is refused, so these come from the plan before that rewrite.
+
+        Accumulated over a semicolon-separated batch like `relations`, and for
+        the same reason: one execute(), one result, one answer about what fed
+        it. A batch whose earlier statement reads a table its last does not is
+        over-reported, which errs toward refusing a copy, never toward allowing
+        one.
+        """
+        relations = self._reading["scanned_relations"]
+        for relation in scanned_relations:
+            if relation not in relations:
+                relations.append(relation)
+        receipt = self._reading["read_sources"]
+        for entry in read_sources:
+            if entry not in receipt:
+                receipt.append(dict(entry))
 
     def add_message(self, message: str):
         """Something the person who ran the statement should be told.
@@ -143,6 +181,10 @@ class _QueryTelemetry:
             # responses, and a set would not serialise there anyway.
             "relations",
             "statement_relations",
+            # Likewise: read off the telemetry object by whoever persists them
+            # (worker.opteryx, onto the job document), not API-response shape.
+            "scanned_relations",
+            "read_sources",
             "rows_read",
             "rows_seen",
             "blobs_read",

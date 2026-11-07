@@ -861,6 +861,25 @@ class Session(DataFrame):
     def messages(self) -> List[str]:
         return self._telemetry.messages
 
+    @property
+    def reads(self) -> Dict[str, list]:
+        """What the statement(s) executed on this session read, off the BOUND plan.
+
+        `scanned_relations` - every relation scanned, as bound; pass it through
+        `opteryx.planner.binder.relation.egress_sources` for the ones a copy of
+        the result would be egress-checked on. `read_sources` - the provenance
+        receipt (`{dataset, snapshot-id, resolved-by}` per catalog relation).
+
+        For a caller that persists a result and may copy it into a dataset
+        later (worker.opteryx's SAVE RESULTS): that copy is the CTAS of this
+        statement, so it is gated and receipted on exactly what the CTAS's
+        binder would have seen. Copies, so the caller cannot edit the readings.
+        """
+        return {
+            "scanned_relations": list(self._telemetry.scanned_relations),
+            "read_sources": [dict(entry) for entry in self._telemetry.read_sources],
+        }
+
     # ------------------------------------------------------------------
     @property
     def trace_armed(self) -> bool:

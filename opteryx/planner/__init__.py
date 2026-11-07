@@ -623,6 +623,17 @@ def query_planner(
             plan_context=plan_context,
         )
 
+        # What this statement reads, off the BOUND plan - before the optimizer can
+        # answer a scan from statistics and drop the relation it answered from.
+        # Recorded for every statement, not only writes, because a SELECT's result
+        # can be copied into a dataset after it has run (SAVE RESULTS) and that
+        # copy is judged, and receipted, exactly as the CTAS of the SELECT would
+        # be. See `QueryTelemetry.add_reads`.
+        from opteryx.planner.binder.relation import read_sources as _bound_read_sources
+        from opteryx.planner.binder.relation import scanned_relations as _bound_relations
+
+        telemetry.add_reads(_bound_relations(bound_plan), _bound_read_sources(bound_plan))
+
         start = time.monotonic_ns()
         # The shared CTE bodies (and recursive-CTE metadata) are the query's, on
         # plan_context; the optimizer optimizes them alongside the main plan.
@@ -813,6 +824,13 @@ def execute_logical_plan(
         plan_context=plan_context,
     )
     telemetry.time_planning_binder += time.monotonic_ns() - start
+
+    # What the plan reads, off the bound plan - the same record query_planner
+    # makes, for the same reason the meter below is set on this path too.
+    from opteryx.planner.binder.relation import read_sources as _bound_read_sources
+    from opteryx.planner.binder.relation import scanned_relations as _bound_relations
+
+    telemetry.add_reads(_bound_relations(bound_plan), _bound_read_sources(bound_plan))
 
     start = time.monotonic_ns()
     optimized_plan = do_optimizer(bound_plan, telemetry, plan_context)

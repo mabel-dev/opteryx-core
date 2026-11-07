@@ -2167,6 +2167,19 @@ def _scanned_relations(visitor, context) -> list:
     into their sub-plans, with the same walk relation_resolver's CTE/view
     expansion already relies on to find them.
     """
+    return scanned_relations(visitor.graph)
+
+
+def scanned_relations(graph) -> list:
+    """`_scanned_relations` over a bound plan graph rather than a visitor.
+
+    Public so the planner can record the same list for every statement
+    (`QueryTelemetry.add_reads`), not only for writes: a SELECT's result can be
+    copied into a dataset later (jobs.opteryx's SAVE RESULTS), and that copy
+    has to be judged against the relations THIS walk sees - the bound plan,
+    before the optimizer can replace a scan with a statistics-only `$one_row`
+    and hide the relation it answered from.
+    """
     from opteryx.planner.logical_planner import LogicalPlanStepType
     from opteryx.planner.relation_resolver import _expression_subqueries
 
@@ -2183,7 +2196,7 @@ def _scanned_relations(visitor, context) -> list:
             for subquery in _expression_subqueries(plan_node):
                 _collect(subquery.value)
 
-    _collect(visitor.graph)
+    _collect(graph)
     return relations
 
 
@@ -2224,6 +2237,16 @@ def _read_sources(visitor, context) -> list:
     A relation with a schema and no commits has `snapshot_id` None; it is still
     recorded, with a null version, because the statement did read it.
     """
+    return read_sources(visitor.graph)
+
+
+def read_sources(graph) -> list:
+    """`_read_sources` over a bound plan graph rather than a visitor.
+
+    Public for the same reason as `scanned_relations`: the planner records the
+    receipt for EVERY statement, so a SELECT's result saved into a dataset
+    later carries the same provenance a CTAS of that SELECT would have.
+    """
     from opteryx.connectors.opteryx_connector import OpteryxTable
     from opteryx.planner.logical_planner import LogicalPlanStepType
     from opteryx.planner.relation_resolver import _expression_subqueries
@@ -2252,7 +2275,7 @@ def _read_sources(visitor, context) -> list:
             for subquery in _expression_subqueries(plan_node):
                 _collect(subquery.value)
 
-    _collect(visitor.graph)
+    _collect(graph)
     return entries
 
 
@@ -2298,18 +2321,9 @@ def _enforce_egress(visitor, node, context) -> None:
     anything behind a non-Writable connector belong to no workspace, so they
     cannot leave one.
     """
-    from opteryx.connectors import connector_factory
-    from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import EgressRestrictedError
 
-    sources = []
-    for relation in _scanned_relations(visitor, context):
-        if relation.startswith("$") or "information_schema" in relation.split("."):
-            continue
-        gateway = connector_factory(relation, telemetry=context.telemetry)
-        if isinstance(gateway, Writable):
-            sources.append(relation)
-
+    sources = egress_sources(_scanned_relations(visitor, context), context.telemetry)
     if not sources:
         return
 
@@ -2322,18 +2336,57 @@ def _enforce_egress(visitor, node, context) -> None:
     )
     if not refusals:
         return
+    raise EgressRestrictedError(egress_refusal_message(node.relation_name, refusals))
 
-    # One refusal reads as the catalog wrote it. Several are composed here
-    # rather than reported one at a time: a join across three protected
-    # workspaces would otherwise take three attempts to discover, and someone
-    # asking for access needs to ask once.
+
+def egress_sources(relations, telemetry=None) -> list:
+    """The relations, of those a statement scanned, that belong to a workspace
+    and so can be copied OUT of one - what the egress gate asks about.
+
+    Non-catalog sources are dropped: `$planets`, `information_schema`, and
+    anything behind a non-Writable connector belong to no workspace, so they
+    cannot leave one.
+
+    Public because it is not only the binder's question. A SELECT's result
+    saved into a dataset afterwards (jobs.opteryx's SAVE RESULTS) is the same
+    copy as the CTAS of that SELECT, and must be refused by the same rule - so
+    that path filters the relations the statement recorded through THIS
+    function rather than a second reading of which connectors count.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+
+    sources = []
+    for relation in relations:
+        if relation.startswith("$") or "information_schema" in relation.split("."):
+            continue
+        gateway = connector_factory(relation, telemetry=telemetry)
+        if isinstance(gateway, Writable) and relation not in sources:
+            sources.append(relation)
+    return sources
+
+
+def egress_refusal_message(target_relation: str, refusals) -> str:
+    """The text a refused write raises with, for one refusal or several.
+
+    One refusal reads as the catalog wrote it. Several are composed here
+    rather than reported one at a time: a join across three protected
+    workspaces would otherwise take three attempts to discover, and someone
+    asking for access needs to ask once.
+
+    Takes anything with `workspace`, `remediation` and a message (`.message`,
+    or its `str()`): the engine's `EgressRefusal`, or opteryx-catalog's own,
+    which a caller holding a catalog handle gets back directly. Shared so a
+    save of a result is refused in the same words as the CTAS it is equal to.
+    """
     if len(refusals) == 1:
-        raise EgressRestrictedError(refusals[0].message)
+        refusal = refusals[0]
+        return getattr(refusal, "message", None) or str(refusal)
 
     workspaces = ", ".join(f"'{refusal.workspace}'" for refusal in refusals)
     remediations = " ".join(refusal.remediation for refusal in refusals)
-    raise EgressRestrictedError(
-        f"Cannot write {node.relation_name}: it would copy data out of workspaces "
+    return (
+        f"Cannot write {target_relation}: it would copy data out of workspaces "
         f"{workspaces}, which restrict egress. Clear them with: {remediations}"
     )
 
