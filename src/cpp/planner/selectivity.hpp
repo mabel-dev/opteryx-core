@@ -12,6 +12,10 @@
 // [0, 1]. The port was verified bit-identical to the Python over every estimate
 // of the planner corpus and test suites (py_numeric.hpp; compiled without FMA
 // contraction). For each predicate kind:
+//   0. for = / IN (and their negations), the column's point frequencies, when
+//      its files state them and the literal has a PLAIN encoding for it
+//      (FrequentValues, rugo's `rugo.mcv`) - a uniform 1/NDV prices a common
+//      value thousands of times too low on a skewed column;
 //   1. the histogram, when the column has one;
 //   2. what the column's NDV, value range, ordinal bounds or byte-class
 //      statistics imply;
@@ -28,10 +32,16 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#ifndef XXH_INLINE_ALL
+#define XXH_INLINE_ALL
+#endif
+#include "xxhash.h"  // the writer's value hash (rugo.mcv, the bloom filter)
 
 #include "core/buffers.h"
 #include "ops/ordinalize.h"
@@ -361,8 +371,42 @@ struct Estimator {
 
     // ---- per-predicate-kind estimators --------------------------------------
 
+    // A literal's share of the rows from the column's point frequencies, hashed
+    // as the writer hashed it (XXH64, seed 0, over the PLAIN bytes, low 32
+    // bits). False when the literal has no such encoding for the column - the
+    // tiers below then price it.
+    static bool frequency(const FrequentValues& fv, const LiteralValue& value, double& out) {
+        uint8_t buf[8];
+        const void* data = buf;
+        size_t len = 0;
+        switch (fv.encoding) {
+            case FrequentValues::BYTE_ARRAY:
+                if (value.tag != LITERAL_BYTES) return false;
+                data = value.bytes.data();
+                len = value.bytes.size();
+                break;
+            case FrequentValues::INT32: {
+                if (value.tag != LITERAL_INT64 || value.i < INT32_MIN || value.i > INT32_MAX) return false;
+                const int32_t v = static_cast<int32_t>(value.i);
+                std::memcpy(buf, &v, 4);
+                len = 4;
+                break;
+            }
+            case FrequentValues::INT64:
+                if (value.tag != LITERAL_INT64) return false;
+                std::memcpy(buf, &value.i, 8);
+                len = 8;
+                break;
+        }
+        const auto it = fv.extra.find(static_cast<uint32_t>(XXH64(data, len, 0)));
+        out = clamp01(fv.rest + (it != fv.extra.end() ? it->second : 0.0));
+        return true;
+    }
+
     double eq(Slot identity_, const LiteralValue& value) const {
         const ColumnStats* col = column(identity_);
+        double share = 0.0;
+        if (col != nullptr && col->frequent && frequency(*col->frequent, value, share)) return share;
         const maki_nage::Distogram* dgram = col != nullptr ? col->histogram.get() : nullptr;
         double lit = 0.0;
         const bool has_lit = to_float(value, lit);
@@ -456,6 +500,20 @@ struct Estimator {
         if (n == 0) return 0.0;
 
         const ColumnStats* col = column(identity_);
+        if (col != nullptr && col->frequent) {
+            // each member is a point probe; all must be encodable, or none is used
+            double accumulated = 0.0;
+            bool all = true;
+            for (const LiteralValue& member : *members) {
+                double share = 0.0;
+                if (!frequency(*col->frequent, member, share)) {
+                    all = false;
+                    break;
+                }
+                accumulated += share;
+            }
+            if (all) return clamp01(accumulated);
+        }
         const maki_nage::Distogram* dgram = col != nullptr ? col->histogram.get() : nullptr;
         if (dgram != nullptr) {
             const double total = static_cast<double>(dgram->count());

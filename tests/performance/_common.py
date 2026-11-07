@@ -376,10 +376,10 @@ def check_network_path_unchanged(network: str) -> None:
 def register_aistor_workspace() -> None:
     """Bind workspace `aistor` to the AIStor Iceberg REST catalog.
 
-    Reads AISTOR_ENDPOINT, AISTOR_ACCESS_KEY_ID and AISTOR_SECRET_ACCESS_KEY from
-    the environment (.env, loaded by `import opteryx` — call this after it). A
-    missing key raises KeyError: a remote benchmark with no remote configured
-    must not run.
+    Reads AISTOR_ENDPOINT from the environment (.env, loaded by `import opteryx`
+    — call this after it) and AISTOR_ACCESS_KEY_ID / AISTOR_SECRET_ACCESS_KEY
+    from Vaultwarden (dev/secret_store.py). A missing key raises KeyError: a
+    remote benchmark with no remote configured must not run.
 
     Two clients are configured, because two different readers are involved:
     the catalog, metadata and manifests go through pyiceberg (the kwargs below,
@@ -392,9 +392,12 @@ def register_aistor_workspace() -> None:
     (../opteryx-iceberg, ../opteryx-catalog), the same convention scratch/brace.py
     and opteryx-iceberg's own tests use; an absent checkout fails at import.
     """
+    sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", "dev"))
+    from secret_store import get_secret
+
     endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
-    access_key = os.environ["AISTOR_ACCESS_KEY_ID"]
-    secret_key = os.environ["AISTOR_SECRET_ACCESS_KEY"]
+    access_key = get_secret("AISTOR_ACCESS_KEY_ID")
+    secret_key = get_secret("AISTOR_SECRET_ACCESS_KEY")
 
     os.environ["AWS_S3_ENDPOINT"] = endpoint
     os.environ["AWS_REGION"] = AISTOR_REGION

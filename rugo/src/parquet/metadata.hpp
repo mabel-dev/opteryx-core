@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "file_mcv.hpp"
+
 struct MetadataParseOptions {
   bool schema_only = false;
   bool include_statistics = true;
@@ -307,6 +309,10 @@ struct AggColumnStat {
   // is not a sum, and unknown is not zero.
   bool has_sum = false;
   __int128 sum = 0;
+  // The writer's most frequent values (`rugo.mcv.<column>`, file_mcv.hpp):
+  // hash prefix and lower-bound row count, heaviest first. Empty = NOT STATED
+  // (no key, or a file rugo did not write), never "no frequent values".
+  std::vector<rugo_parquet::FileMcvEntry> frequent;
 };
 
 // Aggregate column statistics across all row groups in a single C++ pass.

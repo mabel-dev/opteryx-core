@@ -862,11 +862,13 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
   }
 
   // A column whose pages are copied byte-for-byte keeps the source's file-level
-  // NDV (`rugo.ndv`, file_ndv.hpp) under its new name; a synthesised or
-  // re-encoded column is not stated. Carried only from a file rugo wrote —
-  // the patched file's created_by is rugo's, so a foreign key would otherwise
-  // become trusted here — and a malformed value in one is an error, as on read.
+  // NDV (`rugo.ndv`, file_ndv.hpp) and most frequent values (`rugo.mcv`,
+  // file_mcv.hpp) under its new name; a synthesised or re-encoded column is not
+  // stated. Carried only from a file rugo wrote — the patched file's created_by
+  // is rugo's, so a foreign key would otherwise become trusted here — and a
+  // malformed value in one is an error, as on read.
   std::vector<std::string> file_ndv(cols.size());
+  std::vector<std::string> file_mcv(cols.size());
   const bool source_is_rugo = !fs.row_groups.empty() &&
                               !fs.row_groups[0].columns.empty() &&
                               fs.row_groups[0].columns[0].writer_is_rugo;
@@ -875,6 +877,14 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
       const int s = cols[j].src_index;
       if (s < 0 || cols[j].reencode || cols[j].shape.is_array) continue;
       const std::string &src_name = fs.row_groups[0].columns[(size_t)s].name;
+      auto mt = fs.key_value_metadata.find(
+          std::string(rugo_parquet::kFileMcvKeyPrefix) + src_name);
+      if (mt != fs.key_value_metadata.end()) {
+        std::vector<rugo_parquet::FileMcvEntry> entries;
+        if (!rugo_parquet::parse_file_mcv(mt->second, &entries))
+          throw std::runtime_error("parquet patch: malformed " + mt->first + " value");
+        file_mcv[j] = mt->second;
+      }
       auto it = fs.key_value_metadata.find(
           std::string(rugo_parquet::kFileNdvKeyPrefix) + src_name);
       if (it == fs.key_value_metadata.end()) continue;
@@ -887,7 +897,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
     }
   }
   write_parquet_footer(out, shapes, (size_t)fs.num_rows, rg_metas, all_rg_cols,
-                       &file_ndv);
+                       &file_ndv, 0, &file_mcv);
   return out;
 }
 

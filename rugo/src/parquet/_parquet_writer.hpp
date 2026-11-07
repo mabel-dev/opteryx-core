@@ -23,6 +23,7 @@
 #include "../_writer_pool.hpp"   // shared writer pool: column chunks encode in parallel
 #include "chunk_sum.hpp"
 #include "file_ndv.hpp"
+#include "file_mcv.hpp"
 
 #include "core/kmv_sketch.h"  // THE shared KMV sketch (draken, header-only)
 
@@ -32,6 +33,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HAVE_ZSTD
@@ -1205,6 +1207,53 @@ inline size_t bloom_ndv(const std::vector<uint64_t> &hashes) {
     if (table[s] == 0) { table[s] = h; ndv++; }
   }
   return ndv + (have_zero ? 1 : 0);
+}
+
+// A value hash and the rows holding it.
+struct HashCount {
+  uint64_t hash;
+  uint64_t count;
+};
+
+// The heaviest hashes one row group keeps for the file's `rugo.mcv` (FileMcv).
+// More than the file states (kFileMcvMaxEntries) so a value heavy across the
+// file but ranked lower in one group is still counted there.
+inline constexpr size_t kRowGroupMcvKeep = 256;
+
+// bloom_ndv's EXACT distinct count, plus every hash's exact occurrence count:
+// the `keep` heaviest go to `top` (count descending, hash ascending). The table
+// is sized from `ndv_bound`, an upper bound on the distinct count (the chunk's
+// sketch size when it is exact, else the row count), so a low-cardinality
+// chunk counts in a cache-sized table.
+inline size_t count_hashes(const std::vector<uint64_t> &hashes, size_t ndv_bound,
+                           size_t keep, std::vector<HashCount> &top) {
+  size_t cap = 16;
+  while (cap < ndv_bound * 2) cap <<= 1;
+  const size_t mask = cap - 1;
+  std::vector<HashCount> table(cap, HashCount{0, 0});
+  uint64_t zero_count = 0; // 0 is the empty-slot marker: counted on the side
+  for (uint64_t h : hashes) {
+    if (h == 0) { zero_count++; continue; }
+    size_t s = (size_t)h & mask;
+    while (table[s].count != 0 && table[s].hash != h) s = (s + 1) & mask;
+    table[s].hash = h;
+    table[s].count++;
+  }
+  top.clear();
+  for (const HashCount &e : table)
+    if (e.count != 0) top.push_back(e);
+  if (zero_count != 0) top.push_back(HashCount{0, zero_count});
+  const size_t ndv = top.size();
+  auto heavier = [](const HashCount &a, const HashCount &b) {
+    return a.count != b.count ? a.count > b.count : a.hash < b.hash;
+  };
+  if (top.size() > keep) {
+    std::partial_sort(top.begin(), top.begin() + keep, top.end(), heavier);
+    top.resize(keep);
+  } else {
+    std::sort(top.begin(), top.end(), heavier);
+  }
+  return ndv;
 }
 
 // Serialize a BloomFilterHeader (Compact Protocol): numBytes(1),
@@ -2885,6 +2934,7 @@ struct EncodedRowGroup {
   std::vector<EncodedChunk> chunks;            // per column, schema order
   std::vector<std::vector<uint8_t>> blooms;    // per column; empty = no filter
   std::vector<ColumnKmv> kmv;                  // per column; FileNdv's input
+  std::vector<std::vector<HashCount>> top;     // per column; FileMcv's input
   RGMeta meta;                                 // offsets are filled by placement
 };
 
@@ -2926,18 +2976,105 @@ struct FileNdv {
   std::vector<std::string> values() const {
     std::vector<std::string> out(cols.size());
     for (size_t i = 0; i < cols.size(); i++) {
-      const Col &c = cols[i];
-      if (c.poisoned || c.sketch.size() == 0) continue;
-      if (c.sketch.is_exact()) {
-        out[i] = rugo_parquet::format_file_ndv(true, (uint64_t)c.sketch.size());
-        continue;
-      }
-      uint64_t n = (uint64_t)std::llround(c.sketch.estimate());
-      n = std::max<uint64_t>(n, (uint64_t)c.sketch.size());
-      n = std::min<uint64_t>(n, c.present);
-      out[i] = rugo_parquet::format_file_ndv(false, n);
+      bool exact = false;
+      const uint64_t n = count(i, exact);
+      if (n != 0) out[i] = rugo_parquet::format_file_ndv(exact, n);
     }
     return out;
+  }
+
+  // Column i's stated count (0 = not stated), and whether it is exact.
+  uint64_t count(size_t i, bool &exact) const {
+    const Col &c = cols[i];
+    exact = false;
+    if (c.poisoned || c.sketch.size() == 0) return 0;
+    if (c.sketch.is_exact()) {
+      exact = true;
+      return (uint64_t)c.sketch.size();
+    }
+    uint64_t n = (uint64_t)std::llround(c.sketch.estimate());
+    n = std::max<uint64_t>(n, (uint64_t)c.sketch.size());
+    return std::min<uint64_t>(n, c.present);
+  }
+};
+
+// The file's per-column most frequent values, merged one row group at a time
+// from each group's kRowGroupMcvKeep heaviest hashes (exact within the group)
+// and stated once in the footer as `rugo.mcv.<column>` (file_mcv.hpp). A
+// value's file count is the sum of its counts in the groups that kept it, so
+// it is a lower bound. Memory: at most kFileMcvTrackCap hashes per column;
+// past it the lightest are dropped (a dropped value that recurs restarts from
+// its later groups — still a lower bound).
+inline constexpr size_t kFileMcvTrackCap = 8192;
+
+struct FileMcv {
+  struct Col {
+    bool poisoned = false; // some chunk was not counted: the column is not stated
+    std::unordered_map<uint64_t, uint64_t> counts;
+  };
+  std::vector<Col> cols;
+
+  void add(const EncodedRowGroup &erg) {
+    if (cols.empty()) cols.resize(erg.top.size());
+    if (cols.size() != erg.top.size() || cols.size() != erg.kmv.size())
+      throw std::logic_error("FileMcv: row groups disagree on the column count");
+    for (size_t i = 0; i < cols.size(); i++) {
+      Col &c = cols[i];
+      if (c.poisoned) continue;
+      if (!erg.kmv[i].tracked) {
+        c.poisoned = true;
+        c.counts.clear();
+        continue;
+      }
+      for (const HashCount &e : erg.top[i]) c.counts[e.hash] += e.count;
+      if (c.counts.size() > kFileMcvTrackCap) prune(c);
+    }
+  }
+
+  // Footer values, one per column, "" when not stated: the heaviest values
+  // above twice the uniform rate (non-null rows / NDV), at most
+  // kFileMcvMaxEntries. A count past uint32 is refused, not clamped.
+  std::vector<std::string> values(const FileNdv &ndv) const {
+    std::vector<std::string> out(cols.size());
+    if (ndv.cols.size() != cols.size())
+      throw std::logic_error("FileMcv: NDV and MCV disagree on the column count");
+    for (size_t i = 0; i < cols.size(); i++) {
+      const Col &c = cols[i];
+      bool exact = false;
+      const uint64_t distinct = ndv.count(i, exact);
+      if (c.poisoned || c.counts.empty() || distinct == 0) continue;
+      const double floor = 2.0 * (double)ndv.cols[i].present / (double)distinct;
+      std::vector<HashCount> heavy;
+      for (const auto &e : c.counts)
+        if ((double)e.second > floor) heavy.push_back(HashCount{e.first, e.second});
+      if (heavy.empty()) continue;
+      const size_t keep = std::min(heavy.size(), rugo_parquet::kFileMcvMaxEntries);
+      std::partial_sort(heavy.begin(), heavy.begin() + keep, heavy.end(), heavier);
+      std::vector<rugo_parquet::FileMcvEntry> entries(keep);
+      for (size_t k = 0; k < keep; k++) {
+        if (heavy[k].count > UINT32_MAX)
+          throw std::runtime_error("parquet writer: a value's count in this file exceeds the "
+                                   "rugo.mcv uint32 field");
+        entries[k] = rugo_parquet::FileMcvEntry{(uint32_t)heavy[k].hash, (uint32_t)heavy[k].count};
+      }
+      out[i] = rugo_parquet::format_file_mcv(entries);
+    }
+    return out;
+  }
+
+ private:
+  static bool heavier(const HashCount &a, const HashCount &b) {
+    return a.count != b.count ? a.count > b.count : a.hash < b.hash;
+  }
+
+  static void prune(Col &c) {
+    std::vector<HashCount> all;
+    all.reserve(c.counts.size());
+    for (const auto &e : c.counts) all.push_back(HashCount{e.first, e.second});
+    const size_t keep = kFileMcvTrackCap / 2;
+    std::partial_sort(all.begin(), all.begin() + keep, all.end(), heavier);
+    c.counts.clear();
+    for (size_t k = 0; k < keep; k++) c.counts.emplace(all[k].hash, all[k].count);
   }
 };
 
@@ -2951,6 +3088,7 @@ inline EncodedRowGroup init_encoded_row_group(size_t ncols, size_t rg_rows,
   erg.chunks.resize(ncols);
   erg.blooms.resize(ncols);
   erg.kmv.resize(ncols);
+  erg.top.resize(ncols);
   erg.meta.row_count = rg_rows;
   erg.meta.init_columns(ncols, codec);
   erg.meta.statistics = statistics;
@@ -3054,9 +3192,14 @@ inline void encode_column_chunk(EncodedRowGroup &erg,
         kmv.present = (uint64_t)hashes.size();
         kmv.sketch.add_many(hashes.data(), hashes.size());
         if (!hashes.empty()) {
-          // Below K distinct the sketch already holds every distinct hash, so
-          // its size IS the count; only a wider chunk pays the counting pass.
-          exact_ndv = kmv.sketch.is_exact() ? kmv.sketch.size() : bloom_ndv(hashes);
+          // One counting pass gives the exact distinct count and the group's
+          // heaviest values (FileMcv). Below K distinct the sketch's size IS
+          // the count, which bounds the table to a cache-sized one.
+          const bool small = kmv.sketch.is_exact();
+          exact_ndv = count_hashes(hashes, small ? kmv.sketch.size() : hashes.size(),
+                                   kRowGroupMcvKeep, erg.top[i]);
+          if (small && exact_ndv != kmv.sketch.size())
+            throw std::logic_error("parquet writer: hash count disagrees with the exact sketch");
           meta.stats[i].distinct_count = (int64_t)exact_ndv;
         }
       } else if (!hashes.empty()) {
@@ -3632,6 +3775,7 @@ inline void append_draken_logical_kv(
 
 // `file_ndv`: one `rugo.ndv` value per schema column ("" = not stated), from
 // FileNdv::values() or carried over by the patch path; nullptr = none.
+// `file_mcv`: the same for `rugo.mcv` (FileMcv::values(), file_mcv.hpp).
 // The footer key that records a per-column-layout write: the writer's
 // narrow_chunk_bytes, in decimal. Stamped whenever the layout was ON for the file
 // (whether or not any column turned out narrow), absent otherwise, so compaction
@@ -3644,7 +3788,8 @@ inline constexpr const char *kNarrowChunkBytesKey = "rugo.narrow_chunk_bytes";
 inline void write_file_kv(TCompactWriter &fm,
                           const std::vector<ColumnInput> &schema_cols,
                           const std::vector<std::string> *file_ndv,
-                          size_t narrow_chunk_bytes = 0) {
+                          size_t narrow_chunk_bytes = 0,
+                          const std::vector<std::string> *file_mcv = nullptr) {
   std::vector<std::pair<std::string, std::string>> kv;
   append_draken_logical_kv(kv, schema_cols);
   if (narrow_chunk_bytes > 0)
@@ -3656,6 +3801,14 @@ inline void write_file_kv(TCompactWriter &fm,
       if (!(*file_ndv)[i].empty())
         kv.emplace_back(std::string(rugo_parquet::kFileNdvKeyPrefix) + schema_cols[i].name,
                         (*file_ndv)[i]);
+  }
+  if (file_mcv != nullptr) {
+    if (file_mcv->size() != schema_cols.size())
+      throw std::logic_error("write_file_kv: file MCV values do not match the schema");
+    for (size_t i = 0; i < schema_cols.size(); i++)
+      if (!(*file_mcv)[i].empty())
+        kv.emplace_back(std::string(rugo_parquet::kFileMcvKeyPrefix) + schema_cols[i].name,
+                        (*file_mcv)[i]);
   }
   if (kv.empty())
     return;
@@ -3739,7 +3892,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                                  const std::vector<RGMeta> &rg_meta,
                                  const std::vector<std::vector<ColumnInput>> &all_rg_cols,
                                  const std::vector<std::string> *file_ndv = nullptr,
-                                 size_t narrow_chunk_bytes = 0) {
+                                 size_t narrow_chunk_bytes = 0,
+                                 const std::vector<std::string> *file_mcv = nullptr) {
   const char *MAGIC = "PAR1";
   TCompactWriter fm;
   fm.structBegin();
@@ -3781,7 +3935,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     fm.writeI64Field(6, rg_compressed);                 // total_compressed_size
     fm.structEnd();
   }
-  write_file_kv(fm, schema_cols, file_ndv, narrow_chunk_bytes); // key_value_metadata (field 5, optional)
+  write_file_kv(fm, schema_cols, file_ndv, narrow_chunk_bytes, file_mcv); // key_value_metadata (field 5, optional)
   fm.writeStringField(6, RUGO_PARQUET_CREATED_BY); // created_by
   // column_orders (field 7): one TypeDefinedOrder per leaf column.
   fm.writeFieldHeader(CT_LIST, 7);
@@ -3896,6 +4050,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   std::vector<std::vector<ColumnInput>> all_rg_cols(n_rg);
 
   FileNdv ndv; // merged per row group below, stated in the footer
+  FileMcv mcv; // likewise
 
   std::vector<uint8_t> file;
   file.reserve(1024);
@@ -3928,6 +4083,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
       write_block(file, /*base_offset=*/0, block);
     for (size_t k = 0; k < block.size(); k++) {
       ndv.add(block[k]);
+      mcv.add(block[k]);
       rg_meta[block_first + k] = std::move(block[k].meta);
       blooms[block_first + k]  = std::move(block[k].blooms);
     }
@@ -3941,8 +4097,9 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   if (want_index)
     write_page_index(file, /*base_offset=*/0, rg_meta, all_rg_cols);
   const std::vector<std::string> ndv_values = ndv.values();
+  const std::vector<std::string> mcv_values = mcv.values(ndv);
   write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, &ndv_values,
-                       runs.chunk_bytes);
+                       runs.chunk_bytes, &mcv_values);
 
   if (out_stats) {
     // One pool task per column: each is an independent pass over its whole
@@ -4064,8 +4221,9 @@ class StreamingParquetWriter {
     if (want_index_)
       write_page_index(buf_, abs_offset_, rg_meta_, all_rg_cols_);
     const std::vector<std::string> ndv_values = ndv_.values();
+    const std::vector<std::string> mcv_values = mcv_.values(ndv_);
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
-                         all_rg_cols_, &ndv_values, runs_.chunk_bytes);
+                         all_rg_cols_, &ndv_values, runs_.chunk_bytes, &mcv_values);
     return take_pending();
   }
 
@@ -4077,6 +4235,7 @@ class StreamingParquetWriter {
       write_block(buf_, abs_offset_, block_);
     for (EncodedRowGroup &erg : block_) {
       ndv_.add(erg);
+      mcv_.add(erg);
       rg_meta_.push_back(std::move(erg.meta));
       blooms_.push_back(std::move(erg.blooms));
     }
@@ -4128,6 +4287,7 @@ class StreamingParquetWriter {
   std::vector<EncodedRowGroup> block_; // encoded, not yet placed
   std::vector<RGMeta> rg_meta_;
   FileNdv ndv_;                        // one sketch per column, until finish()
+  FileMcv mcv_;                        // heaviest hashes per column, until finish()
   std::vector<std::vector<std::vector<uint8_t>>> blooms_;   // [rg][col], until finish()
   std::vector<std::vector<ColumnInput>> all_rg_cols_;
 };

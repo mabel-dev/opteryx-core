@@ -1841,6 +1841,12 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
   if (rugo_writer) {
     for (size_t i = 0; i < result.size(); ++i) {
       AggColumnStat &agg = result[i];
+      // The writer's most frequent values (file_mcv.hpp), same trust rule.
+      auto mt = fs.key_value_metadata.find(
+          std::string(rugo_parquet::kFileMcvKeyPrefix) + agg.name);
+      if (mt != fs.key_value_metadata.end() &&
+          !rugo_parquet::parse_file_mcv(mt->second, &agg.frequent))
+        throw std::runtime_error("parquet footer: malformed " + mt->first + " value");
       auto it = fs.key_value_metadata.find(
           std::string(rugo_parquet::kFileNdvKeyPrefix) + agg.name);
       if (it == fs.key_value_metadata.end()) continue;

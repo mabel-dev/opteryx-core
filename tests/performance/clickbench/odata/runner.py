@@ -10,22 +10,17 @@ Each try is timed from request to the last page of the response body parsed
 (following @odata.nextLink), so it measures what an OData client sees: auth
 excluded, network and serialisation included.
 
-Credentials follow the ClickBench convention for hosted systems - they come
-from the environment, never from the repo or the result file:
+Credentials never touch the repo or the result file - they are read from
+Vaultwarden (dev/secret_store.py):
 
     CLIENT_ID      opteryx.app client id
     CLIENT_SECRET  opteryx.app client secret
-
-`--env-file PATH` loads them from a dotenv-style file first (the make target
-passes the gitignored repo-root .env). A variable already set in the
-environment is not overridden.
 
 Output: odata/results.local.json (ClickBench result format; a failed try is
 null and the run exits non-zero).
 
 Usage:
-    CLIENT_ID=... CLIENT_SECRET=... python tests/performance/clickbench/odata/runner.py
-    python tests/performance/clickbench/odata/runner.py --env-file .env
+    python tests/performance/clickbench/odata/runner.py
 """
 
 import argparse
@@ -39,6 +34,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "dev"))
+from secret_store import get_secret  # noqa: E402
+
 AUTH_URL = "https://authenticate.opteryx.app/token"
 ODATA_BASE = "https://odata.opteryx.app/api/v4/benchmarks/clickbench"
 QUERY_COUNT = 43
@@ -48,19 +46,6 @@ TIMEOUT = 600
 TOKEN_EXPIRY_SKEW = 60
 # Same threshold as the opteryx runner: (max - min) / min above this is UNSTABLE.
 UNSTABLE_SPREAD = 0.45
-
-
-def load_env_file(path: str) -> None:
-    with open(path) as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            val = val.strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-                val = val[1:-1]
-            os.environ.setdefault(key.strip(), val)
 
 
 class Token:
@@ -229,7 +214,6 @@ def print_summary(results: list, failures: list, wall_seconds: float) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="OData ClickBench benchmark against opteryx.app")
-    parser.add_argument("--env-file", default=None, help="dotenv file to load CLIENT_ID/CLIENT_SECRET from")
     parser.add_argument(
         "--output",
         default=os.path.join(os.path.dirname(__file__), "results.local.json"),
@@ -237,14 +221,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.env_file is not None:
-        load_env_file(args.env_file)
-    missing = [v for v in ("CLIENT_ID", "CLIENT_SECRET") if not os.environ.get(v)]
-    if missing:
-        print(f"ERROR: {', '.join(missing)} not set", file=sys.stderr)
-        return 1
-
-    token = Token(os.environ["CLIENT_ID"], os.environ["CLIENT_SECRET"])
+    token = Token(get_secret("CLIENT_ID"), get_secret("CLIENT_SECRET"))
     token.header()  # authenticate up front: a credential failure stops the run before any timing
 
     print("Opteryx ClickBench — OData (opteryx.app)")

@@ -94,6 +94,11 @@ struct FooterStats {
     // rugo's `rugo.sum`, summed over the file's row groups (AggColumnStat).
     bool has_sum = false;
     __int128 sum = 0;
+    // rugo's `rugo.mcv` (AggColumnStat::frequent): (low 32 bits of the value's
+    // XXH64 over its PLAIN bytes, lower-bound rows), heaviest first, and the
+    // parquet physical type those bytes are. Empty = not stated.
+    std::string physical_type;
+    std::vector<std::pair<uint32_t, uint32_t>> frequent;
 };
 
 struct ManifestCell {

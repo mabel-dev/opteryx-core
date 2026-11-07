@@ -744,7 +744,8 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 #    The stamp .rugo-vN is bumped when the writer changes what a mirror holds
 #    (v1 = DECIMAL dictionary encoding, commit 1fdadfc4; v2 = 16-byte string
 #    bounds, NDV without blooms, file-level `rugo.ndv.<column>`, encoding_stats
-#    and size_statistics, 2026-10-23), so a mirror written by an older writer
+#    and size_statistics, 2026-10-23; v3 = file-level `rugo.mcv.<column>` most
+#    frequent values, 2026-11-07), so a mirror written by an older writer
 #    regenerates instead of being benchmarked.
 #
 #  - mirror_skene — the `-skene` targets. skene v3, lz4 (see gate 3 below).
@@ -753,13 +754,13 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 # interrupted build leaves a partial tree that `test -d` would accept, silently
 # benchmarking a fraction of the dataset.
 define mirror_rugo
-	@test -f $(2).rugo-v2 || { \
+	@test -f $(2).rugo-v3 || { \
 		rm -rf $(2) && \
 		for t in $$(cd $(1) && ls -d */ | tr -d /); do \
 			$(PYTHON) dev/rewrite_parquet_layout.py $(1)/$$t $(2)/$$t \
 				--rows 65536 --block 4 --compression zstd --file-bytes 4294967296 || exit 1; \
 		done && \
-		touch $(2).rugo-v2; \
+		touch $(2).rugo-v3; \
 	}
 endef
 
@@ -1124,9 +1125,8 @@ clickbench-clickhouse-orc: ## ClickHouse local over the clickbench-orc shards, 1
 	@test -x $(CLICKHOUSE) || { echo "no clickhouse binary at $(CLICKHOUSE) (set CLICKHOUSE=...)" >&2; exit 1; }
 	@$(PYTHON) tests/performance/clickbench/clickhouse/runner.py --binary $(CLICKHOUSE) --orc-dir scratch/hits_orc
 
-clickbench-odata: ## ClickBench against opteryx.app as OData reads of benchmarks.clickbench.q_00..q_42 (writes odata/results.local.json; CLIENT_ID/CLIENT_SECRET from env or the gitignored .env)
-	@test -f .env || { echo "no .env - set CLIENT_ID/CLIENT_SECRET in .env (gitignored) or call the runner directly with them in the environment" >&2; exit 1; }
-	@$(PYTHON) tests/performance/clickbench/odata/runner.py --env-file .env
+clickbench-odata: ## ClickBench against opteryx.app as OData reads of benchmarks.clickbench.q_00..q_42 (writes odata/results.local.json; CLIENT_ID/CLIENT_SECRET from Vaultwarden via dev/secret_store.py)
+	@$(PYTHON) tests/performance/clickbench/odata/runner.py
 
 jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
 	@clear || true

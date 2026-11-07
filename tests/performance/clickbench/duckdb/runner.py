@@ -40,6 +40,9 @@ import time
 
 import duckdb
 
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "dev"))
+from secret_store import get_secret  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # 43 ClickBench queries translated for DuckDB against the `hits` view.
 # Queries 33 and 34 are commented-out in the Opteryx benchmark; we still run
@@ -190,13 +193,14 @@ def resolve_aistor_table(table_name: str) -> tuple[str, int]:
     """(metadata_location, data_size) of `clickbench.<table_name>` in the AIStor
     Iceberg REST catalog - the catalog tests/performance/_common.py binds the
     opteryx `aistor` workspace to, configured identically. A missing AISTOR_*
-    key raises KeyError: no remote configured means no remote run."""
+    key raises KeyError: no remote configured means no remote run. The keys
+    come from Vaultwarden (dev/secret_store.py), the endpoint from .env."""
     from pyiceberg.catalog import load_catalog
 
     endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
     # pyiceberg's SigV4 signer takes its credentials from the process environment.
-    os.environ["AWS_ACCESS_KEY_ID"] = os.environ["AISTOR_ACCESS_KEY_ID"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["AISTOR_SECRET_ACCESS_KEY"]
+    os.environ["AWS_ACCESS_KEY_ID"] = get_secret("AISTOR_ACCESS_KEY_ID")
+    os.environ["AWS_SECRET_ACCESS_KEY"] = get_secret("AISTOR_SECRET_ACCESS_KEY")
     os.environ["AWS_REGION"] = AISTOR_REGION
     catalog = load_catalog(
         "aistor",
@@ -235,8 +239,8 @@ def run_benchmark(queries: list, parquet_glob: str = None, avro_glob: str = None
         con.execute(f"""
             CREATE SECRET aistor (
                 TYPE s3,
-                KEY_ID '{os.environ["AISTOR_ACCESS_KEY_ID"]}',
-                SECRET '{os.environ["AISTOR_SECRET_ACCESS_KEY"]}',
+                KEY_ID '{get_secret("AISTOR_ACCESS_KEY_ID")}',
+                SECRET '{get_secret("AISTOR_SECRET_ACCESS_KEY")}',
                 REGION '{AISTOR_REGION}',
                 ENDPOINT '{host}',
                 URL_STYLE 'path',
@@ -339,7 +343,7 @@ def main():
     if args.aistor_table is not None:
         import dotenv
 
-        # AISTOR_* live in the repo-root .env (make runs from the root).
+        # AISTOR_ENDPOINT lives in the repo-root .env (make runs from the root).
         dotenv.load_dotenv(os.path.join(os.getcwd(), ".env"))
         metadata_location, data_size = resolve_aistor_table(args.aistor_table)
         output_path = args.output or os.path.join(

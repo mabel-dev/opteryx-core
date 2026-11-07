@@ -268,19 +268,22 @@ inline Cols scale_ndvs(const Cols& cols, const RelationStats& base, double selec
     return out;
 }
 
-inline Cols drop_histograms(const Cols& cols) {
+// Drop each column's value distribution - its histogram and point frequencies -
+// where the operator changes how often values occur.
+inline Cols drop_distributions(const Cols& cols) {
     bool any = false;
-    for (const auto& e : cols) any = any || static_cast<bool>(e.second->histogram);
+    for (const auto& e : cols) any = any || e.second->histogram || e.second->frequent;
     if (!any) return cols;
     Cols out;
     out.reserve(cols.size());
     for (const auto& e : cols) {
-        if (!e.second->histogram) {
+        if (!e.second->histogram && !e.second->frequent) {
             out.push_back(e);
             continue;
         }
         auto c = copy_of(*e.second);
         c->histogram.reset();
+        c->frequent.reset();
         out.emplace_back(e.first, std::move(c));
     }
     return out;
@@ -383,10 +386,55 @@ inline StatBound bound_of(const estimate_detail::End& e) {
     return StatBound::of_float(e.d);
 }
 
+// The column's point frequencies from its files' `rugo.mcv` lists, or null.
+// Stated only when some file lists values, the listing files agree on a
+// physical type a literal can be PLAIN-encoded in (as the bloom probe does:
+// byte_array, int32, int64), and every file's footer counts its rows, nulls and
+// distinct values - a file that lists nothing still holds the value at its
+// uniform rate, which needs those.
+inline std::shared_ptr<const FrequentValues> frequent_values(const NativeManifest& m, size_t pos) {
+    std::string physical;
+    for (size_t f = 0; f < m.file_count(); ++f) {
+        const FooterStats& footer = m.cell(f, pos).footer;
+        if (!m.file(f).has_footer || footer.frequent.empty()) continue;
+        if (!physical.empty() && footer.physical_type != physical) return nullptr;
+        physical = footer.physical_type;
+    }
+    auto out = std::make_shared<FrequentValues>();
+    if (physical == "byte_array") out->encoding = FrequentValues::BYTE_ARRAY;
+    else if (physical == "int32") out->encoding = FrequentValues::INT32;
+    else if (physical == "int64") out->encoding = FrequentValues::INT64;
+    else return nullptr;  // none listed, or a type no literal is encoded in
+    double rows = 0.0;
+    double rest = 0.0;
+    std::unordered_map<uint32_t, double> extra;
+    for (size_t f = 0; f < m.file_count(); ++f) {
+        const ManifestFile& file = m.file(f);
+        const FooterStats& footer = m.cell(f, pos).footer;
+        if (!file.has_footer || file.record_count == kUnknown || footer.null_count == kUnknown ||
+            footer.distinct_estimate == kUnknown) {
+            return nullptr;
+        }
+        rows += static_cast<double>(file.record_count);
+        double listed = 0.0;
+        for (const auto& e : footer.frequent) listed += static_cast<double>(e.second);
+        const double non_null = static_cast<double>(file.record_count - footer.null_count);
+        const double others = static_cast<double>(footer.distinct_estimate) - static_cast<double>(footer.frequent.size());
+        const double file_rest = others > 0.0 ? std::max(0.0, non_null - listed) / others : 0.0;
+        rest += file_rest;
+        for (const auto& e : footer.frequent) extra[e.first] += static_cast<double>(e.second) - file_rest;
+    }
+    if (rows <= 0.0) return nullptr;
+    out->rest = rest / rows;
+    for (const auto& e : extra) out->extra.emplace(e.first, e.second / rows);
+    return out;
+}
+
 // One column's statistics as the manifest records them: NDV (a sketch, else
-// the range-derived costing fallback), histogram, numeric value range (when
-// asked for), null fraction (when any file counts nulls), byte classes,
-// ordinal and length bounds; `encoded_bytes` the footer's encoded size.
+// the range-derived costing fallback), histogram, point frequencies, numeric
+// value range (when asked for), null fraction (when any file counts nulls),
+// byte classes, ordinal and length bounds; `encoded_bytes` the footer's
+// encoded size.
 inline void manifest_column_stats(const NativeManifest& m, size_t pos, bool identity, bool null_counts,
                                   bool value_ranges, ColumnStats& c, int64_t& encoded_bytes) {
     double estimate = -1.0;
@@ -398,6 +446,7 @@ inline void manifest_column_stats(const NativeManifest& m, size_t pos, bool iden
         if (range != kUnknown) c.distinct_count = range;
     }
     c.histogram = column_distogram(m, pos);
+    c.frequent = frequent_values(m, pos);
     if (value_ranges) {
         estimate_detail::End lo, hi;
         if (value_range(m, pos, identity, lo, hi)) {
@@ -1255,7 +1304,7 @@ private:
         const int64_t out_rows = std::max<int64_t>(
             1, saturate(std::min<__int128>(static_cast<__int128>(left.row_count()) * right.row_count(), kInt64Max)));
         note_join(nid, r, left.row_count(), right.row_count(), out_rows, 0);
-        Cols merged = drop_histograms(merge_columns(left, right));
+        Cols merged = drop_distributions(merge_columns(left, right));
         merged = scale_total_bytes_by_origin(merged, left, right, out_rows);
         const bool metric = metric_if_both && left.row_count_is_metric() && right.row_count_is_metric();
         return make_relation(metric, out_rows, kNoStat, cap_ndvs(merged, out_rows));
@@ -1308,7 +1357,7 @@ private:
             // exactly one row per left row, matched or not
             const int64_t out_rows = std::max<int64_t>(0, left.row_count());
             note_join(nid, r, left.row_count(), right.row_count(), out_rows, 0);
-            Cols merged = drop_histograms(merge_columns(left, right));
+            Cols merged = drop_distributions(merge_columns(left, right));
             merged = scale_total_bytes_by_origin(merged, left, right, out_rows);
             return make_relation(left.row_count_is_metric(), out_rows, kNoStat, cap_ndvs(merged, out_rows));
         }
@@ -1333,7 +1382,7 @@ private:
         else if (estimator_type == "outer") cardinality_type = JT_FULL_OUTER;
         const int64_t out_rows = checked_join_estimate(left, right, cardinality_type, equi);
         note_join(nid, r, left.row_count(), right.row_count(), out_rows, key_classes);
-        Cols merged = drop_histograms(merge_columns(left, right));
+        Cols merged = drop_distributions(merge_columns(left, right));
         merged = intersect_join_keys(merged, left, right, left_keys, right_keys, estimator_type);
         merged = scale_total_bytes_by_origin(merged, left, right, out_rows);
         // a later join keys off one of the base relations under this one: keep
@@ -1374,6 +1423,7 @@ private:
             if (col == nullptr) continue;
             auto c = copy_of(*col);
             c->histogram.reset();
+            c->frequent.reset();
             c->distinct_count = single_key_ndv != kNoStat ? single_key_ndv : col->distinct_count;
             put(out, k, std::move(c));
         }
@@ -1429,7 +1479,7 @@ private:
             for (const auto& e : base->columns) take(*e.second);
         }
         const int64_t out_rows = estimate_group_by_cardinality(base->row_count(), ndvs.data(), has.data(), ndvs.size());
-        Cols cols = scale_total_bytes(drop_histograms(base->columns), ratio(out_rows, base->row_count()));
+        Cols cols = scale_total_bytes(drop_distributions(base->columns), ratio(out_rows, base->row_count()));
         return make_relation(false, out_rows, kNoStat, cap_ndvs(cols, out_rows));
     }
 
@@ -1525,6 +1575,7 @@ private:
                 if (existing == nullptr) {
                     auto c = copy_of(*e.second);
                     c->histogram.reset();
+                    c->frequent.reset();
                     put(cols, e.first, std::move(c));
                     continue;
                 }
@@ -1537,6 +1588,7 @@ private:
                                         ? saturate(static_cast<__int128>(existing->distinct_count) + v.distinct_count)
                                         : kNoStat;
                 c->histogram.reset();
+                c->frequent.reset();
                 c->has_total_bytes = existing->has_total_bytes && v.has_total_bytes;
                 c->total_bytes = c->has_total_bytes ? existing->total_bytes + v.total_bytes : 0;
                 put(cols, e.first, std::move(c));

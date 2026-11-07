@@ -126,6 +126,19 @@ inline StatBound bound_min(const StatBound& a, const StatBound& b) {
 // ---------------------------------------------------------------------------
 inline constexpr int kCharClasses = 8;   // selectivity's _CHAR_CLASSES, in its order
 
+// A column's point frequencies, from the files' `rugo.mcv` lists
+// (rugo/src/parquet/file_mcv.hpp): the share of the relation's rows holding a
+// value is `rest` plus `extra[h]`, h the low 32 bits of the value's XXH64 over
+// its PLAIN bytes of `encoding`. `rest` is the share of a value no file lists
+// (each file's non-null rows outside its list spread over its other distinct
+// values); `extra` adds, per listed hash, its counts less those files' `rest`.
+struct FrequentValues {
+    enum Encoding : uint8_t { BYTE_ARRAY, INT32, INT64 };
+    Encoding encoding = BYTE_ARRAY;
+    double rest = 0.0;
+    std::unordered_map<uint32_t, double> extra;
+};
+
 struct ColumnStats {
     int64_t distinct_count = kNoStat;
     // PRE-filter distinct count - the key domain; kNoStat means "same as
@@ -134,6 +147,9 @@ struct ColumnStats {
     StatBound lower;
     StatBound upper;
     std::shared_ptr<const maki_nage::Distogram> histogram;
+    // Point frequencies (= / IN); a share of the SCAN's rows, so dropped
+    // wherever the histogram is (it describes the same distribution).
+    std::shared_ptr<const FrequentValues> frequent;
     bool has_null_fraction = false;
     double null_fraction = 0.0;
     // LIKE '%needle%' inputs: each class's share of the column's bytes, and

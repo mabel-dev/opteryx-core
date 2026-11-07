@@ -248,6 +248,20 @@ inline void apply_footer_stat(const AggColumnStat& stat, ManifestCell& cell) {
     footer.uncompressed_size = stat.total_uncompressed_size > 0 ? stat.total_uncompressed_size : kUnknown;
     footer.has_sum = stat.has_sum;
     footer.sum = stat.has_sum ? stat.sum : 0;
+    // Point frequencies only where a query literal's PLAIN bytes are certain:
+    // text/binary, and plain integers (a DATE or TIMESTAMP literal's unit is
+    // not the stored one's).
+    const std::string& lt = stat.logical_type;
+    const bool encodable =
+        (stat.physical_type == "byte_array" && (lt == "varchar" || lt == "binary")) ||
+        ((stat.physical_type == "int32" || stat.physical_type == "int64") &&
+         (lt == "int8" || lt == "int16" || lt == "int32" || lt == "int64" || lt == "uint8" || lt == "uint16" ||
+          lt == "uint32" || lt == "uint64"));
+    if (encodable) {
+        footer.physical_type = stat.physical_type;
+        footer.frequent.reserve(stat.frequent.size());
+        for (const rugo_parquet::FileMcvEntry& e : stat.frequent) footer.frequent.emplace_back(e.hash, e.count);
+    }
 }
 
 }  // namespace opteryx::planner
