@@ -136,8 +136,12 @@ def test_single_relation_or_lands_on_the_leg():
     sql = SELF_JOIN + " WHERE (p.id > 1 OR p.name = 'x') AND (p.id > 1 OR s.name = 'y')"
     plan = _plan(sql)
     assert _filter_below_join(plan, "(id > 1 OR name = 'x')"), plan
-    # the two-relation OR stays above the join
-    assert plan[1].startswith("Filter | (id > 1 OR name = 'y')"), plan
+    # the two-relation OR stays above the join, its branches tagged on their legs
+    # (JoinDisjunctTaggingStrategy), so the Filter renders the qualified branch text
+    assert plan[1] == "Filter | (p.id > 1 OR s.name = 'y')", plan
+    assert plan[2].startswith("Inner Join"), plan
+    assert "Projection | id, name, id > 1" in plan[3:], plan
+    assert "Projection | id, name = 'y'" in plan[3:], plan
     assert _rows(sql) == 8
 
 
@@ -328,8 +332,11 @@ def test_inner_join_two_sided_or_in_on_is_evaluated():
 
 def test_inner_join_two_sided_residual_lands_above_the_join():
     plan = _plan(SELF_JOIN + " AND (p.id = 3 OR s.id = 4)")
-    assert plan[1].startswith("Filter | (id = 3 OR id = 4)"), plan
+    # branches tagged on their legs (JoinDisjunctTaggingStrategy); the OR stays above
+    assert plan[1] == "Filter | (p.id = 3 OR s.id = 4)", plan
     assert plan[2].startswith("Inner Join"), plan
+    assert "Projection | id, name, id = 3" in plan[3:], plan
+    assert "Projection | id, id = 4" in plan[3:], plan
 
 
 def test_inner_join_theta_comparison_stays_a_residual():
