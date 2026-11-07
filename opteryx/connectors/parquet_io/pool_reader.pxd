@@ -14,6 +14,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.pair cimport pair
 from libcpp.memory cimport shared_ptr
+from libcpp.unordered_map cimport unordered_map
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache, ParquetFooterMap, ParquetFooterRef
@@ -82,6 +83,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         void set_hash_key_columns(const vector[uint8_t]& v)
         void set_length_only_columns(const vector[uint8_t]& v)
         void set_chunk_cache_admit(bint v)
+        void set_cache_versions(const unordered_map[string, string]& v)
         # Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-
         # derived timeout floor). Set once at plan time, by value — see
         # HttpTuning's comment in http_client.hpp for why this is never stored

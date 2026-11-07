@@ -13,7 +13,9 @@
 // (docs/C7_GET_SKIP_AND_DECODED_CACHE_DESIGN.md, Part A).
 // Only complete chunks are inserted (ruling: partial chunks are not cached).
 // Files are immutable for the life of the process (ruling), so the key is the
-// file path plus the chunk's first byte offset.
+// file path plus the chunk's first byte offset. A file that is NOT immutable (a
+// customer object read by READ_*) is keyed by path AND version: the "path" a
+// caller passes is io_pipeline's chunk_cache_key, which carries the version.
 //
 // An entry has one of two forms (docs/C7_PAGE_CACHE_DESIGN.md §30): an IMAGE as
 // above, or COMPRESSED — a remote compressed chunk's bytes as fetched, with no

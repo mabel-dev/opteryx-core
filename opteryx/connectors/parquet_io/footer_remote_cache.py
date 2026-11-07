@@ -9,8 +9,13 @@ in-process footer cache is cold on almost every request, so those reads are paid
 again for footers another instance already has.
 
 This tier stores the raw footer **envelope bytes** (not a parsed structure) in a shared KV
-store, keyed by a digest of the data-file path. A Parquet data file is write-once — a new
-commit mints a new path — so a cached footer can never be stale and needs no invalidation.
+store, keyed by a digest of the data-file path. A platform Parquet data file is write-once —
+a new commit mints a new path — so a cached footer can never be stale and needs no
+invalidation. A CUSTOMER object read through READ_* is not: it can be rewritten in place,
+and its bucket name can be deleted and reused by another tenant. For those the "path" the
+caller hands this tier is already versioned (`pool_reader._vkey`: the path plus the object
+version the caller's own authorised HEAD observed), so an entry is only ever served for the
+exact object version the caller has proven it can read.
 On a hit, the bytes are reconstructed into `FileStats` through the *same* trusted native
 parser (`ReadParquetMetadataFromBuffer`) a fresh fetch uses: there is no bespoke serializer
 on the read path, so a cache hit cannot silently disagree with a cold read. The parse still
@@ -116,7 +121,8 @@ class RemoteFooterCache:
     def _key(path: str) -> bytes:
         # Digest, not the raw path: bounded key length, no separator collisions between a
         # bucket path and the store's own namespacing. Keyed by the canonical original
-        # path — never a signed URL, whose token would make the key unstable per request.
+        # path — never a signed URL, whose token would make the key unstable per request
+        # — with the object version appended for a mutable (customer) object.
         return b"pqfooter/" + sha256(path.encode("utf-8")).hexdigest().encode("ascii")
 
     def get_many(self, paths: Iterable[str]) -> Dict[str, bytes]:

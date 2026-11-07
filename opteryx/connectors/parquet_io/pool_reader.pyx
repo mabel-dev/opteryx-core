@@ -750,8 +750,15 @@ cdef class CppIOPipeline:
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
                   int64_t pool_size=256*1024*1024,
                   http_tuning=None, coalesce_tuning=None, auth_header=None,
-                  int fetch_ahead=0):
+                  int fetch_ahead=0, cache_versions=None):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
+        # {fetch path: object version} for files that can change under one path
+        # (`_object_versions`): joins their chunk-cache key. Before any submit.
+        cdef unordered_map[string, string] _cv
+        if cache_versions:
+            for _k, _v in cache_versions.items():
+                _cv[(<str>_k).encode("utf-8")] = (<str>_v).encode("utf-8")
+            self.pipeline.set_cache_versions(_cv)
         # Fetch-ahead depth (0 = off = the coupled path). Validated by the
         # opener via _submission_window; set before any submit.
         if fetch_ahead > 0:
@@ -1308,8 +1315,12 @@ cdef tuple _read_footer_payload(
     int64_t file_size,
     ParquetFooterBytesCache footer_cache,
     str auth_header=None,
+    str cache_key=None,
 ):
     """Fetch the Parquet footer envelope. Pure C++ IO, typed cache.
+
+    `cache_key` keys `footer_cache` (default: `path`) - a versioned file's key
+    carries its object version (`_vkey`).
 
     Returns (envelope_bytes, bytes_fetched). Pass file_size=-1 to auto-detect
     via stat() (local) or HEAD (http/gcs). Pass footer_cache=None to bypass
@@ -1331,8 +1342,10 @@ cdef tuple _read_footer_payload(
     cdef string cpp_auth
     cdef string cpp_path
 
+    if cache_key is None:
+        cache_key = path
     if footer_cache is not None:
-        cached = footer_cache.get(path)
+        cached = footer_cache.get(cache_key)
         if cached is not None:
             return cached, 0
 
@@ -1355,7 +1368,7 @@ cdef tuple _read_footer_payload(
     envelope = env_ptr[:env_sz]
 
     if footer_cache is not None:
-        footer_cache.put(path, envelope)
+        footer_cache.put(cache_key, envelope)
 
     return envelope, result.bytes_fetched
 
@@ -2726,6 +2739,62 @@ cdef tuple _sign_paths(object filesystem, object paths):
     return orig_to_cpp, cpp_to_orig
 
 
+cdef dict _object_versions(object filesystem, object paths):
+    """{original path: object version} when this scan's files can change under the
+    same path, else None.
+
+    Every Parquet cache tier here - the parsed and bytes footer caches, the disk and
+    shared (cross-instance) footer tiers, and the C++ chunk cache - is process- or
+    fleet-wide and was keyed by path alone, on the ruling that files are write-once.
+    That holds for platform files and NOT for a customer's bucket read through
+    READ_*: a rewritten object kept being served its old footer and chunks (stale
+    COUNT/MIN/MAX, filters pruning live rows, a new column read as NULL), and a
+    caller who could read only the NEW object was served the OLD one's statistics
+    and bytes - including another tenant's, at a reused bucket name.
+
+    A filesystem built for such a read carries `object_versions`: the version token
+    each object had when THIS caller's own authorised HEAD looked at it (the binder
+    records it; see binder/dataset.py READ_PARQUET). Its presence switches every tier
+    to (path, version) keys for this scan (`_vkey`, `chunk_cache_key`), so a cached
+    entry is served only for the exact object version this caller has proven it can
+    read. A path the binder did not HEAD is HEADed here, with the same filesystem,
+    before any cache is consulted - there is no unversioned fallback. Filesystems
+    without the attribute (platform storage) keep path-only keys: None here."""
+    versions = getattr(filesystem, "object_versions", None)
+    if versions is None:
+        return None
+    missing = [p for p in dict.fromkeys(paths) if p not in versions]
+    if missing:
+        infos = filesystem.get_file_info(missing)
+        if not isinstance(infos, list):
+            infos = [infos]
+        for p, info in zip(missing, infos):
+            versions[p] = getattr(info, "version", None) or f"s:{getattr(info, 'size', 0) or 0}"
+    return versions
+
+
+cdef inline str _vkey(str key, dict versions, str path):
+    """`key` (a path, or the fetch URL the bytes cache uses) as a cache key for the
+    file at original `path`: unchanged for an immutable file, joined with the object's
+    version for a versioned one (`_object_versions`). '\x1f' never appears in a path
+    or URL, so a versioned key cannot collide with an unversioned one."""
+    if versions is None:
+        return key
+    return key + "\x1f" + <str>versions[path]
+
+
+cdef unordered_map[string, string] _cpp_cache_versions(
+        dict versions, dict orig_to_cpp, object paths):
+    """`versions` re-keyed by FETCH path, for the C++ pipeline's chunk-cache key
+    (io_pipeline.hpp `chunk_cache_key`). Empty when the scan is unversioned."""
+    cdef unordered_map[string, string] out
+    if versions is None:
+        return out
+    for p in paths:
+        out[(<str>orig_to_cpp.get(p, p)).encode("utf-8")] = (<str>versions[p]).encode("utf-8")
+    return out
+
+
 cdef class ScanFooters:
     """One scan's parsed footers, keyed by ORIGINAL path: the gate fills it and
     `open_native_scan_plan` reads it. Both walk every file after acquiring every
@@ -2743,6 +2812,7 @@ cdef tuple _acquire_remote_footers(
     ParquetFooterMap* footer_map,
     object prefetched_footers,
     str auth_header=None,
+    dict versions=None,
 ):
     """Acquire the Parquet footer for every REMOTE file in `paths`, in three steps
     that share ONE eligibility pass so the caching rules can't drift apart (they used
@@ -2764,7 +2834,9 @@ cdef tuple _acquire_remote_footers(
     `FetchParquetFooter` this batching exists to avoid.
 
     POSTCONDITION, which is what callers rely on: every non-prefetched remote file in
-    `paths` has a PARSED footer in `_PARSED_FOOTER_CACHE`, keyed by its ORIGINAL path.
+    `paths` has a PARSED footer in `_PARSED_FOOTER_CACHE`, keyed by its ORIGINAL path
+    (as `_vkey` makes it: with its object version when `versions` is given — see
+    `_object_versions`; every tier probed and written here uses that same key).
     The original is the stable key — a signed URL carries an expiring signature, so
     keying the persistent caches by the fetch URL would bust them on every query.
 
@@ -2781,7 +2853,7 @@ cdef tuple _acquire_remote_footers(
     no information — the caller should report nothing rather than report zeros."""
     cdef ParquetFooterRef probe
     cdef Py_ssize_t bi
-    cdef str path, fetch_url
+    cdef str path, fetch_url, ckey
     cdef bytes envelope
 
     # Telemetry for the two in-process caches probed below. Counted together: both mean
@@ -2816,16 +2888,17 @@ cdef tuple _acquire_remote_footers(
         # footer_map[key]) keeps a MISS from inserting an empty reference into the
         # map. On a hit the map takes a SHARED reference — no copy — which keeps the
         # footer alive for the map's lifetime even if the cache evicts it.
-        probe = _PARSED_FOOTER_CACHE.get(path)
+        ckey = _vkey(path, versions, path)
+        probe = _PARSED_FOOTER_CACHE.get(ckey)
         if probe.get() != NULL:
             if footer_map != NULL:
                 footer_map[0][path.encode('utf-8')] = probe
             process_hits += 1
             continue
         if footer_bytes_cache is not None:
-            envelope = footer_bytes_cache.get(fetch_url)
+            envelope = footer_bytes_cache.get(_vkey(fetch_url, versions, path))
             if envelope is not None:
-                _parse_and_cache_footer(path, envelope, footer_map)
+                _parse_and_cache_footer(path, ckey, envelope, footer_map)
                 process_hits += 1
                 continue
         remote_candidates.append((path, fetch_url,
@@ -2838,22 +2911,26 @@ cdef tuple _acquire_remote_footers(
     probe_hits = set()
     if footer_disk is not None:
         for path, fetch_url, _ in remote_candidates:
-            envelope = footer_disk.get(path)
+            ckey = _vkey(path, versions, path)
+            envelope = footer_disk.get(ckey)
             if envelope is None:
                 continue
             if footer_bytes_cache is not None:
-                footer_bytes_cache.put(fetch_url, envelope)
-            _parse_and_cache_footer(path, envelope, footer_map)
+                footer_bytes_cache.put(_vkey(fetch_url, versions, path), envelope)
+            _parse_and_cache_footer(path, ckey, envelope, footer_map)
             probe_hits.add(path)
         disk_hits = len(probe_hits)
     if footer_remote is not None:
-        for path, envelope in footer_remote.get_many(
-                [c[0] for c in remote_candidates if c[0] not in probe_hits]).items():
+        # The shared tier is probed by the versioned key and answers by it.
+        tier_keys = {_vkey(c[0], versions, c[0]): c[0]
+                     for c in remote_candidates if c[0] not in probe_hits}
+        for ckey, envelope in footer_remote.get_many(list(tier_keys)).items():
+            path = tier_keys[ckey]
             if footer_bytes_cache is not None:
-                footer_bytes_cache.put(orig_to_cpp.get(path, path), envelope)
-            _parse_and_cache_footer(path, envelope, footer_map)
+                footer_bytes_cache.put(_vkey(orig_to_cpp.get(path, path), versions, path), envelope)
+            _parse_and_cache_footer(path, ckey, envelope, footer_map)
             if footer_disk is not None:
-                footer_disk.put(path, envelope)
+                footer_disk.put(ckey, envelope)
             probe_hits.add(path)
 
     # ── Step 3: fetch the residual from origin in one concurrent batch ─────────
@@ -2878,15 +2955,16 @@ cdef tuple _acquire_remote_footers(
         pending_remote = []
         for bi in range(len(chunk_urls)):
             path = batch_orig[chunk_start + bi]
+            ckey = _vkey(path, versions, path)
             envelope = envelopes[bi]
             if footer_bytes_cache is not None:
-                footer_bytes_cache.put(chunk_urls[bi], envelope)
-            _parse_and_cache_footer(path, envelope, footer_map)
+                footer_bytes_cache.put(_vkey(chunk_urls[bi], versions, path), envelope)
+            _parse_and_cache_footer(path, ckey, envelope, footer_map)
             # Write back only AFTER a successful parse, so a cross-instance reader never
             # receives bytes that fail to decode here.
             if footer_disk is not None:
-                footer_disk.put(path, envelope)
-            pending_remote.append((path, envelope))
+                footer_disk.put(ckey, envelope)
+            pending_remote.append((ckey, envelope))
         if footer_remote is not None and pending_remote:
             footer_remote.put_many(pending_remote)
 
@@ -2902,16 +2980,18 @@ cdef tuple _acquire_remote_footers(
 
 cdef void _parse_and_cache_footer(
     str path,
+    str cache_key,
     bytes envelope,
     ParquetFooterMap* footer_map,
 ):
-    """Parse one footer envelope and land it in `_PARSED_FOOTER_CACHE` under the
-    stable ORIGINAL path, plus `footer_map` (the same shared reference) when the
-    caller keeps one."""
+    """Parse one footer envelope and land it in `_PARSED_FOOTER_CACHE` under
+    `cache_key` (the stable ORIGINAL path, versioned by `_vkey` where the file is),
+    plus `footer_map` under `path` (the same shared reference) when the caller keeps
+    one."""
     cdef const uint8_t* buf_ptr = <const uint8_t*>envelope
     cdef size_t buf_size = len(envelope)
     cdef ParquetFooterRef footer = _PARSED_FOOTER_CACHE.put(
-        path, _parse_footer_nogil(buf_ptr, buf_size))
+        cache_key, _parse_footer_nogil(buf_ptr, buf_size))
     if footer_map != NULL:
         footer_map[0][path.encode('utf-8')] = footer
 
@@ -2923,6 +3003,7 @@ cdef ParquetFooterRef _footer_after_acquire(
     ParquetFooterBytesCache footer_bytes_cache,
     ParquetFooterMap* footer_map,
     str auth_header=None,
+    dict versions=None,
 ):
     """The parsed footer of `path` once `_acquire_remote_footers` has run over it:
     from `footer_map` for a remote file (its postcondition, holding for cache hits
@@ -2938,7 +3019,7 @@ cdef ParquetFooterRef _footer_after_acquire(
     # an empty FileStats on a miss, which reads downstream as "zero row groups".
     if footer_map[0].count(path_bytes) != 0:
         return footer_map[0][path_bytes]
-    footer = _PARSED_FOOTER_CACHE.get(path)
+    footer = _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path))
     if footer.get() == NULL:
         fetch_url = orig_to_cpp.get(path, path)
         envelope, _ = _read_footer_payload(
@@ -2946,11 +3027,12 @@ cdef ParquetFooterRef _footer_after_acquire(
             file_sizes.get(path, -1) if file_sizes else -1,
             footer_bytes_cache,
             auth_header,
+            _vkey(fetch_url, versions, path),
         )
         buf_ptr = <const uint8_t*>envelope
         buf_size = <size_t>len(envelope)
         footer = _PARSED_FOOTER_CACHE.put(
-            path, _parse_footer_nogil(buf_ptr, buf_size))
+            _vkey(path, versions, path), _parse_footer_nogil(buf_ptr, buf_size))
     return footer
 
 
@@ -3017,12 +3099,13 @@ cpdef list fetch_column_stats_many(
         return out
 
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    versions = _object_versions(filesystem, paths)
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            &footer_map, None, _native_auth_header(filesystem))
+                            &footer_map, None, _native_auth_header(filesystem), versions)
 
     for path in paths:
         footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
-                                       _native_auth_header(filesystem))
+                                       _native_auth_header(filesystem), versions)
         agg_stats = AggregateColumnStats(deref(footer))
         out.append((
             deref(footer).num_rows,
@@ -3065,12 +3148,13 @@ cpdef list fetch_footer_key_values_many(
         return out
 
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    versions = _object_versions(filesystem, paths)
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            &footer_map, None, _native_auth_header(filesystem))
+                            &footer_map, None, _native_auth_header(filesystem), versions)
 
     for path in paths:
         footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
-                                       _native_auth_header(filesystem))
+                                       _native_auth_header(filesystem), versions)
         found = {}
         for key in wanted:
             if deref(footer).key_value_metadata.count(key) != 0:
@@ -3133,12 +3217,13 @@ cpdef list row_group_int_bounds(
         return out
 
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    versions = _object_versions(filesystem, paths)
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            &footer_map, None, _native_auth_header(filesystem))
+                            &footer_map, None, _native_auth_header(filesystem), versions)
 
     for path in paths:
         footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
-                                       _native_auth_header(filesystem))
+                                       _native_auth_header(filesystem), versions)
         bounds = []
         for g in range(deref(footer).row_groups.size()):
             rg = &deref(footer).row_groups[g]
@@ -3221,6 +3306,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     orig_to_cpp, cpp_to_orig = _sign_paths(filesystem, paths)
     src.orig_to_cpp = orig_to_cpp
     src.cpp_to_orig = cpp_to_orig
+    cdef dict versions = _object_versions(filesystem, paths)
 
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
@@ -3248,7 +3334,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     cdef Py_ssize_t remote_files_seen, process_hits, disk_hits, tier_hits, tier_misses
     remote_files_seen, process_hits, disk_hits, tier_hits, tier_misses = _acquire_remote_footers(
         paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-        src.footer_map, prefetched_footers, _native_auth_header(filesystem),
+        src.footer_map, prefetched_footers, _native_auth_header(filesystem), versions,
     )
     # Reported whenever this scan considered a remote file, including when the in-process
     # caches served every one of them and the remote tier was never reached — that is
@@ -3289,18 +3375,20 @@ cpdef IpcRowGroupSource open_ipc_source(
         else:
             path_bytes_cpp = path.encode('utf-8')
             if src.footer_map[0].count(path_bytes_cpp) == 0:
-                footer = _PARSED_FOOTER_CACHE.get(path)
+                footer = _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path))
                 if footer.get() == NULL:
                     envelope, _ = _read_footer_payload(
                         orig_to_cpp.get(path, path),
                         file_sizes.get(path, -1) if file_sizes else -1,
                         footer_bytes_cache,
                         _native_auth_header(filesystem),
+                        _vkey(orig_to_cpp.get(path, path), versions, path),
                     )
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)
                     footer = _PARSED_FOOTER_CACHE.put(
-                        path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
+                        _vkey(path, versions, path),
+                        _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
                 src.footer_map[0][path_bytes_cpp] = footer
             fsp = src.footer_map[0][path_bytes_cpp].get()
             # Local file path for bloom probing (None for remote — blooms are read
@@ -3382,6 +3470,8 @@ cpdef IpcRowGroupSource open_ipc_source(
         # Armed only when something is remote: a local-only scan gets the
         # validated window but no idle fetch threads.
         fetch_ahead=fetch_ahead if _any_remote_path(paths) else 0,
+        cache_versions=(None if versions is None else
+                        {orig_to_cpp.get(p, p): versions[p] for p in paths}),
     )
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
@@ -3455,6 +3545,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     orig_to_cpp, cpp_to_orig = _sign_paths(filesystem, [w[0] for w in work_items])
     src.orig_to_cpp = orig_to_cpp
     src.cpp_to_orig = cpp_to_orig
+    cdef dict versions = _object_versions(filesystem, [w[0] for w in work_items])
 
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
@@ -3467,18 +3558,20 @@ cpdef IpcRowGroupSource open_pass2_source(
         masks.append(bytes(mask_bytes))
         path_bytes_cpp = path.encode('utf-8')
         if src.footer_map[0].count(path_bytes_cpp) == 0:
-            footer = _PARSED_FOOTER_CACHE.get(path)
+            footer = _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path))
             if footer.get() == NULL:
                 envelope, _ = _read_footer_payload(
                     orig_to_cpp.get(path, path),
                     file_sizes.get(path, -1) if file_sizes else -1,
                     footer_bytes_cache,
                     _native_auth_header(filesystem),
+                    _vkey(orig_to_cpp.get(path, path), versions, path),
                 )
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
                 footer = _PARSED_FOOTER_CACHE.put(
-                    path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
+                    _vkey(path, versions, path),
+                    _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
             src.footer_map[0][path_bytes_cpp] = footer
     src.work_items = wi
     src.masks = masks
@@ -3503,6 +3596,8 @@ cpdef IpcRowGroupSource open_pass2_source(
         coalesce_tuning=coalesce_tuning,
         auth_header=_native_auth_header(filesystem),
         fetch_ahead=fetch_ahead if _any_remote_path([p for p, _, _ in work_items]) else 0,
+        cache_versions=(None if versions is None else
+                        {orig_to_cpp.get(p, p): versions[p] for p, _, _ in work_items}),
     )
     return src
 
@@ -3957,6 +4052,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     # submit_row_group), so there is nothing to translate back for telemetry.
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
     plan.fetch_paths = orig_to_cpp
+    cdef dict versions = _object_versions(filesystem, paths)
 
     # Batched, shared-tier remote footer acquisition into `footers` (ORIGINAL-path
     # keyed; plan.footer_map is FETCH-url keyed), which the loop below reads first.
@@ -3965,7 +4061,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     # remote file.
     _footer_t0 = time.perf_counter_ns()
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            &footers.footers, None, _native_auth_header(filesystem))
+                            &footers.footers, None, _native_auth_header(filesystem), versions)
     plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers the
@@ -3988,7 +4084,7 @@ cpdef NativeScanPlan open_native_scan_plan(
         if footers.footers.count(path.encode('utf-8')) != 0:
             plan.footer_map[0][path_bytes_cpp] = footers.footers[path.encode('utf-8')]
             continue
-        footer = _PARSED_FOOTER_CACHE.get(path)
+        footer = _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path))
         if footer.get() != NULL:
             plan.footer_map[0][path_bytes_cpp] = footer
         else:
@@ -4007,7 +4103,7 @@ cpdef NativeScanPlan open_native_scan_plan(
             footer_buf_ptr = <const uint8_t*>envelope
             footer_buf_size = len(envelope)
             plan.footer_map[0][path_bytes_cpp] = _PARSED_FOOTER_CACHE.put(
-                path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
+                _vkey(path, versions, path), _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
         plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
     cdef _CoverageRequest request = None if coverage is None else _CoverageRequest(coverage)
@@ -4064,7 +4160,7 @@ cpdef NativeScanPlan open_native_scan_plan(
             if footers.footers.count(path.encode('utf-8')) != 0:
                 footer = footers.footers[path.encode('utf-8')]
             else:
-                footer = _PARSED_FOOTER_CACHE.get(path)
+                footer = _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path))
             if footer.get() == NULL:
                 # Not "compile" — a real network round-trip (cold cache), timed on its
                 # own so it cannot hide inside whatever span calls this function. Only
@@ -4078,7 +4174,7 @@ cpdef NativeScanPlan open_native_scan_plan(
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
                 footer = _PARSED_FOOTER_CACHE.put(
-                    path, _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
+                    _vkey(path, versions, path), _parse_footer_nogil(footer_buf_ptr, footer_buf_size))
                 plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
             plan.footer_map[0][path_bytes_cpp] = footer
         fsp = plan.footer_map[0][path_bytes_cpp].get()
@@ -4218,6 +4314,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     _auth = _native_auth_header(filesystem)
     if _auth:
         plan.pipeline_ptr.set_auth_header(_auth.encode("utf-8"))
+    # Versioned (customer) files: their version joins the chunk-cache key.
+    if versions is not None:
+        plan.pipeline_ptr.set_cache_versions(_cpp_cache_versions(versions, orig_to_cpp, paths))
     if _config.GCS_TRANSPORT == "grpc":
         plan.pipeline_ptr.set_gcs_transport_grpc(_config.GCS_GRPC_CONNECTIONS)
     # Armed only when something is remote (see _any_remote_path); the window
@@ -4538,6 +4637,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     # again, check that macro before anything in this file.
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
     auth_header = _native_auth_header(filesystem)
+    versions = _object_versions(filesystem, paths)
     for path in paths:
         if not _is_local_path(path) and path not in orig_to_cpp and not auth_header:
             return (f"remote file {path} can be neither signed nor bearer-authenticated by "
@@ -4550,7 +4650,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     if footers is None:
         footers = ScanFooters()
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            &footers.footers, None, auth_header)
+                            &footers.footers, None, auth_header, versions)
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers.
     # This gate is the FIRST toucher of local footers on the native path (it
@@ -4565,7 +4665,7 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
         if (_is_local_path(fetch_url) and footers.footers.count(path.encode('utf-8')) == 0
-                and _PARSED_FOOTER_CACHE.get(path).get() == NULL):
+                and _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path)).get() == NULL):
             _local_miss_paths.append(path)
             _local_miss_urls.append(fetch_url)
     if len(_local_miss_paths) > 1:
@@ -4578,7 +4678,8 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
             footers.footers[_local_miss_paths[_lm_i].encode('utf-8')] = _PARSED_FOOTER_CACHE.put(
-                _local_miss_paths[_lm_i], _parse_footer_nogil(buf_ptr, buf_size))
+                _vkey(_local_miss_paths[_lm_i], versions, _local_miss_paths[_lm_i]),
+                _parse_footer_nogil(buf_ptr, buf_size))
 
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
@@ -4589,14 +4690,15 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
         if footers.footers.count(path.encode('utf-8')) != 0:
             footer = footers.footers[path.encode('utf-8')]
         else:
-            footer = _PARSED_FOOTER_CACHE.get(path)
+            footer = _PARSED_FOOTER_CACHE.get(_vkey(path, versions, path))
         if footer.get() == NULL:
             envelope, _ = _read_footer_payload(
                 fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None, auth_header
             )
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
-            footer = _PARSED_FOOTER_CACHE.put(path, _parse_footer_nogil(buf_ptr, buf_size))
+            footer = _PARSED_FOOTER_CACHE.put(
+                _vkey(path, versions, path), _parse_footer_nogil(buf_ptr, buf_size))
         footers.footers[path.encode('utf-8')] = footer
         fsp = footer.get()
         # A file already proven against THIS parsed footer for THIS request is

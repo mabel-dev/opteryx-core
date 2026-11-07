@@ -8,9 +8,11 @@ import os
 import threading
 import urllib.parse
 from typing import List
+from typing import Optional
 from typing import Tuple
 from typing import Union
 
+from opteryx.connectors.io_systems._file_info import version_from_headers
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import md_cause
 from opteryx.exceptions import md_code
@@ -234,6 +236,8 @@ class OpteryxGcsFileSystem:
             path: str
             type: "FileType"
             size: int
+            # The object's generation (_file_info.version_from_headers), or None.
+            version: Optional[str] = None
 
         # Handle both single path and list of paths
         single_path = isinstance(paths, str)
@@ -262,7 +266,9 @@ class OpteryxGcsFileSystem:
                 headers={"Authorization": bearer},
             )
             size = _content_length(paths[0], headers)
-            info = FileInfo(path=paths[0], type=FileType.File, size=size)
+            info = FileInfo(
+                path=paths[0], type=FileType.File, size=size, version=version_from_headers(headers)
+            )
             return info if single_path else [info]
 
         # Fan out all HEAD requests in ONE native libcurl batch (a single C++
@@ -274,7 +280,12 @@ class OpteryxGcsFileSystem:
         requests = [(self.object_url(path), {"Authorization": bearer}) for path in paths]
         headers_list = self.http_client.head_many(requests)
         infos = [
-            FileInfo(path=path, type=FileType.File, size=_content_length(path, headers))
+            FileInfo(
+                path=path,
+                type=FileType.File,
+                size=_content_length(path, headers),
+                version=version_from_headers(headers),
+            )
             for path, headers in zip(paths, headers_list)
         ]
 

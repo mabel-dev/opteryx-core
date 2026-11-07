@@ -63,6 +63,7 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
+from opteryx.connectors.io_systems._file_info import version_from_headers
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import md_cause
 from opteryx.exceptions import md_code
@@ -104,6 +105,8 @@ class FileInfo:
     path: str
     type: FileType
     size: int = 0
+    # The object's version token (_file_info.version_from_headers), or None.
+    version: Optional[str] = None
 
 
 def split_path(path: str) -> Tuple[str, str]:
@@ -826,7 +829,9 @@ class OpteryxS3FileSystem:
                 info = FileInfo(path=paths[0], type=FileType.NotFound)
                 return info if single_path else [info]
             size = int(headers.get("content-length", 0))
-            info = FileInfo(path=paths[0], type=FileType.File, size=size)
+            info = FileInfo(
+                path=paths[0], type=FileType.File, size=size, version=version_from_headers(headers)
+            )
             return info if single_path else [info]
 
         # Fan out all HEAD requests in ONE native libcurl batch (a single C++
@@ -835,7 +840,12 @@ class OpteryxS3FileSystem:
         requests = [(self._object_url(path, method="HEAD"), {}) for path in paths]
         headers_list = self.http_client.head_many(requests)
         return [
-            FileInfo(path=path, type=FileType.File, size=int(headers.get("content-length", 0)))
+            FileInfo(
+                path=path,
+                type=FileType.File,
+                size=int(headers.get("content-length", 0)),
+                version=version_from_headers(headers),
+            )
             for path, headers in zip(paths, headers_list)
         ]
 

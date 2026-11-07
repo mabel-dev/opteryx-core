@@ -1243,6 +1243,20 @@ def visit_function_dataset(
         # correctness-affecting kind) already applies generically to FunctionDataset
         # nodes the same as Scan.
         file_infos = filesystem.get_file_info(parquet_files)
+        # SECURITY + CORRECTNESS: a READ_* path is the CUSTOMER's object - mutable,
+        # and readable only with the caller's own credential. Every Parquet cache tier
+        # (parsed/bytes/disk/shared footers, the chunk cache) keys a file by path, so
+        # record the version THIS caller's authorised HEAD just observed: its presence
+        # on the filesystem makes pool_reader key every tier by (path, version) for
+        # this scan. A cached entry is then served only for the exact object version
+        # this caller proved it can read - never a rewritten file's stale footer or
+        # bytes, never another tenant's object at a reused path. A store that sent
+        # no version header falls back to the HEAD's size (weak, but never shared
+        # with a different-size object).
+        filesystem.object_versions = {
+            f: (getattr(info, "version", None) or f"s:{info.size or 0}")
+            for f, info in zip(parquet_files, file_infos)
+        }
         builder = NativeManifestBuilder(
             tuple(column.name for column in schema.columns),
             tuple(column.column_type.physical for column in schema.columns),

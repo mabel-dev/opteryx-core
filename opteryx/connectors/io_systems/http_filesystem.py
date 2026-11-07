@@ -9,9 +9,11 @@ from concurrent.futures import as_completed
 from dataclasses import dataclass
 from enum import Enum
 from typing import List
+from typing import Optional
 from typing import Tuple
 from typing import Union
 
+from opteryx.connectors.io_systems._file_info import version_from_headers
 from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
 from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 from opteryx.exceptions import DatasetReadError
@@ -36,6 +38,8 @@ class FileInfo:
     path: str
     type: FileType
     size: int = 0
+    # The object's version token (_file_info.version_from_headers), or None.
+    version: Optional[str] = None
 
 
 # HTTP HEAD-request pool.
@@ -165,7 +169,9 @@ class OpteryxHttpFileSystem:
                     return idx, FileInfo(path=path, type=FileType.NotFound)
                 raise
             size = int(headers.get("content-length", 0))
-            return idx, FileInfo(path=path, type=FileType.File, size=size)
+            return idx, FileInfo(
+                path=path, type=FileType.File, size=size, version=version_from_headers(headers)
+            )
 
         # Fast path: avoid pool overhead for single file
         if len(paths) == 1:

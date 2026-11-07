@@ -2096,6 +2096,9 @@ class ParquetIOPipeline {
         // A LOCAL row group's file in the process table (resolved once at
         // submit); null for a remote one.
         std::shared_ptr<LocalFileTable::File> file;
+        // C7 chunk-cache key for this file (chunk_cache_key): resolved once at
+        // submit, shared by every lookup and fill of this item's chunks.
+        std::string cc_key;
     };
 
     // ── Fetch block ──────────────────────────────────────────────────────────
@@ -2115,6 +2118,7 @@ class ParquetIOPipeline {
     // waits on another worker's IO — it is not claimable until the bytes exist.
     struct FetchBlock {
         std::string path;
+        std::string cc_key;   // C7 chunk-cache key for `path` (chunk_cache_key)
         size_t ncols = 0;
         size_t n_members = 0;
         // Per member: the chunk-frame geometry the decode of that member reads.
@@ -2264,6 +2268,10 @@ class ParquetIOPipeline {
     // never fill (a compaction scan reads every byte once — caching it would only
     // evict useful entries). Set before the first submit.
     bool chunk_cache_admit_ = true;
+    // Object version per FETCH path, for files whose bytes can change under the
+    // same path (a customer's bucket, read by READ_*). Empty for platform files,
+    // which are write-once. See chunk_cache_key.
+    std::unordered_map<std::string, std::string> cache_versions_;
 
     // Pushed per-value predicates (ValuePredicate, decode.hpp), keyed by parquet
     // column name. Set once before any submit (workers read it const, no
@@ -2924,11 +2932,10 @@ class ParquetIOPipeline {
             if (p != nullptr) draken_cc_unpin(p);
         blk.cc_pins.assign(members.size() * ncols, nullptr);
         // C7: a chunk already in the cache needs no bytes — pin it and buy nothing
-        // for it (an IMAGE or the COMPRESSED chunk as fetched, §30). Same key as the decoder's (the path up to any '?', the chunk's
+        // for it (an IMAGE or the COMPRESSED chunk as fetched, §30). Same key as the decoder's (chunk_cache_key, the chunk's
         // first byte). Every codec: a block is remote, and a remote UNCOMPRESSED
         // chunk is cached too — its GET is the cost a hit saves.
         const bool cc_on = draken_cc_enabled() != 0;
-        const size_t cc_key_len = std::min(blk.path.find('?'), blk.path.size());
         for (size_t m = 0; m < members.size(); ++m) {
             WorkItem& item = *members[m];
             compute_page_prune(item);
@@ -2941,7 +2948,7 @@ class ParquetIOPipeline {
                 plan.clen[slot]   = item.column_stats[i].total_compressed_size;
                 if (pp.active && pp.all_pruned) continue;   // nothing to buy for this member
                 if (cc_on) {
-                    blk.cc_pins[slot] = draken_cc_lookup_hit(blk.path.data(), cc_key_len,
+                    blk.cc_pins[slot] = draken_cc_lookup_hit(blk.cc_key.data(), blk.cc_key.size(),
                                                              base_offsets[i]);
                     if (blk.cc_pins[slot] != nullptr) {          // served from the cache
                         cc_get_skipped_chunks_.fetch_add(1, std::memory_order_relaxed);
@@ -3924,12 +3931,13 @@ class ParquetIOPipeline {
 
                 // Cross-query decompressed chunk cache (C7): every decode below
                 // hands the decoder this chunk, chunk-relative, so the key is the
-                // file path plus the chunk's first byte. Files are immutable for
-                // the life of the process (ruling), so the path is the identity.
-                // A pre-signed fetch URL carries its credential (and expiry) in the
-                // query string, which changes per query: the object is the URL up
-                // to the '?', so that is the key.
-                const size_t cc_key_len = std::min(item.path.find('?'), item.path.size());
+                // file's chunk_cache_key plus the chunk's first byte. Platform files
+                // are immutable for the life of the process (ruling), so their path
+                // is the identity; a customer object's recorded version joins it
+                // (chunk_cache_key). A pre-signed fetch URL carries its credential
+                // (and expiry) in the query string, which changes per query: the
+                // object is the URL up to the '?'. `item.cc_key` outlives the
+                // request - the item owns it for the whole decode.
                 const DrakenChunkEntry* cc_pinned = nullptr;
                 if (remote && item.block) {
                     const size_t slot = item.member * item.block->ncols + i;
@@ -3939,7 +3947,7 @@ class ParquetIOPipeline {
                 // uses to decide what to fetch.
                 const bool cc_whole =
                     !(pp.active && i < pp.extents.size() && !pp.extents[i].empty());
-                const ChunkCacheRequest cc_req{item.path.data(), cc_key_len,
+                const ChunkCacheRequest cc_req{item.cc_key.data(), item.cc_key.size(),
                                                base_offset, chunk_cache_admit_,
                                                !path_is_local(item.path), cc_whole, cc_pinned};
 
@@ -4875,6 +4883,29 @@ class ParquetIOPipeline {
     void set_length_only_columns(const std::vector<uint8_t>& v) { length_only_columns_ = v; }
     // C7: false = this scan may use chunk-cache hits but never fills the cache.
     void set_chunk_cache_admit(bool v) { chunk_cache_admit_ = v; }
+    // Set once at plan time, before any submit: {fetch path: object version}.
+    void set_cache_versions(const std::unordered_map<std::string, std::string>& v) {
+        cache_versions_ = v;
+    }
+    // The C7 chunk cache is process-wide and keyed by (key, chunk offset). The key
+    // is the path up to any '?' - a signed URL's signature expires, so it must not
+    // be part of it - and, for a file with a recorded version, that version too:
+    // the cache treats a key's bytes as immutable, which a customer object
+    // rewritten in place (or a bucket name reused by another tenant) is not.
+    // Without the version, a rewrite served the OLD file's chunks - its first
+    // column chunk always starts at offset 4 - to a caller who had just proven it
+    // can read the NEW one. '\x1f' cannot appear in a URL, so keys never collide.
+    std::string chunk_cache_key(const std::string& path) const {
+        std::string key = path.substr(0, std::min(path.find('?'), path.size()));
+        if (!cache_versions_.empty()) {
+            auto it = cache_versions_.find(path);
+            if (it != cache_versions_.end()) {
+                key.push_back('\x1f');
+                key.append(it->second);
+            }
+        }
+        return key;
+    }
 
 #ifdef RUGO_ENABLE_HTTP
     // Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-derived
@@ -5240,10 +5271,12 @@ class ParquetIOPipeline {
                     "submit_block: every member must carry stats for every projected column");
         }
         const bool remote = !path_is_local(path);
+        const std::string cc_key = chunk_cache_key(path);
         std::shared_ptr<FetchBlock> blk;
         if (remote) {
             blk = std::make_shared<FetchBlock>();
             blk->path = path;
+            blk->cc_key = cc_key;
             blk->ncols = column_names.size();
         }
         const std::shared_ptr<LocalFileTable::File> file = remote ? nullptr : files_->get(path);
@@ -5252,6 +5285,7 @@ class ParquetIOPipeline {
         for (size_t m = 0; m < rg_idx.size(); ++m) {
             WorkItem item;
             item.path = path;
+            item.cc_key = cc_key;
             item.rg_idx = rg_idx[m];
             item.column_names = column_names;
             item.column_stats = column_stats[m];
