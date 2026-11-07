@@ -13,7 +13,27 @@ set -ex
 # required; setup.py fails the build without it) and auditwheel bundles
 # libnghttp2.so into the wheel, as it does libssl/libcrypto. Without the headers
 # here, configure silently built HTTP/1.1-only (0.9.173's manylinux wheel).
-yum install -y openssl-devel curl-devel pkgconfig libnghttp2-devel || dnf install -y openssl-devel libcurl-devel pkgconf-pkg-config libnghttp2-devel
+#
+# libnghttp2-devel lives only in the CRB repo. AlmaLinux mirrors occasionally
+# serve an empty CRB repomd.xml ("Document is empty"); that is transient, so
+# drop the cached metadata and retry. (`yum` is `dnf` on AlmaLinux 9 — a
+# `yum || dnf` fallback hits the same broken mirror, so there is none.)
+packages_installed=false
+for attempt in 1 2 3; do
+  if dnf install -y openssl-devel libcurl-devel pkgconf-pkg-config libnghttp2-devel; then
+    packages_installed=true
+    break
+  fi
+  echo "dnf install attempt ${attempt}/3 failed" >&2
+  dnf clean metadata
+  sleep $((attempt * 15))
+done
+
+if [ "${packages_installed}" != true ]; then
+  echo "ERROR: dnf could not install the build headers after 3 attempts." >&2
+  echo "       libnghttp2-devel (CRB) is required for HTTP/2 in the vendored libcurl." >&2
+  exit 1
+fi
 
 # Install Rust 1.83.0 (pinned version to avoid GLIBC_2.18 symbols from newer compilers)
 #
