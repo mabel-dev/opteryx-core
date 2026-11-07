@@ -20,7 +20,7 @@ import pytest
 import opteryx
 from opteryx.exceptions import PermissionsError, UnsupportedSyntaxError, VariableNotFoundError
 
-DEFAULT_IP = "SET @ip = COALESCE(@ip, '192.168.4.80'::ipv4)::ipv4"
+DEFAULT_IP = "SET @ip = COALESCE(@ip, '192.168.0.1'::ipv4)::ipv4"
 
 
 def _one(session, sql):
@@ -35,7 +35,7 @@ def _run(session, sql):
 def test_unset_self_reference_takes_the_default():
     session = opteryx.session()
     _run(session, DEFAULT_IP)
-    assert _one(session, "SELECT CAST(@ip AS VARCHAR)") == ("192.168.4.80",)
+    assert _one(session, "SELECT CAST(@ip AS VARCHAR)") == ("192.168.0.1",)
 
 
 def test_set_self_reference_keeps_the_existing_value():
@@ -48,7 +48,7 @@ def test_set_self_reference_keeps_the_existing_value():
 def test_another_unset_variable_still_raises():
     session = opteryx.session()
     with pytest.raises(VariableNotFoundError):
-        _run(session, "SET @ip = COALESCE(@other, '192.168.4.80'::ipv4)")
+        _run(session, "SET @ip = COALESCE(@other, '192.168.0.1'::ipv4)")
 
 
 def test_value_expression_is_folded():
