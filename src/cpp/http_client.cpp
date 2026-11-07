@@ -123,7 +123,7 @@ curl_socket_t open_guarded_socket(void* clientp, curlsocktype, struct curl_socka
         return CURL_SOCKET_BAD;
     }
     curl_socket_t fd = ::socket(addr->family, addr->socktype, addr->protocol);
-    if (fd != CURL_SOCKET_BAD && fd >= kCurlSelectFdLimit) {
+    if (fd != CURL_SOCKET_BAD && kCurlSelectFdLimit > 0 && fd >= kCurlSelectFdLimit) {
         guard->refused_fd = fd;
         ::close(fd);
         return CURL_SOCKET_BAD;

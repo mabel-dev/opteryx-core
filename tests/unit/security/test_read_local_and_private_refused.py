@@ -47,5 +47,12 @@ def test_http_client_refuses_non_public_peer(url):
         client.head(url)
 
 
+def test_http_client_allows_public_peer_when_denying_private():
+    # Regression: with a poll() libcurl (select fd limit 0) the guard refused EVERY
+    # socket as "fd N >= 0" whenever deny_private_addresses was on.
+    client = HttpClient(max_connections=1, deny_private_addresses=True)
+    assert client.head("https://storage.googleapis.com/opteryx/rugo_examples%2Fspace_missions.parquet")
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

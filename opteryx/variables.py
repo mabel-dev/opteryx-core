@@ -663,6 +663,11 @@ class SystemVariablesContainer:
         return self._entry(key)[1]
 
     def __setitem__(self, key: str, value: Any) -> None:
+        # `SET @@name` names the system variable `name`, as `as_column` reads it.
+        # Without this the `@` test below stored it as a USER variable called
+        # `@@name` — the system variable untouched and its permission check skipped.
+        if key.startswith("@@"):
+            key = key[2:]
         if key[0] == "@":
             variable_type = value.type
             owner = VariableOwner.USER

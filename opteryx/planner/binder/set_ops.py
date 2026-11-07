@@ -23,11 +23,44 @@ from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.expression.formatter import format_expression
+
+
+def _null_self_reference(tree: Expression, variable: str, plan_context) -> Expression:
+    """`tree` with every reference to `variable` replaced by an untyped NULL."""
+    if tree.node_type == NodeType.IDENTIFIER and tree.source_column == variable:
+        return Literal(type=_lt.NULL, alias=tree.alias, arena=plan_context.expressions)
+    tree.map_children(lambda child: _null_self_reference(child, variable, plan_context))
+    return tree
 
 
 def visit_set(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
-    node.variables = context.execution_context.variables
+    """SET's value is bound and folded here, against the session's variables, to the
+    single literal the variable will hold. Anything that does not fold is refused."""
+    from opteryx.planner.binder.binder import inner_binder
+    from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
+
+    variables = context.execution_context.variables
+    value = node.value
+    # `SET @x = COALESCE(@x, …)`: an unset user variable reads NULL in its OWN
+    # assignment only; everywhere else it still raises (ruled 2026-11-07).
+    is_user_variable = node.variable[0] == "@" and not node.variable.startswith("@@")
+    if is_user_variable and node.variable not in variables:
+        value = _null_self_reference(value, node.variable, context.plan_context)
+    value, context = inner_binder(value, context)
+    value = fold_constants(value, context.telemetry, plan_context=context.plan_context)
+    while value.node_type == NodeType.NESTED:
+        value = value.centre
+    if value.node_type != NodeType.LITERAL:
+        raise UnsupportedSyntaxError(
+            f"SET needs a value that can be worked out before the query runs, but "
+            f"`{format_expression(value)}` does not reduce to a single value."
+        )
+    node.value = value
+    node.variables = variables
     node.columns = []
     return node, context
 
