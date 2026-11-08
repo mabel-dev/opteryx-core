@@ -489,15 +489,19 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_co
     outer query addresses the expanded relation. It keeps the Scan's uuid too, and that
     uuid is already in the enclosing join's reader list, so the boundary stays listed as
     a reader (see `get_subplan_reads`).
+
+    The Scan may have NO consumer: it can be the whole of the plan it sits in. A CTE
+    body of exactly `SELECT * FROM a` plans as a bare Scan with no Project above it,
+    and when that CTE is referenced twice its body stays a standalone registry plan
+    while `a` (referenced once, from inside it) is spliced in here. The boundary then
+    simply becomes that plan's head. Refusing this failed `WITH a AS (...), b AS
+    (SELECT * FROM a) SELECT ... FROM b JOIN b ...` — the shape Superset emits for
+    a virtual dataset with a series limit — with "it has no consumer".
     """
     sub_plan = rename_relations(sub_plan, plan_context=plan_context)
     sub_plan_head = sub_plan.exit_point()
 
     outgoing = plan.outgoing_edges(nid)
-    if not outgoing:
-        raise UnsupportedSyntaxError(
-            f"Relation '{node.relation}' cannot be expanded here — it has no consumer."
-        )
 
     # A NEW Subquery step in the Scan's place, carrying the fields a boundary has.
     plan[nid] = SubqueryStep(
@@ -511,7 +515,10 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_co
         columns=_boundary_columns(sub_plan, sub_plan_head, node.relation or node.alias),
     )
     plan.absorb(sub_plan)
-    plan.add_edge(sub_plan_head, nid, outgoing[0][2])
+    if outgoing:
+        plan.add_edge(sub_plan_head, nid, outgoing[0][2])
+    else:
+        plan.add_edge(sub_plan_head, nid)
     return join_leg_preprocess(plan)
 
 
