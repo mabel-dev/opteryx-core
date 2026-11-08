@@ -7,6 +7,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+from opteryx.operators.aggregate.helpers import AGGREGATE_SUMMARIES
 from opteryx.operators.aggregate.helpers import AGGREGATORS
 
 # ARRAY_AGG is NOT here. visit_aggregate_and_group
@@ -106,27 +107,9 @@ _CATEGORIES = {
     "VAR_SAMP": "numeric",
 }
 
-_SUMMARIES = {
-    "ANY_VALUE": "Returns one non-null value from the input set.",
-    "APPROX_COUNT_DISTINCT": "Estimates the number of distinct input values.",
-    "APPROX_PERCENTILE": "Estimates a percentile using sketch-based aggregation.",
-    "ARRAY_AGG": "Collects input values into an array.",
-    "CIDR_AGG": "Collects IPv4 addresses into the smallest list of CIDR blocks that covers exactly those addresses.",
-    "AVG": "Computes the arithmetic mean of the input values.",
-    "CORR": "Computes the Pearson correlation coefficient between two numeric columns.",
-    "COUNT": "Counts rows or non-null input values.",
-    "COUNT_DISTINCT": "Counts distinct non-null input values.",
-    "MAX": "Returns the largest non-null input value.",
-    "MEDIAN": "Computes the exact median (middle value) of the input values.",
-    "MIN": "Returns the smallest non-null input value.",
-    "PERCENTILE_CONT": "Computes the exact percentile of the input values, interpolating between neighbours.",
-    "SUM": "Sums the input values.",
-    "STDDEV": "Computes the population standard deviation of the input values.",
-    "STDDEV_POP": "Computes the population standard deviation of the input values.",
-    "STDDEV_SAMP": "Computes the sample standard deviation of the input values.",
-    "VAR_POP": "Computes the population variance of the input values.",
-    "VAR_SAMP": "Computes the sample variance of the input values.",
-}
+# The one-line summaries live with the registry, in the engine, because
+# SHOW FUNCTIONS reports them at runtime and this package does not ship.
+_SUMMARIES = AGGREGATE_SUMMARIES
 
 _DOCUMENTATION = {
     "ANY_VALUE": "Useful when a grouped query only needs one representative value from each group.",

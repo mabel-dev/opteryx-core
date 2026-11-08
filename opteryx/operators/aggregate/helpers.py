@@ -30,6 +30,33 @@ AGGREGATORS: dict = {
     "VAR_SAMP": "var_samp",
 }
 
+# One line per aggregate, keyed like AGGREGATORS. Two readers: SHOW FUNCTIONS
+# (opteryx/managers/virtual_datasets/functions_data.py), which reports it at
+# runtime, and reference/aggregate_catalog.py, which exports it to
+# aggregates.json. It lives here, not in reference/, because reference/ is not
+# part of the installed package.
+AGGREGATE_SUMMARIES: dict = {
+    "ANY_VALUE": "Returns one non-null value from the input set.",
+    "APPROX_COUNT_DISTINCT": "Estimates the number of distinct input values.",
+    "APPROX_PERCENTILE": "Estimates a percentile using sketch-based aggregation.",
+    "ARRAY_AGG": "Collects input values into an array.",
+    "CIDR_AGG": "Collects IPv4 addresses into the smallest list of CIDR blocks that covers exactly those addresses.",
+    "AVG": "Computes the arithmetic mean of the input values.",
+    "CORR": "Computes the Pearson correlation coefficient between two numeric columns.",
+    "COUNT": "Counts rows or non-null input values.",
+    "COUNT_DISTINCT": "Counts distinct non-null input values.",
+    "MAX": "Returns the largest non-null input value.",
+    "MEDIAN": "Computes the exact median (middle value) of the input values.",
+    "MIN": "Returns the smallest non-null input value.",
+    "PERCENTILE_CONT": "Computes the exact percentile of the input values, interpolating between neighbours.",
+    "SUM": "Sums the input values.",
+    "STDDEV": "Computes the population standard deviation of the input values.",
+    "STDDEV_POP": "Computes the population standard deviation of the input values.",
+    "STDDEV_SAMP": "Computes the sample standard deviation of the input values.",
+    "VAR_POP": "Computes the population variance of the input values.",
+    "VAR_SAMP": "Computes the sample variance of the input values.",
+}
+
 # Aggregate SPELLINGS that are not aggregates in their own right: the builder
 # rewrites each to a base aggregate carrying duplicate_treatment="Distinct"
 # (see logical_planner_builders), so `COUNT_DISTINCT(x)` and `COUNT(DISTINCT x)`

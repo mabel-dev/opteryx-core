@@ -27,8 +27,9 @@ from opteryx.types.schema import RelationDescriptor
 
 # Datasets that exist ONLY to back a dedicated SQL surface and are therefore not
 # addressable by name in user SQL. `$variables` is reachable exclusively through
-# `SHOW VARIABLES`, `$user` exclusively through `SHOW USER`, and `$grants`
+# `SHOW VARIABLES`, `$user` exclusively through `SHOW USER`, `$grants`
 # exclusively through `SHOW GRANTS` (see logical_planner.plan_show_variables),
+# and `$functions` exclusively through `SHOW FUNCTIONS` (plan_show_functions),
 # so that each has a SINGLE surface rather than two that can drift.
 #
 # The flag in WELL_KNOWN_DATASETS below is `suggestable`, which only governs
@@ -44,6 +45,7 @@ INTERNAL_ONLY_SURFACES = {
     "$variables": "SHOW VARIABLES",
     "$user": "SHOW USER",
     "$grants": "SHOW GRANTS",
+    "$functions": "SHOW FUNCTIONS",
 }
 
 INTERNAL_ONLY_DATASETS = frozenset(INTERNAL_ONLY_SURFACES)
@@ -55,6 +57,7 @@ WELL_KNOWN_DATASETS = {
     "$one_row": ("opteryx.managers.virtual_datasets.one_row_data", False),
     "$user": ("opteryx.managers.virtual_datasets.user", False),
     "$grants": ("opteryx.managers.virtual_datasets.grants", False),
+    "$functions": ("opteryx.managers.virtual_datasets.functions_data", False),
 }
 
 

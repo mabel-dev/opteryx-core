@@ -1,10 +1,26 @@
 # Source: feature_tests.run_tests
 
 
-# SHOW FUNCTIONS;
-# SHOW FUNCTIONS LIKE '%date';
-# SHOW FUNCTIONS LIKE '%date%';
-# SHOW FUNCTIONS LIKE '%zz';
+statement ok
+SHOW FUNCTIONS
+
+statement ok
+SHOW FUNCTIONS LIKE '%date'
+
+statement ok
+SHOW FUNCTIONS LIKE '%date%'
+
+query TTT rowsort
+SHOW FUNCTIONS LIKE '%zz'
+----
+
+query TTT rowsort
+SHOW FUNCTIONS LIKE 'row_number'
+----
+ROW_NUMBER window Numbers the rows of each window partition 1..n in the window's ORDER BY order.
+
+statement error UnsupportedSyntaxError
+SELECT * FROM $functions
 
 # crashed Opteryx (excluded): SELECT planetId, LEAST(ARRAY_AGG(magnitude)) FROM testdata.satellites group by planetId
 

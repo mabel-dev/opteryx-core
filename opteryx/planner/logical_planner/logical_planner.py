@@ -4128,12 +4128,16 @@ def plan_show_columns(statement, *, plan_context, **kwargs):
     return plan
 
 
-def _plan_virtual_dataset_scan(relation: str, internal_relation: bool, *, plan_context) -> LogicalPlan:
-    """`SELECT * FROM <virtual dataset>`, built by the planner rather than typed.
+def _plan_virtual_dataset_scan(
+    relation: str, internal_relation: bool, *, plan_context, condition=None
+) -> LogicalPlan:
+    """`SELECT * FROM <virtual dataset> [WHERE <condition>]`, built by the planner
+    rather than typed.
 
     Shared by the `SHOW` forms that are just a wildcard read of a virtual dataset,
     so `SHOW VARIABLES` and `SHOW USER` cannot drift into producing different plan
-    shapes for the same job.
+    shapes for the same job. `condition`, when given, is planned as a Filter
+    between the scan and the exit (`SHOW FUNCTIONS LIKE '...'`).
     """
     plan = LogicalPlan(plan_context)
 
@@ -4144,6 +4148,12 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool, *, plan_c
     # unless this flag marks it as planner-built rather than user-typed.
     from_step.internal_relation = internal_relation
     step_id = plan.add_node(from_step)
+
+    if condition is not None:
+        filter_node = FilterStep()
+        filter_node.condition = condition
+        previous_step_id, step_id = step_id, plan.add_node(filter_node)
+        plan.add_edge(previous_step_id, step_id)
 
     exit_node = ExitStep()
     # A BARE wildcard: `value` must be None. A non-None `value` marks a QUALIFIED
@@ -4314,6 +4324,38 @@ def _plan_show_triggers(table_name: str, *, plan_context) -> LogicalPlan:
     plan.add_edge(previous_step_id, step_id)
 
     return plan
+
+
+def plan_show_functions(statement, *, plan_context, **kwargs):
+    """SHOW FUNCTIONS [LIKE '<pattern>' | ILIKE '<pattern>' | WHERE <condition>]
+
+    A wildcard read of `$functions` (name, kind, summary), which is
+    INTERNAL_ONLY_DATASETS: this statement is its only surface. The rows come
+    from the engine's own registries; see
+    opteryx/managers/virtual_datasets/functions_data.py.
+
+    LIKE matches the function name case-insensitively, as every SHOW filter here
+    does (extract_simple_filter), so ILIKE is the same filter under its other
+    spelling. WHERE filters on any column, `WHERE kind = 'window'` for one.
+    """
+    filters = statement["ShowFunctions"].get("filter")
+    condition = None
+    if filters:
+        if "ILike" in filters:
+            filters = {"Like": filters["ILike"]}
+        if "Like" not in filters and "Where" not in filters:
+            example = md_code("SHOW FUNCTIONS LIKE 'DATE%'")
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"{md_syntax('SHOW FUNCTIONS')} takes a {md_syntax('LIKE')} pattern or a "
+                    f"{md_syntax('WHERE')} clause",
+                    f"Write {example}",
+                )
+            )
+        condition = extract_simple_filter(filters, "name", plan_context=plan_context)
+    return _plan_virtual_dataset_scan(
+        "$functions", internal_relation=True, plan_context=plan_context, condition=condition
+    )
 
 
 def plan_show_variables(statement, *, plan_context, **kwargs):
@@ -7816,7 +7858,7 @@ QUERY_BUILDERS = {
     "Set": plan_set_variable,
     "ShowColumns": plan_show_columns,
     "ShowCreate": plan_show_create_query,
-    # "ShowFunctions": show_functions_query,
+    "ShowFunctions": plan_show_functions,
     "ShowVariable": plan_show_variables,  # generic SHOW handler; only SHOW VARIABLES is supported
     # "Use": plan_use
     "CreateSchema": plan_create_collection,  # CREATE COLLECTION, rewritten by the SQL rewriter

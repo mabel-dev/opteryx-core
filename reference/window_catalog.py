@@ -70,6 +70,7 @@ from opteryx.operators.aggregate.helpers import DISTINCT_SPELLINGS
 from opteryx.operators.aggregate.helpers import ORDERED_SET_AGGREGATES
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
+from opteryx.operators.window.helpers import WINDOW_SUMMARIES
 
 from .aggregate_catalog import _GLOBAL_SUPPORTED
 from .aggregate_catalog import _GROUPED_SUPPORTED
@@ -98,7 +99,6 @@ from .aggregate_catalog import _GROUPED_SUPPORTED
 _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "ROW_NUMBER": {
         "friendly_name": "Row Number",
-        "summary": "Numbers the rows of each window partition 1..n in the window's ORDER BY order.",
         "documentation": (
             "Every row in a partition gets a distinct number, so the numbering is a "
             "permutation of 1..n. Rows that tie on the ORDER BY key are numbered in an "
@@ -111,7 +111,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     },
     "RANK": {
         "friendly_name": "Rank",
-        "summary": "Ranks the rows of each window partition, tied rows sharing a rank and the next rank skipping.",
         "documentation": (
             "1-based. Rows equal on the ORDER BY key share a rank, and the following "
             "rank skips the ties it jumped over, so a two-way tie for first yields "
@@ -122,7 +121,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     },
     "DENSE_RANK": {
         "friendly_name": "Dense Rank",
-        "summary": "Ranks the rows of each window partition, tied rows sharing a rank and the next rank not skipping.",
         "documentation": (
             "1-based. Rows equal on the ORDER BY key share a rank and the following "
             "rank does not skip, so a two-way tie for first yields 1, 1, 2 - the ranks "
@@ -134,7 +132,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "LAG": {
         "friendly_name": "Lag",
         "category": "navigation",
-        "summary": "The argument's value from the row `offset` rows earlier in the partition, in the window's ORDER BY order.",
         "documentation": (
             "LAG(expr) reads the previous row's value of `expr`; LAG(expr, offset) "
             "reads the row `offset` rows earlier. Rows closer to the start of their "
@@ -161,7 +158,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "LEAD": {
         "friendly_name": "Lead",
         "category": "navigation",
-        "summary": "The argument's value from the row `offset` rows later in the partition, in the window's ORDER BY order.",
         "documentation": (
             "LEAD(expr) reads the next row's value of `expr`; LEAD(expr, offset) "
             "reads the row `offset` rows later. Rows closer to the end of their "
@@ -188,7 +184,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "NTILE": {
         "friendly_name": "N-Tile",
         "category": "ranking",
-        "summary": "Divides each window partition into `buckets` contiguous groups in the window's ORDER BY order, numbered 1..buckets.",
         "documentation": (
             "NTILE(buckets) splits a partition of n rows into `buckets` groups as "
             "evenly as n divides: the first (n mod buckets) groups take one row more "
@@ -216,7 +211,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "PERCENT_RANK": {
         "friendly_name": "Percent Rank",
         "category": "ranking",
-        "summary": "The row's RANK expressed as a fraction of the partition, from 0 for the first row to 1 for the last.",
         "documentation": (
             "(RANK - 1) / (partition rows - 1). The first row of every partition is 0 "
             "and the last is 1, so the value spans the CLOSED interval [0, 1] - unlike "
@@ -231,7 +225,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "CUME_DIST": {
         "friendly_name": "Cumulative Distribution",
         "category": "ranking",
-        "summary": "The proportion of the partition at or before the current row in the window's ORDER BY order, counting all of its tied peers.",
         "documentation": (
             "The number of rows up to and including the current row's LAST TIED PEER, "
             "divided by the number of rows in the partition. The value spans the "
@@ -247,7 +240,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "FIRST_VALUE": {
         "friendly_name": "First Value",
         "category": "value",
-        "summary": "The argument's value from the FIRST row of the partition, in the window's ORDER BY order.",
         "documentation": (
             "FIRST_VALUE(expr) evaluates `expr` on the partition's first row and repeats "
             "it on every row of that partition. The result's type is the ARGUMENT's "
@@ -271,7 +263,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "LAST_VALUE": {
         "friendly_name": "Last Value",
         "category": "value",
-        "summary": "The argument's value from the LAST row of the partition, in the window's ORDER BY order.",
         "documentation": (
             "LAST_VALUE(expr) evaluates `expr` on the partition's last row and repeats it "
             "on every row of that partition. The result's type is the ARGUMENT's type. "
@@ -300,7 +291,6 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "NTH_VALUE": {
         "friendly_name": "Nth Value",
         "category": "value",
-        "summary": "The argument's value from the nth row of the partition (1-based), in the window's ORDER BY order.",
         "documentation": (
             "NTH_VALUE(expr, n) evaluates `expr` on the partition's nth row - counting "
             "from 1 - and repeats it on every row of that partition. A partition with "
@@ -439,7 +429,7 @@ def export_window_catalog() -> OrderedDict[str, Any]:
             "friendly_name": entry["friendly_name"],
             "category": entry.get("category", "ranking"),
             "status": "supported",
-            "summary": entry["summary"],
+            "summary": WINDOW_SUMMARIES[function],
             "documentation": entry["documentation"],
             "sql_forms": _with_named_forms(
                 entry.get("sql_forms") or _default_sql_forms(function)

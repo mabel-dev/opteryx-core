@@ -32,6 +32,24 @@ WINDOW_FUNCTIONS: dict[str, int] = {
     "NTH_VALUE": 10,
 }
 
+# One line per window function, keyed like WINDOW_FUNCTIONS. Read by SHOW
+# FUNCTIONS at runtime and by reference/window_catalog.py for windows.json; it
+# lives here because reference/ is not part of the installed package. The
+# longer prose (documentation, sql_forms, parameters) stays in reference/.
+WINDOW_SUMMARIES: dict[str, str] = {
+    "ROW_NUMBER": "Numbers the rows of each window partition 1..n in the window's ORDER BY order.",
+    "RANK": "Ranks the rows of each window partition, tied rows sharing a rank and the next rank skipping.",
+    "DENSE_RANK": "Ranks the rows of each window partition, tied rows sharing a rank and the next rank not skipping.",
+    "LAG": "The argument's value from the row `offset` rows earlier in the partition, in the window's ORDER BY order.",
+    "LEAD": "The argument's value from the row `offset` rows later in the partition, in the window's ORDER BY order.",
+    "NTILE": "Divides each window partition into `buckets` contiguous groups in the window's ORDER BY order, numbered 1..buckets.",
+    "PERCENT_RANK": "The row's RANK expressed as a fraction of the partition, from 0 for the first row to 1 for the last.",
+    "CUME_DIST": "The proportion of the partition at or before the current row in the window's ORDER BY order, counting all of its tied peers.",
+    "FIRST_VALUE": "The argument's value from the FIRST row of the partition, in the window's ORDER BY order.",
+    "LAST_VALUE": "The argument's value from the LAST row of the partition, in the window's ORDER BY order.",
+    "NTH_VALUE": "The argument's value from the nth row of the partition (1-based), in the window's ORDER BY order.",
+}
+
 # The rank-valued subset: outputs that ARE a rank over the window's ORDER BY,
 # which is what makes a downstream `output <= K` filter a top-K and therefore
 # fusable (WindowTopKFusionStrategy). LAG/LEAD outputs are VALUES from another
