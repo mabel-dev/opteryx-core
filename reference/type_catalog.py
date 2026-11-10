@@ -17,16 +17,47 @@ from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.logical_type import _NUMERIC_TYPES
 from opteryx.types.logical_type import _TEMPORAL_TYPES
 
-# SQL alias groups: alternate spellings accepted in SQL DDL/casts.
-# Source of truth: _SQL_NAME_ALIASES in opteryx/types/logical_type.py
-_SQL_ALIASES: dict[str, list[str]] = {
-    "integer": ["bigint", "int"],
-    "float": ["double"],
-    "varchar": ["string", "text"],
-    "varbinary": ["blob", "bytes"],
-    "nvarchar": [],
-    "boolean": ["bool"],
-}
+
+
+def _cast_spellings() -> dict[str, list[str]]:
+    """Type id -> every spelling CAST accepts for it, asked of the engine's own normaliser.
+
+    The candidates are every type name the engine holds in a table; each is put
+    through `_normalize_cast_type` and kept only if CAST accepts it, so a spelling the
+    canonical-only ruling refuses (DOUBLE, BIGINT, TEXT, ...) can never be documented.
+    shortcut: spellings that live only inside the normaliser's body (BINARY, RAW) are
+    not enumerable and are not listed; hoist that table if they need documenting.
+    """
+    from opteryx.exceptions import SqlError
+    from opteryx.planner.logical_planner.logical_planner_builders import _CAST_TARGET_NAMES
+    from opteryx.planner.logical_planner.logical_planner_builders import _IMPLIED_ALIAS_CANONICAL
+    from opteryx.planner.logical_planner.logical_planner_builders import _normalize_cast_type
+    from opteryx.types.logical_type import _NAME_TO_PHYSICAL
+    from opteryx.types.logical_type import _SQL_NAME_ALIASES
+    from opteryx.types.logical_type import try_parse_column_type
+
+    candidates = (
+        set(_CAST_TARGET_NAMES)
+        | set(_IMPLIED_ALIAS_CANONICAL)
+        | set(_SQL_NAME_ALIASES)
+        | set(_NAME_TO_PHYSICAL)
+        | {cat.value for cat in LogicalCategory}
+    )
+    grouped: defaultdict[str, set[str]] = defaultdict(set)
+    for spelling in candidates:
+        try:
+            normalized = _normalize_cast_type(spelling, refused_as="a CAST target")
+        except SqlError:
+            continue
+        # IPV4 is an INTEGER category but documented as its own entry (see below);
+        # DECIMAL and ARRAY carry parameters, so they parse only by their bare name.
+        if normalized == "IPV4":
+            type_id = "ipv4"
+        else:
+            column_type = try_parse_column_type(normalized)
+            type_id = _type_id(column_type.category) if column_type is not None else normalized.lower()
+        grouped[type_id].add(spelling.lower())
+    return {type_id: sorted(spellings) for type_id, spellings in grouped.items()}
 
 # Static metadata per canonical type name (lower-case).
 # Keys:
@@ -107,7 +138,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         ],
     },
     "integer": {
-        "description": "Signed 64-bit integer. Write `INTEGER`, `INT`, or `BIGINT` in SQL — they are all equivalent.",
+        "description": "Signed 64-bit integer. Write `INTEGER` or `INT64` in SQL — they are equivalent.",
         "example": "42",
         "min": -9223372036854775808,
         "max": 9223372036854775807,
@@ -126,7 +157,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         ],
     },
     "float": {
-        "description": "64-bit IEEE 754 double-precision floating-point number. Write `FLOAT` or `DOUBLE` in SQL — they are equivalent.",
+        "description": "64-bit IEEE 754 double-precision floating-point number. Write `FLOAT` or `FLOAT64` in SQL — they are equivalent.",
         "example": "3.14",
         "min": -1.7976931348623157e+308,
         "max": 1.7976931348623157e+308,
@@ -168,7 +199,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             "Unlike INTEGER, DECIMAL arithmetic overflow (result too wide for the storage tier) raises an error rather than wrapping silently."
         ),
         "limitations": [
-            "MEDIAN does not support DECIMAL columns — cast to FLOAT/DOUBLE first: `MEDIAN(col::DOUBLE)`. SUM, AVG, MIN, and MAX all support DECIMAL natively and preserve exactness (SUM/MIN/MAX stay DECIMAL; AVG returns DOUBLE).",
+            "MEDIAN does not support DECIMAL columns — cast to FLOAT first: `MEDIAN(col::FLOAT)`. SUM, AVG, MIN, and MAX all support DECIMAL natively and preserve exactness (SUM/MIN/MAX stay DECIMAL; AVG returns FLOAT64).",
         ],
     },
     "date": {
@@ -427,6 +458,8 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
     parquet_logical = _storage_mapping_groups(PARQUET_LOGICAL_TYPE_MAP)
     jsonl = _storage_mapping_groups(JSONL_TYPE_MAP)
 
+    cast_spellings = _cast_spellings()
+
     exported: dict[str, dict[str, Any]] = {}
     for cat in LogicalCategory:
         # VECTOR is not a SQL type (architect ruling 2026-10-01): it exists only inside
@@ -434,13 +467,14 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
         if cat == LogicalCategory.VECTOR:
             continue
         type_id = _type_id(cat)
-        aliases = _SQL_ALIASES.get(type_id, [])
+        spellings = cast_spellings.get(type_id, [])
+        aliases = [spelling for spelling in spellings if spelling != type_id]
         metadata = _TYPE_METADATA.get(type_id, {})
 
         entry: dict[str, Any] = {
             "canonical_name": cat.value,
             "aliases": aliases,
-            "accepted_spellings": sorted({type_id, *aliases}),
+            "accepted_spellings": spellings,
             "family": _FAMILY.get(cat, "other"),
             "flags": {
                 "numeric": cat in _NUMERIC_TYPES,
@@ -488,7 +522,7 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
     exported["ipv4"] = {
         "canonical_name": "IPV4",
         "aliases": [],
-        "accepted_spellings": ["ipv4"],
+        "accepted_spellings": cast_spellings["ipv4"],
         "family": "network",
         "flags": {
             "numeric": False,

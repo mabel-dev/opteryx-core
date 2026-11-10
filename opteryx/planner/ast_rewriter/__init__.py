@@ -26,12 +26,66 @@ The AST Rewriter does NOT resolve column names, look up schemas, or build plan n
 
 import datetime
 import decimal
+import functools
+import re
 from typing import Any, Dict, List, Union
 
 from opteryx.exceptions import ParameterError
 from opteryx.planner.ast_rewriter.relation_pronouns import do_substitute_relation_pronouns
+from opteryx.planner.logical_planner.logical_planner_builders import _CAST_TARGET_NAMES
+from opteryx.third_party import sqloxide
 
 LiteralNode = Dict[str, Any]
+
+# A typed parameter's `type` is a canonical type name, optionally with numeric
+# arguments - `DECIMAL(10,2)`. ARRAY is absent: it needs an element type.
+_TYPED_PARAMETER_TYPES = frozenset(_CAST_TARGET_NAMES) - {"ARRAY"}
+_TYPED_PARAMETER_TYPE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)(\(\s*\d+\s*(?:,\s*\d+\s*)?\))?$")
+
+
+@functools.lru_cache(maxsize=64)
+def _cast_data_type(type_text: str):
+    """The parser's data_type node for `type_text`, exactly as `CAST(x AS type_text)` gives it."""
+    statement = sqloxide.parse_sql(f"SELECT CAST(NULL AS {type_text})", _dialect="opteryx")
+    return statement[0]["Query"]["body"]["Select"]["projection"][0]["UnnamedExpr"]["Cast"]["data_type"]
+
+
+def _build_typed_parameter_node(parameter: dict) -> LiteralNode:
+    """`{"type": "DATE", "value": "2026-01-01"}` -> `CAST('2026-01-01' AS DATE)`.
+
+    The type is validated here; the value is CAST's to accept or refuse, so a
+    typed parameter accepts exactly what a CAST written in the SQL would.
+    """
+    if set(parameter) != {"type", "value"}:
+        raise ParameterError(
+            f"A typed parameter has exactly the keys `type` and `value`; got {sorted(parameter)}."
+        )
+    type_text, value = parameter["type"], parameter["value"]
+    # A typeless null (a DBAPI None) binds as a bare NULL, exactly as NULL written in the SQL.
+    if isinstance(type_text, str) and type_text.upper() == "NULL":
+        if value is not None:
+            raise ParameterError("A `NULL` parameter's value must be null.")
+        return _build_literal_node(None)
+    match =_TYPED_PARAMETER_TYPE_RE.match(type_text) if isinstance(type_text, str) else None
+    if match is None or match.group(1).upper() not in _TYPED_PARAMETER_TYPES:
+        raise ParameterError(
+            f"`{type_text}` is not a parameter type. Use one of: {', '.join(sorted(_TYPED_PARAMETER_TYPES))}, "
+            "or NULL for a typeless null."
+        )
+    if value is not None and not isinstance(value, (bool, int, float, str)):
+        raise ParameterError(
+            f"A typed parameter's value is a string, number, boolean or null; got {type(value).__name__}."
+        )
+    if match.group(1).upper() == "DECIMAL" and isinstance(value, float):
+        raise ParameterError("A DECIMAL parameter's value must be a string; a float has already lost precision.")
+    return {
+        "Cast": {
+            "kind": "Cast",
+            "expr": _build_literal_node(value),
+            "data_type": _cast_data_type(type_text),
+            "format": None,
+        }
+    }
 
 
 def _build_literal_node(value: Any) -> LiteralNode:
@@ -52,8 +106,15 @@ def _build_literal_node(value: Any) -> LiteralNode:
         return {"Value": {"SingleQuotedString": value}}
     elif isinstance(value, (int, float, decimal.Decimal)):
         return {"Value": {"Number": [value, False]}}
-    elif isinstance(value, (datetime.date, datetime.datetime, datetime.time)):
-        return {"Value": {"SingleQuotedString": value.isoformat()}}
+    elif isinstance(value, dict):
+        return _build_typed_parameter_node(value)
+    # datetime before date: a datetime IS a date.
+    elif isinstance(value, datetime.datetime):
+        return _build_typed_parameter_node({"type": "TIMESTAMP", "value": value.isoformat()})
+    elif isinstance(value, datetime.date):
+        return _build_typed_parameter_node({"type": "DATE", "value": value.isoformat()})
+    elif isinstance(value, datetime.time):
+        return _build_typed_parameter_node({"type": "TIME", "value": value.isoformat()})
     else:
         raise ValueError(f"Unsupported literal type: {type(value)}")
 

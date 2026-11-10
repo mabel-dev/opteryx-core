@@ -251,7 +251,7 @@
             ],
             "notes": "Precision 1\u201318 uses 64-bit integer storage. Precision 19\u201338 uses 128-bit integer storage. Precision above 38 is not supported. Arithmetic result precision follows SQL Server rules: addition/subtraction scales as `max(s1,s2)` with precision `max(p1-s1, p2-s2) + max(s1,s2) + 1`; multiplication gives `p1+p2` precision and `s1+s2` scale; division gives `p1+6` precision and `max(s1+6, 6)` scale. FLOAT \u2192 DECIMAL casts round half-away-from-zero, not banker's rounding. Unlike INTEGER, DECIMAL arithmetic overflow (result too wide for the storage tier) raises an error rather than wrapping silently.",
             "limitations": [
-                "MEDIAN does not support DECIMAL columns \u2014 cast to FLOAT/DOUBLE first: `MEDIAN(col::DOUBLE)`. SUM, AVG, MIN, and MAX all support DECIMAL natively and preserve exactness (SUM/MIN/MAX stay DECIMAL; AVG returns DOUBLE)."
+                "MEDIAN does not support DECIMAL columns \u2014 cast to FLOAT first: `MEDIAN(col::FLOAT)`. SUM, AVG, MIN, and MAX all support DECIMAL natively and preserve exactness (SUM/MIN/MAX stay DECIMAL; AVG returns FLOAT64)."
             ]
         },
         "parameterized_forms": [
@@ -269,11 +269,13 @@
     "float": {
         "canonical_name": "FLOAT",
         "aliases": [
-            "double"
+            "float32",
+            "float64"
         ],
         "accepted_spellings": [
-            "double",
-            "float"
+            "float",
+            "float32",
+            "float64"
         ],
         "family": "numeric",
         "flags": {
@@ -283,7 +285,7 @@
             "parameterized": false
         },
         "metadata": {
-            "description": "64-bit IEEE 754 double-precision floating-point number. Write `FLOAT` or `DOUBLE` in SQL \u2014 they are equivalent.",
+            "description": "64-bit IEEE 754 double-precision floating-point number. Write `FLOAT` or `FLOAT64` in SQL \u2014 they are equivalent.",
             "example": "3.14",
             "min": -1.7976931348623157e+308,
             "max": 1.7976931348623157e+308,
@@ -338,13 +340,25 @@
     "integer": {
         "canonical_name": "INTEGER",
         "aliases": [
-            "bigint",
-            "int"
+            "int16",
+            "int32",
+            "int64",
+            "int8",
+            "uint16",
+            "uint32",
+            "uint64",
+            "uint8"
         ],
         "accepted_spellings": [
-            "bigint",
-            "int",
-            "integer"
+            "int16",
+            "int32",
+            "int64",
+            "int8",
+            "integer",
+            "uint16",
+            "uint32",
+            "uint64",
+            "uint8"
         ],
         "family": "numeric",
         "flags": {
@@ -354,7 +368,7 @@
             "parameterized": false
         },
         "metadata": {
-            "description": "Signed 64-bit integer. Write `INTEGER`, `INT`, or `BIGINT` in SQL \u2014 they are all equivalent.",
+            "description": "Signed 64-bit integer. Write `INTEGER` or `INT64` in SQL \u2014 they are equivalent.",
             "example": "42",
             "min": -9223372036854775808,
             "max": 9223372036854775807,
@@ -529,9 +543,7 @@
     "null": {
         "canonical_name": "NULL",
         "aliases": [],
-        "accepted_spellings": [
-            "null"
-        ],
+        "accepted_spellings": [],
         "family": "null",
         "flags": {
             "numeric": false,
@@ -858,13 +870,8 @@
     },
     "varbinary": {
         "canonical_name": "VARBINARY",
-        "aliases": [
-            "blob",
-            "bytes"
-        ],
+        "aliases": [],
         "accepted_spellings": [
-            "blob",
-            "bytes",
             "varbinary"
         ],
         "family": "binary",
@@ -918,13 +925,8 @@
     },
     "varchar": {
         "canonical_name": "VARCHAR",
-        "aliases": [
-            "string",
-            "text"
-        ],
+        "aliases": [],
         "accepted_spellings": [
-            "string",
-            "text",
             "varchar"
         ],
         "family": "text",
@@ -994,9 +996,7 @@
     "variant": {
         "canonical_name": "VARIANT",
         "aliases": [],
-        "accepted_spellings": [
-            "variant"
-        ],
+        "accepted_spellings": [],
         "family": "nested",
         "flags": {
             "numeric": false,

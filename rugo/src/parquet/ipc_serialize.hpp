@@ -988,8 +988,9 @@ static void serialize_core(const DecodedColumn& col,
                            ByteSink& out,
                            uint8_t decimal_precision,
                            uint8_t decimal_scale) {
-    // List columns (rep_levels present) take precedence over the flat byte_array path.
-    if (!col.rep_levels.empty()) {
+    // List columns take precedence over the flat byte_array path. Routed on the
+    // schema: a zero-row chunk decodes no levels at all.
+    if (col.max_rep_level > 0) {
         serialize_list_column(out, col);
         return;
     }

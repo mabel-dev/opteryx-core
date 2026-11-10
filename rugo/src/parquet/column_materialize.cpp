@@ -754,7 +754,8 @@ bool logical_is_string(const std::string& lt) {
 }
 
 bool materialize_scalar(const DecodedColumn& col, int32_t num_rows, MaterializedColumn& out) {
-    if (col.absent || !col.success || !col.rep_levels.empty()) return false;
+    // Lists route on the schema: a zero-row chunk decodes no levels at all.
+    if (col.absent || !col.success || col.max_rep_level > 0) return false;
     if (col.is_uuid)    { out = materialize_uuid(col, num_rows); return true; }
     if (col.is_decimal) { out = materialize_decimal(col, num_rows); return true; }
     if (col.type == "int64")      out = materialize_int(col, num_rows, false);

@@ -1,0 +1,14 @@
+# CREATE TABLE ... AS WITH ... failed with "Dataset `a` cannot be found": the CTEs
+# were only read from a SELECT/INSERT/EXPLAIN statement's query, never a CTAS source.
+# dbt inlines ephemeral models this way (`__dbt__cte__<name>`).
+
+statement ok
+CREATE TABLE ws.ctas_with_cte AS WITH a AS (SELECT 1 AS x), b AS (SELECT x + 1 AS x FROM a) SELECT * FROM b
+
+query I
+SELECT x FROM ws.ctas_with_cte
+----
+2
+
+statement ok
+DROP TABLE ws.ctas_with_cte

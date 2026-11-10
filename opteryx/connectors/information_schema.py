@@ -30,8 +30,13 @@ ordinary catalog table scan already goes through) rather than re-deriving
 type mapping here. It does one `load_dataset` + `schema()` catalog round
 trip per table found - there is no pruning/pushdown in this cut, so an
 unfiltered `SELECT * FROM information_schema.columns` costs one round trip
-per table in the catalog. Views are not included - their columns are only
-knowable by binding the view body, which is out of scope here.
+per table in the catalog. Views are included from the schema CREATE/ALTER
+VIEW bound and stored on the view's current statement (`_view_output_schema`
+in the binder) - one `load_view` round trip per view, no binding here. That
+schema is a snapshot taken at definition time: a source that later changes
+shape is not reflected until the view is re-defined. A view with NO stored
+schema (registered before schemas were stored) raises rather than being
+skipped or listed with no columns.
 
 `tables` also does one `load_dataset` + `snapshot()` round trip per table
 (same cost profile as `columns`, above) to surface per-table statistics
@@ -122,6 +127,7 @@ from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.connectors.capabilities import RelationSummary
 from opteryx.exceptions import DatasetNotFoundError
+from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.managers.permissions import can_perform_action
@@ -613,7 +619,7 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
 
 
 class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
-    """Reads `information_schema.columns` by fetching each dataset's schema from the catalog."""
+    """Reads `information_schema.columns` from each dataset's schema and each view's stored schema."""
 
     __mode__ = "Internal"
     interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
@@ -676,6 +682,16 @@ class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
         data_type = []
         is_nullable = []
 
+        def _emit(collection: str, name: str, relation_schema) -> None:
+            for position, column in enumerate(relation_schema.columns, start=1):
+                table_catalog.append(self.workspace)
+                table_schema.append(collection)
+                table_name.append(name)
+                column_name.append(column.name)
+                ordinal_position.append(position)
+                data_type.append(str(column.column_type) if column.column_type is not None else "UNKNOWN")
+                is_nullable.append("YES" if column.nullable else "NO")
+
         # table_catalog is constant (== self.workspace) for every row this reader
         # can ever emit - see InformationSchemaTablesTable.read_dataset - so an
         # excluding predicate skips enumeration entirely rather than filtering
@@ -700,16 +716,23 @@ class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
                     raw_schema = (
                         dataset.schema() if snapshot is None else dataset.schema(snapshot.schema_id)
                     )
-                    relation_schema = OpteryxTable._normalize_schema(raw_schema, relation_name=identifier)
-
-                    for position, column in enumerate(relation_schema.columns, start=1):
-                        table_catalog.append(self.workspace)
-                        table_schema.append(collection)
-                        table_name.append(name)
-                        column_name.append(column.name)
-                        ordinal_position.append(position)
-                        data_type.append(str(column.column_type) if column.column_type is not None else "UNKNOWN")
-                        is_nullable.append("YES" if column.nullable else "NO")
+                    _emit(collection, name, OpteryxTable._normalize_schema(raw_schema, relation_name=identifier))
+                for name in self.catalog.list_views(collection):
+                    if not _key_predicates_allow(compiled, {"table_name": name}):
+                        continue
+                    if not _readable(self.execution_context, self.workspace, collection, name):
+                        continue
+                    identifier = f"{collection}.{name}"
+                    # The schema CREATE/ALTER VIEW bound and stored with the
+                    # view's current statement - see `_view_output_schema`.
+                    stored = self.catalog.load_view(identifier).metadata.schema
+                    if stored is None:
+                        raise DatasetReadError(
+                            f"View '{self.workspace}.{identifier}' has no stored schema (it was "
+                            "registered before view schemas were recorded), so its columns "
+                            "cannot be listed. Re-run its definition with ALTER VIEW to record one."
+                        )
+                    _emit(collection, name, OpteryxTable._normalize_schema(stored, relation_name=identifier))
 
         vectors = [
             vector_from_sequence(table_catalog, dtype=DrakenType.VARCHAR),

@@ -80,7 +80,7 @@ def test_type_catalog_includes_runtime_metadata():
     assert integer_type["metadata"]["example"] == "42"
     assert integer_type["metadata"]["min"] == -9223372036854775808
     assert integer_type["metadata"]["max"] == 9223372036854775807
-    assert "bigint" in integer_type["aliases"]
+    assert "int64" in integer_type["aliases"]
     assert "int32" in integer_type["ingestion_mappings"]["parquet_physical"]
     assert "int64" in integer_type["ingestion_mappings"]["jsonl"]
 

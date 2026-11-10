@@ -117,6 +117,13 @@ def test_delete_predicate_may_use_a_subquery(merge_env):
     assert _target_rows() == [(1, 10, 1), (2, 20, 1)]
 
 
+def test_delete_predicate_may_parenthesise_the_in_operand(merge_env):
+    """dbt's delete+insert strategy always emits `(col) IN (subquery)`; the
+    parentheses were taken for an outer-scope correlation and refused."""
+    _run(f"DELETE FROM {TARGET} WHERE (cve) IN (SELECT cve FROM {TARGET} WHERE details > 25)")
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1)]
+
+
 def test_delete_predicate_may_read_the_target_itself(merge_env):
     """A sub-query over the relation being deleted from. It is lowered after
     binding, so the stamped Scan is still the one that addresses the rows."""

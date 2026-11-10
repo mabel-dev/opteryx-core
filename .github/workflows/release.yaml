@@ -1,4 +1,4 @@
-name: Release to PyPI
+name: Release
 
 on:
   push:
@@ -7,11 +7,55 @@ on:
       # rugo release (rugo uses `rugo-*` tags — see release-rugo.yaml). Previously
       # this ran on every `release: published`, so a `rugo-` GitHub Release fired
       # it too; tag-prefix triggers make the two release decisions independent.
-      - 'opteryx-*'   # release opteryx_core to PyPI
-      - 'all-*'       # release opteryx_core + rugo together
+      - 'opteryx-*'   # full wheel set → Artifact Registry + PyPI
+      - 'all-*'       # opteryx-* + rugo together
       - 'ci-*'        # CI / dry-run builds
+      - 'gar-*'       # SaaS-only: linux cp314 x86_64 + aarch64 → Artifact Registry, NOT PyPI
+
+env:
+  # The SaaS (worker, flight, jobs, odata) installs opteryx-core from here, never from PyPI.
+  GAR_REPOSITORY_URL: https://us-east1-python.pkg.dev/mabeldev/opteryx-wheels/
+  WORKLOAD_IDENTITY_PROVIDER: projects/762690895289/locations/global/workloadIdentityPools/github/providers/github
+  PUBLISH_SERVICE_ACCOUNT: gh-wheels@mabeldev.iam.gserviceaccount.com
 
 jobs:
+  # ── Channel. The tag prefix decides what is built and where it goes:
+  #   pypi (opteryx-*, all-*, ci-*) — the full matrix + sdist to PyPI; the two cp314 linux
+  #                                   wheels also to Artifact Registry.
+  #   gar  (gar-*)                  — only what production runs: cp314 on x86_64 (odata on
+  #                                   Cloud Run) and aarch64 (the n4a fleet), Artifact Registry only.
+  # PyPI releases are deliberately rarer than SaaS releases; PyPI version numbers have gaps.
+  #
+  # aarch64 ships **3.14 only** in both channels; x86_64 keeps 3.11-3.14 on PyPI.
+  # Each wheel is ~35 MB and the PyPI project storage quota was exhausted
+  # mid-publish on 0.9.72, which shipped 8 of 10 files — the missing one was the
+  # cp314 x86_64 wheel the production worker installed. The PyPI ARM consumers
+  # are the ClickBench Graviton machines, which run 3.14.
+  plan:
+    name: plan release channel
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      linux: ${{ steps.plan.outputs.linux }}
+    steps:
+      - id: plan
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            gar-*)
+              echo 'channel=gar' >> "$GITHUB_OUTPUT"
+              echo 'linux=[{"arch":"x86_64","pybuild":"3.14"},{"arch":"aarch64","pybuild":"3.14"}]' >> "$GITHUB_OUTPUT"
+              ;;
+            opteryx-*|all-*|ci-*)
+              echo 'channel=pypi' >> "$GITHUB_OUTPUT"
+              echo 'linux=[{"arch":"x86_64","pybuild":"3.11"},{"arch":"x86_64","pybuild":"3.12"},{"arch":"x86_64","pybuild":"3.13"},{"arch":"x86_64","pybuild":"3.14"},{"arch":"aarch64","pybuild":"3.14"}]' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: tag '${GITHUB_REF_NAME}' has no release channel" >&2
+              exit 1
+              ;;
+          esac
+
   # ── Release floor: the absolute minimum operational proof. rugo has had this
   # since its pipeline was written (release-rugo.yaml `floor`); opteryx_core —
   # the component that bundles rugo and skene — had no test gate at all: it went straight from a tag to building and
@@ -249,67 +293,27 @@ jobs:
       - name: ${{ matrix.name }}
         run: make ${{ matrix.target }}
 
-  # No `needs:` — wheels build concurrently with the floor suites. `upload` is
-  # the gate that keeps a red suite off PyPI.
+  # Needs only `plan` (for the matrix) — wheels build concurrently with the floor
+  # suites. `upload` is the gate that keeps a red suite off every registry.
   build-manylinux:
+    needs: plan
     strategy:
       fail-fast: false
       max-parallel: 8
       matrix:
-        include:
-          # ── x86_64: native Intel/AMD runner.
-          - arch: x86_64
-            runner: ubuntu-latest
-            runner-python: "3.11"
-            pybuild: "3.11"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
-          - arch: x86_64
-            runner: ubuntu-latest
-            runner-python: "3.12"
-            pybuild: "3.12"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
-          - arch: x86_64
-            runner: ubuntu-latest
-            runner-python: "3.13"
-            pybuild: "3.13"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
-          - arch: x86_64
-            runner: ubuntu-latest
-            runner-python: "3.14"
-            pybuild: "3.14"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
-          # ── aarch64: NATIVE ARM runner, no QEMU. `docker/setup-qemu-action`
-          # would let ubuntu-latest build these, but emulating a manylinux
-          # Rust + C++ + LTO build costs hours and risks the job time limit.
-          # release-rugo.yaml already builds aarch64 on ubuntu-24.04-arm
-          # natively; this matches it.
-          #
-          # Motivation: without these, `pip install opteryx-core` on any Linux
-          # ARM host (AWS Graviton, Ampere) falls through to the sdist and
-          # attempts an on-box Rust/C++ build. That blocks ClickBench's two
-          # Graviton machines (c8g.4xlarge, c8g.metal-48xl), which cannot run
-          # a source build in the benchmark harness.
-          #
-          # aarch64 ships **3.14 only**, deliberately; x86_64 keeps the full
-          # 3.11-3.14 range. Each wheel is ~35 MB and the PyPI project storage
-          # quota was exhausted mid-publish on 0.9.72, which shipped 8 of 10
-          # files — the missing one was the cp314 x86_64 wheel the production
-          # worker installs, so a "successful" release could not be deployed.
-          # Dropping the three unused ARM interpreters takes a release from
-          # ~310 MB to ~190 MB. The ARM consumers here are the ClickBench
-          # Graviton machines, which run 3.14.
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            runner-python: "3.14"
-            pybuild: "3.14"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
+        include: ${{ fromJSON(needs.plan.outputs.linux) }}
     name: linux ${{ matrix.arch }} py${{ matrix.pybuild }}
-    runs-on: ${{ matrix.runner }}
+    # aarch64 builds on a NATIVE ARM runner, no QEMU: emulating a manylinux
+    # Rust + C++ + LTO build costs hours and risks the job time limit.
+    # release-rugo.yaml builds aarch64 on ubuntu-24.04-arm natively too.
+    # Without an aarch64 wheel, `pip install opteryx-core` on Linux ARM (Graviton,
+    # Ampere, the n4a fleet) falls through to the sdist and an on-box source build.
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
       - name: Set up Python (runner)
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.runner-python }}
+          python-version: ${{ matrix.pybuild }}
 
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -326,7 +330,7 @@ jobs:
           set -euo pipefail
 
           ARCH="${{ matrix.arch }}"
-          DESIRED_IMAGE="${{ matrix.manylinux_image }}"
+          DESIRED_IMAGE="quay.io/pypa/manylinux_2_34_${{ matrix.arch }}"
           echo "Attempting to pull ${DESIRED_IMAGE}..."
 
           # NO FALLBACK IMAGES. Every fallback this workflow used to carry was a
@@ -398,7 +402,7 @@ jobs:
           docker run --rm \
             -v `pwd`:/io \
             --workdir /io \
-            "${{ matrix.manylinux_image }}" \
+            "quay.io/pypa/manylinux_2_34_${{ matrix.arch }}" \
             bash -lc '
               set -euo pipefail
               FOUND=0
@@ -433,7 +437,7 @@ jobs:
           set -euo pipefail
 
           ARCH="${{ matrix.arch }}"
-          DESIRED_IMAGE="${{ matrix.manylinux_image }}"
+          DESIRED_IMAGE="quay.io/pypa/manylinux_2_34_${{ matrix.arch }}"
 
           # Arch-scoped, for the same reason as the build step: verifying an
           # aarch64 wheel inside an x86_64 container cannot install it, and this
@@ -495,11 +499,13 @@ jobs:
           path: io/dist/*manylinux_2_34_${{ matrix.arch }}*.whl
           if-no-files-found: error
 
-  # No `needs:` — see build-manylinux. `upload` is the gate.
+  # PyPI channel only — nothing in the SaaS runs macOS. `upload` is the gate.
   build-macos:
     # macos-15 = Apple Silicon (arm64) only, Python 3.13 + 3.14 GIL builds.
     # Mirrors rugo's macOS build (release-rugo.yaml) but opteryx_core
     # additionally needs Rust (opteryx.compute) and libcurl.
+    needs: plan
+    if: needs.plan.outputs.channel == 'pypi'
     runs-on: macos-15
     strategy:
       fail-fast: false
@@ -541,11 +547,22 @@ jobs:
 
   upload:
     # THE release gate. Every floor suite and every wheel job is listed here,
-    # so nothing reaches PyPI unless all of them are green — the same guarantee
-    # the old single `floor` job gave by blocking the builds, now enforced at
-    # the publish step instead. Never trim this list to make a release go out.
-    needs: [test-python, build-manylinux, build-macos]
+    # so nothing reaches any registry unless all of them are green — the same
+    # guarantee the old single `floor` job gave by blocking the builds, now
+    # enforced at the publish step instead. Never trim this list to make a
+    # release go out.
+    #
+    # `!cancelled() && !failure()` instead of the implicit `success()` only
+    # because build-macos is SKIPPED on the gar channel, and a skipped need
+    # would otherwise skip this job. Any failed need still blocks it.
+    needs: [plan, test-python, build-manylinux, build-macos]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # Workload Identity Federation → Artifact Registry
+    env:
+      CHANNEL: ${{ needs.plan.outputs.channel }}
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -557,107 +574,79 @@ jobs:
 
       - name: Install Python package dependencies
         run: |
-          python -m pip install --upgrade pip setuptools packaging wheel build cython setuptools_rust
+          python -m pip install --upgrade pip setuptools packaging wheel build cython setuptools_rust twine
 
       - name: Create source dist
+        if: env.CHANNEL == 'pypi'
         run: python setup.py sdist
 
-      # Artifact names below MUST match `dist-linux-<arch>-<pybuild>` from
-      # build-manylinux's Archive step exactly. download-artifact fails hard on
-      # a name it cannot find, so a mismatch here is loud, not silent — that is
-      # deliberate, and is why these stay enumerated rather than being replaced
-      # by a single download-all + `find -exec mv`.
-      - name: Stage linux x86_64 3.11 (GIL)
+      # Every `dist-*` wheel artifact this run produced, into dist/. The channel
+      # decides which legs ran; the next step is the gate that the expected set,
+      # and nothing less, is present.
+      - name: Stage wheels
         uses: actions/download-artifact@v4.1.7
         with:
-          name: dist-linux-x86_64-3.11
-          path: dist-linux-x86_64-3.11
-      - run: mv -v dist-linux-x86_64-3.11/* dist/
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
 
-      - name: Stage linux x86_64 3.12 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-x86_64-3.12
-          path: dist-linux-x86_64-3.12
-      - run: mv -v dist-linux-x86_64-3.12/* dist/
-
-      - name: Stage linux x86_64 3.13 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-x86_64-3.13
-          path: dist-linux-x86_64-3.13
-      - run: mv -v dist-linux-x86_64-3.13/* dist/
-
-      - name: Stage linux x86_64 3.14 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-x86_64-3.14
-          path: dist-linux-x86_64-3.14
-      - run: mv -v dist-linux-x86_64-3.14/* dist/
-
-      - name: Stage linux aarch64 3.14 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-aarch64-3.14
-          path: dist-linux-aarch64-3.14
-      - run: mv -v dist-linux-aarch64-3.14/* dist/
-
-      - name: Stage macos 3.13 (arm64, GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-macos-3.13
-          path: dist-macos-3.13
-      - run: mv -v dist-macos-3.13/* dist/
-
-      - name: Stage macos 3.14 (arm64, GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-macos-3.14
-          path: dist-macos-3.14
-      - run: mv -v dist-macos-3.14/* dist/
-
-      # Last gate before PyPI. Staging is 10 independent artifact downloads; if
-      # any leg silently produced nothing the publish would still succeed and
-      # ship an incomplete set, which is only discoverable by a user hitting a
-      # missing wheel. Assert the exact expected matrix instead.
+      # Last gate before any registry. If any leg silently produced nothing the
+      # publish would still succeed and ship an incomplete set, which is only
+      # discoverable by a user hitting a missing wheel. Assert the exact
+      # expected set for this channel instead. Keep in lockstep with `plan`.
       - name: Verify the full artifact set is staged
         run: |
           set -euo pipefail
-          echo "=== staged dist/ ===" && ls -1 dist/
+          echo "=== ${CHANNEL} channel, staged dist/ ===" && ls -1 dist/
 
           MISSING=0
-          # x86_64 ships the full interpreter range; aarch64 ships 3.14 only.
-          # Keep this in lockstep with the build-manylinux matrix — the point of
-          # this gate is that a leg which silently produced nothing must not be
-          # able to reach PyPI.
-          for PY in 311 312 313 314; do
-            if ! ls dist/*cp${PY}-cp${PY}-*manylinux_2_34_x86_64*.whl >/dev/null 2>&1; then
-              echo "MISSING: linux x86_64 cp${PY} wheel"
+          need() {
+            if ! ls dist/$1 >/dev/null 2>&1; then
+              echo "MISSING: $2"
               MISSING=1
             fi
-          done
-          if ! ls dist/*cp314-cp314-*manylinux_2_34_aarch64*.whl >/dev/null 2>&1; then
-            echo "MISSING: linux aarch64 cp314 wheel"
-            MISSING=1
-          fi
-          for PY in 313 314; do
-            if ! ls dist/*cp${PY}-cp${PY}-*macosx*arm64*.whl >/dev/null 2>&1; then
-              echo "MISSING: macos arm64 cp${PY} wheel"
-              MISSING=1
-            fi
-          done
-          if ! ls dist/*.tar.gz >/dev/null 2>&1; then
-            echo "MISSING: sdist"
-            MISSING=1
+          }
+          if [ "${CHANNEL}" = "pypi" ]; then
+            for PY in 311 312 313 314; do
+              need "*cp${PY}-cp${PY}-*manylinux_2_34_x86_64*.whl" "linux x86_64 cp${PY} wheel"
+            done
+            need "*cp314-cp314-*manylinux_2_34_aarch64*.whl" "linux aarch64 cp314 wheel"
+            for PY in 313 314; do
+              need "*cp${PY}-cp${PY}-*macosx*arm64*.whl" "macos arm64 cp${PY} wheel"
+            done
+            need "*.tar.gz" "sdist"
+          else
+            need "*cp314-cp314-*manylinux_2_34_x86_64*.whl" "linux x86_64 cp314 wheel"
+            need "*cp314-cp314-*manylinux_2_34_aarch64*.whl" "linux aarch64 cp314 wheel"
           fi
 
           if [ "${MISSING}" -ne 0 ]; then
             echo "ERROR: refusing to publish an incomplete artifact set." >&2
             exit 1
           fi
-          echo "All 5 linux wheels (4 x86_64 + 1 aarch64) + 2 macOS arm64 wheels (3.13, 3.14) + sdist present."
+          echo "Complete ${CHANNEL} artifact set present."
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.PUBLISH_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      # Artifact Registry first, on BOTH channels: if it fails, PyPI is not
+      # touched. A version can be published once — promoting a gar-* build to
+      # PyPI means a new version and an opteryx-* tag.
+      # Only the two prod wheels go to Artifact Registry, on every channel; the
+      # rest of the pypi set (macOS, older x86_64, sdist) is PyPI-only.
+      - name: Publish distribution 📦 to Artifact Registry
+        env:
+          TWINE_USERNAME: oauth2accesstoken
+          TWINE_PASSWORD: ${{ steps.auth.outputs.access_token }}
+        run: python -m twine upload --non-interactive --repository-url "${GAR_REPOSITORY_URL}" dist/*cp314-cp314-*manylinux_2_34_x86_64*.whl dist/*cp314-cp314-*manylinux_2_34_aarch64*.whl
 
       - name: Publish distribution 📦 to PyPI
+        if: env.CHANNEL == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}

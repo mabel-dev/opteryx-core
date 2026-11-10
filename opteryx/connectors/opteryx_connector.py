@@ -2163,7 +2163,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """Remove all rows from a dataset, retaining the dataset and its schema."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        catalog.load_dataset(relative_id).truncate(author=author)
+        # Without commit_truncation the catalog never moves current-snapshot-id: OK, nothing removed.
+        catalog.load_dataset(relative_id).truncate(author=author, commit_truncation=True)
 
     def set_cluster_by(
         self, relation_name: str, columns: List[str], author: Optional[str] = None

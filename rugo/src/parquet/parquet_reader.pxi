@@ -1605,7 +1605,7 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
     # repeated, no materializer consumes num_rows so 0 is harmless.
     for col_idx in range(<Py_ssize_t>row_group_columns.size()):
         if (row_group_columns[col_idx].success
-                and row_group_columns[col_idx].rep_levels.size() == 0):
+                and row_group_columns[col_idx].max_rep_level == 0):
             num_rows = row_group_columns[col_idx].num_rows
             if num_rows > 0:
                 break
@@ -1632,10 +1632,11 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
                 )
             vec = Vector(_rugo_steal(wrap_prematerialized(pre[0][col_idx])))
             _TEL["cython_other_s"] += _time.perf_counter() - _t0
-        elif cp[0].rep_levels.size() > 0:
+        elif cp[0].max_rep_level > 0:
             # Repeated (LIST) column — reconstruct nested vector from
             # rep/def levels. Must precede the scalar type branches so a
-            # list<int64> / list<float64> etc. is never flattened.
+            # list<int64> / list<float64> etc. is never flattened. Routed on
+            # the schema: a zero-row chunk decodes no levels at all.
             vec = _make_array_vector(cp[0])
             if cp[0].string_dict_lens.size() > 0:
                 _TEL["parquet_dict_materialize_fallbacks"] += 1
@@ -2267,9 +2268,10 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     num_rows = <int32_t>result.num_rows
 
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
-    if result.rep_levels.size() > 0:
+    if result.max_rep_level > 0:
         # Repeated (LIST) column — reconstruct from rep/def levels. Must precede
         # the scalar type branches so a nested column is never flattened.
+        # Routed on the schema: a zero-row chunk decodes no levels at all.
         return _make_array_vector(result)
 
     # DECIMAL (scalar): int64/int32-tier (width<=8) and int128-tier (width 9..16)

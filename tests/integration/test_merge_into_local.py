@@ -1061,3 +1061,73 @@ def test_update_set_star_is_refused_by_name(merge_env):
     """
     with pytest.raises(UnsupportedSyntaxError, match="SET \\*"):
         list(opteryx.session(user="tester").execute_to_morsels(sql))
+
+
+# ── NOT MATCHED arms see only the source ────────────────────────────────────
+#
+# A NOT MATCHED row has no target row, so (as standard SQL has it) only the
+# source is in scope in that arm and an unqualified column there names a source
+# column. This is the SQL dbt's merge incremental strategy emits.
+
+_UNQUALIFIED_UPSERT = """
+MERGE INTO {target} AS n
+USING {source} AS t
+   ON n.cve = t.cve
+ WHEN MATCHED THEN UPDATE SET details = t.details
+ WHEN NOT MATCHED THEN INSERT ("cve", "details", "revision") VALUES ("cve", "details", 1)
+"""
+
+
+def test_not_matched_insert_values_bind_to_the_source_unqualified(merge_env):
+    session = opteryx.session(user="tester")
+    list(session.execute_to_morsels(_UNQUALIFIED_UPSERT.format(target=TARGET, source=SOURCE)))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 99, 1), (4, 40, 1)]
+
+    # The second, incremental run: cve 4 is now matched, 5 and 6 are new.
+    delta = f"(SELECT cve + 2 AS cve, details + 1 AS details FROM {SOURCE})"
+    list(session.execute_to_morsels(_UNQUALIFIED_UPSERT.format(target=TARGET, source=delta)))
+    assert _target_rows() == [
+        (1, 10, 1), (2, 20, 1), (3, 99, 1), (4, 21, 1), (5, 100, 1), (6, 41, 1),
+    ]
+
+
+def test_not_matched_predicate_binds_to_the_source_unqualified(merge_env):
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED AND details > 100 THEN DO NOTHING
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (cve, details * 2, 1)
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1), (4, 80, 1)]
+
+
+def test_not_matched_cannot_read_a_target_only_column(merge_env):
+    """`revision` exists only on the target, and there is no target row here -
+    it must be refused, not bound to the outer join's NULL."""
+    from opteryx.exceptions import ColumnNotFoundError
+
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (cve, details, revision)
+    """
+    with pytest.raises(ColumnNotFoundError):
+        list(opteryx.session(user="tester").execute_to_morsels(sql))
+
+
+def test_matched_arm_still_sees_both_relations(merge_env):
+    """Both rows exist in a MATCHED arm, so a name both sides carry is still
+    ambiguous there."""
+    from opteryx.exceptions import AmbiguousIdentifierError
+
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN UPDATE SET details = details
+    """
+    with pytest.raises(AmbiguousIdentifierError):
+        list(opteryx.session(user="tester").execute_to_morsels(sql))

@@ -2704,7 +2704,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                 "visit_insert: source feeder has no bound columns"
             )
         source_column_count = len(feeder.columns)
-        source_types = [c.schema_column.category for c in feeder.columns]
+        source_types = [c.schema_column.column_type for c in feeder.columns]
 
     # ---- 2. Target column order (schema order, or explicit list order) ----
     explicit_columns = node.explicit_columns
@@ -2740,7 +2740,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         if not _types_compatible(src_type, target_col.category):
             raise UnsupportedSyntaxError(
                 f"**INSERT** type mismatch on column '{target_col.name}': "
-                f"source {src_type} is not compatible with target {target_col.category}"
+                f"source {src_type} is not compatible with target {target_col.column_type}"
             )
 
     # ---- 4. Build column mapping (source idx → target schema idx) ----

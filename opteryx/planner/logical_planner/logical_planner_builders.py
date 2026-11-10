@@ -2599,9 +2599,12 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None, *, plan_context
 
 
 def in_subquery(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    from opteryx.planner.logical_planner.logical_planner import _strip_outer_nesting
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
-    left = build(branch["expr"], plan_context=plan_context)
+    # `(id) IN (...)` is `id IN (...)`: the IN delimits its operand, so the parentheses
+    # disambiguate nothing. Left wrapped, decorrelation saw a NESTED, not the column.
+    left = _strip_outer_nesting(build(branch["expr"], plan_context=plan_context))
     ast = {"Query": branch["subquery"]}
     subquery_plan = plan_query(ast, plan_context=plan_context)
     exit_node = subquery_plan.exit_point()

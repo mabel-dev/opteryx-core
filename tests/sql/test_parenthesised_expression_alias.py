@@ -184,6 +184,18 @@ def test_group_by_matches_a_parenthesised_case():
             "SELECT id % 3 AS m, COUNT(*) AS n FROM $planets GROUP BY id % 3 HAVING COUNT(*) > 2 ORDER BY m",
             "SELECT (id % 3) AS m, COUNT(*) AS n FROM $planets GROUP BY (id % 3) HAVING (COUNT(*) > 2) ORDER BY m",
         ),
+        # The operand of IN (subquery) — the IN delimits it, so `(id)` is `id`.
+        # Decorrelation took the wrapper for an outer-scope reference and refused
+        # "correlates on `(id)`, which belongs to a scope further out". dbt's
+        # delete+insert strategy always emits this spelling.
+        (
+            "SELECT name FROM $planets WHERE id IN (SELECT id FROM $planets WHERE id > 5) ORDER BY name",
+            "SELECT name FROM $planets WHERE (id) IN (SELECT id FROM $planets WHERE id > 5) ORDER BY name",
+        ),
+        (
+            "SELECT name FROM $planets WHERE id NOT IN (SELECT id FROM $planets WHERE id > 5) ORDER BY name",
+            "SELECT name FROM $planets WHERE (id) NOT IN (SELECT id FROM $planets WHERE id > 5) ORDER BY name",
+        ),
         # QUALIFY names the window inline — `QUALIFY <select alias>` is refused by
         # this engine, with or without parentheses, and that is not this test's
         # business.

@@ -465,6 +465,38 @@ def _reject_source_references(arms: List[_Arm], source_alias: str) -> None:
                 )
 
 
+# Keys whose subtree is not a column reference in the arm's own scope: ObjectName
+# positions (a function, type or collation name, `t.*`), a struct field after a
+# dot, and the bodies of sub-queries and lambdas, which bind their own names.
+_NOT_SOURCE_SCOPED = frozenset(
+    {"name", "data_type", "collation", "QualifiedWildcard", "Dot", "Subquery", "subquery", "Lambda"}
+)
+
+
+def _scope_to_source(expr, source_alias: str):
+    """Qualify every unqualified column in a NOT MATCHED arm with the source.
+
+    A NOT MATCHED row has no target row, so only the source is in scope there
+    (standard SQL) and `INSERT (id) VALUES (id)` means the source's `id`. The
+    desugared join puts both relations in scope, so left unqualified the binder
+    would call a name both carry ambiguous - and silently bind a target-only
+    name to the outer join's NULL. Qualified, a target-only name fails as not
+    found. The AST is JSON (dicts, lists, scalars), so the walk is on exact type.
+    """
+    node_type = type(expr)
+    if node_type is list:
+        return [_scope_to_source(item, source_alias) for item in expr]
+    if node_type is not dict:
+        return expr
+    identifier = expr.get("Identifier")
+    if identifier is not None:
+        return {"CompoundIdentifier": [{"value": source_alias}, identifier]}
+    return {
+        key: value if key in _NOT_SOURCE_SCOPED else _scope_to_source(value, source_alias)
+        for key, value in expr.items()
+    }
+
+
 def _chain(arms, groups, per_arm_result):
     """The one CASE chain shape both the action code and every blended column use.
 
@@ -540,6 +572,15 @@ def plan_merge(statement, *, plan_context, **kwargs):
 
     on_expr = merge["on"]
     arms = _read_arms(merge["clauses"])
+    for arm in arms:
+        if arm.population != POP_NOT_MATCHED:
+            continue
+        if arm.predicate is not None:
+            arm.predicate = _scope_to_source(arm.predicate, source_alias)
+        arm.assignments = {
+            column: _scope_to_source(value, source_alias)
+            for column, value in arm.assignments.items()
+        }
 
     # The target's columns, in schema order — the shape the merged rows must
     # have. Read here rather than at bind time because the projection cannot be

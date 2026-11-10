@@ -35,6 +35,8 @@ class PlanContext:
         "physical_shared_ctes",
         "recursive_ctes",
         "pending_shared_ctes",
+        "statement_with",
+        "nested_ctes",
         "variables",
         "statistics_estimated_by_optimizer",
     )
@@ -75,6 +77,12 @@ class PlanContext:
         # (cte_key, LogicalPlan) in the order made. do_plan_rewrite drains this after
         # each plan it rewrites and places them in `shared_ctes` dependencies-first.
         self.pending_shared_ctes: list = []
+        # Logical planning of one statement (do_logical_planning_phase): the WITH
+        # clause of the statement's own query, and the CTEs of every OTHER WITH clause
+        # (a derived table's, a CTE body's, a CTAS source's) under scope-unique names -
+        # see logical_planner._plan_scoped_query.
+        self.statement_with = None
+        self.nested_ctes: dict = {}
         # Whether the optimizer refreshed statistics - see
         # OptimizerVisitor.refreshed_statistics.
         self.statistics_estimated_by_optimizer: bool = False

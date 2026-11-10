@@ -67,6 +67,34 @@ python dev/vendor_boost_math.py
 | `io_waterfall/`, `instrument_engine.py` | I/O waterfall and native-trace tooling |
 | `c1_skew_probe.py`, `native_residual_census.py` | Probes referenced from the design documents in `docs/` |
 
+## Secrets
+
+Local secrets live in the Vaultwarden at `https://vault.internal:8443`, not in the repo-root `.env`. `secret_store.py` reads them through the Bitwarden CLI. Vaultwarden is LAN-only, so CI cannot reach it; CI keeps passing its own secrets as environment variables.
+
+```bash
+python dev/secret_store.py list                               # item names, never values
+python dev/secret_store.py run GITPAT -- <command>            # <command> runs with GITPAT in its environment
+```
+
+From Python, put `dev/` on `sys.path` and call `get_secret("NAME")`; it raises `KeyError` if no item has that name. The AIStor and OData perf runners (`tests/performance/_common.py`, `clickbench/duckdb/runner.py`, `clickbench/odata/runner.py`) already do.
+
+Each secret is a Vaultwarden item named exactly like its environment variable, with the value in the login's password field (or the body of a secure note).
+
+| Where | What |
+|-------|------|
+| Vaultwarden | `AISTOR_ACCESS_KEY_ID`, `AISTOR_SECRET_ACCESS_KEY`, `CLIENT_ID`, `CLIENT_SECRET`, `CLIENT_ID_2`, `CLIENT_SECRET_2`, `CLIENT_ID_3`, `CLIENT_SECRET_3`, `OPTERYX_CONNECTION_STRING`, `FIREHOSE_TAP_TOKEN`, `IMPROVMX_API_KEY`, `GITPAT`, `STATUS_IO`, `COCKROACH`, `YUGABYTE` |
+| `.env` | `SECRET_MANAGER_USERNAME` / `SECRET_MANAGER_PASSWORD` (the Vaultwarden login), `DATA_CATALOG_CONNECTION` and `VALKEY_CONNECTION` (read as environment variables by the engine and by tests that also run in CI), `GOOGLE_APPLICATION_CREDENTIALS` (a path to a key file), and non-secret config |
+
+Setting up a new machine:
+
+1. `brew install bitwarden-cli`
+2. Pin the server's self-signed certificate:
+   `mkdir -p ~/.config/opteryx-secrets && openssl s_client -connect vault.internal:8443 </dev/null 2>/dev/null | openssl x509 > ~/.config/opteryx-secrets/vault.internal.pem`
+3. Put the Vaultwarden account in `.env`: `SECRET_MANAGER_USERNAME` must be the account's **email address**, plus `SECRET_MANAGER_PASSWORD`.
+4. `python dev/secret_store.py list` should print the item names.
+
+The helper keeps its bw login in `~/.config/opteryx-secrets/bw`, apart from any personal `bw` login, and unlocks once per process.
+
 ## Other tools
 
 | Path | Purpose |

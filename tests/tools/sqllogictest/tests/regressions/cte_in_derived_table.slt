@@ -1,0 +1,41 @@
+# A WITH clause on a query other than the statement's own (a derived table, a
+# subquery, a CTE body) was never read: "Dataset `a` cannot be found". dbt wraps
+# every generic test in `SELECT count(*) FROM (<test sql>) t`.
+
+query I
+SELECT count(*) FROM (WITH a AS (SELECT 1 AS x) SELECT * FROM a) t
+----
+1
+
+# the nested CTE shadows an outer CTE of the same name only inside its own query
+query II
+WITH a AS (SELECT 5 AS x) SELECT t.x, a.x FROM (WITH a AS (SELECT 1 AS x) SELECT * FROM a) t CROSS JOIN a
+----
+1 5
+
+# an outer CTE is visible inside the nested WITH
+query I
+WITH o AS (SELECT 7 AS y) SELECT * FROM (WITH a AS (SELECT y AS x FROM o) SELECT * FROM a) t
+----
+7
+
+# siblings and deeper nesting
+query I
+SELECT * FROM (WITH a AS (SELECT 1 AS x), b AS (SELECT x + 1 AS x FROM a) SELECT * FROM (WITH c AS (SELECT x * 10 AS x FROM b) SELECT * FROM c) s) t
+----
+20
+
+# a WITH inside a CTE body, and inside an IN subquery
+query I
+WITH a AS (WITH b AS (SELECT 2 AS x) SELECT * FROM b) SELECT * FROM a
+----
+2
+
+query T
+SELECT name FROM $planets WHERE id IN (WITH a AS (SELECT 3 AS x) SELECT x FROM a)
+----
+Earth
+
+# the nested CTE's name does not leak out of its query
+statement error
+SELECT * FROM (WITH a AS (SELECT 1 AS x) SELECT * FROM a) t CROSS JOIN a

@@ -243,6 +243,25 @@ def test_mutating_the_clone_leaves_the_upstream_untouched(fork_env, name):
     _assert_upstream_unchanged(env, before)
 
 
+def test_truncate_persists_the_moved_snapshot_pointer(fork_env, monkeypatch):
+    """The local catalog shares in-memory metadata, so the pointer moving there proves
+    nothing: TRUNCATE must hand the new pointer to save_dataset_metadata, or a real
+    catalog keeps serving the pre-truncate rows."""
+    env = fork_env
+    saved = []
+    monkeypatch.setattr(
+        env.catalog_cls,
+        "save_dataset_metadata",
+        lambda self, identifier, metadata, **kwargs: saved.append(
+            (self._key(identifier), metadata.current_snapshot_id)
+        ),
+    )
+
+    _run(f"TRUNCATE TABLE {CLONE}")
+
+    assert saved == [(CLONE, env.clone.metadata.current_snapshot_id)]
+
+
 def test_optimize_on_the_clone_leaves_the_upstream_untouched(fork_env):
     env = fork_env
     before = _upstream_state(env)

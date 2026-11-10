@@ -569,9 +569,8 @@ def _extract_recursive_cte(_ast, alias, column_aliases, *, plan_context):
     return RecursiveCteDefinition(anchor=anchor, term=term, distinct=distinct, name=alias)
 
 
-def extract_ctes(branch, *, plan_context):
+def extract_ctes(with_clause, *, plan_context):
     ctes = {}
-    with_clause = _query_body(branch).get("with")
     if with_clause:
         recursive = bool(with_clause.get("recursive"))
         for _ast in with_clause["cte_tables"]:
@@ -608,6 +607,45 @@ def extract_ctes(branch, *, plan_context):
 
             ctes[alias] = logical_plan
     return ctes
+
+
+def _plan_scoped_query(query: dict, with_clause: dict, *, plan_context) -> LogicalPlan:
+    """Plan a query carrying a WITH clause that is not the statement's own.
+
+    A WITH on a derived table, a CTE body, a set-operation leg or a CTAS source was
+    never read - only the statement's own query had its CTEs extracted - so every
+    reference to one failed with "dataset '<cte name>' could not be found".
+
+    Its CTEs are visible only inside this query. Each gets a name nothing else in
+    the statement can spell, every reference within this query (its body, its sibling
+    CTEs, and WITH clauses nested deeper, already hoisted) is renamed to it, and the
+    definitions join the statement's CTE scope, where the Relation Resolver finds
+    them like any other. A reference outside this query keeps its name, so it still
+    reaches the outer CTE or dataset it meant. The Scan's alias is left as written.
+    """
+    from opteryx.planner.relation_resolver import iter_plan_forest
+
+    hoisted = plan_context.nested_ctes
+    already_hoisted = len(hoisted)
+    ctes = extract_ctes(with_clause, plan_context=plan_context)
+    plan = plan_query({**query, "with": None}, plan_context=plan_context)
+
+    scoped_names = {name: f"$with-{random_string(8)}-{name}" for name in ctes}
+    in_scope = [plan, *list(hoisted.values())[already_hoisted:]]
+    for definition in ctes.values():
+        if isinstance(definition, RecursiveCteDefinition):
+            in_scope.extend((definition.anchor, definition.term))
+        else:
+            in_scope.append(definition)
+    for member in in_scope:
+        for sub_plan in iter_plan_forest(member):
+            for _nid, node in sub_plan.nodes(True):
+                if node.node_type == LogicalPlanStepType.Scan and node.relation in scoped_names:
+                    node.relation = scoped_names[node.relation]
+
+    for name, definition in ctes.items():
+        hoisted[scoped_names[name]] = definition
+    return plan
 
 
 def extract_value(clause, *, plan_context):
@@ -3948,6 +3986,10 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
     root_node = statement
     if "Query" in root_node:
         root_node = root_node["Query"]
+
+    with_clause = root_node.get("with")
+    if with_clause and with_clause is not plan_context.statement_with:
+        return _plan_scoped_query(root_node, with_clause, plan_context=plan_context)
 
     # set operations (UNION, INTERSECT, EXCEPT)
     if "SetOperation" in root_node["body"]:
@@ -8093,6 +8135,12 @@ def do_logical_planning_phase(parsed_statement: dict, *, plan_context) -> tuple:
         raise UnsupportedSyntaxError(
             f"Opteryx does not support '{convert_camel_to_sql_case(statement_type)}' type queries."
         )
-    # CTEs are Common Table Expressions, they're variations of subqueries
-    ctes = extract_ctes(parsed_statement, plan_context=plan_context)
-    return QUERY_BUILDERS[statement_type](parsed_statement, plan_context=plan_context), parsed_statement, ctes
+    # CTEs are Common Table Expressions, they're variations of subqueries. The
+    # statement's own WITH keeps its names; any other WITH met while planning is
+    # hoisted under scope-unique names (_plan_scoped_query) and joins the same scope.
+    plan_context.statement_with = _query_body(parsed_statement).get("with")
+    plan_context.nested_ctes = {}
+    ctes = extract_ctes(plan_context.statement_with, plan_context=plan_context)
+    plan = QUERY_BUILDERS[statement_type](parsed_statement, plan_context=plan_context)
+    ctes.update(plan_context.nested_ctes)
+    return plan, parsed_statement, ctes
