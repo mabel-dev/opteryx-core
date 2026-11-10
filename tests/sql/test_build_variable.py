@@ -81,13 +81,16 @@ def test_build_cannot_be_set():
 
 @pytest.mark.parametrize("variable", ["build", "version"])
 def test_the_sigil_spelling_cannot_shadow_the_real_value(variable):
-    """`SET @@build = 1` is accepted — it registers an ad-hoc `@@`-named user variable
-    rather than writing the system one, which is how every system variable already
-    behaves (`SET @@version` too, hence the parametrize). What matters is that it
-    cannot make the engine LIE about itself afterwards."""
+    """`SET @@build` names the system variable `build`, so it hits the same INTERNAL
+    owner check as `SET build` (`@@version` too, hence the parametrize) — it must not
+    register an ad-hoc `@@`-named user variable around the check. Nor can the attempt
+    make the engine LIE about itself afterwards."""
+    from opteryx.exceptions import PermissionsError
+
     session = opteryx.session()
-    for _ in session.execute_to_morsels(f"SET @@{variable} = 1"):
-        pass
+    with pytest.raises(PermissionsError):
+        for _ in session.execute_to_morsels(f"SET @@{variable} = 1"):
+            pass
     expected = __build__ if variable == "build" else opteryx.__version__
     for morsel in session.execute_to_morsels(f"SELECT @@{variable}"):
         for row in morsel:
