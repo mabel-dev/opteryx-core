@@ -47,6 +47,8 @@ class _QueryTelemetry:
         # What the statement(s) read, as the BINDER saw it - see `add_reads`.
         self._reading["scanned_relations"] = []
         self._reading["read_sources"] = []
+        # When each catalog relation read was committed - see `add_reads`.
+        self._reading["read_commits"] = {}
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
@@ -84,7 +86,7 @@ class _QueryTelemetry:
         self._reading["relations"].update(relations)
         self._reading["statement_relations"] = relations
 
-    def add_reads(self, scanned_relations, read_sources):
+    def add_reads(self, scanned_relations, read_sources, read_commits=None):
         """Record what a bound statement reads, for a copy of its RESULT made
         after it has run.
 
@@ -118,6 +120,11 @@ class _QueryTelemetry:
         for entry in read_sources:
             if entry not in receipt:
                 receipt.append(dict(entry))
+        # `read_commits` - `{relation: committed epoch ms}` (binder.relation.
+        # read_commits). Not part of the receipt: it says how fresh the answer
+        # is, for a caller to tell its reader, and is never persisted.
+        if read_commits:
+            self._reading["read_commits"].update(read_commits)
 
     def add_message(self, message: str):
         """Something the person who ran the statement should be told.
@@ -185,6 +192,7 @@ class _QueryTelemetry:
             # (worker.opteryx, onto the job document), not API-response shape.
             "scanned_relations",
             "read_sources",
+            "read_commits",
             "rows_read",
             "rows_seen",
             "blobs_read",

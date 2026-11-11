@@ -2279,6 +2279,40 @@ def read_sources(graph) -> list:
     return entries
 
 
+def read_commits(graph) -> dict:
+    """When each catalog relation the bound plan reads was committed, as
+    `{"<workspace>.<dataset>": epoch_ms}`.
+
+    The same walk as `read_sources`, but NOT part of the receipt: that is
+    persisted as provenance and says which version was read, not when it was
+    written. This is for a caller that wants to tell its reader how fresh the
+    answer is (the OData service's `X-Dataset-LastModified` on row responses)
+    without a second catalog read - the binder resolved the snapshot already.
+    A relation with nothing committed has no time and is left out; one read at
+    two versions reports the newer.
+    """
+    from opteryx.connectors.opteryx_connector import OpteryxTable
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+    from opteryx.planner.relation_resolver import _expression_subqueries
+
+    commits: dict = {}
+
+    def _collect(graph) -> None:
+        if graph is None:
+            return
+        for _, plan_node in graph.nodes(True):
+            if plan_node.node_type == LogicalPlanStepType.Scan:
+                table = plan_node.connector
+                if isinstance(table, OpteryxTable) and table.dataset_committed_at is not None:
+                    name = f"{table.workspace}.{table.dataset}"
+                    commits[name] = max(commits.get(name, 0), table.dataset_committed_at)
+            for subquery in _expression_subqueries(plan_node):
+                _collect(subquery.value)
+
+    _collect(graph)
+    return commits
+
+
 def _produced_by(node) -> Optional[str]:
     """What made this commit, for the snapshot's `produced-by`: the task an
     EXECUTE expanded (stamped by `plan_execute`), or the view a CREATE

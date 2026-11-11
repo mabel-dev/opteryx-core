@@ -433,3 +433,44 @@ def test_the_producer_is_qualified_by_the_connector():
     assert connector._qualified_producer("task:cat.ops.t") == "task:cat.ops.t"
     assert connector._qualified_producer("view:cat.mart.v") == "view:cat.mart.v"
     assert connector._qualified_producer(None) is None
+
+
+# --- when what was read was committed (not part of the receipt)
+#
+# The OData service stamps `X-Dataset-LastModified` on row responses from this,
+# rather than a second catalog read: the binder settled the snapshot already.
+
+
+def _commits(statement):
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels(statement))
+    return session._telemetry.read_commits
+
+
+def test_a_select_records_when_its_relation_was_committed(workspace):
+    assert _commits("SELECT id FROM cat.ops.src") == {"cat.ops.src": _T_HEAD}
+
+
+def test_the_commit_time_is_of_the_version_read(workspace):
+    assert _commits(f"SELECT id FROM cat.ops.src VERSION AS OF {_OLDER}") == {
+        "cat.ops.src": _T_OLDER
+    }
+
+
+def test_a_relation_read_at_two_versions_reports_the_newer(workspace):
+    assert _commits(
+        f"SELECT a.id FROM cat.ops.src a JOIN cat.ops.src VERSION AS OF {_OLDER} b ON a.id = b.id"
+    ) == {"cat.ops.src": _T_HEAD}
+
+
+def test_a_relation_with_nothing_committed_has_no_commit_time(workspace):
+    assert _commits("SELECT id FROM cat.ops.fresh") == {}
+
+
+def test_the_commit_times_are_not_in_the_api_telemetry(workspace):
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("SELECT id FROM cat.ops.src"))
+
+    assert "read_commits" not in session.telemetry
+    assert session.reads["read_sources"][0]["dataset"] == "cat.ops.src"
+    assert "committed-at" not in session.reads["read_sources"][0]
