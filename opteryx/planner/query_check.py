@@ -155,6 +155,7 @@ class QueryCheck:
         query_type: `Query`, `Insert`, `CreateTable`, `Drop`, ... None if unparsed.
         tables: every relation named, sorted. Not a CTE's own alias, a table-valued
             function, or a `$` system dataset.
+        writes: the subset of `tables` whose contents the statement writes, sorted.
         parameters: the `:name` placeholders the statement needs, no leading colon.
             Read from the pre-rewrite AST, so supplying them does not empty this.
         is_read / is_mutation / is_ddl: what kind of statement it is.
@@ -169,6 +170,7 @@ class QueryCheck:
     identities: Tuple[CheckedIdentity, ...] = ()
     query_type: Optional[str] = None
     tables: Tuple[str, ...] = ()
+    writes: Tuple[str, ...] = ()
     parameters: Tuple[str, ...] = ()
     is_read: bool = False
     is_mutation: bool = False
@@ -203,6 +205,7 @@ class QueryCheck:
             "identities": [identity.as_dict() for identity in self.identities],
             "query_type": self.query_type,
             "tables": list(self.tables),
+            "writes": list(self.writes),
             "parameters": list(self.parameters),
             "is_read": self.is_read,
             "is_mutation": self.is_mutation,
@@ -598,6 +601,7 @@ def _check_statement(
     about = {
         "query_type": described["query_type"],
         "tables": tuple(described["tables"]),
+        "writes": tuple(described["writes"]),
         "parameters": tuple(described["parameters"]),
         "is_read": described["is_read"],
         "is_mutation": described["is_mutation"],

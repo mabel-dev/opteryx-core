@@ -1188,6 +1188,7 @@ inline CxxColumn emit_string_column_by(const AggColMeta& meta, const int64_t* va
     sa->slots = dst; sa->arena = out_arena; sa->length = n;
     sa->arena_used = total_arena; sa->arena_cap = total_arena;
     sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = meta.type;
+    sa->payloads_elided = 0;   // not self-zeroing (buffers.h): the block is not memset
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
     uint8_t* vbits = nullptr;
     size_t arena_pos = 0;
@@ -3900,6 +3901,7 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
         sa->slots = dst; sa->arena = out_arena; sa->length = n;
         sa->arena_used = total_arena; sa->arena_cap = total_arena;
         sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
+        sa->payloads_elided = 0;   // not self-zeroing (buffers.h): the block is not memset
         if (total_arena > 0) {
             uint8_t* w = out_arena;
             col.arena.for_each_run(win_lo, win_hi, [&w](const uint8_t* p, size_t bytes) {
@@ -4128,6 +4130,268 @@ struct GBPartition : GBPartData {
     }
 };
 
+// ---- GROUP BY spill (GROUPBY_SPILL_BYTES, ruled 2026-11-12) -------------------------
+// Up to the budget, windows queue in memory as ever. Past it, each further window is
+// written to the spill store instead, and finalize reads a partition's spilled windows
+// back beside its queued ones: the 64 sink partitions are disjoint, so the merge is
+// unchanged and only one partition per merge thread is read back at a time. A window travels as plain columns — the group hash, the stored keys, the rows
+// lane and every fixed-width lane its kinds use, each lane as raw 8-byte containers (an
+// int128 lane as two) so nothing is re-derived on the way back.
+
+// A spill unit is cut once the windows behind it hold this much: a quarter of the
+// budget shared across the workers (each holds one unit's windows while it fills, and
+// about twice that again while it encodes), within these bounds.
+constexpr size_t kGBSpillUnitMinBytes = size_t(1) << 20;
+constexpr size_t kGBSpillUnitMaxBytes = size_t(128) << 20;
+constexpr int kGBSpillI128Bit = 15;
+
+// Kinds whose whole state is fixed-width lanes. The per-group OBJECT kinds (string
+// extremes, lists, sketches, distinct pairs) have no serialiser and never spill.
+inline bool gb_kind_spillable(GBKind k) {
+    switch (k) {
+        case GBKind::Rows: case GBKind::Valid:
+        case GBKind::SumI: case GBKind::SumF: case GBKind::SumD128:
+        case GBKind::AvgI: case GBKind::AvgF: case GBKind::AvgD128:
+        case GBKind::MinMaxNum: case GBKind::MinMaxD128:
+        case GBKind::Stddev: case GBKind::StddevSamp:
+        case GBKind::VarPop: case GBKind::VarSamp:
+        case GBKind::Corr:
+            return true;
+        case GBKind::MinMaxStr: case GBKind::CountDistinct: case GBKind::ArrayAgg:
+        case GBKind::Quantile: case GBKind::QuantileShared:
+        case GBKind::ApproxCountDistinct: case GBKind::ApproxPercentile:
+        case GBKind::CidrAgg:
+            return false;
+    }
+    return false;
+}
+
+// Every 8-byte lane of a lane set, in one fixed order.
+template <class LT, class F>
+inline void gb_each_i64_lane(LT& L, F&& f) {
+    f(L.valid); f(L.i64); f(L.f64); f(L.f64sq); f(L.f64y); f(L.f64yy); f(L.f64xy);
+    f(L.f64k); f(L.f64ky); f(L.mkey);
+}
+
+// The lanes a kind allocates: one bit per gb_each_i64_lane position, plus
+// kGBSpillI128Bit for the int128 lane. Asked of gb_lanes_resize, the one authority.
+inline uint16_t gb_spill_lane_mask(GBKind k) {
+    GBLanes T;
+    gb_lanes_resize(T, k, 1);
+    uint16_t m = 0;
+    int i = 0;
+    gb_each_i64_lane(T, [&m, &i](auto& lane) {
+        if (!lane.empty()) m |= static_cast<uint16_t>(1u << i);
+        ++i;
+    });
+    if (!T.i128.empty()) m |= static_cast<uint16_t>(1u << kGBSpillI128Bit);
+    return m;
+}
+
+// An n-row INT64 column of raw containers for the caller to fill through `data`.
+inline CxxColumn gb_spill_i64_column(uint32_t n, int64_t*& data) {
+    data = static_cast<int64_t*>(draken_malloc(static_cast<size_t>(n == 0 ? 1 : n) * 8u));
+    uint8_t* no_validity = nullptr;
+    DrakenVector v;
+    v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
+    v.validity = nullptr; v.type = DRAKEN_INT64;
+    v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
+                                          OwnedBuffer<uint8_t>(no_validity));
+    c.view = c.own->vec;
+    return c;
+}
+
+// One morsel holding every group of `wins` — one partition's windows, all of one sink
+// (same keys, same kinds). Column order is the read-back's contract (gb_spill_decode).
+inline MorselPtr gb_spill_encode(const std::vector<GBPartData>& wins,
+                                 const std::vector<uint16_t>& masks, bool has_rows,
+                                 ErrCtx& err) {
+    size_t total = 0;
+    for (const GBPartData& w : wins) total += w.size();
+    auto fail = [&err](const char* msg) {
+        err.code = 1;
+        err.msg = msg;
+        return MorselPtr();
+    };
+    if (total > UINT32_MAX) return fail("GROUP BY spill: one unit's partition passes 2^32 groups");
+    const uint32_t n = static_cast<uint32_t>(total);
+    auto m = std::make_shared<CxxMorsel>();
+    m->zero_col_rows = n;
+    auto add = [&m](CxxColumn&& c) {
+        m->columns.push_back(std::move(c));
+        m->names.emplace_back();
+    };
+    // A lane of every window, end to end. `pick(w)` is that window's lane.
+    auto add_lane = [&](auto&& pick) -> bool {
+        int64_t* d;
+        CxxColumn c = gb_spill_i64_column(n, d);
+        for (const GBPartData& w : wins) {
+            const auto& lane = pick(w);
+            if (lane.size() != w.size()) return false;
+            lane.for_each_run(0, w.size(), [&d](const auto* p, size_t rows) {
+                std::memcpy(d, p, rows * 8u);
+                d += rows;
+            });
+        }
+        add(std::move(c));
+        return true;
+    };
+    const char* const unsized = "GROUP BY spill: a queued window's lane is not sized to its groups";
+    if (!add_lane([](const GBPartData& w) -> const GBSegVec<uint64_t>& { return w.hashes; }))
+        return fail(unsized);
+    const size_t nkeys = wins.empty() ? 0 : wins[0].keycols.size();
+    for (size_t k = 0; k < nkeys; ++k) {
+        if (wins.size() == 1) {
+            add(jpc_emit_range(wins[0].keycols[k], 0, n, err));
+        } else {
+            // shortcut: keys of several windows are joined row by row through the
+            // store's own append; upgrade to a per-type run copy if spill encode shows
+            // up in a profile.
+            GroupKeyColumn all;
+            const GroupKeyColumn& first = wins[0].keycols[k];
+            all.set_type(first.type, first.elem_size, first.logical);
+            all.raw.hint(n);
+            for (const GBPartData& w : wins) {
+                const GroupKeyColumn& src = w.keycols[k];
+                for (size_t r = 0; r < w.size(); ++r) {
+                    all.append_from(src, r, err);
+                    if (err.code != 0) return MorselPtr();
+                }
+            }
+            add(jpc_emit_range(all, 0, n, err));
+        }
+        if (err.code != 0) return MorselPtr();
+    }
+    if (has_rows &&
+            !add_lane([](const GBPartData& w) -> const GBSegVec<int64_t>& { return w.grows; }))
+        return fail(unsized);
+    for (size_t s = 0; s < masks.size(); ++s) {
+        for (int bit = 0; bit < kGBSpillI128Bit; ++bit) {
+            if (!((masks[s] >> bit) & 1u)) continue;
+            int64_t* d;
+            CxxColumn c = gb_spill_i64_column(n, d);
+            for (const GBPartData& w : wins) {
+                int i = 0;
+                bool sized = true;
+                gb_each_i64_lane(w.lanes[s], [&](const auto& lane) {
+                    if (i++ != bit) return;
+                    if (lane.size() != w.size()) { sized = false; return; }
+                    lane.for_each_run(0, w.size(), [&d](const auto* p, size_t rows) {
+                        std::memcpy(d, p, rows * 8u);
+                        d += rows;
+                    });
+                });
+                if (!sized) return fail(unsized);
+            }
+            add(std::move(c));
+        }
+        if ((masks[s] >> kGBSpillI128Bit) & 1u) {
+            int64_t *lo, *hi;
+            CxxColumn clo = gb_spill_i64_column(n, lo);
+            CxxColumn chi = gb_spill_i64_column(n, hi);
+            for (const GBPartData& w : wins) {
+                const GBSegVec<__int128>& lane = w.lanes[s].i128;
+                if (lane.size() != w.size()) return fail(unsized);
+                lane.for_each_run(0, w.size(), [&lo, &hi](const __int128* p, size_t rows) {
+                    for (size_t r = 0; r < rows; ++r) {
+                        const unsigned __int128 u = static_cast<unsigned __int128>(p[r]);
+                        *lo++ = static_cast<int64_t>(static_cast<uint64_t>(u));
+                        *hi++ = static_cast<int64_t>(static_cast<uint64_t>(u >> 64));
+                    }
+                });
+            }
+            add(std::move(clo));
+            add(std::move(chi));
+        }
+    }
+    return m;
+}
+
+// The inverse of gb_spill_encode: fill `P` (typed and empty — ready_partition) from one
+// spilled morsel. Every column is checked for type and count: a morsel that is not
+// what this sink wrote fails loud, never a wrong group.
+inline bool gb_spill_decode(const CxxMorsel& m, GBPartData& P,
+                            const std::vector<GBKind>& kinds,
+                            const std::vector<uint16_t>& masks, bool has_rows,
+                            ErrCtx& err) {
+    auto fail = [&err](const char* msg) {
+        err.code = 1;
+        err.msg = msg;
+        return false;
+    };
+    const uint32_t n = static_cast<uint32_t>(m.num_rows());
+    size_t col = 0;
+    // The next column, which must be an all-valid INT64 lane column.
+    auto lane_data = [&](const DrakenVector*& d) -> bool {
+        if (col >= m.columns.size()) return false;
+        const DrakenVector& v = m.columns[col++].view;
+        if (v.type != DRAKEN_INT64 || v.length != n || v.validity != nullptr) return false;
+        d = &v;
+        return true;
+    };
+    // Read through the selection — whatever shape the reader handed back.
+    auto fill = [n](auto& lane, const DrakenVector* v) {
+        const int64_t* data = static_cast<const int64_t*>(v->data);
+        const uint32_t* sel = v->selection;
+        lane.resize_uninit(n);
+        lane.for_each_run(0, n, [data, &sel](auto* p, size_t rows) {
+            for (size_t r = 0; r < rows; ++r) std::memcpy(&p[r], &data[sel[r]], 8u);
+            sel += rows;
+        });
+    };
+    const char* const shape = "GROUP BY spill: a read-back unit does not have the columns "
+                              "this sink wrote — fail loud, never a wrong group";
+    P.hint_rows(n);
+    const DrakenVector* d = nullptr;
+    if (!lane_data(d)) return fail(shape);
+    fill(P.hashes, d);
+    for (GroupKeyColumn& k : P.keycols) {
+        if (col >= m.columns.size()) return fail(shape);
+        const DrakenVector& v = m.columns[col++].view;
+        if (v.type != k.type || v.length != n) return fail(shape);
+        for (uint32_t r = 0; r < n; ++r) {
+            k.append_row(v, r, err, "GROUP BY key value");
+            if (err.code != 0) return false;
+        }
+    }
+    if (has_rows) {
+        if (!lane_data(d)) return fail(shape);
+        fill(P.grows, d);
+    }
+    for (size_t s = 0; s < masks.size(); ++s) {
+        GBLanes& L = P.lanes[s];
+        gb_lanes_resize(L, kinds[s], n);
+        int i = 0;
+        bool ok = true;
+        gb_each_i64_lane(L, [&](auto& lane) {
+            if (!((masks[s] >> i++) & 1u) || !ok) return;
+            if (!lane_data(d)) { ok = false; return; }
+            fill(lane, d);
+        });
+        if (!ok) return fail(shape);
+        if ((masks[s] >> kGBSpillI128Bit) & 1u) {
+            const DrakenVector *vlo = nullptr, *vhi = nullptr;
+            if (!lane_data(vlo) || !lane_data(vhi)) return fail(shape);
+            const int64_t* lo = static_cast<const int64_t*>(vlo->data);
+            const int64_t* hi = static_cast<const int64_t*>(vhi->data);
+            const uint32_t* slo = vlo->selection;
+            const uint32_t* shi = vhi->selection;
+            L.i128.for_each_run(0, n, [lo, hi, &slo, &shi](__int128* p, size_t rows) {
+                for (size_t r = 0; r < rows; ++r) {
+                    const unsigned __int128 u =
+                        (static_cast<unsigned __int128>(static_cast<uint64_t>(hi[*shi++])) << 64)
+                        | static_cast<uint64_t>(lo[*slo++]);
+                    p[r] = static_cast<__int128>(u);
+                }
+            });
+        }
+    }
+    if (col != m.columns.size()) return fail(shape);
+    return true;
+}
+
 
 struct GroupByLocal : LocalSinkState {
     std::array<GBPartition, kGBParts> parts;
@@ -4199,6 +4463,13 @@ struct GroupByLocal : LocalSinkState {
     uint64_t da_slots = 0;
     GBPartData da;
     std::vector<uint32_t> da_gid;     // per-row slot scratch
+    // Spill: once the sink is spilling, this worker's windows collect here per
+    // partition and are written as one unit per GroupBySink::spill_unit_bytes.
+    std::array<std::vector<GBPartData>, kGBParts> spill_pile;
+    size_t spill_pile_bytes = 0;
+    int8_t spillable = 0;             // 0 = undecided, 1 = every kind spills, -1 = no
+    size_t spill_stride = 0;          // fixed bytes per group: hash + keys + lanes
+    std::vector<uint16_t> spill_masks;   // per spec: gb_spill_lane_mask
 };
 struct GroupByGlobal : GlobalSinkState {
     std::mutex mtx;
@@ -4224,6 +4495,17 @@ struct GroupByGlobal : GlobalSinkState {
     std::vector<uint8_t> cd_repart;
     std::vector<std::vector<int64_t>> cd_count;
     opteryx::carchar::CarcharIndex cd_dir;
+    // Spill: `queued_bytes` is what `pending` holds (mtx). `spilling` latches when it
+    // passes the sink's budget; `pending` stays as it is and from then workers write
+    // their windows to `spill`. Each
+    // spill claim is one partition's groups: spill_part[claim] names the partition.
+    size_t queued_bytes = 0;
+    std::atomic<bool> spilling{false};
+    MorselBuffer spill;
+    std::vector<uint8_t> spill_part;                  // mtx
+    std::array<uint64_t, kGBParts> spill_rows{};      // mtx
+    size_t spill_stride = 0;                          // set at the latch
+    std::string spill_err;                            // mtx; the first spill failure
 };
 
 struct GroupBySink : Sink {
@@ -4278,6 +4560,11 @@ struct GroupBySink : Sink {
     std::vector<int64_t> da_lo, da_hi;
     std::vector<uint8_t> da_known;
     int64_t da_rows = -1;
+
+    // Spill (set by the engine at plan time): the query's spill environment and the
+    // group-state bytes queued in memory before windows go to disk. 0 = never spill.
+    SpillEnv* spill_env = nullptr;
+    size_t spill_bytes = 0;
 
     // `kemit` has one entry per key (invariant enforced at the binding, which is the
     // only construction site and can raise) — false = hash the key, never store it.
@@ -4757,7 +5044,7 @@ struct GroupBySink : Sink {
         g.init = true;
     }
 
-    void flush_locals(GroupByGlobal& g, GroupByLocal& l) {
+    void flush_locals(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
         // R3 (docs/GROUPBY_REDESIGN_2026_10_12.md): a flush queues each partition's
         // DATA and keeps its tables, cleared in place, for the next window — no fresh
         // tables, no front-map promotion (the merge builds its own tables and never
@@ -4807,16 +5094,154 @@ struct GroupBySink : Sink {
             }
         }
         l.entries_total = 0;
-        std::lock_guard<std::mutex> lk(g.mtx);
-        publish_meta(g, l);
-        for (auto& [p, data] : out) g.pending[p].push_back(std::move(data));
+        const bool can_spill = spill_bytes != 0 && spill_decide(l);
+        if (!can_spill || !g.spilling.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> lk(g.mtx);
+            publish_meta(g, l);
+            // Re-read under the lock, where the latch is set: a window is either
+            // queued before the latch or sees it here and goes to this worker's pile.
+            if (!can_spill || !g.spilling.load(std::memory_order_relaxed)) {
+                for (auto& [p, data] : out) {
+                    g.queued_bytes += window_bytes(l, data);
+                    g.pending[p].push_back(std::move(data));
+                }
+                out.clear();
+                if (can_spill && g.queued_bytes >= spill_bytes) {
+                    if (spill_env == nullptr || spill_env->root.empty()) {
+                        err.code = 1;
+                        err.msg = "GROUP BY state passed GROUPBY_SPILL_BYTES and spill is "
+                                  "not configured: set KVSTORE_LOCATION to a local "
+                                  "directory (file:// or a bare path)";
+                        return;
+                    }
+                    g.spill.configure(spill_env);
+                    g.spill.set_label("GROUP BY spill");
+                    g.spill_stride = l.spill_stride;
+                    // The queue stays in memory — it is the budget's worth. Draining it
+                    // was one worker compressing all of it alone (profiled 2026-11-12:
+                    // 4.5 of 10.5 s on TPC-H SF100 Q18); only later windows go to disk.
+                    g.spilling.store(true, std::memory_order_release);
+                }
+            }
+        }
+        for (auto& [p, data] : out) {
+            l.spill_pile_bytes += window_bytes(l, data);
+            l.spill_pile[p].push_back(std::move(data));
+        }
+        if (l.spill_pile_bytes >= spill_unit_bytes(g)) spill_windows(g, l, l.spill_pile, err);
+    }
+
+    size_t spill_unit_bytes(const GroupByGlobal& g) const {
+        const size_t dop = g.exec_dop > 0 ? static_cast<size_t>(g.exec_dop) : 1;
+        return std::clamp(spill_bytes / (4 * dop), kGBSpillUnitMinBytes, kGBSpillUnitMaxBytes);
+    }
+
+    // Whether this sink's aggregates can spill, with the per-group byte stride and the
+    // per-spec lane masks the spill path works from. Decided once per worker, after
+    // capture (the kinds are the captured operand types').
+    bool spill_decide(GroupByLocal& l) {
+        if (l.spillable != 0) return l.spillable == 1;
+        l.spillable = 1;
+        size_t stride = 8 + (l.has_rows ? 8 : 0);
+        for (size_t j = 0; j < store_key_pos.size(); ++j) {
+            const KeyColMeta& m = l.key_meta[store_key_pos[j]];
+            stride += gb_key_elem_size(m.type, m.logical);
+        }
+        l.spill_masks.resize(specs.size());
+        for (size_t s = 0; s < specs.size(); ++s) {
+            if (!gb_kind_spillable(l.kinds[s]) || specs[s].distinct_operand) {
+                l.spillable = -1;
+                return false;
+            }
+            const uint16_t mask = gb_spill_lane_mask(l.kinds[s]);
+            l.spill_masks[s] = mask;
+            stride += 8u * static_cast<size_t>(
+                          std::popcount(static_cast<uint16_t>(mask & ~(1u << kGBSpillI128Bit))))
+                      + (((mask >> kGBSpillI128Bit) & 1u) ? 16u : 0u);
+        }
+        l.spill_stride = stride;
+        return true;
+    }
+
+    // A window's group-state bytes: the fixed stride per group plus its long key bytes.
+    static size_t window_bytes(const GroupByLocal& l, const GBPartData& w) {
+        size_t b = w.size() * l.spill_stride;
+        for (const GroupKeyColumn& k : w.keycols) b += static_cast<size_t>(k.arena.used());
+        return b;
+    }
+
+    // Write `wins` (windows per partition; emptied) to the sink's spill buffer: one
+    // row group per partition, a unit cut every spill_unit_bytes. Encoding runs on
+    // the calling worker with no lock held; only the unit's registration takes g.mtx.
+    void spill_windows(GroupByGlobal& g, GroupByLocal& l,
+                       std::array<std::vector<GBPartData>, kGBParts>& wins, ErrCtx& err) {
+        std::vector<MorselPtr> pile;
+        std::vector<uint8_t> parts;
+        std::vector<uint64_t> rows;
+        size_t bytes = 0;
+        const size_t unit_bytes = spill_unit_bytes(g);
+        auto write_unit = [&]() -> bool {
+            if (pile.empty()) return true;
+            MorselBuffer::SpillUnit unit;
+            std::string msg;
+            const bool encoded = g.spill.encode_unit(pile, unit, msg);
+            std::lock_guard<std::mutex> lk(g.mtx);
+            if (encoded && g.spill.add_unit(std::move(unit))) {
+                for (size_t i = 0; i < parts.size(); ++i) {
+                    g.spill_part.push_back(parts[i]);
+                    g.spill_rows[parts[i]] += rows[i];
+                }
+                pile.clear(); parts.clear(); rows.clear();
+                bytes = 0;
+                return true;
+            }
+            if (g.spill_err.empty())
+                g.spill_err = encoded ? g.spill.error() : "spill (GROUP BY spill): " + msg;
+            err.code = 1;
+            err.msg = g.spill_err.c_str();
+            return false;
+        };
+        for (size_t p = 0; p < kGBParts; ++p) {
+            std::vector<GBPartData>& w = wins[p];
+            if (w.empty()) continue;
+            uint64_t n = 0;
+            for (const GBPartData& d : w) { n += d.size(); bytes += window_bytes(l, d); }
+            MorselPtr m = gb_spill_encode(w, l.spill_masks, l.has_rows, err);
+            w = std::vector<GBPartData>();
+            if (err.code != 0) return;
+            pile.push_back(std::move(m));
+            parts.push_back(static_cast<uint8_t>(p));
+            rows.push_back(n);
+            if (bytes >= unit_bytes && !write_unit()) return;
+        }
+        l.spill_pile_bytes = 0;
+        write_unit();
+    }
+
+    // Read partition p's spilled groups back into g.pending[p], for its merge. Only
+    // the merge thread that owns p calls this.
+    bool load_spilled(GroupByGlobal& g, size_t p, const std::vector<size_t>& claims,
+                      const std::vector<uint16_t>& masks, ErrCtx& err) {
+        for (size_t idx : claims) {
+            MorselPtr m;
+            if (!g.spill.get(idx, m)) {
+                err.code = 1;
+                err.msg = g.spill.error().c_str();
+                return false;
+            }
+            GBPartData P;
+            ready_partition(g, P);
+            if (!gb_spill_decode(*m, P, g.kinds, masks, g.has_rows, err)) return false;
+            g.pending[p].push_back(std::move(P));
+        }
+        return true;
     }
 
     // The flush trigger, plus the adaptive raw-mode decision it is the natural point
     // for: a flush is where the tables' size is compared to the rows that built them.
     // Groups only — COUNT(DISTINCT) pairs count toward the flush but say nothing
     // about how well the KEY probe deduplicates.
-    void maybe_flush(GroupByGlobal& g, GroupByLocal& l) {
+    void maybe_flush(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
         if (l.entries_total <= kGBFlushEntries) return;
 
         if (!l.raw) {
@@ -4828,7 +5253,7 @@ struct GroupBySink : Sink {
                 groupby_tel::raw_switches.fetch_add(1, std::memory_order_relaxed);
             }
         }
-        flush_locals(g, l);
+        flush_locals(g, l, err);
         l.rows_since_flush = 0;
     }
 
@@ -5321,7 +5746,7 @@ struct GroupBySink : Sink {
                 GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
                 l.entries_total = 0;
                 for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
-                maybe_flush(static_cast<GroupByGlobal&>(gs), l);
+                maybe_flush(static_cast<GroupByGlobal&>(gs), l, err);
                 return SinkResult::CONTINUE;
             }
             if (l.row_kinds_only && l.codepass_on) {
@@ -5371,7 +5796,7 @@ struct GroupBySink : Sink {
                 groupby_tel::dict_codepass.fetch_add(1, std::memory_order_relaxed);
                 l.entries_total = 0;
                 for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
-                maybe_flush(static_cast<GroupByGlobal&>(gs), l);
+                maybe_flush(static_cast<GroupByGlobal&>(gs), l, err);
                 return SinkResult::CONTINUE;
             }
             // Other spec kinds (SUM/AVG/MIN/MAX/CountDistinct) each have their own
@@ -5632,7 +6057,7 @@ struct GroupBySink : Sink {
             for (const GBCountDistinct& d : P.cd) l.entries_total += d.size();
         }
         GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
-        maybe_flush(static_cast<GroupByGlobal&>(gs), l);
+        maybe_flush(static_cast<GroupByGlobal&>(gs), l, err);
         return SinkResult::CONTINUE;
     }
 
@@ -5644,7 +6069,12 @@ struct GroupBySink : Sink {
             da_spill(g, l, err);
             if (err.code != 0) return;
         }
-        flush_locals(g, l);
+        flush_locals(g, l, err);
+        if (err.code != 0) return;
+        if (l.spill_pile_bytes != 0) {
+            spill_windows(g, l, l.spill_pile, err);
+            if (err.code != 0) return;
+        }
         if (l.ticket_mode == 1 || l.tl_rows > 0) {
             std::lock_guard<std::mutex> lk(g.mtx);
             g.ticket_lanes.push_back(std::move(l.tl));
@@ -5726,6 +6156,7 @@ struct GroupBySink : Sink {
             sa->slots = dst; sa->arena = out_arena; sa->length = n;
             sa->arena_used = total; sa->arena_cap = total;
             sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = type;
+            sa->payloads_elided = 0;   // not self-zeroing (buffers.h): the block is not memset
             size_t w = 0;
             for (uint32_t i = 0; i < n; ++i) {
                 const uint64_t ref = keyref[start + i];
@@ -7283,8 +7714,23 @@ struct GroupBySink : Sink {
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<GroupByGlobal&>(gs);
         if (seed.groups > 0 && !queue_seed(g, err)) return;
+        // Spilled groups: each claim is one partition's row group of some unit.
+        const bool spilled = g.spill.spilled();
+        std::array<std::vector<size_t>, kGBParts> spill_claims;
+        std::vector<uint16_t> spill_masks;
+        if (spilled) {
+            if (!g.spill.seal() || g.spill.claim_count() != g.spill_part.size()) {
+                err.code = 1;
+                err.msg = g.spill.failed() ? g.spill.error().c_str()
+                                           : "GROUP BY spill: claims do not match the units written";
+                return;
+            }
+            for (size_t i = 0; i < g.spill_part.size(); ++i)
+                spill_claims[g.spill_part[i]].push_back(i);
+            for (GBKind k : g.kinds) spill_masks.push_back(gb_spill_lane_mask(k));
+        }
         if (g.ticket) {
-            bool pending = false;
+            bool pending = spilled;
             for (size_t p = 0; p < kGBParts && !pending; ++p) pending = !g.pending[p].empty();
             if (!pending) {
                 ticket_emit(g, err);
@@ -7300,9 +7746,12 @@ struct GroupBySink : Sink {
         // spawns). Thread only when the queued group count justifies it.
         size_t total_entries = 0;
         size_t nonempty_parts = 0;
+        size_t biggest_part = 0;
         for (size_t p = 0; p < kGBParts; ++p) {
             size_t part_entries = 0;
             for (const GBPartData& pt : g.pending[p]) part_entries += pt.size();
+            part_entries += static_cast<size_t>(g.spill_rows[p]);
+            biggest_part = std::max(biggest_part, part_entries);
             total_entries += part_entries;
             if (part_entries > 0) ++nonempty_parts;
         }
@@ -7346,20 +7795,27 @@ struct GroupBySink : Sink {
                                       std::memory_order_relaxed);
         if (nt > nonempty_parts) nt = static_cast<unsigned>(nonempty_parts);
         if (total_entries < 65536) nt = 1;   // small agg: inline, no threads
+        if (spilled) {
+            // A partition being merged is in memory about three times over (queued or
+            // read back, scattered, merged), so the merge runs only as wide as the
+            // budget holds — on top of the queue, which is released as it merges.
+            const uint64_t per_merge = 3 * static_cast<uint64_t>(biggest_part) * g.spill_stride;
+            const uint64_t fit = per_merge == 0 ? nt : spill_bytes / per_merge;
+            if (fit < nt) nt = static_cast<unsigned>(fit);
+        }
         if (nt < 1) nt = 1;
         std::atomic<size_t> next_part{0};
-        std::mutex out_mtx;
         std::vector<ErrCtx> errs(nt);
         auto worker = [&](unsigned tid) {
             std::vector<MorselPtr> local_out;
             for (;;) {
                 size_t p = next_part.fetch_add(1);
                 if (p >= kGBParts) break;
+                if (!load_spilled(g, p, spill_claims[p], spill_masks, errs[tid])) break;
                 merge_and_emit_partition(g, p, local_out, errs[tid]);
                 if (errs[tid].code != 0) break;
-            }
-            if (!local_out.empty()) {
-                std::lock_guard<std::mutex> lk(out_mtx);
+                // Handed to the output buffer per partition, never held to the end of
+                // the merge: the buffer is what bounds (and spills) the output.
                 for (MorselPtr& m : local_out) {
                     if (!out->append(m)) {
                         errs[tid].code = 1;
@@ -7367,9 +7823,12 @@ struct GroupBySink : Sink {
                         break;
                     }
                 }
+                local_out.clear();
+                if (errs[tid].code != 0) break;
             }
         };
         fork_join(nt, worker);
+        g.spill.release();
         for (unsigned t = 0; t < nt; ++t) {
             if (errs[t].code != 0) { err = errs[t]; return; }
         }

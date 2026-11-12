@@ -285,6 +285,7 @@ public:
     std::string span_err_text_;
     SpillEnv spill_env;   // shared spill config/store for every buffer this run
     size_t sort_run_bytes_ = 0;   // set_sort_run_bytes; 0 until the plan sets it
+    size_t groupby_spill_bytes_ = 0;   // set_groupby_spill_bytes; 0 = GROUP BY never spills
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
     std::vector<std::unique_ptr<GroupJoinState>> groupjoin_states;
     // Runtime min/max join filter slots. unique_ptr because a probe Source holds
@@ -580,6 +581,8 @@ public:
     // Input bytes an ORDER BY sorts in memory before spilling a run (SORT_RUN_BYTES).
     // Set at plan build, before any sort sink is made.
     void set_sort_run_bytes(size_t bytes) { sort_run_bytes_ = bytes; }
+    // Group-state bytes a GROUP BY queues in memory before spilling (GROUPBY_SPILL_BYTES).
+    void set_groupby_spill_bytes(size_t bytes) { groupby_spill_bytes_ = bytes; }
     // Labels the buffer with the sink's display name so a spill failure names
     // the operator that overspent, then hands it to the sink.
     MorselBuffer* sink_buffer_(size_t buf) {
@@ -1722,6 +1725,8 @@ public:
         auto sink = std::make_unique<GroupBySink>(
             std::move(key_idx), std::move(key_names), std::move(key_emit),
             std::move(specs), sink_buffer_(buf), ndv_estimate);
+        sink->spill_env = &spill_env;
+        sink->spill_bytes = groupby_spill_bytes_;
         groupby_sinks_[p] = sink.get();
         set_sink_(p, std::move(sink));
     }

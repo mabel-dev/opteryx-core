@@ -226,6 +226,21 @@ starting the next (docs/SORT_SPILL_DESIGN.md; ruled 2026-11-01). Counted as the 
 receives its input, so ~1 GiB of dictionary-shaped strings is several GiB once sorted.
 A sort that reaches it with spill unconfigured (KVSTORE_LOCATION) fails loud."""
 
+GROUPBY_SPILL_BYTES: Optional[int] = (
+    None if get("GROUPBY_SPILL_BYTES") is None else int(get("GROUPBY_SPILL_BYTES")))
+"""Bytes of group state a GROUP BY queues in memory before it writes further windows to
+spill and merges them back one hash partition at a time (ruled 2026-11-12). The queue
+itself stays in memory, so this is what the GROUP BY holds, not what it frees. Unset,
+the budget is an eighth of the container's memory (the cgroup limit when set, else
+physical RAM). A fraction, because no fixed figure fits both a 16 GB node and a 32 GB
+one; an eighth, because the budget counts key and aggregate-state bytes and the store
+holds about 1.66x that: measured 2026-11-12 on TPC-H SF100 Q18 (4.51 GiB of state), a
+1.8 GiB budget peaks at 8.54 GB charged and a 3.6 GiB one at 12.79 GB, against 13.19 GB
+unspilled. 0 = never spill. Only fixed-width aggregates spill (COUNT, SUM, AVG, numeric
+MIN/MAX, STDDEV/VAR, CORR); a GROUP BY with any other aggregate stays in memory. A
+spillable GROUP BY that reaches the budget with spill unconfigured (KVSTORE_LOCATION)
+fails loud."""
+
 COMPACTION_DISK_BYTES: int = int(get("COMPACTION_DISK_BYTES", 25 * 1024 * 1024 * 1024))
 """How much an `OPTIMIZE TABLE x FINAL` pass may sort, in the manifest's uncompressed
 estimate - an upper bound on the lz4 sort spill that pass writes to local disk

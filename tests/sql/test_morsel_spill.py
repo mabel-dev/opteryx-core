@@ -252,6 +252,81 @@ def test_external_sort_without_spill_fails_loud():
         config.SORT_RUN_BYTES = saved
 
 
+# Near-unique groups over an int and a nullable string key. Every aggregate is exact
+# whatever order the groups merge in (integer sums; a double sum of integers), so the
+# spilled and in-memory answers must be the same rows.
+_GROUP_SQL = (
+    "SELECT g, k, COUNT(*), COUNT(k), SUM(s), AVG(s), MIN(s), MAX(s), "
+    "SUM(CAST(s AS FLOAT64)) FROM (SELECT s, k, s % 700000 AS g FROM "
+    + _RUN_SOURCE
+    + ") AS u GROUP BY g, k"
+)
+
+
+def test_spilled_group_by_matches_the_in_memory_group_by():
+    """Past GROUPBY_SPILL_BYTES a GROUP BY writes its queued windows to spill and
+    merges them back one hash partition at a time (ruled 2026-11-12). A 1MB budget
+    must give exactly the groups of the same query held in memory, and leave nothing
+    on disk. A GROUP BY with an aggregate that cannot spill stays in memory."""
+    with tempfile.TemporaryDirectory() as root:
+        out = _run_in_subprocess(
+            f"""
+            from opteryx import config
+
+            def groups(sql):
+                rows = []
+                for m in opteryx.session().execute_to_morsels(sql):
+                    rows.extend(repr(m[i]) for i in range(m.num_rows))
+                return sorted(rows)
+
+            sql = {_GROUP_SQL!r}
+            config.GROUPBY_SPILL_BYTES = 1 << 40
+            reset_spill_telemetry()
+            expected = groups(sql)
+            print("ref_units", get_spill_telemetry()["units_written"])
+            config.GROUPBY_SPILL_BYTES = 1024 * 1024
+            reset_spill_telemetry()
+            got = groups(sql)
+            print("units", get_spill_telemetry()["units_written"])
+            print("same", got == expected, len(got))
+            reset_spill_telemetry()
+            distinct = groups("SELECT g, COUNT(DISTINCT k) FROM (SELECT k, s % 700000 AS g FROM "
+                              + {_RUN_SOURCE!r} + ") AS u GROUP BY g")
+            print("unspillable", get_spill_telemetry()["units_written"], len(distinct))
+            """,
+            root,
+        )
+        got = dict(line.split(" ", 1) for line in out.strip().splitlines())
+        assert got["ref_units"] == "0", out
+        # The point of the test: the GROUP BY actually spilled.
+        assert int(got["units"]) >= 1, out
+        assert got["same"].startswith("True "), out
+        assert int(got["same"].split(" ")[1]) > 1_000_000, out
+        assert got["unspillable"] == "0 700000", out
+        leftovers = [f for _, _, files in os.walk(root) for f in files]
+        assert leftovers == [], leftovers
+
+
+def test_group_by_past_budget_without_spill_fails_loud():
+    """A spillable GROUP BY past GROUPBY_SPILL_BYTES with no spill root raises, naming
+    the budget — never holding on past it."""
+    import opteryx
+    from opteryx import config
+
+    saved = config.GROUPBY_SPILL_BYTES
+    config.GROUPBY_SPILL_BYTES = 1024 * 1024
+    try:
+        raised = None
+        try:
+            for _ in opteryx.session().execute_to_morsels(_GROUP_SQL):
+                pass
+        except Exception as err:  # the engine's error type is not the contract here
+            raised = str(err)
+        assert raised is not None and "GROUPBY_SPILL_BYTES" in raised, raised
+    finally:
+        config.GROUPBY_SPILL_BYTES = saved
+
+
 def test_unconfigured_is_the_pre_spill_engine():
     """No KVSTORE_LOCATION: the same >512MB sort runs entirely resident."""
     import opteryx
@@ -275,4 +350,6 @@ if __name__ == "__main__":
     test_unconfigured_is_the_pre_spill_engine()
     test_external_sort_runs_match_the_in_memory_sort()
     test_external_sort_without_spill_fails_loud()
+    test_spilled_group_by_matches_the_in_memory_group_by()
+    test_group_by_past_budget_without_spill_fails_loud()
     print("✅ okay")

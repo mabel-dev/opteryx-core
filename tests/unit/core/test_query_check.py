@@ -322,6 +322,7 @@ def test_relations_are_empty_when_the_from_clause_itself_is_wrong():
 _ANALYZE_FIELDS = (
     "query_type",
     "tables",
+    "writes",
     "parameters",
     "is_read",
     "is_mutation",
@@ -337,6 +338,7 @@ _ANALYZE_FIELDS = (
         "SELECT u.name FROM users AS u JOIN orders AS o ON u.id = o.user_id",
         "WITH c AS (SELECT * FROM users) SELECT * FROM c",
         "INSERT INTO t (a) VALUES (1)",
+        "DELETE FROM t WHERE a IN (SELECT a FROM s)",
         "DROP TABLE t",
         "CREATE VIEW v AS SELECT 1",
         "REFRESH MATERIALIZED VIEW opteryx.public.daily",

@@ -672,6 +672,7 @@ def test_one_statement_is_described_exactly_as_before():
     assert info == {
         "query_type": "Query",
         "tables": ["users"],
+        "writes": [],
         "parameters": [],
         "is_read": True,
         "is_mutation": False,
@@ -713,3 +714,77 @@ def test_vector_index_statements_target_their_relation_at_owner_tier(sql, query_
     assert info["tables"] == ["ws.c.t"]
     assert (info["is_mutation"], info["is_ddl"]) == (is_mutation, is_ddl)
     assert info["permission_required"] == "owner"
+
+
+# ── Reads vs writes: what a submission gate checks at READ and what at WRITE ──
+# A caller pre-flighting permissions must not check a write target at READ: a
+# reader-only grant on the target would pass a DELETE. `writes` names the targets;
+# everything else in `tables` is only read.
+
+
+@pytest.mark.parametrize(
+    "sql, query_type, tables, writes",
+    [
+        (
+            'merge into "personal"."ginny"."m" as d using "personal"."ginny"."m__tmp" as s '
+            'on (s.id = d.id) when matched then update set "name" = s."name"',
+            "Merge",
+            ["personal.ginny.m", "personal.ginny.m__tmp"],
+            ["personal.ginny.m"],
+        ),
+        (
+            'delete from "personal"."ginny"."d" where (id) in '
+            '(select distinct id from "personal"."ginny"."d__tmp")',
+            "Delete",
+            ["personal.ginny.d", "personal.ginny.d__tmp"],
+            ["personal.ginny.d"],
+        ),
+        (
+            "update a.b.t set x = 1 where id in (select id from a.b.s)",
+            "Update",
+            ["a.b.s", "a.b.t"],
+            ["a.b.t"],
+        ),
+        ("insert into a.b.t select * from a.b.s", "Insert", ["a.b.s", "a.b.t"], ["a.b.t"]),
+        (
+            "with x as (select * from a.b.s) insert into a.b.t select * from x",
+            "Insert",
+            ["a.b.s", "a.b.t"],
+            ["a.b.t"],
+        ),
+        ("truncate table a.b.t, a.b.u", "Truncate", ["a.b.t", "a.b.u"], ["a.b.t", "a.b.u"]),
+    ],
+)
+def test_mutations_report_their_write_targets_apart_from_their_sources(
+    sql, query_type, tables, writes
+):
+    info = opteryx.analyze_query(sql)
+
+    assert info["query_type"] == query_type
+    assert info["tables"] == tables
+    assert info["writes"] == writes
+    assert info["is_mutation"] is True
+    assert info["is_read"] is False
+    assert info["permission_required"] == "writer"
+
+
+def test_reads_and_definition_ddl_write_no_contents():
+    """DROP changes a definition, not contents - owner-tier, and not a WRITE target."""
+    assert opteryx.analyze_query("SELECT * FROM a.b.c")["writes"] == []
+    assert opteryx.analyze_query("DROP TABLE a.b.c")["writes"] == []
+
+
+def test_ctas_writes_its_target_and_reads_its_source():
+    info = opteryx.analyze_query("CREATE TABLE a.b.t AS SELECT * FROM a.b.s")
+
+    assert info["tables"] == ["a.b.s", "a.b.t"]
+    assert info["writes"] == ["a.b.t"]
+
+
+def test_batch_writes_are_every_statement_s():
+    info = opteryx.analyze_query(
+        "DELETE FROM a.b.t WHERE id = 1; INSERT INTO a.b.u SELECT * FROM a.b.s"
+    )
+
+    assert info["tables"] == ["a.b.s", "a.b.t", "a.b.u"]
+    assert info["writes"] == ["a.b.t", "a.b.u"]

@@ -251,6 +251,16 @@ def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
                 tables.add(name)
         return
 
+    if statement_type == "Truncate":
+        # one statement, several targets: TRUNCATE a, b - each a `{"name": [...]}`
+        # entry, not a relation node, so the generic walk cannot see them.
+        for entry in body.get("table_names") or []:
+            if isinstance(entry, dict):
+                name = _extract_table_name(entry.get("name"))
+                if name:
+                    tables.add(name)
+        return
+
     if statement_type == "CreateTable":
         # A clone READS its upstream, and reads it whole. The target is picked up
         # by `_STATEMENT_TARGETS` below like any other CREATE TABLE; this adds
@@ -367,6 +377,26 @@ def _relation_node_name(node: Any) -> Optional[str]:
     return _extract_table_name(table.get("name"))
 
 
+def _unwrap_leading_with(ast: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The INSERT/UPDATE/DELETE/MERGE a leading `WITH` wraps, or None.
+
+    sqloxide puts `WITH ... INSERT ...` in a `Query` node - `with` beside a `body`
+    that is itself one statement dict, doubly-nested the same way every statement
+    is (`{"Insert": {"Insert": {...}}}`). A plain SELECT's body is a `Select` or
+    set operation, never that shape, so None means "this is what it says it is".
+    """
+    body = ast.get("Query")
+    if not isinstance(body, dict):
+        return None
+    inner_body = body.get("body")
+    if isinstance(inner_body, dict) and len(inner_body) == 1:
+        inner_type = next(iter(inner_body))
+        wrapped_statement = inner_body[inner_type]
+        if isinstance(wrapped_statement, dict) and list(wrapped_statement) == [inner_type]:
+            return wrapped_statement
+    return None
+
+
 def extract_write_targets(ast: Dict[str, Any]) -> List[str]:
     """Every relation whose CONTENTS a statement writes, in sorted order.
 
@@ -399,12 +429,9 @@ def extract_write_targets(ast: Dict[str, Any]) -> List[str]:
     # WITH-prefixed statement's target under `reads` and nothing under
     # `writes`.
     if statement_type == "Query":
-        inner_body = body.get("body")
-        if isinstance(inner_body, dict) and len(inner_body) == 1:
-            inner_type = next(iter(inner_body))
-            wrapped_statement = inner_body[inner_type]
-            if isinstance(wrapped_statement, dict) and list(wrapped_statement) == [inner_type]:
-                return extract_write_targets(wrapped_statement)
+        wrapped_statement = _unwrap_leading_with(ast)
+        if wrapped_statement is not None:
+            return extract_write_targets(wrapped_statement)
         return []
 
     targets: Set[str] = set()
@@ -508,7 +535,8 @@ def union_descriptions(descriptions: List[Dict[str, Any]]) -> Dict[str, Any]:
                             stop - a caller switching on it should fail to recognise
                             "Batch" rather than act on a wrong answer.
         tables              every relation any statement references.
-        parameters          every placeholder any statement needs - all of them have
+        writes              every relation any statement writes the contents of.
+        parameters         every placeholder any statement needs - all of them have
                             to be supplied for the batch to run.
         is_read             True only when EVERY statement is a read. One write makes
                             the batch not a read.
@@ -528,14 +556,17 @@ def union_descriptions(descriptions: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     types = {d["query_type"] for d in descriptions}
     tables: Set[str] = set()
+    writes: Set[str] = set()
     parameters: Set[str] = set()
     for description in descriptions:
         tables.update(description["tables"])
+        writes.update(description["writes"])
         parameters.update(description["parameters"])
 
     return {
         "query_type": types.pop() if len(types) == 1 else "Batch",
         "tables": sorted(tables),
+        "writes": sorted(writes),
         "parameters": sorted(parameters),
         "is_read": all(d["is_read"] for d in descriptions),
         "is_mutation": any(d["is_mutation"] for d in descriptions),
@@ -570,11 +601,15 @@ def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         The dict documented on `parse_query_info`, minus nothing.
     """
-    query_type = next(iter(parsed_statement))
+    # `WITH ... INSERT` is an INSERT: classed by what it does, not by the `Query`
+    # node sqloxide wraps it in, or a write is described as a reader-tier read.
+    wrapped_statement = _unwrap_leading_with(parsed_statement)
+    query_type = next(iter(wrapped_statement or parsed_statement))
 
     tables = _extract_tables_from_ast(parsed_statement)
     # Remove system tables (those starting with $)
     filtered_tables = [t for t in sorted(tables) if not t.startswith("$")]
+    writes = [t for t in extract_write_targets(parsed_statement) if not t.startswith("$")]
 
     parameters = sorted(_extract_placeholders(parsed_statement))
 
@@ -584,6 +619,7 @@ def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "query_type": query_type,
             "tables": filtered_tables,
+            "writes": writes,
             "parameters": parameters,
             "is_read": False,
             "is_mutation": is_mutation,
@@ -592,7 +628,7 @@ def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     reader_actions = ["Query", "ShowColumns", "ShowTables", "Use", "ShowCreate"]
-    mutation_actions = ["Insert", "Update", "Delete"]
+    mutation_actions = ["Insert", "Update", "Delete", "Merge", "Truncate"]
     # "AlterFunction" is ALTER WORKSPACE - the SQL rewriter borrows the parser's
     # AlterFunction statement for it (see sql_rewriter.rewrite_alter_workspace).
     ddl_actions = ["CreateTable", "CreateView", "AlterTable", "AlterFunction", "Drop"]
@@ -600,6 +636,7 @@ def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "query_type": query_type,
         "tables": filtered_tables,
+        "writes": writes,
         "parameters": parameters,
         "is_read": query_type in reader_actions,
         "is_mutation": query_type in mutation_actions,
@@ -651,6 +688,11 @@ def parse_query_info(sql: str, user: Optional[str] = None) -> Dict[str, Any]:
           target of a mutation or a DDL statement. Not included: a CTE's own
           alias (it names a result, not a relation), a table-valued function
           (it reads its arguments), or a `$` system dataset.
+        - writes: List[str] - the subset of `tables` whose CONTENTS the
+          statement writes (INSERT, UPDATE, DELETE, MERGE, TRUNCATE and CREATE
+          TABLE targets; see `extract_write_targets`), sorted. Every other
+          relation in `tables` is only read. DDL that changes a definition
+          (DROP, ALTER, CREATE VIEW) writes no contents and reports none.
         - parameters: List[str] - Names of `:name` placeholders referenced in
           the query (sorted, deduplicated, no leading `:`) - lets a caller
           resolve exactly the parameters a query needs before execution,
@@ -658,7 +700,8 @@ def parse_query_info(sql: str, user: Optional[str] = None) -> Dict[str, Any]:
           Positional `?` placeholders aren't named and so aren't included.
         - is_read: bool - True if this only reads (SELECT, SHOW COLUMNS,
           SHOW TABLES, USE, SHOW CREATE)
-        - is_mutation: bool - True if this modifies data (INSERT, UPDATE, DELETE)
+        - is_mutation: bool - True if this modifies data (INSERT, UPDATE,
+          DELETE, MERGE, TRUNCATE - with or without a leading WITH)
         - is_ddl: bool - True if this is a DDL operation (CREATE, ALTER, DROP)
         - permission_required: str - the role the statement needs: "reader",
           "writer", "owner", or "denied" for a statement none of them permits

@@ -211,10 +211,12 @@ def analyze_query(sql: str, user: Optional[str] = None) -> Dict[str, Any]:
         - tables: Every relation the statement references, sorted - including
           through subqueries, derived tables and CTE bodies, and the target of a
           mutation or DDL statement
+        - writes: the subset of `tables` whose contents the statement writes;
+          the rest are only read
         - parameters: Names of `:name` placeholders referenced in the query
           (sorted, deduplicated, no leading `:`)
         - is_read: True if this only reads (SELECT, SHOW COLUMNS, SHOW TABLES, USE)
-        - is_mutation: True if this modifies data (INSERT, UPDATE, DELETE)
+        - is_mutation: True if this modifies data (INSERT, UPDATE, DELETE, MERGE, TRUNCATE)
         - is_ddl: True if this changes a definition (CREATE, ALTER, DROP)
         - permission_required: the role the statement needs - "reader", "writer",
           "owner", or "denied" for a statement none of them permits

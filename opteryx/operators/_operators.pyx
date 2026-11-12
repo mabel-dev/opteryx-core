@@ -592,6 +592,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                            string name) except +
         void set_spill_root(string root)
         void set_sort_run_bytes(size_t bytes)
+        void set_groupby_spill_bytes(size_t bytes)
         void set_native_skene_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* column_names,
@@ -2986,6 +2987,14 @@ cdef class NativePlan:
         if _root and "://" not in _root:
             self._e.set_spill_root(_root.encode("utf-8"))
         self._e.set_sort_run_bytes(_config.SORT_RUN_BYTES)
+        # Unset: an eighth of the container (cgroup limit when set, else physical RAM).
+        if _config.GROUPBY_SPILL_BYTES is None:
+            from opteryx.compiled.platform import cgroup_memory_limit_bytes
+            from opteryx.compiled.platform import physical_memory_total_bytes
+            self._e.set_groupby_spill_bytes(
+                (cgroup_memory_limit_bytes() or physical_memory_total_bytes()) // 8)
+        else:
+            self._e.set_groupby_spill_bytes(_config.GROUPBY_SPILL_BYTES)
 
     def __dealloc__(self):
         if self._e != NULL:
