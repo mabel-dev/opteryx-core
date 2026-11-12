@@ -4,22 +4,13 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Serial execution engine — streaming push pipeline.
+Serial execution — the statements that are not data pipelines.
 
-Drives the compiled pipeline by iterating each scan, pushing morsels into
-the chain head, and draining the terminal ExitNode's `_pending` queue to
-the caller as a single generator. The per-morsel hot path is a typed
-Cython vtable call (`chain_head.push(morsel)`) — no generator protocol, no
-graph traversal, no Python wrapper.
-
-LIMIT short-circuit: the LIMIT operator calls `ctx.terminate()` when its
-quota is reached; the scan loop checks `ctx.is_terminated()` between morsels
-and breaks promptly, dropping the scan iterator (which closes the underlying
-I/O).
-
-Special operators (Explain, SetVariable, ShowCreate, ShowColumns,
-Insert, ViewManagement, TableManagement, RelationManagement) do not enter the
-push pipeline — they're invoked directly via their `__call__` interface.
+EXPLAIN, SET, SHOW and DDL are answered here directly through the operator's
+`__call__` interface. The write statements (INSERT, MERGE, OPTIMIZE) run their
+read side on the native engine and are fed, morsel by morsel, into their sink
+from here — interim debt per CLAUDE.md §2, one shared loop shape to move.
+Every data pipeline (SELECT and friends) runs on `compiler.execute_native`.
 """
 
 from typing import Any, Generator, Tuple
@@ -29,9 +20,7 @@ from draken.morsels.morsel import Morsel
 from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
-from opteryx.managers.execution.pipeline_compiler import compile_pipeline
 from opteryx.models import PhysicalPlan, QueryTelemetry
-from opteryx.operators._operators import drive_scan
 from draken.draken_native import DrakenType
 
 
@@ -155,31 +144,30 @@ def execute(
             )
         return head_node.result, ResultType.NON_TABULAR
     if isinstance(head_node, InsertNode):
-        # INSERT ... SELECT: plan_insert keeps the sub-query's ExitNode instead
-        # of stripping it (see logical_planner.py), so the SELECT subplan is
-        # genuinely Exit-headed — run it on the native engine like any other
-        # SELECT. INSERT ... VALUES has no SELECT subplan at all (its source is
-        # a FunctionDatasetNode, never Exit-headed) and stays on the legacy
-        # push-pipeline. Strip InsertNode from a copy of the plan (heal=True
-        # re-exposes whatever sits below it as the sole exit point) and check
-        # which shape we actually have before picking an engine.
+        # plan_insert puts an ExitNode under the Insert for BOTH sources — the
+        # sub-query's own for INSERT ... SELECT, one over the VALUES rows for
+        # INSERT ... VALUES (see logical_planner.py) — so the sub-plan is
+        # Exit-headed and runs on the native engine like any other SELECT. Strip
+        # InsertNode from a copy of the plan (heal=True re-exposes the ExitNode as
+        # the sole exit point).
         subplan = plan.shallow_copy()  # structure only: the operators are shared
         subplan.remove_node(head_nid, heal=True)
         new_head = subplan[subplan.exit_point()]
-        if new_head.kind == "ExitNode":
-            # Drive InsertNode's existing, tested write/commit logic directly
-            # from the native generator's morsels. This keeps a Python-driven
-            # per-morsel loop calling into `_push_impl` — interim debt per
-            # CLAUDE.md §2, accepted here rather than building a native write
-            # sink.
-            from opteryx.managers.execution.compiler import execute_native
+        if new_head.kind != "ExitNode":
+            raise InvalidInternalStateError(
+                "InsertNode sub-plan is not Exit-headed; it cannot run on the "
+                "native engine"
+            )
+        # Drive InsertNode's existing, tested write/commit logic directly from
+        # the native generator's morsels. This keeps a Python-driven per-morsel
+        # loop calling into `_push_impl` — interim debt per CLAUDE.md §2,
+        # accepted here rather than building a native write sink.
+        from opteryx.managers.execution.compiler import execute_native
 
-            generator, _ = execute_native(subplan, telemetry=telemetry, cancel=cancel)
-            for morsel in generator:
-                head_node._push_impl(morsel)
-            head_node._push_impl(EOS)
-        else:
-            _drain_pipeline(plan)
+        generator, _ = execute_native(subplan, telemetry=telemetry, cancel=cancel)
+        for morsel in generator:
+            head_node._push_impl(morsel)
+        head_node._push_impl(EOS)
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
@@ -214,30 +202,6 @@ def execute(
         f"serial_engine received a data-pipeline head ({head_node.kind}); "
         "SELECT/data plans must run on the native engine, not here."
     )
-
-
-def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
-    """Drive the pipeline to completion without yielding to the caller.
-    Used for INSERT (side effects) and EXPLAIN ANALYZE (telemetry) where
-    we discard the result rows."""
-    chains, exit_node, ctx = compile_pipeline(plan)
-    if enable_tracing:
-        # EXPLAIN ANALYZE wants per-operator wall-time. Flip the trace flag
-        # on every node so push() emits clock_gettime + execution_time.
-        for nid, node in plan.depth_first_search_flat():
-            if getattr(node, "enable_tracing", None) is not None:
-                node.enable_tracing(True)
-    try:
-        for scan, chain_head in chains:
-            # Consume drive_scan but discard all yielded morsels.
-            for _ in drive_scan(scan, chain_head, exit_node, ctx):
-                pass
-            if ctx.is_terminated():
-                break
-    finally:
-        # On exception, stop any further scan and let drive_scan's own finally
-        # (entered as the generator is collected) close source-side resources.
-        ctx.terminate()
 
 
 def explain(

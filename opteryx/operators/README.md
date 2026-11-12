@@ -6,15 +6,11 @@ compiled into a single `_operators.so` module via `_operators.pyx`.
 
 ## Architecture
 
-Operators are **push-based**: upstream operators push `Morsel` (column batches) downstream through
-typed `_downstream` pointers wired by `opteryx/managers/execution/pipeline_compiler.py`; the serial
-engine (`opteryx/managers/execution/serial_engine.py`) drives each scan's morsels through its chain.
-
-```
-Reader operators  →  Filter  →  Project  →  Aggregate  →  Sort  →  Limit  →  Result
-       ↑                   ↑           ↑              ↑          ↑
-  Null, Parquet     WHERE      SELECT        GROUP BY    ORDER BY  LIMIT
-```
+The classes here are **plan nodes**, not an execution engine. The plan compiler
+(`opteryx/managers/execution/compiler.py`) builds the native engine (`src/cpp/engine/`) from them, and
+the native engine runs every data pipeline. Two kinds of node still do work in this package: special
+operations (SET, SHOW, DDL, EXPLAIN), answered directly, and the write sinks (INSERT, MERGE, OPTIMIZE),
+which `opteryx/managers/execution/serial_engine.py` feeds from the native engine's output.
 
 ## Operator Categories
 

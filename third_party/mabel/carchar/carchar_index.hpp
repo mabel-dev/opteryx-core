@@ -8,22 +8,9 @@
 #include "carchar_common.hpp"
 #include "core/tracked_allocator.h"   // draken::TrackedAllocator — charged to the process memory account
 
-// Hot-path probe/insert statistics (probe lengths, lookup/insert counts).
-// Diagnostic-only — no production consumer reads them — but they cost two adds
-// and two compare-branch max-updates on every insert and stats-lookup.
-// Compiled out by default; build with -DCARCHAR_HOT_STATS=1 to re-enable.
-#ifndef CARCHAR_HOT_STATS
-#define CARCHAR_HOT_STATS 0
-#endif
-
 namespace opteryx::carchar {
 
-// detail::uninitialized_allocator lives in carchar_common.hpp (shared with
-// CarcharSet, which has the same never-read-empty-slot proof).
-
 class CarcharIndex {
-    static constexpr bool kHotStats = CARCHAR_HOT_STATS != 0;
-
    public:
     explicit CarcharIndex(std::size_t initial_capacity = kMinCapacity, double load_factor = 0.80)
         : load_factor_(load_factor) {
@@ -36,30 +23,6 @@ class CarcharIndex {
 
     std::size_t size() const noexcept { return size_; }
     std::size_t capacity() const noexcept { return capacity_; }
-    std::size_t probe_group_count() const noexcept { return capacity_ / kGroupWidth; }
-    std::size_t probe_group_index(std::uint64_t key) const noexcept {
-        if (capacity_ == 0) {
-            return 0;
-        }
-        return static_cast<std::size_t>((key & (capacity_ - 1U)) / kGroupWidth);
-    }
-
-    // ⛔ DEAD — kept only so the measurement is not repeated a third time.
-    // Compute-path software prefetch is banned (architect, 2026-07-02). The call
-    // site in native_group_sinks.hpp pass B was removed then, on Apple Silicon
-    // measurements. Re-tested on x86 2026-08-14, prefetching this line 8/16 rows
-    // ahead of the dependent probe (and in a variant the hashes_ line too):
-    // 8% SLOWER on a cache-resident 9k-group table, flat at 6M, 2.8% (ranges
-    // barely separating) at 17.6M, noise at 18.3M. Net negative on both
-    // architectures. If the probe is slow, restructure the passes.
-    void prefetch(std::uint64_t key) const noexcept {
-        if (capacity_ == 0) {
-            return;
-        }
-        const std::size_t slot = static_cast<std::size_t>(key & (capacity_ - 1U));
-        __builtin_prefetch(&control_[slot], 0 /*read*/, 1 /*low temporal locality*/);
-    }
-
     void reserve(std::size_t expected_entries) {
         if (expected_entries == 0) {
             return;
@@ -81,38 +44,6 @@ class CarcharIndex {
         size_ = 0;
     }
 
-    void tighten() {
-        tighten(load_factor_);
-    }
-
-    void tighten(double target_load_factor) {
-        if (size_ == 0) {
-            return;
-        }
-        if (!(target_load_factor > 0.0 && target_load_factor < 1.0)) {
-            throw std::invalid_argument("target_load_factor must be between 0 and 1");
-        }
-        const double desired = static_cast<double>(size_) / target_load_factor;
-        const std::size_t target =
-            std::max(kMinCapacity, next_power_of_two(static_cast<std::size_t>(desired + 0.999999)));
-        if (target < capacity_) {
-            resize(target);
-        }
-    }
-
-    bool lookup(std::uint64_t key, std::int64_t& payload_ref_out) {
-        const auto result = find_slot(key);
-        if constexpr (kHotStats) {
-            ++lookup_count_;
-            record_lookup_probe_length(result.probes);
-        }
-        if (!result.found) {
-            return false;
-        }
-        payload_ref_out = slots_[result.slot].payload;
-        return true;
-    }
-
     bool lookup_fast(std::uint64_t key, std::int64_t& payload_ref_out) const {
         const auto result = find_slot(key);
         if (!result.found) {
@@ -125,10 +56,6 @@ class CarcharIndex {
     std::size_t insert_new(std::uint64_t key, std::int64_t payload_ref) {
         ensure_insert_capacity();
         const auto result = find_slot(key);
-        if constexpr (kHotStats) {
-            ++insert_count_;
-            record_insert_probe_length(result.probes);
-        }
         if (result.found) {
             throw std::runtime_error("key already exists");
         }
@@ -140,10 +67,6 @@ class CarcharIndex {
     std::pair<std::int64_t, bool> find_or_insert(std::uint64_t key, PayloadFactory&& payload_factory) {
         ensure_insert_capacity();
         const auto result = find_slot(key);
-        if constexpr (kHotStats) {
-            ++insert_count_;
-            record_insert_probe_length(result.probes);
-        }
         if (result.found) {
             return {slots_[result.slot].payload, false};
         }
@@ -159,7 +82,7 @@ class CarcharIndex {
     // Returns true  → new_id was inserted (caller should treat row as a new group).
     // Returns false → existing payload was placed in payload_out (no new group).
     //
-    // Hit-path is hot: no floating-point capacity check, no insert-stat update.
+    // Hit-path is hot: no capacity check.
     // Miss path runs the capacity check and re-probes if a resize fired.
     bool find_or_insert_id(std::uint64_t key, std::int64_t new_id, std::int64_t& payload_out) {
         auto result = find_slot(key);
@@ -171,10 +94,6 @@ class CarcharIndex {
         if (size_ >= resize_threshold_) {
             resize(capacity_ * 2U);
             result = find_slot(key);
-        }
-        if constexpr (kHotStats) {
-            ++insert_count_;
-            record_insert_probe_length(result.probes);
         }
         insert_at(result.slot, key, new_id);
         payload_out = new_id;
@@ -191,26 +110,6 @@ class CarcharIndex {
         }
         return out;
     }
-
-    CarcharStats stats() const {
-        CarcharStats stats;
-        stats.capacity = capacity_;
-        stats.size = size_;
-        stats.resize_count = resize_count_;
-        stats.lookup_count = lookup_count_;
-        stats.insert_count = insert_count_;
-        stats.total_probes = total_probes_;
-        stats.max_probe_length = max_probe_length_;
-        stats.lookup_total_probes = lookup_total_probes_;
-        stats.insert_total_probes = insert_total_probes_;
-        stats.max_lookup_probe_length = max_lookup_probe_length_;
-        stats.max_insert_probe_length = max_insert_probe_length_;
-        stats.bytes_estimate = estimated_bytes();
-        return stats;
-    }
-
-   protected:
-    std::size_t estimated_bytes() const noexcept { return capacity_ * (1U + sizeof(Slot)); }
 
    private:
     struct FindResult {
@@ -260,29 +159,6 @@ class CarcharIndex {
         ++size_;
     }
 
-    void record_lookup_probe_length(std::size_t probes) {
-        lookup_total_probes_ += probes;
-        if (probes > max_lookup_probe_length_) {
-            max_lookup_probe_length_ = probes;
-        }
-        record_probe_length(probes);
-    }
-
-    void record_insert_probe_length(std::size_t probes) {
-        insert_total_probes_ += probes;
-        if (probes > max_insert_probe_length_) {
-            max_insert_probe_length_ = probes;
-        }
-        record_probe_length(probes);
-    }
-
-    void record_probe_length(std::size_t probes) {
-        total_probes_ += probes;
-        if (probes > max_probe_length_) {
-            max_probe_length_ = probes;
-        }
-    }
-
     std::size_t find_empty_slot_for_resize(std::uint64_t key) const noexcept {
         const std::size_t mask = capacity_ - 1U;
         std::size_t slot = static_cast<std::size_t>(key & mask);
@@ -292,7 +168,7 @@ class CarcharIndex {
         return slot;
     }
 
-    // noexcept: exhaustion is REPORTED (probes == capacity_), not thrown, so the
+    // noexcept: exhaustion is REPORTED (probes > capacity_), not thrown, so the
     // hot probe path carries no unwind state. The throw moves to find_slot()
     // below, which every existing caller already used — behaviour unchanged.
     FindResult find_slot_nothrow(std::uint64_t key) const noexcept {
@@ -305,7 +181,7 @@ class CarcharIndex {
 
     FindResult find_slot(std::uint64_t key) const {
         const FindResult r = find_slot_nothrow(key);
-        if (r.probes < capacity_) {
+        if (r.probes <= capacity_) {
             return r;
         }
         throw std::runtime_error("Carchar probe exhausted table capacity");
@@ -314,12 +190,17 @@ class CarcharIndex {
     void resize(std::size_t new_capacity) {
         new_capacity = std::max(kMinCapacity, next_power_of_two(new_capacity));
 
-        auto old_control      = std::move(control_);
-        auto old_slots        = std::move(slots_);
+        // Allocate the new storage BEFORE touching the table: if either allocation
+        // throws, the table is exactly as it was. Nothing after this can throw.
+        decltype(control_) old_control(new_capacity + (kGroupWidth - 1U), kEmpty);
+        decltype(slots_)   old_slots(new_capacity);   // default-init: not filled
+        old_control.swap(control_);
+        old_slots.swap(slots_);                       // old_* now hold the old table
         const auto old_capacity = capacity_;
-
-        initialize_storage(new_capacity);
-        ++resize_count_;
+        capacity_ = new_capacity;
+        size_ = 0;
+        resize_threshold_ =
+            static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_);
 
         for (std::size_t slot = 0; slot < old_capacity; ++slot) {
             if (old_control[slot] == kEmpty) {
@@ -351,16 +232,6 @@ class CarcharIndex {
     std::size_t size_ = 0;
     std::size_t resize_threshold_ = 0;
     double load_factor_ = 0.80;
-
-    std::size_t resize_count_ = 0;
-    std::size_t lookup_count_ = 0;
-    std::size_t insert_count_ = 0;
-    std::size_t total_probes_ = 0;
-    std::size_t max_probe_length_ = 0;
-    std::size_t lookup_total_probes_ = 0;
-    std::size_t insert_total_probes_ = 0;
-    std::size_t max_lookup_probe_length_ = 0;
-    std::size_t max_insert_probe_length_ = 0;
 };
 
 }  // namespace opteryx::carchar

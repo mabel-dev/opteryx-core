@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "carchar_common.hpp"
+#include "core/tracked_allocator.h"   // draken::TrackedAllocator — charged to the process memory account
 
 namespace opteryx::carchar {
 
@@ -34,18 +35,6 @@ class CarcharSet {
         }
     }
 
-    void tighten() {
-        if (size_ == 0) {
-            return;
-        }
-        const double desired = static_cast<double>(size_) / load_factor_;
-        const std::size_t target =
-            std::max(kMinCapacity, next_power_of_two(static_cast<std::size_t>(desired + 0.999999)));
-        if (target < capacity_) {
-            resize(target);
-        }
-    }
-
     bool contains(std::uint64_t key) const noexcept {
         return find_slot(key).found;
     }
@@ -58,36 +47,6 @@ class CarcharSet {
         }
         insert_at(result.slot, key);
         return true;
-    }
-
-    // Bulk insert for COUNT DISTINCT style set-and-forget workloads.
-    // Returns number of newly inserted keys.
-    std::size_t insert_many(const std::uint64_t* keys, std::size_t length) {
-        if (keys == nullptr || length == 0) {
-            return 0;
-        }
-        reserve(size_ + length);
-        std::size_t inserted = 0;
-        for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i])) {
-                ++inserted;
-            }
-        }
-        return inserted;
-    }
-
-    // Bulk probe count for membership checks.
-    std::size_t contains_many_count(const std::uint64_t* keys, std::size_t length) const {
-        if (keys == nullptr || length == 0) {
-            return 0;
-        }
-        std::size_t hits = 0;
-        for (std::size_t i = 0; i < length; ++i) {
-            if (find_slot(keys[i]).found) {
-                ++hits;
-            }
-        }
-        return hits;
     }
 
     // Bulk insert for DISTINCT-style filtering; writes row indices of newly inserted keys
@@ -106,26 +65,6 @@ class CarcharSet {
         for (std::size_t i = 0; i < length; ++i) {
             if (insert_or_ignore_no_reserve(keys[i])) {
                 out_indices[inserted++] = static_cast<std::int32_t>(i);
-            }
-        }
-        return inserted;
-    }
-
-    // Same as mark_new_indices_32 but writes int64 row indices.
-    // Used for datasets with more than 2^31 rows.
-    std::size_t mark_new_indices_64(
-        const std::uint64_t* keys,
-        std::int64_t*        out_indices,
-        std::size_t          length
-    ) {
-        if (keys == nullptr || out_indices == nullptr || length == 0) {
-            return 0;
-        }
-        reserve(size_ + length);
-        std::size_t inserted = 0;
-        for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i])) {
-                out_indices[inserted++] = static_cast<std::int64_t>(i);
             }
         }
         return inserted;
@@ -199,50 +138,6 @@ class CarcharSet {
         return inserted;
     }
 
-    // Pure read-only probe for SEMI JOIN (IN subquery): returns indices of keys
-    // that ARE present in the set.  Caller supplies out_indices with at least
-    // `length` int32 slots.  Returns the count written.
-    // const — never modifies the set; safe to call NoGIL with a shared build-side set.
-    std::size_t probe_found_32(
-        const std::uint64_t* keys,
-        std::int32_t*        out_indices,
-        std::size_t          length
-    ) const noexcept {
-        if (keys == nullptr || out_indices == nullptr || length == 0) {
-            return 0;
-        }
-        std::size_t found = 0;
-        for (std::size_t i = 0; i < length; ++i) {
-            if (find_slot(keys[i]).found) {
-                out_indices[found++] = static_cast<std::int32_t>(i);
-            }
-        }
-        return found;
-    }
-
-    // Pure read-only probe for ANTI JOIN (NOT IN subquery): returns indices of
-    // keys that are NOT present in the set.  Caller supplies out_indices with
-    // at least `length` int32 slots.  Returns the count written.
-    // const — never modifies the set; safe to call NoGIL with a shared build-side set.
-    std::size_t probe_not_found_32(
-        const std::uint64_t* keys,
-        std::int32_t*        out_indices,
-        std::size_t          length
-    ) const noexcept {
-        if (keys == nullptr || out_indices == nullptr || length == 0) {
-            return 0;
-        }
-        std::size_t not_found = 0;
-        for (std::size_t i = 0; i < length; ++i) {
-            if (!find_slot(keys[i]).found) {
-                out_indices[not_found++] = static_cast<std::int32_t>(i);
-            }
-        }
-        return not_found;
-    }
-
-    std::size_t estimated_bytes() const noexcept { return capacity_ * (1U + 8U); }
-
    private:
     struct FindResult {
         std::size_t slot = 0;
@@ -253,7 +148,7 @@ class CarcharSet {
     void initialize_storage(std::size_t capacity) {
         capacity_ = capacity;
         // control_ IS initialized: kEmpty is the authority on slot occupancy.
-        // hashes_ is deliberately left UNINITIALIZED (uninitialized_allocator
+        // hashes_ is deliberately left UNINITIALIZED (TrackedUninitAllocator
         // default-init) — an empty slot's hash is never read: a tag is always
         // <= 0x7F while kEmpty is 0x80, so a probe can never confirm against an
         // empty slot (same proof as CarcharIndex). Pre-filling was a dead
@@ -309,7 +204,7 @@ class CarcharSet {
         const std::uint8_t tag = key_tag(key);
         const auto result = detail::probe_find_slot_direct(
             control_.data(), hashes_.data(), capacity_, key, tag);
-        if (result.probes >= capacity_) {
+        if (result.probes > capacity_) {
             // Unreachable while the load-factor invariant holds (an empty slot
             // always exists). Throw like CarcharIndex — the old release-mode
             // assert silently returned a fabricated slot. Callers reached
@@ -322,11 +217,17 @@ class CarcharSet {
     void resize(std::size_t new_capacity) {
         new_capacity = std::max(kMinCapacity, next_power_of_two(new_capacity));
 
-        auto old_control = std::move(control_);
-        auto old_hashes  = std::move(hashes_);
+        // Allocate the new storage BEFORE touching the table: if either allocation
+        // throws, the table is exactly as it was. Nothing after this can throw.
+        decltype(control_) old_control(new_capacity + (kGroupWidth - 1U), kEmpty);
+        decltype(hashes_)  old_hashes(new_capacity);   // default-init: not filled
+        old_control.swap(control_);
+        old_hashes.swap(hashes_);                      // old_* now hold the old table
         const auto old_capacity = capacity_;
-
-        initialize_storage(new_capacity);
+        capacity_ = new_capacity;
+        size_ = 0;
+        resize_threshold_ =
+            static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_);
 
         for (std::size_t slot = 0; slot < old_capacity; ++slot) {
             if (old_control[slot] == kEmpty) {
@@ -337,10 +238,10 @@ class CarcharSet {
     }
 
     std::size_t capacity_ = 0;
-    std::vector<std::uint8_t> control_;
+    std::vector<std::uint8_t, draken::TrackedAllocator<std::uint8_t>> control_;
     // Uninitialized-allocator vector: allocated but never pre-filled — an
     // empty slot's hash is never read (see initialize_storage).
-    std::vector<std::uint64_t, detail::uninitialized_allocator<std::uint64_t>> hashes_;
+    std::vector<std::uint64_t, draken::TrackedUninitAllocator<std::uint64_t>> hashes_;
     std::size_t size_ = 0;
     std::size_t resize_threshold_ = 0;
     double load_factor_ = 0.80;

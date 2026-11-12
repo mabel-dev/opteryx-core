@@ -27,6 +27,9 @@ constexpr std::size_t kProbeGroupWidth = 16;
 constexpr std::size_t kProbeGroupWidth = 8;
 #endif
 
+// `probes` is the slots examined, 1..capacity for a real result (the last lane of the
+// last group reads exactly `capacity`). capacity + 1 means the table has no empty slot
+// and no match: exhausted.
 struct ProbeResult {
     std::size_t slot = 0;
     bool found = false;
@@ -118,7 +121,7 @@ inline ProbeResult probe_find_slot_scalar(
         probes += kProbeGroupWidth;
     }
 
-    return {0, false, capacity};
+    return {0, false, capacity + 1U};   // exhausted: above any real probe count
 }
 
 #if defined(__AVX2__)
@@ -166,7 +169,7 @@ inline ProbeResult probe_find_slot_avx2(
         probes += 16U;
     }
 
-    return {0, false, capacity};
+    return {0, false, capacity + 1U};   // exhausted: above any real probe count
 }
 #endif
 
@@ -225,7 +228,7 @@ inline ProbeResult probe_find_slot_neon(
         probes += 16U;
     }
 
-    return {0, false, capacity};
+    return {0, false, capacity + 1U};   // exhausted: above any real probe count
 }
 #endif
 
@@ -310,7 +313,7 @@ inline ProbeResult probe_find_slot_rvv(
         probes += 16U;
     }
 
-    return {0, false, capacity};
+    return {0, false, capacity + 1U};   // exhausted: above any real probe count
 }
 #endif
 

@@ -215,8 +215,7 @@ iterations. Design:
 
 - An engine-owned row-hash set keyed on the full row (all CTE columns),
   using the existing native row-hash machinery (`compute_row_hashes` /
-  carchar's hash-set substrate — `opteryx/compiled/structures/carchar_set.pyx`
-  and the C++ it fronts).
+  carchar's hash-set substrate — `third_party/mabel/carchar/carchar_set.hpp`).
 - Seeded from the anchor's output **with the anchor itself deduplicated**
   (`UNION` semantics dedupe the anchor too).
 - The control step probes DELTA against the set, keeps only novel rows

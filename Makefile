@@ -482,7 +482,9 @@ carchar-set-test: ## Build and run the CarcharSet batched-probe (mark_new) oracl
 	@mkdir -p /tmp/opteryx-tests
 	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
 	    -I$(CURDIR)/third_party/mabel/carchar -I$(CURDIR)/draken/simd \
+	    -I$(CURDIR)/draken -I$(CURDIR)/draken/core \
 	    $(CURDIR)/src/cpp/engine/test_carchar_set_batch.cpp \
+	    $(CURDIR)/draken/core/mem_account.cpp \
 	    -o /tmp/opteryx-tests/test_carchar_set_batch
 	@/tmp/opteryx-tests/test_carchar_set_batch
 

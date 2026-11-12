@@ -34,7 +34,6 @@ from draken.core.buffers cimport (
     DRAKEN_SEL_IDENTITY,
     DrakenType, DrakenVector,
 )
-from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet
 from cpython.array cimport array
 import draken.draken_native as _draken_native
@@ -985,9 +984,7 @@ def get_scan_telemetry():
 # -----------------------------------------------------------------------------
 # Native execution tracing (docs/EXECUTION_TRACING_DESIGN.md) — Phase 1.
 #
-# Distinct from the per-morsel ``TraceEvent`` packed struct below (EXPLAIN
-# ANALYZE's own, unrelated buffer): this is the engine-wide span waterfall
-# gated by config.OPTERYX_TRACE. All recording happens in engine/trace.hpp
+# The engine-wide span waterfall gated by config.OPTERYX_TRACE. All recording happens in engine/trace.hpp
 # (nogil, no Python touched — the old opteryx/tracing/ died from trying to
 # call Python per-span from this path). These wrappers only arm/disarm the
 # runtime gate and drain the already-closed spans into one bytes blob at
@@ -1061,45 +1058,6 @@ def native_trace_drain_file_symbols():
     return out
 
 
-cdef packed struct TraceEvent:
-    int64_t morsel_index
-    uint64_t rows_in
-    uint64_t rows_out
-    uint64_t bytes_in
-    uint64_t bytes_out
-    uint64_t duration_ns
-    int produced_output       # 0/1; bint not allowed in packed struct
-
-
-cdef class PipelineContext:
-    """Per-query shared state. Used for backpressure (LIMIT short-circuit).
-
-    Termination is mediated through is_terminated()/terminate() rather than a
-    public attribute so the underlying signalling primitive (today: bint; later:
-    threading.Event) can change without touching every call site.
-
-    Carrier-flip error stash: with each operator body now in its own `with gil:`
-    region (the chain currency is `shared_ptr[CxxMorsel]`, the methods are
-    `noexcept nogil`), a downstream Python exception cannot propagate through the
-    nogil frames — the failing body stashes it here on the shared context and
-    returns a non-OK status; the driver (drive_scan / push_one) re-raises it once
-    at the gil boundary. `_exc` holds the first exception seen (later ones are
-    dropped — the first failure is the cause).
-    """
-    cdef bint _terminated
-    cdef object _exc
-
-    def __cinit__(self):
-        self._terminated = False
-        self._exc = None
-
-    cpdef bint is_terminated(self):
-        return self._terminated
-
-    cpdef void terminate(self):
-        self._terminated = True
-
-
 # Sentinels — Python-level objects from opteryx top-level. We resolve them at
 # module init and store as module-level Python references. Comparisons use `is`
 # for identity at the C level.
@@ -1108,29 +1066,13 @@ from opteryx import EMPTY as _EMPTY_SENTINEL
 
 
 cdef class BasePlanNode:
-    """Base class for every operator on the push pipeline.
+    """Base class for every physical plan node.
 
-    Subclasses override `_push_impl(Morsel)` to do their work and call
-    `self.emit(result)` to forward results downstream. They MUST NOT call
-    `emit()` for `EMPTY`/`None` results — only for real morsels and for
-    terminal `EOS`.
-
-    The fast path (push → _push_impl → emit → downstream.push) is all typed
-    Cython calls dispatched via the C-level vtable.
-
-    Morsel ownership contract
-    -------------------------
-    A pushed morsel is handed to the receiver: once an operator calls
-    `emit(morsel)` (or pushes downstream), it transfers ownership and MUST NOT
-    retain or mutate that morsel afterwards. Symmetrically, a receiver may
-    consume its input however it likes — including in-place mutation (e.g.
-    Distinct's `_take_inplace`) — because no upstream operator will read the
-    morsel again. Morsels are not shared between consumers in the push
-    pipeline (single-output topology), so this exclusive-ownership rule holds
-    without copying. Operators that need to keep input across calls (blocking
-    operators buffering for a sort/aggregate/join build) take ownership by
-    appending to their own state and never emitting those morsels until
-    finalisation.
+    A node is a plan descriptor: the native engine is compiled from these
+    (managers/execution/compiler.py) and runs the data pipeline itself. Two kinds
+    of node still do work here: special operations answered through `__call__`
+    (SET, SHOW, DDL, EXPLAIN), and the write sinks (INSERT, MERGE, OPTIMIZE),
+    which the serial engine feeds one morsel at a time through `_push_impl`.
     """
     # Class-level defaults — operators override via the registry in __init__.
     # Declared as `public bint` instance fields so subclasses' __init__ may set
@@ -1140,38 +1082,16 @@ cdef class BasePlanNode:
     cdef public bint is_not_explained
     cdef public bint is_stateless
 
-    # Pipeline wiring — set by pipeline_compiler before execution starts.
-    cdef BasePlanNode _downstream
-    cdef PipelineContext _ctx
-    # Number of upstream input chains that will each push exactly one EOS into
-    # this operator. The pipeline compiler stamps this from the incoming-edge
-    # count; defaults to 1 (single-input operators). Multi-input operators that
-    # gate their downstream EOS on all inputs closing (e.g. Union) count down
-    # against this instead of hardcoding the number of legs.
-    cdef int _expected_input_closes
-    cdef int _seen_input_closes
-
     # Hot-path telemetry counters (typed; no Python attr writes per morsel).
-    cdef public uint64_t execution_time      # ns; cumulative, INCLUSIVE of downstream
-    # Time (ns) spent inside downstream `push()` calls, accumulated in
-    # `_emit_cdef`. Subtracting it from `execution_time` yields this operator's
-    # SELF time (its own work, excluding the downstream chain it drives).
-    # Only accumulated when tracing is enabled (EXPLAIN ANALYZE flips it on),
-    # so normal queries pay zero extra clock_gettime cost; when tracing is off
-    # `self_time` reported by sensors() equals `execution_time` (inclusive).
+    # Nothing here advances them any more: the native engine reports each
+    # operator's readings (native_op_stats), overlaid by utils/plan_telemetry.py.
+    cdef public uint64_t execution_time      # ns
     cdef public uint64_t downstream_time
     cdef public uint64_t calls
     cdef public uint64_t records_in
     cdef public uint64_t records_out
     cdef public uint64_t bytes_in
     cdef public uint64_t bytes_out
-    cdef int64_t _morsel_index
-
-    # Tracing — gated by flag; off by default so emit() pays zero cost.
-    cdef bint _tracing_enabled
-    cdef TraceEvent *_trace_buf
-    cdef Py_ssize_t _trace_capacity
-    cdef Py_ssize_t _trace_count
 
     # Construction-time configuration (Python objects, not on the hot path).
     cdef public object properties
@@ -1188,9 +1108,6 @@ cdef class BasePlanNode:
     cdef public str identity
     cdef public object _empty_morsel_cache
     cdef public object readings   # defaultdict(int); operators use `+= 1` patterns
-    # Cached iterator backing the default `next_morsel` implementation —
-    # lazy-initialised on first call from drive_scan.
-    cdef object _morsel_iter
     # Optimizer/binder-attached metadata copied from the logical plan
     cdef public object manifest
     cdef public object uuid
@@ -1198,30 +1115,6 @@ cdef class BasePlanNode:
     # node carries it: plan-level consumers (EXPLAIN, telemetry, join-leg
     # labelling) read the logical configuration from here, uniformly.
     cdef public object step
-    # Carrier-flip error stash (per-node fallback). Bodies normally stash on the
-    # shared PipelineContext (`_ctx._exc`); this node-local slot is the fallback
-    # for nodes with no context (e.g. direct-push unit tests). The driver
-    # re-raises at the gil boundary (status-code model — `except +` is
-    # unavailable on cdef-class methods, validated by the S-B spike).
-    cdef object _cxx_push_exc
-
-    def __cinit__(self, *args, **kwargs):
-        self._downstream = None
-        self._ctx = None
-        self._cxx_push_exc = None
-        self._morsel_index = 0
-        self._tracing_enabled = False
-        self._trace_buf = NULL
-        self._trace_capacity = 0
-        self._trace_count = 0
-        self._morsel_iter = None
-        self._expected_input_closes = 1
-        self._seen_input_closes = 0
-
-    def __dealloc__(self):
-        if self._trace_buf is not NULL:
-            free(self._trace_buf)
-            self._trace_buf = NULL
 
     def __init__(self, properties, step, columns=None, pre_update_columns=None):
         """`step` is the typed logical plan step this operator was planned from;
@@ -1285,13 +1178,10 @@ cdef class BasePlanNode:
         return f"{self.name} {self.sensors()}"
 
     def __call__(self, morsel):
-        """Legacy direct invocation for operators that don't enter the push
-        pipeline (SetVariable, ShowCreate, ViewManagement,
-        TableManagement, RelationManagement, Insert, Explain, ShowColumns).
-        These all retain a `def execute(self, morsel)` generator method;
-        this wrapper yields from it without any per-morsel telemetry.
-        Push-pipeline operators are invoked via push()/_push_impl() and
-        never go through this path."""
+        """Direct invocation for the special operations (SetVariable, ShowCreate,
+        ViewManagement, TableManagement, RelationManagement, Explain,
+        ShowColumns). Each has a `def execute(self, morsel)` generator method;
+        this wrapper yields from it."""
         execute = getattr(self, "execute", None)
         if execute is None:
             raise NotImplementedError(
@@ -1301,12 +1191,7 @@ cdef class BasePlanNode:
         yield from execute(morsel)
 
     def sensors(self):
-        # self_time = own work, excluding the downstream chain this operator
-        # drives (execution_time is INCLUSIVE of downstream). downstream_time is
-        # only accumulated under tracing (EXPLAIN ANALYZE); when tracing is off
-        # it is 0 and self_time == execution_time. Clamp at 0 to absorb clock
-        # jitter and the join/scan case where push() is never called on the node
-        # itself (its downstream emits still accrue downstream_time).
+        # self_time = execution_time less downstream_time, clamped at 0.
         cdef uint64_t self_time = 0
         if self.execution_time > self.downstream_time:
             self_time = self.execution_time - self.downstream_time
@@ -1324,442 +1209,10 @@ cdef class BasePlanNode:
             base.update(self.readings)
         return base
 
-    # ---- Carrier-flip error-stash helpers (gil held) ---------------------------
-    cdef inline void _stash_exc(self, object exc, ErrCtx* err):
-        """Record a body's Python exception so the driver can re-raise it at the
-        gil boundary, and flag the status code. Prefer the shared context (every
-        node on a pipeline shares it); fall back to the node when there is no
-        context (e.g. a direct-push unit test). First exception wins."""
-        if self._ctx is not None:
-            if self._ctx._exc is None:
-                self._ctx._exc = exc
-        elif self._cxx_push_exc is None:
-            self._cxx_push_exc = exc
-        if err != NULL:
-            err.code = 1
-
-    cdef inline object _peek_exc(self):
-        """Return the stashed exception (context first, then node) WITHOUT
-        clearing it — used by `emit` to re-raise and unwind its own gil body."""
-        if self._ctx is not None and self._ctx._exc is not None:
-            return self._ctx._exc
-        return self._cxx_push_exc
-
-    cdef object _take_exc(self):
-        """Return AND clear the stashed exception — used by drivers
-        (drive_scan / push_one) to raise once at the gil boundary."""
-        cdef object exc
-        if self._ctx is not None and self._ctx._exc is not None:
-            exc = self._ctx._exc
-            self._ctx._exc = None
-            return exc
-        exc = self._cxx_push_exc
-        self._cxx_push_exc = None
-        return exc
-
-    # ---- Push pipeline interface ------------------------------------------------
-    cdef int push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        """Entry point over the C++ morsel carrier (`shared_ptr[CxxMorsel]`).
-        Records timing + per-morsel counters (read nogil from the CxxMorsel),
-        then dispatches to `_dispatch_push`. `noexcept nogil`: the chain is driven
-        with the GIL released; bodies re-acquire it as needed. Errors surface as a
-        status code in `*err` (the driver re-raises the stashed exception).
-        Not Python-callable — Python drivers use the `push_one` module helper."""
-        cdef timespec ts_start, ts_end
-        cdef uint64_t duration_ns
-        cdef uint64_t rows = 0
-        cdef uint64_t nbytes = 0
-        cdef CxxMorsel* raw = m.get()
-        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        cdef uint64_t records_out_before
-        cdef uint64_t bytes_out_before
-        cdef uint64_t rows_emitted
-        cdef uint64_t bytes_emitted
-
-        if self._ctx is not None and self._ctx._terminated:
-            return 0
-
-        if (not is_eos) and raw != NULL:
-            rows = raw.num_rows()
-            # Real per-vector footprint (string arena included), not rows×cols×8.
-            nbytes = <uint64_t>cxx_morsel_nbytes(raw)
-            self.records_in += rows
-            self.bytes_in += nbytes
-        self.calls += 1
-
-        records_out_before = self.records_out
-        bytes_out_before = self.bytes_out
-
-        clock_gettime(CLOCK_MONOTONIC, &ts_start)
-        self._dispatch_push(m, err)
-        clock_gettime(CLOCK_MONOTONIC, &ts_end)
-        duration_ns = (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
-        duration_ns += <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec)
-        self.execution_time += duration_ns
-        if self._tracing_enabled:
-            rows_emitted = self.records_out - records_out_before
-            bytes_emitted = self.bytes_out - bytes_out_before
-            with gil:
-                self._append_trace(rows, rows_emitted, nbytes, bytes_emitted,
-                                   duration_ns, 1 if rows_emitted > 0 else 0)
-
-        self._morsel_index += 1
-        return err.code if err != NULL else 0
-
-    cdef int _dispatch_push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        """Cdef hot path. Cdef-class subclasses override this directly for
-        true C-level vtable dispatch. Default = transitional gil-adapter:
-        re-acquire the GIL, decode the carrier to a Morsel (or recover the EOS
-        sentinel from MorselState), and run the existing `_push_impl(Morsel)` so
-        Python-class subclasses (aggregate/unnest/insert) keep working unchanged."""
-        cdef CxxMorsel* raw = m.get()
-        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        with gil:
-            try:
-                if is_eos:
-                    self._push_impl(_EOS_SENTINEL)
-                else:
-                    self._push_impl(cxx_to_morsel(m))
-            except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx at the boundary
-                self._stash_exc(exc, err)
-        return err.code if err != NULL else 0
-
     cpdef void _push_impl(self, Morsel morsel) except *:
-        """Override in Python-class subclasses (aggregates, joins, special
-        operators that carry many Python attributes). Default is no-op."""
+        """A write sink's per-morsel body (INSERT, MERGE, OPTIMIZE), called by the
+        serial engine with each result morsel and then EOS. Default is no-op."""
         pass
-
-    cdef int _emit_cdef(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        """Real downstream forwarder over the C++ carrier. Accounts emitted
-        rows/bytes (read nogil from the CxxMorsel) and pushes into the downstream
-        operator. `noexcept nogil`; errors propagate via `*err`. Converted
-        true-nogil bodies call this directly; transitional gil-wrapped bodies
-        reach it through the `emit(Morsel)` wrapper below."""
-        cdef uint64_t rows = 0
-        cdef uint64_t nbytes = 0
-        cdef timespec ds_start, ds_end
-        cdef CxxMorsel* raw = m.get()
-        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        if (not is_eos) and raw != NULL:
-            rows = raw.num_rows()
-            # Real per-vector footprint (string arena included), not rows×cols×8.
-            nbytes = <uint64_t>cxx_morsel_nbytes(raw)
-            self.records_out += rows
-            self.bytes_out += nbytes
-        if self._downstream is not None:
-            if self._tracing_enabled:
-                # Time the downstream chain so push() can report SELF time
-                # (execution_time - downstream_time). Gated on tracing so normal
-                # queries pay no extra clock_gettime; EXPLAIN ANALYZE enables it.
-                clock_gettime(CLOCK_MONOTONIC, &ds_start)
-                self._downstream.push(m, err)
-                clock_gettime(CLOCK_MONOTONIC, &ds_end)
-                self.downstream_time += (
-                    (<uint64_t>(ds_end.tv_sec - ds_start.tv_sec)) * <uint64_t>1000000000
-                    + <uint64_t>(ds_end.tv_nsec - ds_start.tv_nsec)
-                )
-            else:
-                self._downstream.push(m, err)
-        return err.code if err != NULL else 0
-
-    cpdef void emit(self, Morsel morsel) except *:
-        """GIL-side Morsel→carrier wrapper used by transitional gil-wrapped
-        bodies (and Python-class operators). Encodes the Morsel (or EOS sentinel)
-        as the C++ carrier and forwards via the nogil `_emit_cdef`. If a
-        downstream operator failed, it stashed its exception on the shared context
-        and returned a non-OK status — re-raise it here so the calling body
-        unwinds and its own `except` re-stashes the (same) original exception."""
-        cdef shared_ptr[CxxMorsel] cxm
-        cdef ErrCtx e
-        cdef object exc
-        e.code = 0
-        e.msg = NULL
-        if morsel is None:
-            return
-        if morsel is _EOS_SENTINEL:
-            cxm = shared_ptr[CxxMorsel](cxx_morsel_new_eos())
-        else:
-            cxm = morsel_to_cxx(morsel)
-        self._emit_cdef(cxm, &e)
-        if e.code != 0:
-            exc = self._peek_exc()
-            if exc is not None:
-                raise exc
-            raise RuntimeError("downstream push failed")
-
-    # ---- Source-side iterator (used by drive_scan) ------------------------------
-    cdef shared_ptr[CxxMorsel] next_morsel(self) except *:
-        """Cdef hot-path source iterator over the C++ carrier. Returns the next
-        morsel as a `shared_ptr[CxxMorsel]`, or a NULL shared_ptr on exhaustion.
-        Stays GIL-requiring during S-B.1 (drive_scan pulls it outside the
-        `with nogil` push); S-B.2 converts the scan body to true nogil.
-        Cdef-class source operators override this directly; Python-class scans
-        override `_next_morsel_py` (wrapped here)."""
-        cdef object py = self._next_morsel_py()
-        cdef shared_ptr[CxxMorsel] out
-        if py is not None:
-            out = morsel_to_cxx(<Morsel>py)
-        return out
-
-    cpdef object _next_morsel_py(self):
-        """Default implementation: lazily wrap the source's existing
-        `read_morsels()` generator. Source operators that need maximum
-        performance can override with a state-machine impl, skipping the
-        Python generator boundary altogether."""
-        if self._morsel_iter is None:
-            self._morsel_iter = iter(self.read_morsels())
-        return next(self._morsel_iter, None)
-
-    cpdef void close_source(self) except *:
-        """Close the lazily-created source iterator backing `next_morsel`,
-        running its finally-block cleanup (e.g. the rugo C++ IO pipeline
-        shutdown in `iter_row_groups_ipc`). Called by `drive_scan` on every
-        exit path — normal exhaustion, early termination, exception, or caller
-        abandonment — so source-side resources never leak. Safe to call more
-        than once and on operators that never created an iterator (state-machine
-        source overrides leave `_morsel_iter` None and clean up themselves)."""
-        cdef object it = self._morsel_iter
-        if it is None:
-            return
-        self._morsel_iter = None
-        close = getattr(it, "close", None)
-        if close is not None:
-            close()
-
-    # ---- Pipeline wiring (called by pipeline_compiler) --------------------------
-    cpdef void set_downstream(self, BasePlanNode node) except *:
-        self._downstream = node
-
-    cpdef void set_context(self, PipelineContext ctx) except *:
-        self._ctx = ctx
-
-    cpdef void set_expected_input_closes(self, int n) except *:
-        """Tell this operator how many upstream input chains will each push one
-        EOS into it. Stamped by the pipeline compiler from the incoming-edge
-        count. Operators that gate downstream EOS on all inputs closing use
-        `_record_input_close()` to count down against this."""
-        self._expected_input_closes = n
-
-    cdef inline bint _record_input_close(self) except -1:
-        """Record one upstream EOS. Returns True once every expected upstream
-        input has closed (i.e. this was the final EOS), False otherwise."""
-        self._seen_input_closes += 1
-        return self._seen_input_closes >= self._expected_input_closes
-
-    cpdef void enable_tracing(self, bint enabled) except *:
-        self._tracing_enabled = enabled
-
-    # ---- Trace buffer management (typed C buffer, no Python on hot path) -------
-    cdef void _append_trace(self,
-                            uint64_t rows_in, uint64_t rows_out,
-                            uint64_t bytes_in, uint64_t bytes_out,
-                            uint64_t duration_ns, int produced_output) except *:
-        cdef Py_ssize_t new_cap
-        cdef TraceEvent *new_buf
-        if self._trace_count >= self._trace_capacity:
-            new_cap = 64 if self._trace_capacity == 0 else self._trace_capacity * 2
-            new_buf = <TraceEvent *>realloc(self._trace_buf, new_cap * sizeof(TraceEvent))
-            if new_buf is NULL:
-                raise MemoryError("trace buffer realloc failed")
-            self._trace_buf = new_buf
-            self._trace_capacity = new_cap
-        self._trace_buf[self._trace_count].morsel_index = self._morsel_index
-        self._trace_buf[self._trace_count].rows_in = rows_in
-        self._trace_buf[self._trace_count].rows_out = rows_out
-        self._trace_buf[self._trace_count].bytes_in = bytes_in
-        self._trace_buf[self._trace_count].bytes_out = bytes_out
-        self._trace_buf[self._trace_count].duration_ns = duration_ns
-        self._trace_buf[self._trace_count].produced_output = produced_output
-        self._trace_count += 1
-
-    def get_trace_events(self):
-        """Materialise the typed C trace buffer to Python dicts. Called by
-        EXPLAIN ANALYZE at query end, NOT in the hot path."""
-        cdef Py_ssize_t i
-        events = []
-        for i in range(self._trace_count):
-            events.append({
-                "morsel_index": self._trace_buf[i].morsel_index,
-                "rows_in": self._trace_buf[i].rows_in,
-                "rows_out": self._trace_buf[i].rows_out,
-                "bytes_in": self._trace_buf[i].bytes_in,
-                "bytes_out": self._trace_buf[i].bytes_out,
-                "duration_ns": self._trace_buf[i].duration_ns,
-                "produced_output": bool(self._trace_buf[i].produced_output),
-            })
-        return events
-
-
-def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineContext ctx):
-    """Drive a single scan's morsels through the chain and yield exit-node
-    pending morsels to the caller.
-
-    Per-morsel hot path is all typed cdef-vtable dispatch:
-      * `scan.next_morsel()` — typed source pull (no Python iter protocol)
-      * `chain_head.push(...)` — typed push into the chain
-      * `exit_node.has_pending()` / `pop_pending()` — typed pending drain
-
-    One Python `yield` per emitted result morsel, not one per scan morsel.
-
-    The body runs under try/finally: on EVERY exit path — normal exhaustion,
-    LIMIT short-circuit, an exception raised anywhere in the chain, or the
-    caller abandoning the result generator (GeneratorExit propagating through
-    the `yield from` in the engine) — `scan.close_source()` runs so the
-    source's own cleanup (rugo C++ pipeline shutdown, open file handles) is
-    not leaked. The original exception/GeneratorExit is not suppressed."""
-    cdef bint has_exit = exit_node is not None
-    cdef timespec ns_start, ns_end
-    # Carrier flip: the chain currency is `shared_ptr[CxxMorsel]` and `push` is
-    # `noexcept nogil`, so the chain is driven with the GIL RELEASED (`with
-    # nogil`). The source pull (`next_morsel`) still runs GIL-held and returns the
-    # carrier directly (a NULL shared_ptr means exhausted); errors come back as a
-    # status code in `err` and the stashed exception is re-raised here at the gil
-    # boundary (status-code model — `except +` is unavailable on cdef-class
-    # methods, validated by the S-B spike).
-    cdef ErrCtx err
-    cdef object _exc
-    cdef shared_ptr[CxxMorsel] cxm
-
-    try:
-        while True:
-            # Time the source pull so the scan operator gets a real
-            # execution_time. Scans are driven via next_morsel(), not push(),
-            # so without this they report 0ms in EXPLAIN ANALYZE. The scan does
-            # not emit (drive_scan pushes for it), so it has no downstream_time
-            # and its self_time == execution_time (pure read/decode).
-            clock_gettime(CLOCK_MONOTONIC, &ns_start)
-            cxm = scan.next_morsel()
-            clock_gettime(CLOCK_MONOTONIC, &ns_end)
-            scan.execution_time += (
-                (<uint64_t>(ns_end.tv_sec - ns_start.tv_sec)) * <uint64_t>1000000000
-                + <uint64_t>(ns_end.tv_nsec - ns_start.tv_nsec)
-            )
-            scan.calls += 1
-            if cxm.get() == NULL:
-                break
-            if ctx.is_terminated():
-                break
-            err.code = 0
-            err.msg = NULL
-            with nogil:
-                chain_head.push(cxm, &err)
-            if err.code != 0:
-                _exc = chain_head._take_exc()
-                raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-            if has_exit:
-                while exit_node.has_pending():
-                    yield exit_node.pop_pending()
-            if ctx.is_terminated():
-                break
-
-        if ctx.is_terminated():
-            if has_exit:
-                while exit_node.has_pending():
-                    yield exit_node.pop_pending()
-            return
-
-        cxm = shared_ptr[CxxMorsel](cxx_morsel_new_eos())
-        err.code = 0
-        err.msg = NULL
-        with nogil:
-            chain_head.push(cxm, &err)
-        if err.code != 0:
-            _exc = chain_head._take_exc()
-            raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-        if has_exit:
-            while exit_node.has_pending():
-                yield exit_node.pop_pending()
-    finally:
-        scan.close_source()
-
-
-def drive_scan_to_sink(BasePlanNode scan, BasePlanNode chain_head, exit_node,
-                       PipelineContext ctx, object sink, bint finish=True):
-    """Native push drive to a MorselQueue sink — slice 3, option B. The push-loop
-    twin of ``drive_scan``: same typed `next_morsel`/`push`/pending-drain hot path,
-    but it PUSHES each output morsel into ``sink`` (a PyMorselQueue) instead of
-    `yield`ing, so there is NO Python generator on the drive path.
-
-    `sink.put(morsel)` converts to the C++ carrier and releases the GIL during the
-    backpressure-blocked enqueue, so the consumer thread can dequeue; a False return
-    means the consumer ABANDONED (LIMIT at the cursor / early close) → stop. On
-    normal exhaustion the chain is flushed with EOS (so agg/sort emit their finals)
-    and `sink.finish()` signals graceful end-of-data. `scan.close_source()` runs on
-    every exit path (exhaustion, abandon, error)."""
-    cdef ErrCtx err
-    cdef object _exc, out
-    cdef shared_ptr[CxxMorsel] cxm
-    cdef bint has_exit = exit_node is not None
-    cdef timespec ns_start, ns_end
-
-    try:
-        while True:
-            clock_gettime(CLOCK_MONOTONIC, &ns_start)
-            cxm = scan.next_morsel()
-            clock_gettime(CLOCK_MONOTONIC, &ns_end)
-            scan.execution_time += (
-                (<uint64_t>(ns_end.tv_sec - ns_start.tv_sec)) * <uint64_t>1000000000
-                + <uint64_t>(ns_end.tv_nsec - ns_start.tv_nsec)
-            )
-            scan.calls += 1
-            if cxm.get() == NULL:
-                break
-            if ctx.is_terminated():
-                break
-            err.code = 0
-            err.msg = NULL
-            with nogil:
-                chain_head.push(cxm, &err)
-            if err.code != 0:
-                _exc = chain_head._take_exc()
-                raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-            if has_exit:
-                while exit_node.has_pending():
-                    out = exit_node.pop_pending()
-                    if not sink.put(out):
-                        return  # consumer abandoned (LIMIT / early close)
-            if ctx.is_terminated():
-                break
-
-        if ctx.is_terminated():
-            if has_exit:
-                while exit_node.has_pending():
-                    out = exit_node.pop_pending()
-                    if not sink.put(out):
-                        return
-            if finish:
-                sink.finish()
-            return
-
-        # Normal exhaustion: flush the chain with EOS so breakers emit their finals.
-        cxm = shared_ptr[CxxMorsel](cxx_morsel_new_eos())
-        err.code = 0
-        err.msg = NULL
-        with nogil:
-            chain_head.push(cxm, &err)
-        if err.code != 0:
-            _exc = chain_head._take_exc()
-            raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-        if has_exit:
-            while exit_node.has_pending():
-                out = exit_node.pop_pending()
-                if not sink.put(out):
-                    return
-        if finish:
-            sink.finish()
-    finally:
-        scan.close_source()
-
-
-cdef inline shared_ptr[CxxMorsel] _carrier_from_py(object morsel):
-    """Encode a Python Morsel / EOS sentinel as the C++ carrier. A NULL
-    shared_ptr means `morsel was None` (nothing to push)."""
-    cdef shared_ptr[CxxMorsel] cxm
-    if morsel is _EOS_SENTINEL:
-        cxm = shared_ptr[CxxMorsel](cxx_morsel_new_eos())
-    elif morsel is not None:
-        cxm = morsel_to_cxx(<Morsel>morsel)
-    return cxm
 
 
 cdef class NativeFanoutHandle:
@@ -1777,26 +1230,6 @@ cdef class NativeFanoutHandle:
         if self._args != NULL:
             free(self._args)
             self._args = NULL
-
-
-cpdef void push_one(BasePlanNode head, object morsel) except *:
-    """Python-callable driver: push one Morsel (or EOS sentinel) into a chain
-    head over the C++ carrier. The sanctioned Morsel→chain entry for Python
-    drivers other than drive_scan — the M4 parallel engine's worker threads and
-    direct-push unit tests. Encodes under the GIL, pushes with the GIL released,
-    and re-raises any stashed pipeline exception at this boundary."""
-    cdef shared_ptr[CxxMorsel] cxm = _carrier_from_py(morsel)
-    cdef ErrCtx err
-    cdef object _exc
-    if cxm.get() == NULL:
-        return
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        head.push(cxm, &err)
-    if err.code != 0:
-        _exc = head._take_exc()
-        raise _exc if _exc is not None else RuntimeError("pipeline push failed")
 
 
 # =====================================================================================

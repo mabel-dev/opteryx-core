@@ -782,37 +782,6 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
     ),
-    Extension(
-        "opteryx.compiled.structures.carchar_set",
-        sources=[
-            "opteryx/compiled/structures/carchar_set.pyx",
-            "draken/simd/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        depends=[
-            "third_party/mabel/carchar/carchar_set.hpp",
-            "third_party/mabel/carchar/carchar_common.hpp",
-            "third_party/mabel/carchar/carchar_simd.hpp",
-        ],
-    ),
-    Extension(
-        "opteryx.compiled.structures.parvi_set",
-        sources=[
-            "opteryx/compiled/structures/parvi_set.pyx",
-            "draken/simd/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        depends=[
-            "third_party/mabel/parvi/parvi.hpp",
-            "third_party/mabel/carchar/carchar_index.hpp",
-            "third_party/mabel/carchar/carchar_common.hpp",
-            "third_party/mabel/carchar/carchar_simd.hpp",
-        ],
-    ),
     # Expression nodes with fixed, declared, enforced attributes (one class per
     # expression NodeType), each a view of its row in the query's native
     # expression arena (src/cpp/planner/expr_arena.hpp).

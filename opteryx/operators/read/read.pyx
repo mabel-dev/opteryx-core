@@ -144,9 +144,7 @@ cdef class ReaderNode(BasePlanNode):
 
     def sensors(self):
         """Reader-specific details, merged onto the base counters (calls,
-        execution_time, self_time, records/bytes) so scans report timing too —
-        the scan's execution_time is populated by drive_scan timing
-        next_morsel()."""
+        execution_time, self_time, records/bytes)."""
         base = BasePlanNode.sensors(self)
         base["dataset"] = self.dataset
         base["alias"] = self.alias

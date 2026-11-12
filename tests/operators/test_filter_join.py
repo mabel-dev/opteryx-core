@@ -391,63 +391,6 @@ def test_except_two_column_full_right_empty():
 
 
 # ---------------------------------------------------------------------------
-# 6. Low-level CarcharSet batch probe API
-# ---------------------------------------------------------------------------
-
-def test_carchar_probe_found_32():
-    """probe_found_32 returns indices of hashes found in the set."""
-    from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-    from array import array
-
-    s = CarcharSetWrapper()
-    keys = array("Q", [10, 20, 30, 40, 50])
-    s.insert_many(keys)
-
-    # Query: [10, 99, 30, 99, 50] → found at positions 0, 2, 4
-    query = array("Q", [10, 99, 30, 99, 50])
-    result = s.probe_found(query)
-    assert list(result) == [0, 2, 4]
-
-
-def test_carchar_probe_not_found_32():
-    """probe_not_found_32 returns indices of hashes NOT in the set."""
-    from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-    from array import array
-
-    s = CarcharSetWrapper()
-    keys = array("Q", [10, 20, 30])
-    s.insert_many(keys)
-
-    # Query: [10, 99, 30, 88] → not-found at positions 1, 3
-    query = array("Q", [10, 99, 30, 88])
-    result = s.probe_not_found(query)
-    assert list(result) == [1, 3]
-
-
-def test_carchar_probe_empty_set():
-    """Probing an empty set: found returns [], not_found returns all indices."""
-    from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-    from array import array
-
-    s = CarcharSetWrapper()
-    query = array("Q", [1, 2, 3])
-    assert list(s.probe_found(query)) == []
-    assert list(s.probe_not_found(query)) == [0, 1, 2]
-
-
-def test_carchar_probe_found_empty_query():
-    """Empty query returns empty results for both probes."""
-    from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-    from array import array
-
-    s = CarcharSetWrapper()
-    s.add(42)
-    empty = array("Q")
-    assert list(s.probe_found(empty)) == []
-    assert list(s.probe_not_found(empty)) == []
-
-
-# ---------------------------------------------------------------------------
 # 7. EXISTS / NOT EXISTS subquery rewrites
 # ---------------------------------------------------------------------------
 
@@ -607,10 +550,6 @@ if __name__ == "__main__":
         test_exists_empty_inner_returns_nothing,
         test_not_exists_full_inner_returns_nothing,
         test_uncorrelated_exists_raises,
-        test_carchar_probe_found_32,
-        test_carchar_probe_not_found_32,
-        test_carchar_probe_empty_set,
-        test_carchar_probe_found_empty_query,
     ]
 
     passed = failed = 0

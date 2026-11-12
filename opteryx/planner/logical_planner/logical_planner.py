@@ -6773,13 +6773,22 @@ def plan_insert(statement, *, plan_context, **kwargs):
 
         values_id = plan.add_node(values_step)
 
+        # An Exit over the VALUES rows, as the SELECT source has: the sub-plan below
+        # the Insert is then Exit-headed and runs on the native engine like any other
+        # (execute_native takes nothing else). visit_insert rebinds the feeder to the
+        # target's columns and rebinds this Exit's columns with it.
+        exit_step = ExitStep()
+        exit_step.columns = [Wildcard(arena=plan_context.expressions)]
+        exit_id = plan.add_node(exit_step)
+        plan.add_edge(values_id, exit_id)
+
         insert_step = InsertStep()
         insert_step.relation_name = relation_name
         insert_step.values_feeder = values_step
-        insert_step.source_tail_id = None
+        insert_step.source_tail_id = exit_id
         insert_step.explicit_columns = explicit_columns_tuple
         insert_id = plan.add_node(insert_step)
-        plan.add_edge(values_id, insert_id)
+        plan.add_edge(exit_id, insert_id)
     else:
         # SELECT source — plan the sub-query and keep its Exit node (it already
         # carries the correct final_columns/final_names from schema binding),

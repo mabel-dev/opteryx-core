@@ -18,7 +18,6 @@ from .catalog import OperatorCategory, get_registry
 from ._operators import (
     BasePlanNode,
     PhysicalStep,
-    PipelineContext,
 )
 from .read import ReaderNode
 from .postgres_read import PostgresReadNode
@@ -26,7 +25,6 @@ from .postgres_read import PostgresReadNode
 __all__ = [
     "BasePlanNode",
     "PhysicalStep",
-    "PipelineContext",
     "OperatorCategory",
     "get_registry",
     "ReaderNode",

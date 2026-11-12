@@ -2824,6 +2824,24 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             columns=[c.schema_column for c in columns],
         )
         context.schemas[target_relation_name] = schema
+        # The Exit above the feeder was bound (post-order, before this node) to the
+        # placeholder columns just replaced: give it the same columns, in the shape
+        # visit_exit produces, so it selects what the feeder now emits.
+        if self.graph is None or node.source_tail_id is None:
+            raise InvalidInternalStateError(
+                "visit_insert: VALUES path requires graph and source_tail_id"
+            )
+        self.graph[node.source_tail_id].columns = [
+            LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=col.name,
+                source=None,
+                alias=col.name,
+                schema_column=col,
+                arena=context.plan_context.expressions,
+            )
+            for col in bound_target.columns
+        ]
 
     return node, context
 
