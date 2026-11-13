@@ -239,8 +239,10 @@ _QUERY_BODY = re.compile(rf"(?P<quoted>{_QUOTED_SPAN})|\b(?:SELECT|WITH)\b", re.
 
 # Whitespace and comments before the statement's first keyword - the parser tokenises
 # comments itself, so a client tagging every statement (dbt's `/* {"app": "dbt"} */`)
-# must still reach the anchored rewrites below.
-_LEADING_TRIVIA = r"(?:\s+|--[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*"
+# must still reach the anchored rewrites below. ONE whitespace char per repetition, never
+# `\s+`: `(\s+)*` can split a run of n spaces 2^n ways, and every non-matching statement
+# tries them all while holding the GIL (2026-11-13: dbt's 33 leading spaces hung jobs).
+_LEADING_TRIVIA = r"(?:\s|--[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*"
 _CREATE_COLLECTION = re.compile(rf"^({_LEADING_TRIVIA}CREATE\s+)COLLECTION\b", re.IGNORECASE)
 _DROP_COLLECTION = re.compile(rf"^({_LEADING_TRIVIA}DROP\s+)COLLECTION\b", re.IGNORECASE)
 # `ALTER WORKSPACE <ws> SET|DROP SECURE ...` is NOT rewritten: it has no ALTER
