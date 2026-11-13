@@ -104,7 +104,15 @@ _CASE_BLEND_FAMILIES = (
     frozenset((LogicalCategory.BOOLEAN,)),
     frozenset((LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY)),
     frozenset((LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)),
-    frozenset((LogicalCategory.DATE, LogicalCategory.TIME, LogicalCategory.TIMESTAMP)),
+    # Each temporal category blends only with itself. As ONE family, a DATE branch
+    # beside a TIMESTAMP one resolved to a string result type and the literal
+    # branches were stringified from their native values — `'20770'` (days) and
+    # `'2209248000000000'` (microseconds) for a date and a timestamp. IIF and
+    # COALESCE already refuse the mix; TIMESTAMPs at different units still blend,
+    # through the rescale cast below.
+    frozenset((LogicalCategory.DATE,)),
+    frozenset((LogicalCategory.TIME,)),
+    frozenset((LogicalCategory.TIMESTAMP,)),
     # UUID blends only with UUID: 16 fixed bytes (draken_type_fixed_itemsize), so
     # draken_if_then_else carries it like any fixed-width scalar.
     frozenset((LogicalCategory.UUID,)),
@@ -171,7 +179,7 @@ def _check_case_branches_compatible(typed_branches, case_column) -> None:
                     f"CASE: {_describe_case_branch(node0)} is {ct0} but "
                     f"{_describe_case_branch(node_i)} is {ct_i} — CASE branches must "
                     "share a compatible type (all BOOLEAN, all string, all "
-                    "numeric/DECIMAL, or all DATE/TIME/TIMESTAMP). Use CAST to align "
+                    "numeric/DECIMAL, all DATE, all TIME, or all TIMESTAMP). Use CAST to align "
                     f"the branches. (column '{case_column}')"
                 )
             )

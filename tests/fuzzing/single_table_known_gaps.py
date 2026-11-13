@@ -375,20 +375,10 @@ REGISTER: List[RegisteredDefect] = [
     # reached predicate positions) into the binder (planner/binder/
     # pattern_compile.py), so a pattern inside a projected CASE/IIF is compiled
     # like any other. The generator's RLIKE placement limits went with it.
-    RegisteredDefect(
-        id="temporal-function-call-inside-a-case-branch",
-        repro=(
-            "SELECT CASE WHEN id > 1 THEN TRUNC('2040-01-04'::DATE, 'month') "
-            "ELSE '2000-01-01'::TIMESTAMP END FROM testdata.planets"
-        ),
-        error_type="NotSupportedError",
-        signature="a function call in",
-        detail=(
-            "A temporal-returning function call in a CASE branch raises 'a function call in "
-            "`IF_THEN_ELSE(...)`, outside the c-native kernel set'. The same TRUNC outside the "
-            "CASE runs, and numeric (ABS) and string (UPPER) calls inside the same CASE run."
-        ),
-    ),
+    # `temporal-function-call-inside-a-case-branch` was registered here. It no
+    # longer reproduces (found 2026-11-13: `CASE WHEN id > 1 THEN TRUNC(d, 'month')
+    # ELSE <timestamp> END` runs and answers). The generator's restriction of
+    # temporal CASE branches to columns and literals went with it.
     RegisteredDefect(
         id="all-op-not-eq-has-no-native-kernel",
         repro=(
@@ -471,15 +461,18 @@ REGISTER: List[RegisteredDefect] = [
         repro=(
             "SELECT TIME_BUCKET(-125533.0000, 'week', '2021-02-03'::DATE) FROM testdata.planets"
         ),
-        error_type="TypeError",
-        signature="Failed to extract integer scalar from constant vector",
+        error_type="NotSupportedError",
+        signature="a function call in `TIME_BUCKET(",
         detail=(
-            "A raw Python TypeError naming an internal operation ('extract integer scalar from "
-            "constant vector') where a SQL error belongs. THE CATALOG HALF OF THIS IS FIXED: "
-            "TIME_BUCKET's `magnitude` now declares `minimum: 1` and `excludes: [DECIMAL]`, so "
-            "the constraint is stated and the fuzzer no longer emits a call that violates it. "
-            "What survives is the diagnostic: a caller who writes this by hand still gets an "
-            "internal exception instead of a message naming the argument."
+            "A magnitude below 1 is refused with the generic 'a function call in "
+            "`TIME_BUCKET(...)`, outside the c-native kernel set, is not supported', which "
+            "names neither the argument nor its bound. (Until folding became native-only this "
+            "was a raw Python TypeError, 'Failed to extract integer scalar from constant "
+            "vector'.) THE CATALOG HALF OF THIS IS FIXED: TIME_BUCKET's `magnitude` declares "
+            "`minimum: 1` and `excludes: [DECIMAL]`, so the constraint is stated and the fuzzer "
+            "no longer emits a call that violates it. What survives is the diagnostic: a caller "
+            "who writes this by hand is told the function is unsupported, not that the "
+            "magnitude is out of range."
         ),
     ),
     RegisteredDefect(
@@ -623,12 +616,15 @@ REGISTER: List[RegisteredDefect] = [
         # The replacement is the one value its domain allows ('\\1'): any other is
         # refused first, by the parameter's enforced domain, and would hide this.
         repro="SELECT REGEXP_REPLACE('theta', 'x', '\\1') FROM testdata.planets",
-        error_type="UnsupportedSyntaxError",
-        signature="REGEXP_REPLACE is only supported natively",
+        error_type="NotSupportedError",
+        signature="a function call in `REGEXP_REPLACE(",
         detail=(
-            "REGEXP_REPLACE is implemented only 'as whole-match capture extraction'. "
+            "REGEXP_REPLACE is implemented only as whole-match capture extraction. "
             "reference/function_signatures.json declares the general three-argument form with no "
-            "such restriction, so the catalog overstates what the engine does."
+            "such restriction, so the catalog overstates what the engine does. Any other shape is "
+            "refused with the generic 'a function call in `REGEXP_REPLACE(...)`, outside the "
+            "c-native kernel set, is not supported' (it used to be an UnsupportedSyntaxError "
+            "saying which shape IS supported)."
         ),
     ),
     # `cast-binary-to-varchar-yields-undecodable-text` was registered here. It is

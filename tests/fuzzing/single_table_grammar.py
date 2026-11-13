@@ -1797,13 +1797,6 @@ class Generator:
             return "'" + self.rng.choice(("%Y-%m-%d", "%Y", "%H:%M:%S")) + "'"
         return self.literal(ty)
 
-    def _temporal_branch(self, ty: Ty) -> Atom:
-        """A temporal CASE branch: a column or a literal, never a function call."""
-        columns = self.relation.of(ty)
-        if columns and self.rng.random() < 0.7:
-            return Atom(self.rng.choice(columns).quoted, ty)
-        return self.literal_atom(ty)
-
     def _cast(self, ty: Ty, depth: int) -> Optional[Expr]:
         rng = self.rng
         sources = [source for source, targets in CAST_TARGETS.items() if _cast_yields(targets, ty)]
@@ -1970,17 +1963,8 @@ class Generator:
         if not self.can_produce(Ty.BOOLEAN):
             return None
         condition = self.predicate(depth + 1)
-        # A temporal-returning FUNCTION CALL in a CASE branch has no native
-        # implementation ("a function call in `IF_THEN_ELSE(...)`"), though the
-        # same call outside a CASE is fine and numeric/string calls inside one
-        # are fine — see
-        # single_table_known_gaps/temporal-function-call-inside-a-case-branch.
-        if ty in TEMPORAL:
-            then = Expr(self._temporal_branch(ty))
-            otherwise = Expr(self._temporal_branch(ty))
-        else:
-            then = self.expression(ty, depth + 1)
-            otherwise = self.expression(ty, depth + 1)
+        then = self.expression(ty, depth + 1)
+        otherwise = self.expression(ty, depth + 1)
         self.tags.add("case")
         return Expr(
             Delimited(

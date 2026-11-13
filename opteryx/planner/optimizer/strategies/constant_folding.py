@@ -57,6 +57,7 @@ from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.types.literal_values import native_literal_value
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .redundant_cast import _eliminate_redundant_casts
 from opteryx.compiled.structures.expressions import Nested
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import Function
@@ -655,7 +656,11 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         if exact is not None:
             return exact
 
-        bc = build_bytecode(lower(root))
+        # A CAST to its operand's own type has no kernel — RedundantCastElimination
+        # removes it, but runs after this pass, so a constant one (`CAST(ABS(1.5) AS
+        # FLOAT)`) reached the evaluator and was refused. Evaluate the tree without
+        # them; `root` still names and types the folded literal.
+        bc = build_bytecode(lower(_eliminate_redundant_casts(root, telemetry, value_context=True)))
         # Folding runs the expression on the native evaluator, nothing else. A tree it
         # cannot run is left in the plan for the engine, which runs it natively or
         # refuses it — folding is never a second way for a query to be answered.
