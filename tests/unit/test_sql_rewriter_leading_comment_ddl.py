@@ -39,6 +39,23 @@ def test_comment_mentioning_collection_is_not_rewritten():
     assert str(do_sql_rewrite(sql)) == sql
 
 
+@pytest.mark.parametrize(
+    "lead",
+    (
+        " " * 5000,  # dbt's delete+insert: 33 leading spaces hung the jobs instance
+        "-- back compat for old kwarg name\n" + "  \n" * 2000,  # dbt's merge preamble
+    ),
+)
+def test_long_leading_trivia_is_linear(lead):
+    import time
+
+    start = time.monotonic()
+    assert str(do_sql_rewrite(lead + "delete from t where x = 1")) == lead + "delete from t where x = 1"
+    assert str(do_sql_rewrite(lead + "DROP WORKSPACE ws")) == lead + "DROP FUNCTION ws"
+    # The nested `(\s+)*` took 2^n steps: 26 spaces were already ~2 s.
+    assert time.monotonic() - start < 1.0
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
