@@ -290,9 +290,22 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
     # is unknown until the claim builder runs, so the fold above writes both
     # halves. A parquet scan's plan-time pruning is already stamped into the facts
     # by `_compile_scan` (splan.pruned_row_group_count is known before the run),
-    # so here we only ADD the runtime filter's marginal share and move that many
-    # row groups from the read column to the pruned column.
+    # so the loops below only ADD each runtime mechanism's marginal share to it.
+    #
+    # `row_groups_read` / `parquet_rows_before_filter` are what the scan's
+    # pipeline actually DECODED — not planned minus pruned. A LIMIT that halts
+    # the pipeline, or a cancel, leaves planned row groups neither pruned nor
+    # read; `row_groups_planned - row_groups_pruned_{runtime,topn,bloom} -
+    # row_groups_read` is that unread remainder. The runtime pruning counts are
+    # themselves walk-time: a unit the scan never walked to before it stopped is
+    # not counted as pruned either.
     parquet_plans = getattr(nplan, "scan_plans", None)
+    for plan in parquet_plans or []:
+        entry = facts.get(plan.scan_identity)
+        if entry is None:
+            continue
+        entry["row_groups_read"] = plan.row_groups_decoded
+        entry["parquet_rows_before_filter"] = plan.rows_decoded
     for plan in parquet_plans or []:
         identity = getattr(plan, "scan_identity", None)
         if identity is None:
@@ -306,9 +319,6 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
             continue
         entry["row_groups_pruned_runtime"] = runtime_pruned
         entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + runtime_pruned
-        entry["row_groups_read"] = max(
-            0, entry.get("row_groups_read", 0) - runtime_pruned
-        )
 
     # The Top-N runtime boundary's share: row groups its consumer walked past
     # without submitting, counted AFTER plan-time and runtime-join pruning, so it is
@@ -321,7 +331,6 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         skipped = nplan.topn_boundary_skipped(idx)
         entry["row_groups_pruned_topn"] = skipped
         entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + skipped
-        entry["row_groups_read"] = max(0, entry.get("row_groups_read", 0) - skipped)
 
     # The remote bloom round's share: units the native scan walked past because a
     # landed bloom proved them empty — counted after plan-time pruning, so it is
@@ -336,7 +345,6 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
             continue
         entry["row_groups_pruned_bloom"] = bloom_pruned
         entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + bloom_pruned
-        entry["row_groups_read"] = max(0, entry.get("row_groups_read", 0) - bloom_pruned)
 
 
 def _and_conjuncts(node):
@@ -5008,11 +5016,15 @@ class _Compiler:
             from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
             self.scan_sources[scan.identity] = "LatmatScanSource"
             manifest = scan.manifest
+            # `row_groups_read` / `parquet_rows_before_filter` are RUN-TIME and are
+            # written by `_fold_skene_scan_facts` from pass 1's pipeline; the plan's
+            # own counts are kept under explicitly plan-time names.
+            p1_plan.scan_identity = scan.identity
             self.scan_facts[scan.identity] = {
                 "files_read": manifest.get_file_count() if manifest is not None else 0,
-                "row_groups_read": p1_plan.row_group_count,
+                "row_groups_planned": p1_plan.row_group_count,
                 "row_groups_pruned": p1_plan.pruned_row_group_count,
-                "parquet_rows_before_filter": p1_plan.surviving_row_count,
+                "parquet_rows_planned": p1_plan.surviving_row_count,
                 # Both passes' column sets — what the scan actually decodes, though
                 # pass 2's columns are only decoded for the top-n candidate rows.
                 "columns_read": len(out_from_p1),
@@ -5044,14 +5056,14 @@ class _Compiler:
             reloc = self._relocated_scan_filters.get(scan.identity)
             self.scan_facts[scan.identity] = {
                 "files_read": manifest.get_file_count() if manifest is not None else 0,
-                "row_groups_read": splan.row_group_count,
+                # PLAN-TIME: row groups the plan scheduled after plan-time pruning,
+                # and their rows. The RUN-TIME `row_groups_read` and
+                # `parquet_rows_before_filter` (what the scan actually decoded) are
+                # written by `_fold_skene_scan_facts` from the scan's pipeline.
+                "row_groups_planned": splan.row_group_count,
                 # WP-02: pushed-predicate min/max + bloom pruning at plan time.
                 "row_groups_pruned": splan.pruned_row_group_count,
-                # Rows fed into this scan, i.e. across the surviving (non-pruned)
-                # row groups only — plan-time, before any relocated residual
-                # filter runs downstream (that filter's own records_in/out carry
-                # its selectivity; this scan node doesn't duplicate it).
-                "parquet_rows_before_filter": splan.surviving_row_count,
+                "parquet_rows_planned": splan.surviving_row_count,
                 # Read-set width (projected ∪ role-3 filter-only), not just the
                 # projection — that is what the native Source actually decodes.
                 "columns_read": len(reloc[1]) if reloc is not None else len(scan.columns),

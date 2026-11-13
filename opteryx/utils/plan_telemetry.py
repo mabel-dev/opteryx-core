@@ -475,6 +475,13 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                         node_stat["blobs_read"] = facts["files_read"]
                         node_stat["row_groups_read"] = facts["row_groups_read"]
                         node_stat["row_groups_pruned"] = facts["row_groups_pruned"]
+                        # PLAN-TIME counts (native parquet scans), kept apart from the
+                        # run-time row_groups_read / parquet_rows_before_filter: the
+                        # row groups the plan scheduled after plan-time pruning, and
+                        # their rows. Absent for scans that do not report them.
+                        for key in ("row_groups_planned", "parquet_rows_planned"):
+                            if key in facts:
+                                node_stat[key] = facts[key]
                         # RUNTIME MIN/MAX JOIN FILTER: present only when a bound
                         # was wired to THIS scan, and then only its marginal
                         # share of `row_groups_pruned` (the plan-time correlated
@@ -670,9 +677,9 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
             # the actual post-pruning, pre-filter count a reader would expect
             # on the left of a TABLE SCAN. Two better numbers already exist and
             # are preferred here when present:
-            #   records_in ← parquet_rows_before_filter (post row-group-pruning,
-            #     pre reader-side-filter row count — 0/absent when nothing was
-            #     pushed, i.e. in genuinely equals out)
+            #   records_in ← parquet_rows_before_filter (rows of the row groups
+            #     the scan actually read, pre reader-side-filter — run time for
+            #     the native parquet scans; 0/absent when nothing was read)
             #   bytes_in   ← billing_bytes_by_scan[node.uuid] (the SAME
             #     dense-logical bytes the DATA_PROCESSED_BYTES meter bills for
             #     this scan, plan-time — not the generic rows*columns*8

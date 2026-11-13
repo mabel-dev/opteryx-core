@@ -240,5 +240,48 @@ def test_local_scan_plans_no_remote_probe(served):
     assert 1 <= reading["row_groups_read"] <= 12, reading
 
 
+def test_scan_counts_are_run_time_truth_on_a_full_scan(served):
+    """`row_groups_read` / `parquet_rows_before_filter` are what the pipeline DECODED.
+    A scan that runs to the end decodes every planned row group, so run time and
+    the explicitly plan-time `row_groups_planned` / `parquet_rows_planned` agree."""
+    rows, diag, reading = _scan_diag("SELECT k, p FROM rb_bare.bare WHERE k = " + str(TARGET))
+    assert rows == [(TARGET, TARGET_ROW * 7)]
+    assert reading["row_groups_planned"] == N_RG, reading
+    assert reading["parquet_rows_planned"] == N, reading
+    assert reading["row_groups_read"] == N_RG, reading
+    assert reading["parquet_rows_before_filter"] == N, reading
+    assert reading["records_in"] == N, reading
+    assert diag["row_groups_decoded"] == N_RG, diag
+    assert diag["rows_decoded"] == N, diag
+
+
+def test_scan_counts_are_run_time_truth_when_a_limit_halts_the_scan(served):
+    """A LIMIT over a filtered scan stays above the scan (relocated, not pushed),
+    halts the pipeline, and the rest of the planned row groups are never decoded.
+    The scan's counts report the row groups it actually decoded, not the plan's 400
+    (the plan-time number previously sat under `row_groups_read`, and `records_in`
+    read as the whole table)."""
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for m in session.execute_to_morsels("SELECT k FROM rb_bare.bare WHERE c = 0 LIMIT 5"):
+        rows.extend(m.column("k").to_pylist())
+    tel = session.telemetry
+    (diag,) = tel.get("io_scan_diagnostics")
+    (reading,) = [r for r in tel.get("operations", {}).values() if "row_groups_read" in r]
+    session.close()
+    assert len(rows) == 5
+    assert tel.get("optimization_limit_pushdown") is None
+    assert tel.get("optimization_limit_relocated") == 1
+    assert reading["row_groups_planned"] == N_RG, reading
+    assert 1 <= reading["row_groups_read"] < N_RG // 2, reading
+    assert reading["row_groups_read"] == diag["row_groups_decoded"], (reading, diag)
+    assert reading["parquet_rows_before_filter"] == reading["row_groups_read"] * R, reading
+    assert reading["records_in"] == reading["parquet_rows_before_filter"], reading
+    # Egress is counted at transfer, so bytes bought and then discarded are inside it.
+    assert diag["prefetch_discarded_bytes"] <= diag["bytes_fetched"], diag
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

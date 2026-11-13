@@ -2060,6 +2060,9 @@ class ParquetIOPipeline {
         std::vector<std::string> column_names;
         std::vector<ColumnStats> column_stats;  // absolute file offsets
         std::vector<uint8_t> row_mask;           // empty = no mask (decode all rows)
+        // The row group's footer row count, -1 when the submitter did not pass it
+        // (only the native Sources do). Feeds rows_decoded_ only.
+        int64_t num_rows = -1;
         // PageIndex page pruning: computed ONCE per item by whichever stage
         // reaches it first (the fetch-ahead stage, or decode on the coupled
         // path) and carried so the other stage reuses the identical plan.
@@ -2250,6 +2253,13 @@ class ParquetIOPipeline {
     // egress for rows nobody read — surfaced so a wrong depth policy shows up
     // in telemetry rather than on the bill.
     std::atomic<uint64_t> prefetch_discarded_bytes_{0};
+    // Row groups whose decode actually ran (past the cancel bail at the top of
+    // decode_row_group), and the footer rows of those that carried a count. The
+    // run-time truth of "what this scan read": a submitted row group that a cancel
+    // (LIMIT met, cursor dropped) skipped is in cancelled_skips_, not here; one
+    // decoded and then dropped at the enqueue guard IS here — the work was done.
+    std::atomic<uint64_t> row_groups_decoded_{0};
+    std::atomic<uint64_t> rows_decoded_{0};
 
     // docs/EXECUTION_TRACING_DESIGN.md: trace_node_id_ is the plan-node
     // identity this pipeline's spans carry, set once via set_trace_node_id()
@@ -2515,13 +2525,16 @@ class ParquetIOPipeline {
     // first of the handoff copies (serialize → pool commit → deserialize).
     // Only the pool path serializes, so this stays 0 for a direct-path scan
     // (WP-6b); it measures a handoff strategy, NOT the scan's IO volume.
-    // bytes_fetched_: the scan's true IO volume — compressed bytes actually
-    // pulled from storage (HTTP range GET / local pread), summed across every
-    // decoded row group. Unlike the engine's rows*cols*8 bytes_in/bytes_out
-    // estimate (src/cpp/engine/executor.hpp telem_nbytes), this is measured at
-    // the point of transfer and so is unaffected by downstream filtering or
-    // LIMIT truncation. Both scan paths (native + trampoline) route their row
-    // groups through decode_one_row_group, so both accrue here.
+    // bytes_fetched_: the scan's true IO volume — bytes actually pulled from
+    // storage, counted at the point of TRANSFER: a remote fetch block's coalesced
+    // range GETs when they land (fetch_block — so bytes the fetch-ahead stage bought
+    // and a cancelled decode then discarded are IN here, and prefetch_discarded_bytes_
+    // is a subset of it), the remote bloom round's GETs (fetch_ranges_async), and a
+    // local row group's chunk reads in decode_row_group (local reads happen there).
+    // PageIndex region reads are counted apart, in page_index_bytes_fetched_.
+    // Unlike the engine's rows*cols*8 bytes_in/bytes_out estimate
+    // (src/cpp/engine/executor.hpp telem_nbytes), it is unaffected by downstream
+    // filtering or LIMIT truncation.
     static constexpr int kHttpLatBuckets = 9;
     static constexpr uint64_t kHttpLatBoundsMs[kHttpLatBuckets - 1] =
         {1, 10, 50, 100, 250, 500, 1000, 5000};
@@ -3233,8 +3246,15 @@ class ParquetIOPipeline {
             if (!blk.plan.groups.empty()) {
                 blk.buffers = fetch_remote_groups(blk.path, blk.plan, &blk.fetch_ns);
                 int64_t held = 0;
-                for (const auto& b : blk.buffers) held += static_cast<int64_t>(b.capacity());
+                uint64_t transferred = 0;
+                for (const auto& b : blk.buffers) {
+                    held += static_cast<int64_t>(b.capacity());
+                    transferred += b.size();
+                }
                 blk.buffers_charge.set(held);
+                // Egress is counted here, once per block, whether or not any member
+                // is ever decoded (decode does not add a remote member's share).
+                bytes_fetched_.fetch_add(transferred, std::memory_order_relaxed);
             }
         } catch (...) {
             blk.buffers.clear();
@@ -3456,6 +3476,10 @@ class ParquetIOPipeline {
         const uint64_t _tr_t_dequeue =
             item.issued_ns != 0 ? draken_trace_now_ns() : 0;
 
+        row_groups_decoded_.fetch_add(1, std::memory_order_relaxed);
+        if (item.num_rows >= 0)
+            rows_decoded_.fetch_add(static_cast<uint64_t>(item.num_rows), std::memory_order_relaxed);
+
         MorselRef result;
         result.path = item.path;
         result.rg_idx = item.rg_idx;
@@ -3468,6 +3492,9 @@ class ParquetIOPipeline {
         std::atomic<uint64_t> total_decode_ns{0};
         // Shared by concurrent decode_col calls under the column fan-out.
         std::atomic<int64_t> fetched_acc{0};
+        // The remote share of fetched_acc: already counted on bytes_fetched_ by
+        // fetch_block at transfer, so kept out of the pipeline accrual below.
+        std::atomic<int64_t> remote_fetched_acc{0};
         std::mutex res_mu;
 
         // For local files, slice this row group's column chunks out of the
@@ -4069,8 +4096,10 @@ class ParquetIOPipeline {
                     // A pinned cache hit was never fetched: no bytes, decoded from the entry.
                     const uint8_t* raw_data = cc_pinned != nullptr ? nullptr : col_ptr[i];
                     const size_t   raw_size = cc_pinned != nullptr ? 0 : col_len[i];
-                    if (cc_pinned == nullptr)
+                    if (cc_pinned == nullptr) {
                         fetched_acc += col_fetched[i];   // what was actually transferred
+                        remote_fetched_acc += col_fetched[i];
+                    }
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(decoded,
                         raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only, &cc_req);
@@ -4635,12 +4664,13 @@ class ParquetIOPipeline {
         result.read_ns = total_read_ns.load();
         result.decode_ns = total_decode_ns.load();
         result.bytes_fetched += fetched_acc.load();
-        // Accrue this row group's transferred bytes onto the pipeline. Done here,
-        // not by the consumer, because the native scan Source drops MorselRef's
-        // telemetry fields on the floor — accumulating at the producer keeps both
-        // scan paths honest with one counter.
-        if (result.bytes_fetched > 0)
-            bytes_fetched_.fetch_add(static_cast<uint64_t>(result.bytes_fetched),
+        // Accrue this row group's LOCAL reads onto the pipeline (they happen here).
+        // Its remote share was counted at transfer by fetch_block. Done here, not by
+        // the consumer, because the native scan Source drops MorselRef's telemetry
+        // fields on the floor.
+        const int64_t local_fetched = fetched_acc.load() - remote_fetched_acc.load();
+        if (local_fetched > 0)
+            bytes_fetched_.fetch_add(static_cast<uint64_t>(local_fetched),
                                      std::memory_order_relaxed);
 
         // docs/EXECUTION_TRACING_DESIGN.md: reconstruct this row group's spans
@@ -5257,7 +5287,8 @@ class ParquetIOPipeline {
                       const std::vector<std::string>& column_names,
                       const std::vector<std::vector<ColumnStats>>& column_stats,
                       const std::vector<std::vector<uint8_t>>& row_masks = {},
-                      std::shared_ptr<const NestedSpec> nested = nullptr) {
+                      std::shared_ptr<const NestedSpec> nested = nullptr,
+                      const std::vector<int64_t>& num_rows = {}) {
         if (shutdown_) return;
         if (rg_idx.empty())
             throw std::invalid_argument("submit_block: a block needs at least one row group");
@@ -5265,6 +5296,8 @@ class ParquetIOPipeline {
             throw std::invalid_argument("submit_block: column_stats must be parallel to rg_idx");
         if (!row_masks.empty() && row_masks.size() != rg_idx.size())
             throw std::invalid_argument("submit_block: row_masks must be parallel to rg_idx");
+        if (!num_rows.empty() && num_rows.size() != rg_idx.size())
+            throw std::invalid_argument("submit_block: num_rows must be parallel to rg_idx");
         for (const auto& cs : column_stats) {
             if (cs.size() != column_names.size())
                 throw std::invalid_argument(
@@ -5290,6 +5323,7 @@ class ParquetIOPipeline {
             item.column_names = column_names;
             item.column_stats = column_stats[m];
             if (!row_masks.empty()) item.row_mask = row_masks[m];
+            if (!num_rows.empty()) item.num_rows = num_rows[m];
             item.nested = nested;
             item.est_decoded_bytes = sum_column_bytes(column_stats[m], false);
             item.est_compressed_bytes = sum_column_bytes(column_stats[m], true);
@@ -5591,11 +5625,14 @@ class ParquetIOPipeline {
     uint64_t ipc_bytes_serialized() const {
         return ipc_bytes_serialized_.load(std::memory_order_relaxed);
     }
-    // Compressed bytes read from storage across every row group this pipeline
-    // decoded. The scan's real IO volume; see bytes_fetched_ above.
+    // Bytes this pipeline transferred from storage, counted at transfer —
+    // decoded or not. The scan's real IO volume; see bytes_fetched_ above.
     uint64_t bytes_fetched() const {
         return bytes_fetched_.load(std::memory_order_relaxed);
     }
+    // Row groups whose decode ran, and their footer rows; see row_groups_decoded_.
+    uint64_t row_groups_decoded() const { return row_groups_decoded_.load(std::memory_order_relaxed); }
+    uint64_t rows_decoded() const { return rows_decoded_.load(std::memory_order_relaxed); }
     // This scan's range requests re-issued on transient failure.
     uint64_t http_retries() const { return http_retries_.load(std::memory_order_relaxed); }
 };

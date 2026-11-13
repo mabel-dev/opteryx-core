@@ -391,10 +391,21 @@ def test_early_abandonment_is_clean_and_discarded_bytes_are_reported():
     """Consume one row group with a deep fetch-ahead against a slow link, then
     abandon. The generator's finally cancels + closes without hanging, the rows
     already read are correct, and the bytes fetch-ahead bought for row groups
-    nobody read are reported (bounded by what was fetched at all). The exact
-    count is timing-dependent, so only the invariants are asserted."""
+    nobody read are reported. The exact count is timing-dependent, so only the
+    invariants are asserted.
+
+    `bytes_fetched` is counted at TRANSFER, so it holds the discarded bytes AND the
+    row group that was read: discarded + one row group <= fetched. (It used to be
+    accrued at decode, so the discarded bytes sat outside it and this failed in
+    prod, where fetch-ahead bought ~3x what was decoded.)"""
     with tempfile.TemporaryDirectory() as tmp:
         path, name = _write(tmp)
+        meta = pq.ParquetFile(path).metadata
+        smallest_rg = min(
+            sum(meta.row_group(g).column(c).total_compressed_size
+                for c in range(meta.num_columns))
+            for g in range(meta.num_row_groups)
+        )
         proc, port = _server(tmp, rtt_ms=20)
         try:
             url = f"http://127.0.0.1:{port}/{name}"
@@ -405,7 +416,8 @@ def test_early_abandonment_is_clean_and_discarded_bytes_are_reported():
     assert all(0 <= v < N for v in rows)
     assert diag["fetch_ahead_depth"] == 8
     assert diag["cancelled_skips"] >= 0
-    assert 0 <= diag["prefetch_discarded_bytes"] <= diag["bytes_fetched"]
+    assert 0 <= diag["prefetch_discarded_bytes"]
+    assert diag["prefetch_discarded_bytes"] + smallest_rg <= diag["bytes_fetched"], diag
 
 
 if __name__ == "__main__":

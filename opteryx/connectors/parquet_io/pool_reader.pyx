@@ -3683,6 +3683,26 @@ cdef class NativeScanPlan:
         return int(self.row_groups_pruned_bloom)
 
     @property
+    def row_groups_decoded(self):
+        """RUN-TIME: row groups this plan's pipeline actually decoded (a submitted
+        row group a cancel skipped is not counted). 0 for a plan with no pipeline
+        (answered at plan time). Read after the drain, before close_scan_plans."""
+        # A plan closed at plan time (answered from statistics) decoded nothing.
+        if self._closed or self.pipeline_ptr == NULL:
+            return 0
+        return int(self.pipeline_ptr.row_groups_decoded())
+
+    @property
+    def rows_decoded(self):
+        """RUN-TIME: footer rows of the row groups counted by `row_groups_decoded` —
+        the rows the scan read, before any in-scan filtering (page index, dictionary
+        skip, prefilter). Only the native Sources pass row counts to the pipeline."""
+        # A plan closed at plan time (answered from statistics) decoded nothing.
+        if self._closed or self.pipeline_ptr == NULL:
+            return 0
+        return int(self.pipeline_ptr.rows_decoded())
+
+    @property
     def runtime_pruned_row_groups(self):
         """Row groups the RUNTIME min/max join bound excluded beyond what plan-time
         pruning had already dropped, or None when no bound was wired for this scan.
@@ -3741,6 +3761,9 @@ cdef class NativeScanPlan:
             # bytes_in/bytes_out are a rows*cols*8 estimate of the morsel that
             # survived filtering and LIMIT, so they cannot report this.
             "bytes_fetched": self.pipeline_ptr.bytes_fetched(),
+            # What the scan actually decoded (run time; see row_groups_decoded).
+            "row_groups_decoded": self.pipeline_ptr.row_groups_decoded(),
+            "rows_decoded": self.pipeline_ptr.rows_decoded(),
             # Fetch-ahead: see CppIOPipeline.diagnostics() — same two counters, so
             # the native path can prove the knob bound and see the waste.
             "fetch_ahead_depth": self.pipeline_ptr.fetch_ahead_depth(),

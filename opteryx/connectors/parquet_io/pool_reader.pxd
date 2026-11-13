@@ -182,6 +182,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t worker_blocked_ns() nogil
         uint64_t ipc_bytes_serialized() nogil
         uint64_t bytes_fetched() nogil
+        uint64_t row_groups_decoded() nogil
+        uint64_t rows_decoded() nogil
         uint64_t http_retries() nogil
 
 
