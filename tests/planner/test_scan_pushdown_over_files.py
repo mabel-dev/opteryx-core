@@ -9,10 +9,11 @@ File-backed scans and the scan-absorbing pushdowns.
 Two things changed for parquet alongside the remote-SQL work and both need a
 regression here:
 
-  - a LIMIT may now be pushed onto a scan that already absorbed a predicate
-    (`supports_filtered_limit_pushdown`). The parquet reader decrements its
-    LIMIT against EMITTED rows, so the rows returned must all satisfy the
-    predicate and be exactly LIMIT many;
+  - a LIMIT over a scan that absorbed a predicate is NOT pushed into a file
+    scan (`FilesystemConnector.supports_filtered_limit_pushdown = False`: the
+    native Source's `row_limit` counts claimed rows, before the predicate). It
+    stays above the scan, and the rows returned must all satisfy the predicate
+    and be exactly LIMIT many;
 
   - `TopNScanPushdownStrategy` moved after ProjectFusion. Before, the Project a
     SELECT list leaves between the HeapSort and the Scan blocked it for every
@@ -65,15 +66,18 @@ def explain_text(sql):
     return "\n".join(parts)
 
 
-def test_filtered_limit_is_pushed_and_every_row_satisfies_the_predicate():
+def test_filtered_limit_stays_above_the_scan_and_every_row_satisfies_the_predicate():
     sql = f"SELECT tweet_id, followers FROM {TABLE} WHERE followers > 100 LIMIT 5"
     rows = run(sql)
     assert len(rows) == 5
     assert all(followers > 100 for _tweet_id, followers in rows)
     text = explain_text(sql)
-    assert "limit pushdown" in text
+    # Relocated above the scan, not absorbed into it. This used to assert
+    # "limit pushdown", which passed only because a relocation bumped that counter.
+    assert "limit relocated" in text
+    assert "limit pushdown" not in text
     assert "predicate pushdown into sc" in text
-    assert "Limit" not in text  # absorbed, not relocated
+    assert text.splitlines()[0].startswith("LIMIT 5")
 
 
 def test_filtered_limit_larger_than_the_match_count_returns_every_match():

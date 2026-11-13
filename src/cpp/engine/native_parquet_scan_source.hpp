@@ -1712,7 +1712,11 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             }
             nested = std::move(spec);
         }
-        pipeline->submit_block(path, rg_idxs, names, stats, masks, nested);
+        // Footer row counts, parallel to rg_idxs: the pipeline's rows_decoded tally.
+        std::vector<int64_t> rg_rows;
+        rg_rows.reserve(rg_idxs.size());
+        for (int rg : rg_idxs) rg_rows.push_back(fit->second->row_groups[static_cast<size_t>(rg)].num_rows);
+        pipeline->submit_block(path, rg_idxs, names, stats, masks, nested, rg_rows);
     }
 
     // Zero-projection scan — no column is read and no predicate is pushed (a

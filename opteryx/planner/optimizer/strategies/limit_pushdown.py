@@ -27,6 +27,11 @@ Order:
             barrier here, so the LIMIT the fusion reads is still above its sort).
     Declares: provides limits-pushed.
 
+Telemetry:
+    optimization_limit_pushdown  - the LIMIT reached a scan, which now enforces it.
+    optimization_limit_relocated - the LIMIT was placed directly above a barrier (or a
+                                   scan that refused it); the scan reads unbounded.
+
 Rewrite:
     SELECT a, b FROM t LIMIT 10
     ->
@@ -191,4 +196,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
         context.optimized_plan.insert_node_after(limit_node, context.node_id, nid=context.collected_nids[id(limit_node)])
         limit_node.columns = []
         context.limit_targets[id(limit_node)] = set(limit_node.all_relations or [])
-        self.telemetry.optimization_limit_pushdown += 1
+        # Its own counter: the LIMIT stays a plan node above a barrier (or a scan that
+        # refused it) - the scan is NOT capped. `optimization_limit_pushdown` counts
+        # only a LIMIT the scan took (`_apply_to_scan`).
+        self.telemetry.optimization_limit_relocated += 1

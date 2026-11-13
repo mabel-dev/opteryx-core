@@ -27,7 +27,10 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE NOT id != 4", "optimization_boolean_rewrite_inversion"),
         ("SELECT * FROM $planets WHERE id = 4 + 4", "optimization_constant_fold_expression"),
         ("SELECT * FROM $planets WHERE id * 0 = 1", "optimization_constant_fold_reduce"),
-        ("SELECT id ^ 1 = 1 FROM $planets LIMIT 10", "optimization_limit_pushdown"),
+        # $planets does not take a pushed LIMIT, so the Limit is parked above the scan:
+        # `_relocated`, not `_pushdown` (which counts only a LIMIT the scan took).
+        ("SELECT id ^ 1 = 1 FROM $planets LIMIT 10", "optimization_limit_relocated"),
+        ("SELECT name FROM testdata.astronauts LIMIT 3", "optimization_limit_pushdown"),
         # `_into_scan`, not the bare `_pushdown` counter: this predicate reaches the
         # Parquet reader and the Filter node disappears entirely. The bare counter
         # never sees that — it counts predicates placed as Filter nodes elsewhere in
