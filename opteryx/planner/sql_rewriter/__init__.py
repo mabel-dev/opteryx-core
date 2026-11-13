@@ -468,7 +468,8 @@ _AS_OF_VERSION = re.compile(
     r"|\bAS\s+OF\s+VERSION\b(?:\s+(?P<operand>'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_]*|\d+))?",
     re.IGNORECASE,
 )
-_STATEMENT_HEAD = re.compile(r"^\s*(?:\(|\s)*(?P<word>[A-Za-z_]+)")
+# No `\s*` before the group: `\s*(\s)*` splits a whitespace run n^2 ways on a miss.
+_STATEMENT_HEAD = re.compile(r"^(?:\(|\s)*(?P<word>[A-Za-z_]+)")
 
 
 def _reject_reversed_version_as_of(text: str) -> Tuple[str, List[Edit]]:

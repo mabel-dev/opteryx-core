@@ -56,6 +56,20 @@ def test_long_leading_trivia_is_linear(lead):
     assert time.monotonic() - start < 1.0
 
 
+def test_long_leading_whitespace_before_version_is_linear():
+    import time
+
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    # `_STATEMENT_HEAD` gates the AS OF VERSION check; `\s*(\s)*` made a miss quadratic.
+    miss = " " * 20000 + "1 VERSION"
+    start = time.monotonic()
+    assert str(do_sql_rewrite(miss)) == miss
+    assert time.monotonic() - start < 1.0
+    with pytest.raises(UnsupportedSyntaxError):
+        do_sql_rewrite(" ( SELECT * FROM t AS OF VERSION 3)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
