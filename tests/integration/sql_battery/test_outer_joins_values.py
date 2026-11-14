@@ -23,7 +23,7 @@ def test_left_join_with_values():
     """)
 
     actual = table.to_pydict()
-    expected = {'a.x': [1, 2, 3], 'b.y': [None, 2, 3]}
+    expected = {'x': [1, 2, 3], 'y': [None, 2, 3]}
     assert actual == expected, f"Expected {expected}, got {actual}"
 
 
@@ -37,7 +37,7 @@ def test_right_join_with_values():
     """)
 
     actual = table.to_pydict()
-    expected = {'a.x': [2, 3, None], 'b.y': [2, 3, 4]}
+    expected = {'x': [2, 3, None], 'y': [2, 3, 4]}
     assert actual == expected, f"Expected {expected}, got {actual}"
 
 
@@ -53,13 +53,13 @@ def test_full_outer_join_with_values():
     actual = table.to_pydict()
 
     # Should have: (1, None), (2, 2), (3, 3), (None, 4)
-    assert 1 in actual['a.x'], "Expected x=1 in result"
-    assert 4 in actual['b.y'], "Expected y=4 in result"
-    assert None in actual['a.x'], "Expected NULL in x column"
-    assert None in actual['b.y'], "Expected NULL in y column"
+    assert 1 in actual['x'], "Expected x=1 in result"
+    assert 4 in actual['y'], "Expected y=4 in result"
+    assert None in actual['x'], "Expected NULL in x column"
+    assert None in actual['y'], "Expected NULL in y column"
 
     # Verify we have exactly 4 rows (one for each unique value)
-    assert len(actual['a.x']) == 4, f"Expected 4 rows, got {len(actual['a.x'])}"
+    assert len(actual['x']) == 4, f"Expected 4 rows, got {len(actual['x'])}"
 
 
 def test_right_outer_join_distinct_with_nulls():
