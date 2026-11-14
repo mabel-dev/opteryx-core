@@ -19,8 +19,12 @@ repos:
       # pre-commit fail the commit if the output moved -- restage and commit
       # again. `language: system` is required: the generators import the
       # in-place compiled opteryx, which pre-commit's isolated venv does not
-      # have. Stale .so in, stale catalogs out -- `make c` before committing
-      # engine changes.
+      # have. The planner is the exception: the generator imports it from its .py
+      # sources (see dev/generate_reference.py), so OPERATOR_MAP is read from the
+      # code being committed and unbuilt planner edits - including unstaged ones
+      # pre-commit stashes - cannot fail the hook. Everything else is still read
+      # from the build: stale .so in, stale catalogs out -- `make c` before
+      # committing changes to the .pyx registrars.
       - id: regenerate-reference
         name: reference catalogs
         entry: python3.14 ./dev/generate_reference.py

@@ -508,9 +508,7 @@
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [],
-            "parquet_logical": [
-                "interval"
-            ],
+            "parquet_logical": [],
             "jsonl": []
         }
     },

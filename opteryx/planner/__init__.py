@@ -44,7 +44,13 @@ def _refuse_stale_compiled_planner() -> None:
     """The planner is compiled by Cython (setup.py) and Python loads a module's build
     over its .py, so a .py edited after the last build would silently not run.
     Refuse to import until rebuilt. Wheels ship no planner .py, so there it finds
-    nothing; a .py with no build beside it (data_processed.py) runs as Python."""
+    nothing; a .py with no build beside it (data_processed.py) runs as Python.
+
+    Skipped when the planner is itself running from its .py sources, which is what
+    dev/generate_reference.py does (OPTERYX_PLANNER_FROM_SOURCE): then no build is
+    in use, so its age cannot matter."""
+    if __file__.endswith(".py") and os.environ.get("OPTERYX_PLANNER_FROM_SOURCE") == "1":
+        return
     stale = []
     for directory, _subdirectories, names in os.walk(os.path.dirname(__file__)):
         for name in names:
