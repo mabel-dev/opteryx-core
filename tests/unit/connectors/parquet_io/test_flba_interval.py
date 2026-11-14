@@ -93,13 +93,17 @@ def test_engine_reads_interval_natively(fixture, request):
 
 def test_days_beyond_int64_microseconds_are_refused(tmp_path):
     """A uint32 day count past ~106.7 million days overflows the int64 microsecond
-    slot: both readers refuse it rather than wrap. (rugo's writer produces such a
-    value today from a negative sub-month interval.)"""
-    ts = "CAST('2026-01-01' AS TIMESTAMP)"
-    morsel = list(opteryx.session().execute_to_morsels(f"SELECT ({ts} - INTERVAL '1' DAY) - {ts} AS d"))[0]
+    slot: both readers refuse it rather than wrap. No writer here produces one, so
+    the day field of an uncompressed file is patched to 0xFFFFFFFF."""
+    morsel = list(
+        opteryx.session().execute_to_morsels("SELECT INTERVAL '12345' DAY + INTERVAL '678' MILLISECOND AS d")
+    )[0]
+    data = parquet.write_parquet(morsel, compression="none")
+    value = (0).to_bytes(4, "little") + (12345).to_bytes(4, "little") + (678).to_bytes(4, "little")
+    assert data.count(value) == 1
     path = str(tmp_path / "overflow.parquet")
     with open(path, "wb") as f:
-        f.write(parquet.write_parquet(morsel))
+        f.write(data.replace(value, (0).to_bytes(4, "little") + b"\xff\xff\xff\xff" + (678).to_bytes(4, "little")))
     with pytest.raises(RuntimeError, match="interval out of representable range"):
         with parquet.read_parquet(path) as reader:
             list(reader)

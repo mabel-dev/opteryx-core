@@ -272,6 +272,29 @@ def test_interval_reads_back_with_rugo(fast):
     assert [r.mo for r in rows] == [(14, 0)] * 3
 
 
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "INTERVAL '-1' MONTH",
+        "(CAST('2026-01-01' AS TIMESTAMP) - INTERVAL '1' DAY) - CAST('2026-01-01' AS TIMESTAMP)",
+        "(CAST('2026-01-01' AS TIMESTAMP) - INTERVAL '1' MICROSECOND) - CAST('2026-01-01' AS TIMESTAMP)",
+    ],
+)
+def test_negative_interval_is_refused(expr):
+    """parquet INTERVAL is three unsigned uint32 (months, days, millis): a negative
+    interval has no representation and used to wrap into a huge positive one."""
+    from rugo.parquet import write_parquet_fast
+
+    m = list(
+        opteryx.session().execute_to_morsels(
+            f"SELECT x, CASE WHEN x = 1 THEN NULL ELSE {expr} END AS d FROM (VALUES (1),(2)) AS t(x) ORDER BY x"
+        )
+    )[0]
+    for write in (write_parquet, write_parquet_fast):
+        with pytest.raises(ValueError, match="negative value at row 1"):
+            write(m)
+
+
 def test_float32_time_via_vectors():
     """FLOAT32 stays parquet `float`; TIME32/64 keep time semantics. Built
     directly since opteryx SQL has no CAST AS FLOAT / TIME producer.
