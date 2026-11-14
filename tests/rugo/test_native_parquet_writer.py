@@ -272,17 +272,36 @@ def test_interval_reads_back_with_rugo(fast):
     assert [r.mo for r in rows] == [(14, 0)] * 3
 
 
+def _doubled(expr, times):
+    for _ in range(times):
+        expr = f"({expr} + {expr})"
+    return expr
+
+
+def test_large_month_count_within_uint32_round_trips():
+    """3,072,000,000 months fits uint32: written and read back exactly."""
+    from rugo.parquet import read_parquet
+
+    m = list(opteryx.session().execute_to_morsels("SELECT " + _doubled("INTERVAL '3000000' MONTH", 10) + " AS d"))[0]
+    with read_parquet(write_parquet(m)) as reader:
+        assert [row.d for morsel in reader for row in morsel] == [(3_072_000_000, 0)]
+
+
 @pytest.mark.parametrize(
     "expr",
     [
         "INTERVAL '-1' MONTH",
         "(CAST('2026-01-01' AS TIMESTAMP) - INTERVAL '1' DAY) - CAST('2026-01-01' AS TIMESTAMP)",
         "(CAST('2026-01-01' AS TIMESTAMP) - INTERVAL '1' MICROSECOND) - CAST('2026-01-01' AS TIMESTAMP)",
+        # 2**11 x 3,000,000 months: past uint32. Literals cap near 3.56M months but sums
+        # do not; a balanced tree keeps the expression shallow.
+        _doubled("INTERVAL '3000000' MONTH", 11),
     ],
 )
-def test_negative_interval_is_refused(expr):
+def test_unrepresentable_interval_is_refused(expr):
     """parquet INTERVAL is three unsigned uint32 (months, days, millis): a negative
-    interval has no representation and used to wrap into a huge positive one."""
+    interval, or more than 4294967295 months, has no representation and used to
+    wrap into a different value."""
     from rugo.parquet import write_parquet_fast
 
     m = list(
@@ -291,7 +310,7 @@ def test_negative_interval_is_refused(expr):
         )
     )[0]
     for write in (write_parquet, write_parquet_fast):
-        with pytest.raises(ValueError, match="negative value at row 1"):
+        with pytest.raises(ValueError, match="cannot hold at row 1"):
             write(m)
 
 

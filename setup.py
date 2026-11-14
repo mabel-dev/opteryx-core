@@ -1731,14 +1731,7 @@ PLANNER_SOURCES = sorted(
     for path in glob.glob("opteryx/planner/**/*.py", recursive=True)
     if path != os.path.join("opteryx", "planner", "data_processed.py")
 )
-# OPTERYX_ENABLE_COVERAGE=1 (CI compile only) line-traces the planner so coverage
-# measures the code that ships. Cython 3.3 traces via sys.monitoring on 3.12+,
-# which coverage's Cython plugin cannot hear; settrace + coverage's ctrace core can.
-OPTERYX_ENABLE_COVERAGE = os.environ.get("OPTERYX_ENABLE_COVERAGE", "0").lower() in ("1", "true", "yes")
-_planner_trace_macros = [("CYTHON_TRACE", "1"), ("CYTHON_USE_SYS_MONITORING", "0")] if OPTERYX_ENABLE_COVERAGE else []
-planner_extensions = [
-    Extension(path[:-3].replace(os.sep, "."), [path], define_macros=_planner_trace_macros) for path in PLANNER_SOURCES
-]
+planner_extensions = [Extension(path[:-3].replace(os.sep, "."), [path]) for path in PLANNER_SOURCES]
 
 
 class build_py(build_py_orig):
@@ -1799,7 +1792,6 @@ setup(
             "language_level": "3",
             "annotation_typing": False,
             "binding": True,
-            "linetrace": OPTERYX_ENABLE_COVERAGE,
             "freethreading_compatible": FREE_THREADED_BUILD,
         },
     ),

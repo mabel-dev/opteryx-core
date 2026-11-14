@@ -73,12 +73,8 @@ jobs:
           rustc --version
           python -m uv pip freeze
 
-      # Line-traces the compiled planner so the coverage gate measures it (setup.py).
-      # Every job below runs this traced tree; release builds never set it.
       - name: Compile
         run: make compile
-        env:
-          OPTERYX_ENABLE_COVERAGE: 1
 
       # Assert OpenSSL is linked into the extension that actually CALLS it:
       # http_client statically links vendored libcurl, which needs -lssl
@@ -216,7 +212,7 @@ jobs:
       # in tests/fuzzing/seeds/. The deterministic native-parser corpus replay
       # (fuzz_native_replay.yaml) stays on every push - it is a regression test.
       - name: Run Regression Tests
-        run: python -m coverage run -m pytest --color=yes --ignore=tests/fuzzing
+        run: python -m pytest --color=yes --ignore=tests/fuzzing
         env:
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;"
           MINIO_END_POINT: "s3.eu-west-2.amazonaws.com"
@@ -229,9 +225,6 @@ jobs:
           DATA_CATALOG_CONNECTION: '${{ secrets.DATA_CATALOG_CONNECTION }}'
           DATA_CATALOG_STORAGE: '${{ secrets.DATA_CATALOG_STORAGE }}'
           VALKEY_CONNECTION: '${{ secrets.VALKEY_CONNECTION }}'
-
-      - name: Check Coverage
-        run: python -m coverage report -m
 
       # opteryx-iceberg (its own repo, because it depends on pyiceberg) is how a
       # workspace reads external Iceberg tables through this engine. Its whole

@@ -20,7 +20,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import pyarrow as pa  # noqa: E402
 import pyarrow.orc as po  # noqa: E402
-import xxhash  # noqa: E402
+from opteryx.third_party.cyan4973.xxhash import hash_bytes  # noqa: E402
 
 import skene  # noqa: E402
 from draken.draken_native import DrakenType  # noqa: E402
@@ -89,7 +89,7 @@ def _dup_skene():
     data[:] = data.replace(b"dupb", b"dupa")
     tail = len(data) - 24
     (footer_bytes,) = struct.unpack_from("<I", data, tail)
-    struct.pack_into("<Q", data, tail + 4, xxhash.xxh3_64_intdigest(bytes(data[tail - footer_bytes : tail])))
+    struct.pack_into("<Q", data, tail + 4, hash_bytes(bytes(data[tail - footer_bytes : tail])))
     return bytes(data)
 
 
