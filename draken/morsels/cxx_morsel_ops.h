@@ -14,21 +14,32 @@
 #include "morsels/cxx_morsel.h"
 #include "core/vector_owner.h"
 
+// Index of the column named `name`, SIZE_MAX when absent. Throws
+// std::invalid_argument when two columns hold the name.
+static inline size_t cxx_find_column(const CxxMorsel& m, const std::string& name) {
+    size_t found = SIZE_MAX;
+    for (size_t i = 0; i < m.names.size(); ++i) {
+        if (m.names[i] != name) continue;
+        if (found != SIZE_MAX)
+            throw std::invalid_argument("column name '" + name + "' appears more than once");
+        found = i;
+    }
+    return found;
+}
+
 // Column subset by name, in the requested order (mirrors Morsel.select). Shares
 // the underlying owners (no copy) — pure container op. A name not present is
-// skipped. If the result has no columns, the row count is carried over.
+// skipped; a name held by two columns throws std::invalid_argument (first-match
+// would hide the other). If the result has no columns, the row count is carried over.
 static inline CxxMorsel cxx_select(const CxxMorsel& m, const std::vector<std::string>& want) {
     CxxMorsel out;
     out.columns.reserve(want.size());
     out.names.reserve(want.size());
     for (const std::string& w : want) {
-        for (size_t i = 0; i < m.names.size(); ++i) {
-            if (m.names[i] == w) {
-                out.columns.push_back(CxxColumn{m.columns[i].view, m.columns[i].own});
-                out.names.push_back(m.names[i]);
-                break;
-            }
-        }
+        const size_t i = cxx_find_column(m, w);
+        if (i == SIZE_MAX) continue;
+        out.columns.push_back(CxxColumn{m.columns[i].view, m.columns[i].own});
+        out.names.push_back(m.names[i]);
     }
     if (out.columns.empty()) out.zero_col_rows = m.num_rows();
     return out;

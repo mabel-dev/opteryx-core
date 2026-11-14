@@ -53,6 +53,8 @@ PARQUET_LOGICAL_TYPE_MAP = {
     "fixed_len_byte_array": LogicalCategory.VARBINARY,
     # FIXED_LEN_BYTE_ARRAY(16) + UUID logical type -> DRAKEN_UUID (raw 16 bytes).
     "uuid": LogicalCategory.UUID,
+    # FIXED_LEN_BYTE_ARRAY(12) + INTERVAL converted type -> DRAKEN_INTERVAL.
+    "interval": LogicalCategory.INTERVAL,
     "uint_8": LogicalCategory.INTEGER,
     "uint_16": LogicalCategory.INTEGER,
     "uint_32": LogicalCategory.INTEGER,

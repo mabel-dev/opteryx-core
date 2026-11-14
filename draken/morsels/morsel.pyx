@@ -113,6 +113,30 @@ cdef inline Vector _wrap(object v):
     return Vector(v)
 
 
+cdef Py_ssize_t _find_column(list names, bytes name, str who) except -2:
+    """Index of `name` in `names`, -1 when absent. A name held by two columns
+    raises: taking the first match would silently hide the other column."""
+    cdef Py_ssize_t i, found = -1
+    for i in range(len(names)):
+        if names[i] == name:
+            if found != -1:
+                raise ValueError(
+                    "%s: column name '%s' appears more than once"
+                    % (who, name.decode("utf-8", "replace")))
+            found = i
+    return found
+
+
+cdef str _first_duplicate(list names):
+    """The first column name held by more than one column, or None."""
+    cdef set seen = set()
+    for n in names:
+        if n in seen:
+            return n.decode("utf-8", "replace") if isinstance(n, bytes) else n
+        seen.add(n)
+    return None
+
+
 cdef Morsel _make_morsel():
     cdef Morsel m = Morsel.__new__(Morsel)
     m._col_names = []
@@ -199,13 +223,17 @@ cdef shared_ptr[CxxMorsel] cxx_select_sp(shared_ptr[CxxMorsel] m, list names):
     cdef bytes b
     cdef list keep = []   # keep the byte buffers alive across the call
     cdef bint freed = False
+    cdef CxxMorsel* out
     try:
         for i in range(n):
             b = names[i] if isinstance(names[i], bytes) else (<str>names[i]).encode("utf-8")
             keep.append(b)
             ptrs[i] = <const char*>b
             lens[i] = <uint32_t>len(b)
-        return shared_ptr[CxxMorsel](cxx_select_c(m.get(), ptrs, lens, <uint32_t>n))
+        out = cxx_select_c(m.get(), ptrs, lens, <uint32_t>n)
+        if out == NULL:
+            raise ValueError("cxx_select_sp: a selected column name appears more than once")
+        return shared_ptr[CxxMorsel](out)
     finally:
         draken_free(ptrs)
         draken_free(lens)
@@ -418,6 +446,9 @@ cdef class Morsel:
     def schema(self):
         """Return {column_name_str: DrakenType} for each column."""
         names = self.column_names
+        dup = _first_duplicate(names)
+        if dup is not None:
+            raise ValueError("Morsel.schema: column name '%s' appears more than once" % dup)
         types = self.column_types
         return {
             (n.decode("utf-8") if isinstance(n, bytes) else n): t
@@ -430,6 +461,9 @@ cdef class Morsel:
         import keyword
         import re
         names = self.column_names
+        dup = _first_duplicate(names)
+        if dup is not None:
+            raise ValueError("Morsel.__iter__: column name '%s' appears more than once" % dup)
         str_names = [
             (n.decode("utf-8") if isinstance(n, bytes) else n)
             for n in names
@@ -456,6 +490,9 @@ cdef class Morsel:
             raise ImportError("to_arrow() requires pyarrow: pip install pyarrow")
         self._ensure_pyobject()
         names = self.column_names
+        dup = _first_duplicate(names)
+        if dup is not None:
+            raise ValueError("Morsel.to_arrow: column name '%s' appears more than once" % dup)
         str_names = [
             (n.decode("utf-8") if isinstance(n, bytes) else n)
             for n in names
@@ -728,22 +765,6 @@ cdef class Morsel:
     def __str__(self):
         return self._render_table(colorize=False)
 
-    def _column_index_from_name(self, name):
-        if isinstance(name, str):
-            name = name.encode("utf-8")
-        # Metadata lookup — answer from the substrate names when Cxx-backed,
-        # without materializing the PyObject column store.
-        cdef list names_src = self._col_names
-        for i, n in enumerate(names_src):
-            if n == name:
-                return i
-        raise KeyError(f"_column_index_from_name: column not found: {name!r}")
-
-    def _ensure_name_map(self):
-        # Metadata only — answer from the substrate names when Cxx-backed.
-        names_src = self._col_names
-        return {name: i for i, name in enumerate(names_src)}
-
     cdef int32_t* _resolve_columns_to_indices(self, object columns,
                                               int32_t* n_cols_out) except NULL:
         """Resolve column names → a freshly draken_malloc'd int32 index array.
@@ -765,7 +786,6 @@ cdef class Morsel:
         cdef int32_t n_cols
         cdef int32_t* result
         cdef bytes name_bytes
-        cdef bint found
 
         if columns is None:
             n_cols = <int32_t>avail
@@ -791,13 +811,14 @@ cdef class Morsel:
                         "Morsel._resolve_columns_to_indices: column name must be "
                         "str or bytes; got %s" % type(name).__name__
                     )
-                found = False
-                for j in range(avail):
-                    if names_src[j] == name_bytes:
-                        result[i] = <int32_t>j
-                        found = True
-                        break
-                if not found:
+                try:
+                    j = _find_column(names_src, name_bytes, "Morsel._resolve_columns_to_indices")
+                except ValueError:
+                    draken_free(result)
+                    raise
+                if j != -1:
+                    result[i] = <int32_t>j
+                else:
                     draken_free(result)
                     raise KeyError(
                         "Morsel._resolve_columns_to_indices: column not found: %r"
@@ -943,15 +964,15 @@ cdef class Morsel:
         self._ensure_pyobject()
         if isinstance(name, str):
             name = name.encode("utf-8")
-        for i, n in enumerate(self._col_names):
-            if n == name:
-                return self._get_column(i)
+        cdef Py_ssize_t i = _find_column(self._col_names, name, "Morsel.column")
+        if i != -1:
+            return self._get_column(i)
         if fallback is not None:
             if isinstance(fallback, str):
                 fallback = fallback.encode("utf-8")
-            for i, n in enumerate(self._col_names):
-                if n == fallback:
-                    return self._get_column(i)
+            i = _find_column(self._col_names, fallback, "Morsel.column")
+            if i != -1:
+                return self._get_column(i)
         raise KeyError(f"column not found: {name!r}")
 
     def select(self, col_names):
@@ -961,14 +982,14 @@ cdef class Morsel:
             names = [n if isinstance(n, bytes) else n.encode("utf-8") for n in col_names]
             return Morsel.from_cxx(self._cxx.select(names))
         cdef Morsel result = _make_morsel()
+        cdef Py_ssize_t i
         for name in col_names:
             if isinstance(name, str):
                 name = name.encode("utf-8")
-            for i, n in enumerate(self._col_names):
-                if n == name:
-                    result._col_names.append(n)
-                    result._append_column(self._get_column(i))
-                    break
+            i = _find_column(self._col_names, name, "Morsel.select")
+            if i != -1:
+                result._col_names.append(name)
+                result._append_column(self._get_column(i))
         if result._num_columns() == 0:
             result._zero_col_num_rows = self.num_rows
         return result

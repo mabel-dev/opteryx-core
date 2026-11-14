@@ -632,11 +632,14 @@ Status resolve_columns(const ReaderState& state, const std::vector<std::string>&
         for (const std::string& name : columns) {
             bool found = false;
             for (uint32_t n : state.top_level) {
-                if (state.nodes[n].name == name) {
-                    top->push_back(n);
-                    found = true;
-                    break;
-                }
+                if (state.nodes[n].name != name) continue;
+                // A second match would be silently unreachable — refuse the file.
+                if (found)
+                    return fail(Code::kMalformed,
+                                "column name '%s' appears more than once in this file",
+                                name.c_str());
+                top->push_back(n);
+                found = true;
             }
             if (!found)
                 return fail(Code::kMalformed, "requested column '%s' is not in this file",

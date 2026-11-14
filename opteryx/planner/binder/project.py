@@ -43,6 +43,8 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         return schema_col.name
 
     output_columns = []
+    qualified_outputs = {}  # output index -> the qualified name `t.col` it was written as
+    collision_qualified = set()  # names qualified only because their bare names collide
 
     # Internal working columns a bare `*` must not expand into — today, the window
     # columns QUALIFY appended so its Filter had something to read (see the QUALIFY
@@ -119,6 +121,7 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                     origin = schema_col.origin
                     if name_counts[schema_col.name] > 1 and origin and len(origin) == 1:
                         output_name = f"{origin[0]}.{schema_col.name}"
+                        collision_qualified.add(output_name)
                     output_columns.append(
                         LogicalColumn(
                             node_type=NodeType.IDENTIFIER,
@@ -138,6 +141,21 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         new_col, _ = inner_binder(column, context)
         schema_col = new_col.schema_column
         column_name = _output_name_for_projection(new_col, schema_col)
+        # An un-aliased qualified reference (`t.col`) is named `col`, as in standard
+        # SQL. Only if that bare name collides with another output does it keep its
+        # qualified name (below) — duplicate output names are refused, because results
+        # are written to parquet, which reads columns back by name.
+        # Matched on the display name the builder wrote (`compound_identifier`): planner
+        # rewrites also emit sourced identifiers (a window's `$win_` reference) whose
+        # display name is something else and must stand.
+        if (
+            new_col.node_type == NodeType.IDENTIFIER
+            and not new_col.alias
+            and new_col.source
+            and column_name == f"{new_col.source}.{new_col.source_column}"
+        ):
+            qualified_outputs[len(output_columns)] = column_name
+            column_name = new_col.source_column
         output_columns.append(
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -149,11 +167,40 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             )
         )
 
+    # Same rule `*` follows over a join: a colliding name is qualified.
+    name_counts = Counter(c.alias for c in output_columns)
+    for index, qualified_name in qualified_outputs.items():
+        if name_counts[output_columns[index].alias] > 1:
+            collision_qualified.add(qualified_name)
+            output_columns[index] = LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=qualified_name,
+                source=None,
+                alias=qualified_name,
+                schema_column=output_columns[index].schema_column,
+                arena=context.plan_context.expressions,
+            )
+
     node.columns = output_columns
+    context.plan_context.collision_qualified_outputs = frozenset(collision_qualified)
 
     context.schemas["$derived"] = derived.schema()
 
     return node, context
+
+
+def refuse_collision_qualified_names(names, plan_context, statement: str) -> None:
+    """A stored relation (CTAS, CREATE VIEW) never takes a name visit_exit qualified only
+    to break a collision: `a.id` is a display disambiguation, not a column name."""
+    from opteryx.exceptions import AmbiguousIdentifierError
+
+    stored = sorted(n for n in names if n in plan_context.collision_qualified_outputs)
+    if stored:
+        bare = sorted({n.rsplit(".", 1)[-1] for n in stored})
+        raise AmbiguousIdentifierError(
+            message=f"{statement} would store column(s) `{'`, `'.join(stored)}`: more than one "
+            f"output column is named `{'`, `'.join(bare)}`. Give each a distinct name with **AS**."
+        )
 
 
 def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:

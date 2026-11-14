@@ -1,4 +1,5 @@
 #include "metadata.hpp"
+#include "../_column_names.hpp"  // shared duplicate-name refusal
 #include "thrift.hpp"
 #include "chunk_sum.hpp"
 #include "file_ndv.hpp"
@@ -1128,6 +1129,9 @@ CollectSchemaArtifacts(const std::vector<SchemaElement> &top_level,
   for (const auto &field : top_level) {
     EmitSchemaEntry(field, false, true, columns, map);
   }
+  rugo::require_unique_column_names(
+      "parquet file", columns.size(),
+      [&](size_t i) -> const std::string & { return columns[i].name; });
 }
 
 // Substring both rugo-emitted created_by variants share: the opteryx_core

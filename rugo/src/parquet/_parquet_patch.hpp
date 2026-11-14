@@ -996,11 +996,6 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
   consts.reserve(add.size());
   for (const std::string &donor : add) {
     consts.push_back(parse_donor((const uint8_t *)donor.data(), donor.size()));
-    const std::string &name = consts.back().shape.name;
-    for (const PatchColumn &existing : cols)
-      if (existing.shape.name == name)
-        throw std::runtime_error("parquet patch: the result would have two columns "
-                                 "named '" + name + "'");
     PatchColumn pc;
     pc.shape = consts.back().shape;
     pc.const_index = (int)consts.size() - 1;
@@ -1009,6 +1004,10 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
 
   if (cols.empty())
     throw std::runtime_error("parquet patch: dropping every column would leave no relation");
+  // A rename or add onto a name the result already holds.
+  rugo::require_unique_column_names(
+      "patch_columns: cannot write", cols.size(),
+      [&](size_t i) -> const std::string & { return cols[i].shape.name; });
 
   return PatchParquetColumns(src, src_len, cols, consts);
 }

@@ -250,6 +250,28 @@ def test_interval_roundtrip():
     assert (mo, da, ms) == (0, 0, 90 * 60 * 1000)   # 90 minutes in millis
 
 
+@pytest.mark.parametrize("fast", [False, True])
+def test_interval_reads_back_with_rugo(fast):
+    """rugo reads its own FLBA(12) INTERVAL back as DRAKEN_INTERVAL (months, us).
+    Until 2026-11-14 the reader refused the column, so any INTERVAL result
+    written by the worker failed the jobs service with a 500."""
+    from rugo.parquet import read_parquet, write_parquet_fast
+
+    m = list(
+        opteryx.session().execute_to_morsels(
+            "SELECT x, CASE WHEN x = 2 THEN NULL ELSE INTERVAL '3' DAY + INTERVAL '90' MINUTE END AS d, "
+            "INTERVAL '14' MONTH AS mo "
+            "FROM (VALUES (1),(2),(3)) AS t(x) ORDER BY x"
+        )
+    )[0]
+    data = write_parquet_fast(m) if fast else write_parquet(m)
+    with read_parquet(data) as reader:
+        rows = [row for morsel in reader for row in morsel]
+    day_and_a_half_hour = (3 * 86400 + 90 * 60) * 1_000_000
+    assert [r.d for r in rows] == [(0, day_and_a_half_hour), None, (0, day_and_a_half_hour)]
+    assert [r.mo for r in rows] == [(14, 0)] * 3
+
+
 def test_float32_time_via_vectors():
     """FLOAT32 stays parquet `float`; TIME32/64 keep time semantics. Built
     directly since opteryx SQL has no CAST AS FLOAT / TIME producer.

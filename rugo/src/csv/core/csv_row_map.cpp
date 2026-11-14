@@ -1,4 +1,5 @@
 #include "csv_row_map.hpp"
+#include "../../_column_names.hpp"  // shared duplicate-name refusal
 
 #include <cstring>
 #include <stdexcept>
@@ -120,6 +121,9 @@ size_t parse_csv_header(
         return 0;
     }
     const size_t data_start = scan_header_row(data, length, ctx, column_names_out);
+    rugo::require_unique_column_names(
+        "CSV header", column_names_out.size(),
+        [&](size_t i) -> const std::string & { return column_names_out[i]; });
     num_cols_out = static_cast<uint32_t>(column_names_out.size());
     return data_start;
 }

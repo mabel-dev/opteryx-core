@@ -344,6 +344,12 @@ def _view_output_schema(node, context: BindingContext):
 
     head = bound_plan[bound_plan.exit_point()]
 
+    from opteryx.planner.binder.project import refuse_collision_qualified_names
+
+    refuse_collision_qualified_names(
+        [column.alias for column in head.columns], context.plan_context, "**CREATE/ALTER VIEW**"
+    )
+
     columns = []
     for column in head.columns:
         # `current_name` is `alias or source_column`, and is recorded as a list

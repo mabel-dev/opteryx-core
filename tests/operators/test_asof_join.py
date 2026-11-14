@@ -70,17 +70,17 @@ def test_asof_basic_gtoreq_correctness():
         ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity >= p2.gravity)
     """
     rows = _collect(sql)
-    by_name = {r[b"p.name"]: r for r in rows}
+    by_name = {r[b"name"]: r for r in rows}
 
     # Mercury (gravity 3.7): nearest right gravity ≤ 3.7. Mercury and Mars both
     # sit at 3.7, so which of the tied rows wins is not pinned here — only the
     # ASOF invariant is.
     mercury = by_name["Mercury"]
-    assert mercury[b"match_gravity"] <= mercury[b"p.gravity"]
+    assert mercury[b"match_gravity"] <= mercury[b"gravity"]
 
     # Jupiter (gravity 23.1, the highest): nearest right ≤ 23.1 → Jupiter itself
     jupiter = by_name["Jupiter"]
-    assert jupiter[b"match_gravity"] <= jupiter[b"p.gravity"]
+    assert jupiter[b"match_gravity"] <= jupiter[b"gravity"]
 
 
 # ---------------------------------------------------------------------------
@@ -103,17 +103,17 @@ def test_asof_left_semantics_no_match():
     assert len(rows) == 9, f"Expected 9 rows, got {len(rows)}"
 
     # All planet ids 1–9 must appear: unmatched rows (id<5) are still emitted.
-    found_ids = {r[b"p.id"] for r in rows}
+    found_ids = {r[b"id"] for r in rows}
     assert found_ids == {1, 2, 3, 4, 5, 6, 7, 8, 9}, f"Missing ids: {found_ids}"
 
     # Planets with id >= 5 must have a right match (match_name is not null).
     # Note: same-named columns deduplicate in align_tables (a system-level constraint),
     # so null-checking right columns that share names with left columns is not reliable
     # for self-joins. Instead verify that matched rows have the expected match.
-    matched = [r for r in rows if r[b"p.id"] >= 5]
+    matched = [r for r in rows if r[b"id"] >= 5]
     assert len(matched) == 5, f"Expected 5 matched rows, got {len(matched)}"
     for r in matched:
-        assert r[b"match_name"] is not None, f"Expected match for id={r[b'p.id']}"
+        assert r[b"match_name"] is not None, f"Expected match for id={r[b'id']}"
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +138,12 @@ def test_asof_basic_ltoreq_correctness():
         ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity <= p2.gravity)
     """
     rows = _collect(sql)
-    by_name = {r[b"p.name"]: r for r in rows}
+    by_name = {r[b"name"]: r for r in rows}
 
     # Every planet should find a match with gravity >= its own gravity
     for row in rows:
         if row[b"match_gravity"] is not None:
-            assert row[b"match_gravity"] >= row[b"p.gravity"]
+            assert row[b"match_gravity"] >= row[b"gravity"]
 
 
 # ---------------------------------------------------------------------------
@@ -203,14 +203,14 @@ def test_asof_on_partition_confines_matches():
     matched = [r for r in rows if r[b"match_name"] is not None]
     assert matched, "expected some matches"
 
-    cross = [r for r in matched if r[b"s.planetId"] != r[b"match_pid"]]
+    cross = [r for r in matched if r[b"planetId"] != r[b"match_pid"]]
     assert not cross, f"ON s.planetId = s2.planetId must not match across partitions: {cross[:5]}"
 
     # And the partition must actually bite: the first satellite of each planet has
     # no earlier id within its own planet, so it must be unmatched. Unpartitioned,
     # only the single globally-first satellite would be unmatched.
     unmatched = len(rows) - len(matched)
-    distinct_planets = len({r[b"s.planetId"] for r in rows})
+    distinct_planets = len({r[b"planetId"] for r in rows})
     assert unmatched == distinct_planets, (
         f"expected one unmatched row per planet ({distinct_planets}), got {unmatched}"
     )

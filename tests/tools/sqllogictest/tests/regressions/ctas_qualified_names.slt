@@ -1,0 +1,35 @@
+# CREATE TABLE AS over a join stored un-aliased qualified references under their
+# qualified names (`p.id`), so a later `SELECT id` failed. They are now stored bare.
+# Names that collide are qualified in a SELECT result, but a stored relation refuses
+# them (duplicate names are refused, and `p.id` is not a column name).
+
+statement ok
+CREATE TABLE ws.ctas_qualified_names AS SELECT p.id, s.name FROM $planets AS p JOIN testdata.satellites AS s ON p.id = s.planetId
+
+query IT
+SELECT id, name FROM ws.ctas_qualified_names ORDER BY name LIMIT 1
+----
+5 Adrastea
+
+statement ok
+DROP TABLE ws.ctas_qualified_names
+
+statement error AmbiguousIdentifierError: \*\*CREATE TABLE \.\.\. AS SELECT\*\* would store column\(s\) `p\.id`, `s\.id`
+CREATE TABLE ws.ctas_qualified_collision AS SELECT p.id, s.id FROM $planets AS p JOIN testdata.satellites AS s ON p.id = s.planetId
+
+statement error AmbiguousIdentifierError: \*\*CREATE TABLE \.\.\. AS SELECT\*\* would store column\(s\)
+CREATE TABLE ws.ctas_qualified_star AS SELECT * FROM $planets AS p JOIN testdata.satellites AS s ON p.id = s.planetId
+
+statement error AmbiguousIdentifierError: \*\*CREATE/ALTER VIEW\*\* would store column\(s\) `p\.id`, `s\.id`
+CREATE VIEW ws.view_qualified_collision AS SELECT p.id, s.id FROM $planets AS p JOIN testdata.satellites AS s ON p.id = s.planetId
+
+statement ok
+CREATE TABLE ws.ctas_qualified_aliased AS SELECT p.id AS planet_id, s.id FROM $planets AS p JOIN testdata.satellites AS s ON p.id = s.planetId
+
+query II
+SELECT planet_id, id FROM ws.ctas_qualified_aliased ORDER BY id LIMIT 1
+----
+3 1
+
+statement ok
+DROP TABLE ws.ctas_qualified_aliased

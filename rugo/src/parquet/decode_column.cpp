@@ -73,6 +73,23 @@ inline __int128 ReadRaw16(const uint8_t* p) {
   return v;
 }
 
+// INTERVAL (FLBA(12)): three little-endian uint32 (months, days, millis) into the
+// DRAKEN_INTERVAL slot [int64 months][int64 us]. The fields are unsigned per the
+// parquet spec, so they are zero-extended. False when days + millis exceed int64
+// microseconds (more than ~106.7 million days), which the slot cannot hold.
+inline bool ReadParquetInterval(const uint8_t* p, __int128* out) {
+  int64_t slot[2];
+  slot[0] = static_cast<int64_t>(static_cast<uint32_t>(ReadLE32(p)));
+  if (__builtin_mul_overflow(static_cast<int64_t>(static_cast<uint32_t>(ReadLE32(p + 4))),
+                             86400000000LL, &slot[1]) ||
+      __builtin_add_overflow(slot[1],
+                             static_cast<int64_t>(static_cast<uint32_t>(ReadLE32(p + 8))) * 1000LL,
+                             &slot[1]))
+    return false;
+  std::memcpy(out, slot, 16);
+  return true;
+}
+
 inline __int128 ReadBESignExt128(const uint8_t* p, int width) {
   __int128 v = static_cast<__int128>(static_cast<int8_t>(p[0]));
   for (int i = 1; i < width; ++i) {
@@ -1142,19 +1159,23 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     if (target_col->physical_type == "fixed_len_byte_array") {
       const bool flba_uuid =
           target_col->logical_type == "uuid" && target_col->type_length == 16;
+      const bool flba_interval =
+          target_col->logical_type == "interval" && target_col->type_length == 12;
       if (target_col->type_length <= 0 || target_col->type_length > 16 ||
-          (!flba_uuid && target_col->logical_type.rfind("decimal", 0) != 0)) {
+          (!flba_uuid && !flba_interval &&
+           target_col->logical_type.rfind("decimal", 0) != 0)) {
         // Other FIXED_LEN_BYTE_ARRAY (fixed-width hashes, ...) and out-of-range
         // widths have no decode path. Reason-carrying so callers fail loud
         // instead of reading this as an absent column.
         result.error_message =
             "fixed_len_byte_array column is only decodable as DECIMAL with "
-            "width 1..16 or UUID with width 16 (got width " +
+            "width 1..16, UUID with width 16 or INTERVAL with width 12 (got width " +
             std::to_string(target_col->type_length) +
             ", logical type '" + target_col->logical_type + "')";
         return;
       }
       result.is_uuid = flba_uuid;
+      result.is_interval = flba_interval;
       flba_byte_width = target_col->type_length;
       if (flba_byte_width > 8) {
         flba_int128 = true;
@@ -1397,9 +1418,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               (int32_t)((dict_end - dict_data_ptr) / flba_byte_width));
           result.dict_int128_values.reserve(safe_count);
           for (int32_t i = 0; i < safe_count; i++) {
-            result.dict_int128_values.push_back(
-                result.is_uuid ? ReadRaw16(dict_data_ptr)
-                               : ReadBESignExt128(dict_data_ptr, flba_byte_width));
+            __int128 v;
+            if (result.is_interval) {
+              if (!ReadParquetInterval(dict_data_ptr, &v)) {
+                result.error_message =
+                    "interval out of representable range at dictionary entry " +
+                    std::to_string(i);
+                return;
+              }
+            } else {
+              v = result.is_uuid ? ReadRaw16(dict_data_ptr)
+                                 : ReadBESignExt128(dict_data_ptr, flba_byte_width);
+            }
+            result.dict_int128_values.push_back(v);
             dict_data_ptr += flba_byte_width;
           }
         } else if (zc_byte_array) {
@@ -3796,10 +3827,20 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             result.int128_values.resize_uninit(old_sz + safe_count);
             __int128* dst = result.int128_values.data() + old_sz;
             for (int32_t i = 0; i < safe_count; i++) {
-              dst[i] = result.is_uuid
-                           ? ReadRaw16(data_ptr + i * flba_byte_width)
-                           : ReadBESignExt128(data_ptr + i * flba_byte_width,
-                                              flba_byte_width);
+              if (result.is_interval) {
+                if (!ReadParquetInterval(data_ptr + i * flba_byte_width, dst + i)) {
+                  result.error_message =
+                      "interval out of representable range at row " +
+                      std::to_string(old_sz + i);
+                  result.int128_values.resize_uninit(old_sz);
+                  return;
+                }
+              } else {
+                dst[i] = result.is_uuid
+                             ? ReadRaw16(data_ptr + i * flba_byte_width)
+                             : ReadBESignExt128(data_ptr + i * flba_byte_width,
+                                                flba_byte_width);
+              }
             }
             data_ptr += safe_count * flba_byte_width;
           }

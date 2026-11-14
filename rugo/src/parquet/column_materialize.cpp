@@ -459,9 +459,8 @@ void str_resolve(const DecodedColumn& col, int32_t num_rows,
 // UUID (FLBA(16) + UUID logical type): the int128 lane holds the RAW 16 bytes, so
 // the same positional scatter as DECIMAL128 builds a DRAKEN_UUID column — no
 // precision, no descriptor.
-MaterializedColumn materialize_uuid(const DecodedColumn& col, int32_t num_rows) {
-    if (!col.is_uuid || col.type != "int128")
-        throw std::invalid_argument("materialize_uuid: column is not a decoded UUID");
+static MaterializedColumn materialize_fixed16(const DecodedColumn& col, int32_t num_rows,
+                                              DrakenType type) {
     const uint32_t length = (uint32_t)(num_rows > 0 ? num_rows : 0);
     DrakenPtr<uint8_t> validity = alloc_validity(length);
     bool has_nulls = false;
@@ -471,7 +470,21 @@ MaterializedColumn materialize_uuid(const DecodedColumn& col, int32_t num_rows) 
     scatter_unscaled<__int128, __int128, __int128>(
         col, num_rows, col.dict_int128_values, col.int128_values,
         has_dict, /*is_rle=*/false, data.get(), validity.get(), &has_nulls);
-    return finish(DRAKEN_UUID, length, data, validity, has_nulls);
+    return finish(type, length, data, validity, has_nulls);
+}
+
+MaterializedColumn materialize_uuid(const DecodedColumn& col, int32_t num_rows) {
+    if (!col.is_uuid || col.type != "int128")
+        throw std::invalid_argument("materialize_uuid: column is not a decoded UUID");
+    return materialize_fixed16(col, num_rows, DRAKEN_UUID);
+}
+
+// INTERVAL (FLBA(12)): the decoder already wrote the DRAKEN_INTERVAL slot into the
+// int128 lane, so it is the same positional scatter as UUID.
+MaterializedColumn materialize_interval(const DecodedColumn& col, int32_t num_rows) {
+    if (!col.is_interval || col.type != "int128")
+        throw std::invalid_argument("materialize_interval: column is not a decoded INTERVAL");
+    return materialize_fixed16(col, num_rows, DRAKEN_INTERVAL);
 }
 
 MaterializedColumn materialize_decimal(const DecodedColumn& col, int32_t num_rows) {
@@ -757,6 +770,7 @@ bool materialize_scalar(const DecodedColumn& col, int32_t num_rows, Materialized
     // Lists route on the schema: a zero-row chunk decodes no levels at all.
     if (col.absent || !col.success || col.max_rep_level > 0) return false;
     if (col.is_uuid)    { out = materialize_uuid(col, num_rows); return true; }
+    if (col.is_interval) { out = materialize_interval(col, num_rows); return true; }
     if (col.is_decimal) { out = materialize_decimal(col, num_rows); return true; }
     if (col.type == "int64")      out = materialize_int(col, num_rows, false);
     else if (col.type == "int32") out = materialize_int(col, num_rows, true);

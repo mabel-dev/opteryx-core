@@ -16,6 +16,7 @@
 #include <climits>
 
 #include "avro_container.hpp"                // take_bz_internal_error
+#include "../_column_names.hpp"               // shared duplicate-name refusal
 #include "bzlib.h"
 #include "compression/stream_decompress.hpp"  // crc32_update: the CRC the reader verifies with
 #include <ankerl/unordered_dense.h>
@@ -794,14 +795,14 @@ std::string build_schema(const std::vector<FieldSpec>& fields, const std::string
         refuse("record name '" + record_name + "' is not a valid Avro name ([A-Za-z_][A-Za-z0-9_]*)");
     plans.assign(fields.size(), FieldPlan{});
     types.assign(fields.size(), std::string());
+    rugo::require_unique_column_names(
+        "Avro writer: cannot write", fields.size(), [&](size_t i) -> const std::string& { return fields[i].name; });
     NamedTypes named;
-    std::unordered_set<std::string> seen;
     std::string s = "{\"type\":\"record\",\"name\":\"" + record_name + "\",\"namespace\":\"rugo\",\"fields\":[";
     for (size_t i = 0; i < fields.size(); ++i) {
         const FieldSpec& f = fields[i];
         if (!is_avro_name(f.name))
             refuse("column name '" + f.name + "' is not a valid Avro name ([A-Za-z_][A-Za-z0-9_]*); rename it before writing");
-        if (!seen.insert(f.name).second) refuse("column name '" + f.name + "' appears more than once");
         plans[i] = choose(f, named, types[i]);
         if (i) s.push_back(',');
         s += "{\"name\":\"" + f.name + "\",\"type\":" +

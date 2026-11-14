@@ -3605,6 +3605,14 @@ class _Compiler:
                 widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)
+            elif pt == DrakenType.INTERVAL:
+                # FLBA(12) + INTERVAL → DK_INTERVAL / DK_INTERVAL_DICT, self-describing;
+                # the footer gate admits only an interval-annotated FLBA(12).
+                kinds.append("interval")
+                string_types.append(0)
+                widen_types.append(0)
+                decimal_columns.append(0)
+                logical_coerce.append(0)
             elif pt == DrakenType.BOOL:
                 # WP-11: BOOLEAN → DK_BOOL dense, self-describing (no descriptor).
                 kinds.append("bool")

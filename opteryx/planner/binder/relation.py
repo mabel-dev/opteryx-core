@@ -2613,6 +2613,14 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                 "visit_insert: CTAS source feeder has no bound columns"
             )
 
+        from opteryx.planner.binder.project import refuse_collision_qualified_names
+
+        refuse_collision_qualified_names(
+            [src_col.alias for src_col in feeder.columns],
+            context.plan_context,
+            "**CREATE TABLE ... AS SELECT**",
+        )
+
         target_columns = []
         seen_names = {}
         for src_col in feeder.columns:

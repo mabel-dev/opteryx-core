@@ -460,8 +460,15 @@ def test_add_drop_and_rename_together(sample, tmp_path):
 def test_adding_a_name_that_already_exists_is_refused(sample):
     _, _, src = sample
 
-    with pytest.raises(RuntimeError, match="two columns named"):
+    with pytest.raises(ValueError, match="column name 'i64' appears more than once"):
         rp.patch_columns(src, add=[_donor("i64", 1, "INT64")])
+
+
+def test_renaming_onto_a_name_that_already_exists_is_refused(sample):
+    _, _, src = sample
+
+    with pytest.raises(ValueError, match="column name 'i64' appears more than once"):
+        rp.patch_columns(src, rename={"b": "i64"})
 
 
 def test_adding_over_a_dropped_name_is_allowed(sample, tmp_path):

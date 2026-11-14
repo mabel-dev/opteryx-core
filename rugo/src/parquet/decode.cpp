@@ -46,7 +46,8 @@ static bool CheckColumnCompatibility(const ColumnStats &col) {
     if (col.type_length <= 0 || col.type_length > 16) return false;
     // UUID: FIXED_LEN_BYTE_ARRAY(16), decoded as its raw 16 bytes (DRAKEN_UUID).
     const bool is_uuid = col.logical_type == "uuid" && col.type_length == 16;
-    if (!is_uuid && col.logical_type.rfind("decimal", 0) != 0) return false;
+    const bool is_interval = col.logical_type == "interval" && col.type_length == 12;
+    if (!is_uuid && !is_interval && col.logical_type.rfind("decimal", 0) != 0) return false;
   }
 
   // At least one listed encoding must decode this column's values

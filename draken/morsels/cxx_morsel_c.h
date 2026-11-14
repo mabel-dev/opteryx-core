@@ -66,6 +66,7 @@ CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m);
 CxxMorsel* cxx_morsel_own_arenas_c(const CxxMorsel* m);
 
 // Select/reorder columns by identity name (opaque bytes as ptr+len arrays).
+// NULL when a requested name is held by more than one column.
 CxxMorsel* cxx_select_c(const CxxMorsel* m, const char** name_ptrs,
                         const uint32_t* name_lens, uint32_t n);
 

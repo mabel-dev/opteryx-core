@@ -116,6 +116,10 @@ struct DecodedColumnMeta {
   // lane) but the values are the RAW bytes in network order, not a sign-extended
   // big-endian integer — the materializer builds DRAKEN_UUID from them.
   bool is_uuid = false;
+  // INTERVAL (ConvertedType) on FIXED_LEN_BYTE_ARRAY(12): `type` is "int128" (the
+  // 16-byte lane) holding the DRAKEN_INTERVAL slot [int64 months][int64 us], already
+  // converted from parquet's three little-endian uint32 (months, days, millis).
+  bool is_interval = false;
   uint8_t decimal_precision = 0;
   uint8_t decimal_scale = 0;
   // Draken logical descriptor KIND for kinds parquet has no logical type to
@@ -345,7 +349,7 @@ static_assert(sizeof(DecodedColumn) ==
 // slice-assign in reset(), so this is not a correctness guard — it exists so a
 // new scalar's DEFAULT gets covered by the test (rle_last_code == -1 is the
 // reason that matters). LP64 layout, both targets.
-static_assert(sizeof(DecodedColumnMeta) == 96,
+static_assert(sizeof(DecodedColumnMeta) == 104,
               "DecodedColumnMeta gained or lost a scalar: assert its default in "
               "decoded_column_reset_test.cpp.");
 

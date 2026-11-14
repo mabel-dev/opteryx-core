@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <string_view>
 #include <type_traits>
+#include <unordered_set>
 
 #include "skene/checksum.h"
 #include "skene/format.h"
@@ -1397,6 +1399,17 @@ Status FileWriter::add_row_group(const CxxMorsel& morsel) {
                     options.field_ids.size(), column_count);
 
     const uint32_t index = static_cast<uint32_t>(state_->row_groups.size());
+
+    // Names resolve columns on read; a second column of one name would be
+    // unreachable. Later row groups must match this schema, so check the first.
+    if (index == 0) {
+        std::unordered_set<std::string_view> seen;
+        for (size_t i = 0; i < column_count; ++i)
+            if (!seen.insert(morsel.names[i]).second)
+                return fail(Code::kMalformed,
+                            "cannot write: column name '%s' appears more than once",
+                            morsel.names[i].c_str());
+    }
 
     // Every column holds the row group's rows. A morsel whose columns disagree
     // would write a chunk whose length is not its row group's — a file the

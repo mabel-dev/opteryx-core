@@ -447,6 +447,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef int dec_w
     cdef long mul
     cdef int64_t months, us, days, millis
+    cdef int64_t negative_row
     cdef object unit, scale_obj, prec_obj, dim_obj, lk_obj
     cdef uint32_t dim
     cdef const uint16_t* fp16_data
@@ -764,20 +765,32 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         elif t == DRAKEN_INTERVAL:
             # draken slot = [int64 months][int64 us]; parquet INTERVAL =
             # FLBA(12) of 3 LE uint32 (months, days, millis). Sub-ms is dropped
-            # (parquet INTERVAL is millisecond resolution).
+            # (parquet INTERVAL is millisecond resolution). The fields are
+            # unsigned, so a negative interval has no representation: refused.
             srcb = <const uint8_t*>dv.data  # reinterpret as int64 pairs below
             tmpdec = vector[uint8_t]()
             tmpdec.resize(<size_t>nrows * 12)
+            negative_row = -1
             with nogil:
                 for j in range(nrows):
                     p = sel[j]
                     months = (<const int64_t*>dv.data)[2 * p]
                     us = (<const int64_t*>dv.data)[2 * p + 1]
+                    if (months < 0 or us < 0) and (
+                            dv.validity == NULL or (dv.validity[j >> 3] >> (j & 7)) & 1):
+                        negative_row = j
+                        break
                     days = _floordiv_pos(us, 86400000000)
                     millis = _floordiv_pos(us - days * <int64_t>86400000000, 1000)
                     _put_u32le(tmpdec.data(), <size_t>j * 12, <uint32_t>months)
                     _put_u32le(tmpdec.data(), <size_t>j * 12 + 4, <uint32_t>days)
                     _put_u32le(tmpdec.data(), <size_t>j * 12 + 8, <uint32_t>millis)
+            if negative_row >= 0:
+                raise ValueError(
+                    "write_parquet: INTERVAL column %r has a negative value at row %d; "
+                    "parquet INTERVAL stores unsigned months, days and milliseconds, "
+                    "so it cannot hold a negative interval"
+                    % (names[i], negative_row))
             dec_store.push_back(tmpdec)
             ci.type = PT_FLBA
             ci.logical = LK_INTERVAL

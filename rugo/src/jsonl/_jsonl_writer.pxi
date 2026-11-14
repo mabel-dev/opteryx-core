@@ -24,6 +24,7 @@ cdef extern from "_text_render.hpp" namespace "rugo_text":
     # Returns the rendered bytes as one buffer per worker (parallel render).
     vector[string] jsonl_write(const DrakenVector** dvs,
                                const ColumnDesc* descs,
+                               const string* names,
                                const string* prefixes, size_t ncols, size_t nrows) except + nogil
 
 
@@ -42,6 +43,7 @@ def write_jsonl(Morsel morsel not None):
     cdef vector[ColumnDesc] descs
     descs.resize(ncols)
     cdef vector[string] prefixes   # pre-escaped  "name":
+    cdef vector[string] cnames     # raw names, for the duplicate-name refusal
 
     cdef Vector v
     cdef const DrakenVector* dv
@@ -69,13 +71,14 @@ def write_jsonl(Morsel morsel not None):
                 _fill_array_levels(&descs[c], v, child_vecs)
             nm = names[c]
             nb_name = nm if isinstance(nm, bytes) else str(nm).encode("utf-8")
+            cnames.push_back(string(<const char*>nb_name, len(nb_name)))
             namebuf = string()
             json_string(namebuf, <const char*>nb_name, len(nb_name))
             namebuf.push_back(b':')
             prefixes.push_back(namebuf)
 
         with nogil:
-            chunks = jsonl_write(dvs, descs.data(),
+            chunks = jsonl_write(dvs, descs.data(), cnames.data(),
                                  prefixes.data(), <size_t>ncols, <size_t>nrows)
         for k in range(chunks.size()):
             total += chunks[k].size()

@@ -1,4 +1,5 @@
 #include "orc_reader.hpp"
+#include "../_column_names.hpp"  // shared duplicate-name refusal
 
 #include <algorithm>
 #include <chrono>
@@ -709,6 +710,9 @@ OrcFile::OrcFile(const uint8_t* data, size_t size) : impl_(new Impl) {
         if (id >= m.footer.types.size()) fail("a column refers to a type that does not exist (the file is corrupt)");
         m.columns.push_back(describe(m.footer.types, root.field_names[i], id));
     }
+    rugo::require_unique_column_names(
+        "ORC file", m.columns.size(),
+        [&](size_t i) -> const std::string & { return m.columns[i].name; });
 }
 
 OrcFile::~OrcFile() = default;

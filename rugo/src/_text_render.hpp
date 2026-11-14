@@ -21,6 +21,7 @@
 #include "ops/kernels/cast_kernels.h"
 
 #include "_writer_pool.hpp"      // shared writer pool (also the Parquet writer's)
+#include "_column_names.hpp"     // shared duplicate-name refusal
 
 #include <algorithm>
 #include <future>
@@ -504,7 +505,10 @@ static constexpr size_t kTextMinRowsPerTask = 16384;
 // inline on the calling thread.
 inline std::vector<std::string> jsonl_write(const DrakenVector **dvs,
                                             const ColumnDesc *descs,
+                                            const std::string *names,
                                             const std::string *prefixes, size_t ncols, size_t nrows) {
+  rugo::require_unique_column_names(
+      "write_jsonl: cannot write", ncols, [&](size_t i) -> const std::string & { return names[i]; });
   std::vector<Col> cols(ncols);
   // Bake the field framing into the prefixes once: first column opens the row
   // ('{'), the rest lead with ','. The row loop then has no per-field branch.
@@ -561,6 +565,8 @@ inline std::vector<std::string> csv_write(const DrakenVector **dvs,
                              char delim, bool header, bool for_excel) {
   // Shape checks first: refuse before rendering a file that cannot be opened
   // whole, rather than after building it.
+  rugo::require_unique_column_names(
+      "write_csv: cannot write", ncols, [&](size_t i) -> const std::string & { return names[i]; });
   if (for_excel) {
     size_t lines = nrows + (header ? 1 : 0);
     if (lines > kExcelMaxRows)

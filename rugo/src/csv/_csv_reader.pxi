@@ -60,7 +60,7 @@ cdef extern from "core/csv_row_map.hpp" namespace "rugo::_csv":
         const CsvParseContext& ctx,
         vector[string]& column_names_out,
         uint32_t&       num_cols_out
-    ) nogil
+    ) except + nogil
 
 
 cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":

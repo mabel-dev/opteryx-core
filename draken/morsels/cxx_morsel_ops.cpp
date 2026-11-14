@@ -1367,7 +1367,11 @@ extern "C" CxxMorsel* cxx_select_c(const CxxMorsel* m, const char** name_ptrs,
     want.reserve(n);
     for (uint32_t i = 0; i < n; ++i)
         want.emplace_back(name_ptrs[i], name_lens[i]);
-    return new CxxMorsel(cxx_select(*m, want));
+    try {
+        return new CxxMorsel(cxx_select(*m, want));
+    } catch (const std::invalid_argument&) {
+        return nullptr;  // C ABI: a requested name is held by two columns
+    }
 }
 extern "C" void cxx_morsel_delete(CxxMorsel* m) {
     delete m;

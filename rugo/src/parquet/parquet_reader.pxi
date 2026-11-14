@@ -937,6 +937,7 @@ cdef extern from "parquet/column_materialize.hpp" namespace "rugo::_parquet":
 
     MaterializedColumn materialize_decimal(parquet_reader.DecodedColumn& col, int32_t num_rows) except +
     MaterializedColumn materialize_uuid(parquet_reader.DecodedColumn& col, int32_t num_rows) except +
+    MaterializedColumn materialize_interval(parquet_reader.DecodedColumn& col, int32_t num_rows) except +
     MaterializedColumn materialize_int(parquet_reader.DecodedColumn& col, int32_t num_rows, bint from_int32) except +
     MaterializedColumn materialize_float(parquet_reader.DecodedColumn& col, int32_t num_rows, bint from_float32) except +
     MaterializedColumn materialize_string(parquet_reader.DecodedColumn& col, int32_t num_rows, bint is_text) except +
@@ -958,6 +959,12 @@ cdef inline object rugo_decimal_vector(parquet_reader.DecodedColumn& col, int32_
 cdef Vector _make_uuid_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
     """DRAKEN_UUID from a decoded FLBA(16) + UUID column (raw 16 bytes per value)."""
     cdef MaterializedColumn mc = materialize_uuid(col, num_rows)
+    return Vector(_rugo_steal(wrap_parquet_column(mc)))
+
+
+cdef Vector _make_interval_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
+    """DRAKEN_INTERVAL from a decoded FLBA(12) + INTERVAL column."""
+    cdef MaterializedColumn mc = materialize_interval(col, num_rows)
     return Vector(_rugo_steal(wrap_parquet_column(mc)))
 
 
@@ -1644,6 +1651,9 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
         elif cp[0].is_uuid:
             vec = _make_uuid_vector(cp[0], num_rows)
             _TEL["cython_other_s"] += _time.perf_counter() - _t0
+        elif cp[0].is_interval:
+            vec = _make_interval_vector(cp[0], num_rows)
+            _TEL["cython_other_s"] += _time.perf_counter() - _t0
         elif cp[0].is_decimal:
             # DECIMAL (any tier): real DECIMAL/DECIMAL128 vector, not a bare
             # int — and never drop the int128 tier.
@@ -2279,6 +2289,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     # bare int (or, for int128, dropping the column).
     if result.is_uuid:
         return _make_uuid_vector(result, num_rows)
+    if result.is_interval:
+        return _make_interval_vector(result, num_rows)
     if result.is_decimal:
         return _make_decimal_vector(result, num_rows)
 

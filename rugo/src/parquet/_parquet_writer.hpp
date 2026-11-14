@@ -21,6 +21,7 @@
 #include "page_index_writer.hpp"
 #include "_bloom_writer.hpp"
 #include "../_writer_pool.hpp"   // shared writer pool: column chunks encode in parallel
+#include "../_column_names.hpp"  // shared duplicate-name refusal
 #include "chunk_sum.hpp"
 #include "file_ndv.hpp"
 #include "file_mcv.hpp"
@@ -4021,6 +4022,9 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t narrow_held_budget = 0) {
   if (row_groups_per_block == 0)
     throw std::invalid_argument("WriteParquet: row_groups_per_block must be >= 1");
+  rugo::require_unique_column_names(
+      "write_parquet: cannot write", cols.size(),
+      [&](size_t i) -> const std::string & { return cols[i].name; });
   NarrowColumnRuns runs;
   runs.chunk_bytes = narrow_chunk_bytes;
   runs.run_blocks = narrow_run_blocks;
@@ -4184,8 +4188,13 @@ class StreamingParquetWriter {
   // row group is fully encoded before it returns.
   void add_row_group(const std::vector<ColumnInput> &rg_cols, size_t rg_rows) {
     if (!have_schema_) {
+      rugo::require_unique_column_names(
+          "write_parquet: cannot write", rg_cols.size(),
+          [&](size_t i) -> const std::string & { return rg_cols[i].name; });
       schema_cols_ = strip_data(rg_cols);
       have_schema_ = true;
+    } else {
+      require_same_schema(rg_cols);
     }
     block_.push_back(encode_row_group(rg_cols, rg_rows, codec_, profile_,
                                       max_page_bytes_, want_index_, statistics_));
@@ -4270,6 +4279,34 @@ class StreamingParquetWriter {
       c.row_level_offsets = nullptr; c.row_element_offsets = nullptr;
     }
     return out;
+  }
+
+  // The footer schema is the FIRST row group's, so a later row group whose
+  // columns differ would be written under the wrong names/types — refuse it.
+  void require_same_schema(const std::vector<ColumnInput> &rg_cols) const {
+    const std::string at = "write_parquet: cannot write row group " +
+                           std::to_string(all_rg_cols_.size());
+    if (rg_cols.size() != schema_cols_.size())
+      throw std::invalid_argument(at + ": it has " + std::to_string(rg_cols.size()) +
+                                  " columns, the first row group has " +
+                                  std::to_string(schema_cols_.size()));
+    for (size_t i = 0; i < rg_cols.size(); ++i) {
+      const ColumnInput &a = schema_cols_[i], &b = rg_cols[i];
+      if (a.name != b.name)
+        throw std::invalid_argument(at + ": column " + std::to_string(i) + " is '" + b.name +
+                                    "', the first row group has '" + a.name + "'");
+      const bool same_type =
+          a.type == b.type && a.is_utf8 == b.is_utf8 && a.logical == b.logical &&
+          a.dec_width == b.dec_width && a.dec_scale == b.dec_scale &&
+          a.dec_precision == b.dec_precision && a.ts_unit == b.ts_unit &&
+          a.ts_utc == b.ts_utc && a.draken_logical_kind == b.draken_logical_kind &&
+          a.is_unsigned == b.is_unsigned && a.int_bit_width == b.int_bit_width &&
+          a.is_array == b.is_array && a.array_depth == b.array_depth &&
+          a.elem_type == b.elem_type && a.elem_is_utf8 == b.elem_is_utf8;
+      if (!same_type)
+        throw std::invalid_argument(at + ": column '" + b.name +
+                                    "' has a different type from the first row group's");
+    }
   }
 
   int codec_;

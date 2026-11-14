@@ -39,6 +39,7 @@ class PlanContext:
         "nested_ctes",
         "variables",
         "statistics_estimated_by_optimizer",
+        "collision_qualified_outputs",
     )
 
     def __init__(self) -> None:
@@ -91,3 +92,7 @@ class PlanContext:
         # worker count). Set by whoever plans a session's query; None = no session, and
         # resolve() then answers each variable's default.
         self.variables = None
+        # Output names the last bound Exit qualified (`a.id`) only because two outputs
+        # shared the bare name (binder/project.py visit_exit). CTAS and CREATE VIEW
+        # refuse to store them (binder relation.visit_insert, view._view_output_schema).
+        self.collision_qualified_outputs: frozenset = frozenset()

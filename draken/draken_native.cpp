@@ -8645,9 +8645,8 @@ NB_MODULE(draken_native, m) {
         // Read one column (by identity/name) from the substrate as a Vector handle —
         // for operators reading the CxxMorsel without materializing the whole morsel.
         .def("column", [](const CxxMorsel& cm, nb::handle identity) -> nb::object {
-            const std::string want = nb_bytes_to_std(identity);
-            for (size_t i = 0; i < cm.names.size(); ++i)
-                if (cm.names[i] == want) return nb::cast(cm.columns[i].own);
+            const size_t i = cxx_find_column(cm, nb_bytes_to_std(identity));
+            if (i != SIZE_MAX) return nb::cast(cm.columns[i].own);
             throw nb::key_error("CxxMorsel.column: not found");
         })
         // Cxx-native ops — return a new CxxMorsel (stay off-PyObject; no materialization).

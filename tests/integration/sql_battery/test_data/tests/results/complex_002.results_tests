@@ -5,16 +5,16 @@
         "planet_name": [
             "Pluto"
         ],
-        "p.diameter": [
+        "diameter": [
             2370
         ],
-        "high_gm_stats.high_gm_satellites_count": [
+        "high_gm_satellites_count": [
             1
         ],
-        "high_gm_stats.avg_high_gm_radius": [
+        "avg_high_gm_radius": [
             603.6
         ],
-        "visible_stats.avg_magnitude": [
+        "avg_magnitude": [
             null
         ]
     }

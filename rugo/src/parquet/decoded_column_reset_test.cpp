@@ -139,6 +139,7 @@ static void test_scalars_defaulted() {
 
     d.is_unsigned = true;          d.int_bit_width = 16;
     d.is_decimal = true;           d.decimal_precision = 38;
+    d.is_interval = true;
     d.decimal_scale = 9;           d.draken_logical_kind = 5;
     d.num_rows = 12345;            d.pages_skipped = 7;
     d.pages_decoded = 9;           d.max_rep_level = 3;
@@ -156,6 +157,7 @@ static void test_scalars_defaulted() {
     check(d.is_unsigned == fresh.is_unsigned, "is_unsigned defaulted");
     check(d.int_bit_width == fresh.int_bit_width, "int_bit_width defaulted");
     check(d.is_decimal == fresh.is_decimal, "is_decimal defaulted");
+    check(d.is_interval == fresh.is_interval, "is_interval defaulted");
     check(d.decimal_precision == fresh.decimal_precision, "decimal_precision defaulted");
     check(d.decimal_scale == fresh.decimal_scale, "decimal_scale defaulted");
     check(d.draken_logical_kind == fresh.draken_logical_kind, "draken_logical_kind defaulted");

@@ -199,6 +199,7 @@ cdef extern from "decode.hpp":
         int32_t int_bit_width
         bint is_decimal
         bint is_uuid
+        bint is_interval
         uint8_t decimal_precision
         uint8_t decimal_scale
         int32_t draken_logical_kind
