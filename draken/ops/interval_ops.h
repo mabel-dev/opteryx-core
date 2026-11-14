@@ -24,6 +24,8 @@
 #include <string.h>
 #include <stdexcept>
 #include <climits>
+#include <string>
+#include <cmath>       // std::trunc / std::nearbyint / std::isfinite (interval_scale)
 #include <unordered_map>
 #include <vector>
 
@@ -488,6 +490,162 @@ static inline VecResult interval_neg(const DrakenVector& v) {
         const DrakenIntervalSlot& s = data[v.selection[i]];
         dst[i].months = -s.months;
         dst[i].us     = -s.us;
+    }
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = out_null;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_INTERVAL;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// SCALE — INTERVAL × number, number × INTERVAL, INTERVAL ÷ number → INTERVAL.
+//
+// Postgres semantics. Months and µs are scaled separately; the fractional part of
+// the scaled months SPILLS into µs at 30 days/month (INTERVAL_MONTH_US):
+//   (1mo, 0) × 1.5 = (1mo, 15d)        (1mo, 0) ÷ 2 = (0mo, 15d)
+//   (1mo, 1d) × 3  = (3mo, 3d)         (2y, 0)  ÷ 3 = (8mo, 0)
+// An INTEGER factor/divisor is EXACT: int128 throughout, the month remainder of a
+// division carried into µs before µs is divided, µs rounded half-to-even. A FLOAT
+// factor goes through double (as Postgres does) — so a factor like 1/3.0 can land
+// a hair off a whole month, e.g. (3mo) × (1/3.0) = 30 days, not 1 month.
+//
+// Fails loud, never a wrapped answer: overflow of either component, or of the
+// normalised total (months × MONTH_US + µs — the ingestion invariant), throws, as
+// does division by zero and a NaN/±inf factor. Null row on either side → null.
+// `num` is any signed/unsigned integer or float vector (read via its selection).
+// ---------------------------------------------------------------------------
+static inline __int128 iv_div_round_half_even(__int128 n, __int128 d) {
+    // d != 0. Quotient rounded to nearest, ties to even (C++ `/` truncates).
+    if (d < 0) { n = -n; d = -d; }
+    __int128 q = n / d;
+    __int128 r = n % d;                  // same sign as n
+    const __int128 twice = (r < 0 ? -r : r) * 2;
+    if (twice > d || (twice == d && (q % 2 != 0))) q += (n < 0 ? -1 : 1);
+    return q;
+}
+
+static inline void iv_store_checked(DrakenIntervalSlot& dst, __int128 months, __int128 us,
+                                    const char* what) {
+    // Components first: only once both are int64 is the total safe to form in int128.
+    bool ok = months <= INT64_MAX && months >= INT64_MIN && us <= INT64_MAX && us >= INT64_MIN;
+    if (ok) {
+        const __int128 total = months * static_cast<__int128>(INTERVAL_MONTH_US) + us;
+        ok = total <= INT64_MAX && total >= INT64_MIN;
+    }
+    if (!ok)
+        throw std::overflow_error(std::string(what) +
+            " overflow: the result does not fit an INTERVAL — fail loud, never a wrapped answer");
+    dst.months = static_cast<int64_t>(months);
+    dst.us     = static_cast<int64_t>(us);
+}
+
+static inline VecResult interval_scale(const DrakenVector& iv, const DrakenVector& num, bool divide) {
+    const uint32_t n = iv.length;
+    const DrakenIntervalSlot* data = static_cast<const DrakenIntervalSlot*>(iv.data);
+    const char* what = divide ? "INTERVAL division" : "INTERVAL multiplication";
+
+    bool is_int = true;
+    switch (num.type) {
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+            break;
+        case DRAKEN_FLOAT32: case DRAKEN_FLOAT64:
+            is_int = false;
+            break;
+        default:
+            throw std::invalid_argument("interval_scale: the factor must be an integer or float");
+    }
+    auto read_int = [&](uint32_t p) -> __int128 {
+        switch (num.type) {
+            case DRAKEN_INT8:   return static_cast<const int8_t*>(num.data)[p];
+            case DRAKEN_INT16:  return static_cast<const int16_t*>(num.data)[p];
+            case DRAKEN_INT32:  return static_cast<const int32_t*>(num.data)[p];
+            case DRAKEN_INT64:  return static_cast<const int64_t*>(num.data)[p];
+            case DRAKEN_UINT8:  return static_cast<const uint8_t*>(num.data)[p];
+            case DRAKEN_UINT16: return static_cast<const uint16_t*>(num.data)[p];
+            case DRAKEN_UINT32: return static_cast<const uint32_t*>(num.data)[p];
+            default:            return static_cast<const uint64_t*>(num.data)[p];
+        }
+    };
+    auto read_f64 = [&](uint32_t p) -> double {
+        return num.type == DRAKEN_FLOAT32
+            ? static_cast<double>(static_cast<const float*>(num.data)[p])
+            : static_cast<const double*>(num.data)[p];
+    };
+
+    const size_t data_bytes = (n > 0u ? n : 1u) * sizeof(DrakenIntervalSlot);
+    DrakenIntervalSlot* dst = static_cast<DrakenIntervalSlot*>(draken_malloc(data_bytes));
+    if (!dst) throw std::bad_alloc();
+
+    const bool has_nulls = (iv.validity != nullptr || num.validity != nullptr);
+    uint8_t* out_null = nullptr;
+    if (has_nulls && n > 0) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
+        memset(out_null, 0, nb);
+    }
+
+    const __int128 MONTH_US = INTERVAL_MONTH_US;
+    // INT64 range as doubles: 2^63 is exact; anything >= it (or < -2^63) cannot convert.
+    const double TWO_63 = 9223372036854775808.0;
+
+    try {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!iv_row_valid(iv.validity, i) || !iv_row_valid(num.validity, i)) {
+                dst[i] = {0, 0};
+                continue;
+            }
+            const DrakenIntervalSlot& s = data[iv.selection[i]];
+            const uint32_t p = num.selection[i];
+
+            if (is_int) {
+                const __int128 k = read_int(p);
+                if (!divide) {
+                    // |k| > 2^63 (a UINT64 factor) times any non-zero component is out
+                    // of range anyway — and int64 × uint64 can overflow int128 itself.
+                    if (k > INT64_MAX && (s.months != 0 || s.us != 0))
+                        throw std::overflow_error(std::string(what) +
+                            " overflow: the result does not fit an INTERVAL — fail loud, never a wrapped answer");
+                    const __int128 kk = k > INT64_MAX ? 0 : k;
+                    iv_store_checked(dst[i], s.months * kk, s.us * kk, what);
+                } else {
+                    if (k == 0) throw std::domain_error("INTERVAL division by zero");
+                    const __int128 m = s.months;
+                    const __int128 mq = m / k;                 // whole months, toward zero
+                    const __int128 carried = s.us + (m - mq * k) * MONTH_US;
+                    iv_store_checked(dst[i], mq, iv_div_round_half_even(carried, k), what);
+                }
+            } else {
+                const double f = read_f64(p);
+                if (!std::isfinite(f))
+                    throw std::domain_error(std::string(what) + " by a NaN or infinite factor");
+                if (divide && f == 0.0) throw std::domain_error("INTERVAL division by zero");
+                const double mf = divide ? static_cast<double>(s.months) / f
+                                         : static_cast<double>(s.months) * f;
+                const double whole = std::trunc(mf);
+                const double usf = (divide ? static_cast<double>(s.us) / f
+                                           : static_cast<double>(s.us) * f)
+                                   + (mf - whole) * static_cast<double>(INTERVAL_MONTH_US);
+                const double usr = std::nearbyint(usf);   // default FE mode: ties to even
+                if (!(whole < TWO_63 && whole >= -TWO_63 && usr < TWO_63 && usr >= -TWO_63))
+                    throw std::overflow_error(std::string(what) +
+                        " overflow: the result does not fit an INTERVAL — fail loud, never a wrapped answer");
+                iv_store_checked(dst[i], static_cast<int64_t>(whole), static_cast<int64_t>(usr), what);
+            }
+            if (out_null) iv_set_valid(out_null, i);
+        }
+    } catch (...) {
+        draken_free(dst);
+        if (out_null) draken_free(out_null);
+        throw;
     }
 
     VecResult r;

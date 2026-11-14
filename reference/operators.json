@@ -776,7 +776,7 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Division operator.",
-        "documentation": "Returns the quotient of two numeric operands.",
+        "documentation": "Returns the quotient of two numeric operands, or divides an INTERVAL by a number.",
         "implemented": true,
         "syntax_forms": [
             "<dividend> / <divisor>"
@@ -784,17 +784,18 @@
         "operands": [
             {
                 "name": "dividend",
-                "documentation": "The value to divide. Two integers still divide to a FLOAT - use `DIV` for integer division.",
+                "documentation": "The value to divide: a number or an INTERVAL. Two integers still divide to a FLOAT - use `DIV` for integer division.",
                 "constant_only": false,
                 "types": [
                     "decimal",
                     "float",
-                    "integer"
+                    "integer",
+                    "interval"
                 ]
             },
             {
                 "name": "divisor",
-                "documentation": "The value to divide by. Dividing by zero yields infinity rather than raising, because the result is floating point.",
+                "documentation": "The number to divide by. Dividing a number by zero yields infinity rather than raising, because the result is floating point; dividing an INTERVAL by zero is an error. A number cannot be divided by an INTERVAL.",
                 "constant_only": false,
                 "types": [
                     "decimal",
@@ -815,6 +816,12 @@
                 "result": [
                     "0.33333333"
                 ]
+            },
+            {
+                "sql": "SELECT CAST('2026-01-01' AS TIMESTAMP) + INTERVAL '1' MONTH / 2;",
+                "result": [
+                    "2026-01-16 00:00:00+00:00"
+                ]
             }
         ],
         "see_also": [
@@ -825,7 +832,8 @@
         "left_types": [
             "decimal",
             "float",
-            "integer"
+            "integer",
+            "interval"
         ],
         "right_types": [
             "decimal",
@@ -834,10 +842,11 @@
         ],
         "result_types": [
             "decimal",
-            "float"
+            "float",
+            "interval"
         ],
         "has_dynamic_result": false,
-        "signature_count": 9,
+        "signature_count": 11,
         "signatures": [
             {
                 "left_type": "decimal",
@@ -901,6 +910,20 @@
                 "result_type": "float",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "float",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "integer",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
             }
         ],
         "precedence": {
@@ -912,7 +935,7 @@
             ],
             "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
         },
-        "notes": "`/` is true division: `5 / 2` is 2.5, never 2. A DECIMAL operand keeps the result DECIMAL; every other combination gives FLOAT, and `1 / 0` is therefore `inf` rather than an error."
+        "notes": "`/` is true division: `5 / 2` is 2.5, never 2. A DECIMAL operand keeps the result DECIMAL; every other numeric combination gives FLOAT, and `1 / 0` is therefore `inf` rather than an error. An INTERVAL divided by a number is an INTERVAL: whole months divide, and the remainder spills into days at 30 days per month, so `INTERVAL '1' MONTH / 2` is 15 days and `INTERVAL '2' YEAR / 3` is 8 months."
     },
     "Eq": {
         "ast_symbol": "Eq",
@@ -3170,10 +3193,11 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Subtraction operator.",
-        "documentation": "Returns the difference between two numeric, date, timestamp, or interval-compatible operands.",
+        "documentation": "Returns the difference between two numeric, date, timestamp, or interval-compatible operands. As a prefix, `-x` negates a number or an INTERVAL.",
         "implemented": true,
         "syntax_forms": [
-            "<left> - <right>"
+            "<left> - <right>",
+            "-<value>"
         ],
         "operands": [
             {
@@ -3216,6 +3240,12 @@
                 "sql": "SELECT CAST('2026-03-01' AS TIMESTAMP) - INTERVAL '1' MONTH;",
                 "result": [
                     "2026-02-01 00:00:00+00:00"
+                ]
+            },
+            {
+                "sql": "SELECT CAST('2026-03-01' AS TIMESTAMP) + -INTERVAL '1' DAY;",
+                "result": [
+                    "2026-02-28 00:00:00+00:00"
                 ]
             }
         ],
@@ -3371,7 +3401,7 @@
                 "-"
             ]
         },
-        "notes": "Unlike addition, subtraction is not symmetric across types: a timestamp minus an interval is a timestamp, but an interval minus a timestamp is not accepted."
+        "notes": "Unlike addition, subtraction is not symmetric across types: a timestamp minus an interval is a timestamp, but an interval minus a timestamp is not accepted. `-INTERVAL '1' DAY` is the same interval as `INTERVAL '-1' DAY`, and negating a computed interval such as `-(end_ts - start_ts)` works too."
     },
     "Modulo": {
         "ast_symbol": "Modulo",
@@ -3463,7 +3493,7 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Multiplication operator.",
-        "documentation": "Returns the product of two numeric operands.",
+        "documentation": "Returns the product of two numeric operands, or scales an INTERVAL by a number.",
         "implemented": true,
         "syntax_forms": [
             "<left> * <right>"
@@ -3471,22 +3501,24 @@
         "operands": [
             {
                 "name": "left",
-                "documentation": "A numeric value.",
+                "documentation": "A numeric value, or an INTERVAL.",
                 "constant_only": false,
                 "types": [
                     "decimal",
                     "float",
-                    "integer"
+                    "integer",
+                    "interval"
                 ]
             },
             {
                 "name": "right",
-                "documentation": "A numeric value. The result takes the wider of the two types - see Signatures.",
+                "documentation": "A numeric value, or an INTERVAL when the left side is a number. The result takes the wider of the two types - see Signatures.",
                 "constant_only": false,
                 "types": [
                     "decimal",
                     "float",
-                    "integer"
+                    "integer",
+                    "interval"
                 ]
             }
         ],
@@ -3498,6 +3530,14 @@
                     "Venus | 24208",
                     "Earth | 25512"
                 ]
+            },
+            {
+                "sql": "SELECT id, CAST('2026-01-31' AS TIMESTAMP) + INTERVAL '1' MONTH * id FROM $planets LIMIT 3;",
+                "result": [
+                    "1 | 2026-02-28 00:00:00+00:00",
+                    "2 | 2026-03-31 00:00:00+00:00",
+                    "3 | 2026-04-30 00:00:00+00:00"
+                ]
             }
         ],
         "see_also": [
@@ -3508,20 +3548,23 @@
         "left_types": [
             "decimal",
             "float",
-            "integer"
+            "integer",
+            "interval"
         ],
         "right_types": [
             "decimal",
             "float",
-            "integer"
+            "integer",
+            "interval"
         ],
         "result_types": [
             "decimal",
             "float",
-            "integer"
+            "integer",
+            "interval"
         ],
         "has_dynamic_result": false,
-        "signature_count": 9,
+        "signature_count": 13,
         "signatures": [
             {
                 "left_type": "decimal",
@@ -3566,6 +3609,13 @@
                 "cost_estimate": 100.0
             },
             {
+                "left_type": "float",
+                "right_type": "interval",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
                 "left_type": "integer",
                 "right_type": "decimal",
                 "result_type": "decimal",
@@ -3585,6 +3635,27 @@
                 "result_type": "integer",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "interval",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "float",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "integer",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
             }
         ],
         "precedence": {
@@ -3595,7 +3666,8 @@
                 "*"
             ],
             "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
-        }
+        },
+        "notes": "An INTERVAL times a number (either way round) is an INTERVAL. Months and the sub-month part scale separately, and a fractional month spills into days at 30 days per month, as in PostgreSQL: `INTERVAL '1' MONTH * 1.5` is 1 month 15 days. An integer factor is exact; a float factor goes through double precision. A result too large for an INTERVAL is an error."
     },
     "MyIntegerDivide": {
         "ast_symbol": "MyIntegerDivide",

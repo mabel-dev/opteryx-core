@@ -88,6 +88,36 @@ def test_multi_value_interval_walks_the_ladder():
     )
 
 
+def test_month_to_day_skips_week():
+    """`MONTH TO DAY` is months then DAYS. Walking the ladder blindly read the second
+    value as WEEKS, so `'1 3' MONTH TO DAY` silently landed on 1 month 3 weeks."""
+    assert scalar(f"SELECT {TS} + INTERVAL '1 3' MONTH TO DAY AS x") == scalar(
+        f"SELECT {TS} + INTERVAL '1' MONTH + INTERVAL '3' DAY AS x"
+    )
+
+
+def test_day_to_second_fills_from_the_leading_unit():
+    assert scalar(f"SELECT {TS} + INTERVAL '1 2 3 4' DAY TO SECOND AS x") == scalar(
+        f"SELECT {TS} + INTERVAL '93784' SECOND AS x"
+    )
+
+
+def test_week_is_a_rung_only_when_named():
+    assert scalar(f"SELECT {TS} + INTERVAL '2 3' WEEK TO DAY AS x") == scalar(
+        f"SELECT {TS} + INTERVAL '17' DAY AS x"
+    )
+
+
+def test_more_values_than_the_range_holds_raises():
+    with pytest.raises(SqlError, match="covers only 2 unit"):
+        scalar(f"SELECT INTERVAL '1 2 3' YEAR TO MONTH AS x")
+
+
+def test_range_must_descend():
+    with pytest.raises(SqlError, match="larger unit to a smaller one"):
+        scalar(f"SELECT INTERVAL '1 2' DAY TO MONTH AS x")
+
+
 @pytest.mark.parametrize("unit", ["doy", "dow", "century", "decade", "epoch"])
 def test_unsupported_unit_raises_sql_error(unit):
     """Parseable but unimplemented — an actionable SqlError, never a ValueError.

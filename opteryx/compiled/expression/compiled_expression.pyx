@@ -1059,6 +1059,16 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
     if op_code == BOP_PLUS or op_code == BOP_MINUS:
         if left_phys in _BINOP_NATIVE_INTERVAL and right_phys in _BINOP_NATIVE_INTERVAL:
             return True
+    # INTERVAL × number (either order) and INTERVAL ÷ number → INTERVAL, via
+    # draken::ops::interval_scale. Also precedes the numeric range check, for the
+    # same reason. number ÷ INTERVAL is not an operation, so it is not admitted.
+    if op_code == BOP_MULTIPLY or op_code == BOP_DIVIDE:
+        if left_phys in _BINOP_NATIVE_INTERVAL and (r_num) and \
+                (result_phys is None or result_phys == "INTERVAL"):
+            return True
+        if op_code == BOP_MULTIPLY and l_num and right_phys in _BINOP_NATIVE_INTERVAL and \
+                (result_phys is None or result_phys == "INTERVAL"):
+            return True
     # DECIMAL (S-A.2): same-kind DECIMAL/DECIMAL128, or decimal × float → FLOAT64.
     # + - * / % only (not INT_DIVIDE). All same-kind, cross-kind (DECIMAL×DECIMAL128),
     # decimal×float and decimal×(any signed int width) are now c-native — incl.

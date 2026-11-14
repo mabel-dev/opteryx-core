@@ -664,6 +664,24 @@ static VecResult binop_rows(void* ctx, const DrakenVector* left, const DrakenVec
             }
         }
 
+        // INTERVAL × number, number × INTERVAL, INTERVAL ÷ number → INTERVAL.
+        // Postgres semantics (fractional months spill into µs at 30 days/month);
+        // see draken::ops::interval_scale. number ÷ INTERVAL means nothing — absent.
+        {
+            auto is_scalar_num = [](DrakenType t) {
+                return t == DRAKEN_INT8 || t == DRAKEN_INT16 || t == DRAKEN_INT32 ||
+                       t == DRAKEN_INT64 || t == DRAKEN_UINT8 || t == DRAKEN_UINT16 ||
+                       t == DRAKEN_UINT32 || t == DRAKEN_UINT64 ||
+                       t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64;
+            };
+            if (op == BOP_MULTIPLY && lt == DRAKEN_INTERVAL && is_scalar_num(rt))
+                return draken::ops::interval_scale(*left, *right, false);
+            if (op == BOP_MULTIPLY && is_scalar_num(lt) && rt == DRAKEN_INTERVAL)
+                return draken::ops::interval_scale(*right, *left, false);
+            if (op == BOP_DIVIDE && lt == DRAKEN_INTERVAL && is_scalar_num(rt))
+                return draken::ops::interval_scale(*left, *right, true);
+        }
+
         // INTERVAL ± INTERVAL → INTERVAL (S-A.1). Component-wise months/µs add/sub —
         // the SAME draken::ops kernels the live closure calls (byte-identical), so
         // this just removes the per-morsel Python-closure hop. No scales/units.

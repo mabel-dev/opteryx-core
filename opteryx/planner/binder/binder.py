@@ -1238,6 +1238,35 @@ def _bind_new_column(node, node_type, column_name, context, schemas):
                     )
                     break
 
+        # Unary minus is lowered to `0 - expr` (logical_planner_builders.unary_op),
+        # and INTEGER - INTERVAL means nothing. Once the operand is known to be an
+        # INTERVAL, `0 - x` (written out, or from `-x`) is its negation: rewrite to
+        # `x * -1`, which interval_scale computes exactly, component-wise.
+        if (
+            node_type == NodeType.BINARY_OPERATOR
+            and node.value == "Minus"
+            and node.left is not None
+            and node.right is not None
+            and node.left.node_type == NodeType.LITERAL
+            and node.left.value == 0
+            and node.left.schema_column is not None
+            and node.left.schema_column.column_type.category == LogicalCategory.INTEGER
+            and node.right.schema_column is not None
+            and node.right.schema_column.column_type.category == LogicalCategory.INTERVAL
+        ):
+            minus_one = node.left
+            _old_sc = minus_one.schema_column
+            minus_one.value = -1
+            minus_one.schema_column = context.plan_context.columns.constant(
+                _old_sc.name,
+                column_type=_old_sc.column_type,
+                aliases=list(_old_sc.aliases) if _old_sc.aliases else [],
+                value=-1,
+                nullable=False,
+            )
+            node.value = "Multiply"
+            node.left, node.right = node.right, minus_one
+
         result_type = determine_type(node)  # ColumnType | None (Phase 2)
         # D-2: when the result is DECIMAL, also derive (precision, scale).
         # determine_type() now returns ColumnType; use .category for LogicalCategory

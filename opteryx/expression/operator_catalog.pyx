@@ -690,12 +690,15 @@ OPERATOR_DEFINITIONS = {
     ),
     "Minus": OperatorDefinition(
         summary="Subtraction operator.",
-        documentation="Returns the difference between two numeric, date, timestamp, or interval-compatible operands.",
+        documentation=(
+            "Returns the difference between two numeric, date, timestamp, or interval-compatible operands. "
+            "As a prefix, `-x` negates a number or an INTERVAL."
+        ),
         token="-",
         category="binary",
         node_kind="binary",
         friendly_name="Subtraction",
-        syntax_forms=("<left> - <right>",),
+        syntax_forms=("<left> - <right>", "-<value>"),
         operands=(
             OperandDefinition("left", "The value to subtract from."),
             OperandDefinition(
@@ -713,24 +716,33 @@ OPERATOR_DEFINITIONS = {
                 "SELECT CAST('2026-03-01' AS TIMESTAMP) - INTERVAL '1' MONTH;",
                 ("2026-02-01 00:00:00+00:00",),
             ),
+            ExampleDefinition(
+                "SELECT CAST('2026-03-01' AS TIMESTAMP) + -INTERVAL '1' DAY;",
+                ("2026-02-28 00:00:00+00:00",),
+            ),
         ),
         see_also=("Plus", "Multiply", "Divide"),
-        notes="Unlike addition, subtraction is not symmetric across types: a timestamp minus an interval is a timestamp, but an interval minus a timestamp is not accepted.",
+        notes=(
+            "Unlike addition, subtraction is not symmetric across types: a timestamp minus an interval is a "
+            "timestamp, but an interval minus a timestamp is not accepted. `-INTERVAL '1' DAY` is the same "
+            "interval as `INTERVAL '-1' DAY`, and negating a computed interval such as `-(end_ts - start_ts)` "
+            "works too."
+        ),
     ),
     "Multiply": OperatorDefinition(
         summary="Multiplication operator.",
-        documentation="Returns the product of two numeric operands.",
+        documentation="Returns the product of two numeric operands, or scales an INTERVAL by a number.",
         token="*",
         category="binary",
         node_kind="binary",
         friendly_name="Multiplication",
         syntax_forms=("<left> * <right>",),
         operands=(
-            OperandDefinition("left", "A numeric value."),
+            OperandDefinition("left", "A numeric value, or an INTERVAL."),
             OperandDefinition(
                 "right",
-                "A numeric value. The result takes the wider of the two types - see "
-                "Signatures.",
+                "A numeric value, or an INTERVAL when the left side is a number. The result takes "
+                "the wider of the two types - see Signatures.",
             ),
         ),
         examples=(
@@ -738,12 +750,22 @@ OPERATOR_DEFINITIONS = {
                 "SELECT name, diameter * 2 FROM $planets LIMIT 3;",
                 ("Mercury | 9758", "Venus | 24208", "Earth | 25512"),
             ),
+            ExampleDefinition(
+                "SELECT id, CAST('2026-01-31' AS TIMESTAMP) + INTERVAL '1' MONTH * id FROM $planets LIMIT 3;",
+                ("1 | 2026-02-28 00:00:00+00:00", "2 | 2026-03-31 00:00:00+00:00", "3 | 2026-04-30 00:00:00+00:00"),
+            ),
         ),
         see_also=("Divide", "Plus", "Minus"),
+        notes=(
+            "An INTERVAL times a number (either way round) is an INTERVAL. Months and the sub-month part "
+            "scale separately, and a fractional month spills into days at 30 days per month, as in "
+            "PostgreSQL: `INTERVAL '1' MONTH * 1.5` is 1 month 15 days. An integer factor is exact; a "
+            "float factor goes through double precision. A result too large for an INTERVAL is an error."
+        ),
     ),
     "Divide": OperatorDefinition(
         summary="Division operator.",
-        documentation="Returns the quotient of two numeric operands.",
+        documentation="Returns the quotient of two numeric operands, or divides an INTERVAL by a number.",
         token="/",
         category="binary",
         node_kind="binary",
@@ -752,13 +774,14 @@ OPERATOR_DEFINITIONS = {
         operands=(
             OperandDefinition(
                 "dividend",
-                "The value to divide. Two integers still divide to a FLOAT - use `DIV` for "
-                "integer division.",
+                "The value to divide: a number or an INTERVAL. Two integers still divide to a "
+                "FLOAT - use `DIV` for integer division.",
             ),
             OperandDefinition(
                 "divisor",
-                "The value to divide by. Dividing by zero yields infinity rather than "
-                "raising, because the result is floating point.",
+                "The number to divide by. Dividing a number by zero yields infinity rather than "
+                "raising, because the result is floating point; dividing an INTERVAL by zero is an "
+                "error. A number cannot be divided by an INTERVAL.",
             ),
         ),
         examples=(
@@ -770,12 +793,18 @@ OPERATOR_DEFINITIONS = {
                 "SELECT CAST(1 AS DECIMAL(10,2)) / 3;",
                 ("0.33333333",),
             ),
+            ExampleDefinition(
+                "SELECT CAST('2026-01-01' AS TIMESTAMP) + INTERVAL '1' MONTH / 2;",
+                ("2026-01-16 00:00:00+00:00",),
+            ),
         ),
         see_also=("MyIntegerDivide", "Modulo", "Multiply"),
         notes=(
             "`/` is true division: `5 / 2` is 2.5, never 2. A DECIMAL operand keeps the "
-            "result DECIMAL; every other combination gives FLOAT, and `1 / 0` is therefore "
-            "`inf` rather than an error."
+            "result DECIMAL; every other numeric combination gives FLOAT, and `1 / 0` is therefore "
+            "`inf` rather than an error. An INTERVAL divided by a number is an INTERVAL: whole months "
+            "divide, and the remainder spills into days at 30 days per month, so `INTERVAL '1' MONTH / 2` "
+            "is 15 days and `INTERVAL '2' YEAR / 3` is 8 months."
         ),
     ),
     "Modulo": OperatorDefinition(

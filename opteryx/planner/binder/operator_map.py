@@ -32,7 +32,7 @@ def _category_name(category) -> str:
 
 # Phase 3: OPERATOR_MAP is now authored directly on LogicalCategory (LC) keys.
 # Integer widths collapse to LC.INTEGER, floats to LC.FLOAT, JSONB/STRUCT to
-# LC.NVARCHAR — the map carries 323 entries. The count is asserted by
+# LC.NVARCHAR — the map carries 329 entries. The count is asserted by
 # test_operator_map_entry_count_is_accurate (tests/planner/test_operator_map.py)
 # rather than maintained by hand: it had drifted through at least three changes
 # (330 was stale before the ILIKE VARBINARY rows were added, and stale again by 13
@@ -217,6 +217,15 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.INTERVAL    , LC.INTERVAL    , 'Minus'                   ): OMT(_G, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'NotEq'                   ): OMT(_B, None, 100.0),
     (LC.INTERVAL    , LC.INTERVAL    , 'Plus'                    ): OMT(_G, None, 100.0),
+    # INTERVAL × number (either order), INTERVAL ÷ number: Postgres semantics, the
+    # fractional month spilling into the sub-month part at 30 days (interval_scale).
+    # number ÷ INTERVAL is meaningless and stays absent.
+    (LC.INTERVAL    , LC.INTEGER     , 'Multiply'                ): OMT(_G, None, 100.0),
+    (LC.INTERVAL    , LC.FLOAT       , 'Multiply'                ): OMT(_G, None, 100.0),
+    (LC.INTEGER     , LC.INTERVAL    , 'Multiply'                ): OMT(_G, None, 100.0),
+    (LC.FLOAT       , LC.INTERVAL    , 'Multiply'                ): OMT(_G, None, 100.0),
+    (LC.INTERVAL    , LC.INTEGER     , 'Divide'                  ): OMT(_G, None, 100.0),
+    (LC.INTERVAL    , LC.FLOAT       , 'Divide'                  ): OMT(_G, None, 100.0),
     (LC.INTERVAL    , LC.TIMESTAMP   , 'Plus'                    ): OMT(_T, None, 100.0),
     (LC.NVARCHAR    , LC.ARRAY       , 'InList'                  ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.ARRAY       , 'NotInList'               ): OMT(_B, None, 100.0),

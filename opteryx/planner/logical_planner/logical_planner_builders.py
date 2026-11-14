@@ -12,6 +12,7 @@ a function and a reference to it in the dictionary.
 import datetime
 import uuid
 import decimal
+import re
 from typing import List, Optional
 
 from draken.draken_native import LogicalKind
@@ -2886,6 +2887,12 @@ def literal_boolean(branch, alias: Optional[List[str]] = None, key=None, *, plan
     return Literal(type=_CT_BOOLEAN, value=branch, alias=alias, arena=plan_context.expressions)
 
 
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_INTERVAL_MONTH_US = 30 * MICROSECONDS_PER_DAY  # draken INTERVAL_MONTH_US
+_INTERVAL_VALUE = re.compile(r"[+-]?[0-9]+")
+
+
 def literal_interval(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """
     Create node for a time literal.
@@ -2912,9 +2919,12 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None, *, pla
     value_node = build(branch["value"]["Value"], plan_context=plan_context)
     if value_node.node_type != NodeType.LITERAL or type(value_node.value) is not bytes:
         raise SqlError("Invalid INTERVAL, values must be provided as a VARCHAR. Quote the value, for example `INTERVAL '1' MONTH`.")
-    values = value_node.text()
-
-    values = values.split(" ")
+    # Any run of whitespace separates values, and surrounding whitespace is padding:
+    # `' 1'` and `'1  3'` split on a single space produced empty values, reported as
+    # "`` is not a whole number" or as one value too many for the range.
+    values = value_node.text().split()
+    if not values:
+        raise SqlError("Invalid INTERVAL, no value was given. Values must look like `INTERVAL '1' MONTH`.")
     leading_unit = branch["leading_field"]
 
     if isinstance(leading_unit, dict) and len(leading_unit) == 1:
@@ -2928,23 +2938,52 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None, *, pla
             f"Invalid INTERVAL, `{leading_unit.upper()}` is not a supported unit. Valid units are {valid_units}."
         )
 
-    unit_index = parts.index(units[leading_unit.lower()])
+    leading = units[leading_unit.lower()]
+    unit_index = parts.index(leading)
 
-    if unit_index + len(values) > len(parts):
+    # The `TO` unit bounds the walk. It used to be ignored, so `INTERVAL '1 3' MONTH TO
+    # DAY` silently read as 1 month 3 WEEKS (WEEK is the rung after MONTH).
+    last_unit = branch.get("last_field")
+    if isinstance(last_unit, dict) and len(last_unit) == 1:
+        last_unit = next(iter(last_unit))
+    if last_unit is not None:
+        if not isinstance(last_unit, str) or last_unit.lower() not in units:
+            raise SqlError(
+                f"Invalid INTERVAL, `{str(last_unit).upper()}` is not a supported unit. Valid units are {valid_units}."
+            )
+        last = units[last_unit.lower()]
+        last_index = parts.index(last)
+        if last_index <= unit_index:
+            raise SqlError(
+                f"Invalid INTERVAL, `{leading.upper()} TO {last.upper()}` must run from a larger unit to a smaller one, for example `INTERVAL '1 3' YEAR TO MONTH`."
+            )
+        ladder = parts[unit_index : last_index + 1]
+    else:
+        last = None
+        ladder = parts[unit_index:]
+
+    # WEEK is not a field of a multi-value interval in SQL — `MONTH TO DAY` means months
+    # then days — so it is only a rung when the reader named it as an end of the range.
+    ladder = [part for part in ladder if part != "Week" or part in (leading, last)]
+
+    if len(values) > len(ladder):
+        span = f"`{leading.upper()} TO {last.upper()}`" if last else f"`{leading.upper()}`"
         raise SqlError(
-            f"Invalid INTERVAL, `{leading_unit.upper()}` is followed by only "
-            f"{len(parts) - unit_index} unit(s) but {len(values)} values were given."
+            f"Invalid INTERVAL, {span} covers only "
+            f"{len(ladder)} unit(s) but {len(values)} values were given."
         )
 
     month, microseconds = (0, 0)
 
     for index, value in enumerate(values):
-        if not value.lstrip("+-").isdigit():
+        # ASCII digits with at most one sign. `str.isdigit` also passes `²` and other
+        # digits `int()` refuses, and `lstrip("+-")` let `--1` through to a raw ValueError.
+        if not _INTERVAL_VALUE.fullmatch(value):
             raise SqlError(
                 f"Invalid INTERVAL, `{value}` is not a whole number. Values must look like `INTERVAL '1' MONTH` or `INTERVAL '1 3' YEAR TO MONTH`."
             )
         value = int(value)
-        unit = parts[unit_index + index]
+        unit = ladder[index]
         if unit == "Year":
             month += 12 * value
         if unit == "Month":
@@ -2963,6 +3002,16 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None, *, pla
             microseconds += value * MICROSECONDS_PER_MILLISECOND
         if unit == "Microsecond":
             microseconds += value
+
+    # Draken stores an interval as ONE int64, months × 30 days + microseconds (see
+    # draken/core/interval_slot.h). Past that, the literal escaped as a bare
+    # `OverflowError` — "Python int too large to convert to C long", or draken's
+    # "normalization overflow" — with no query context.
+    if not _INT64_MIN <= month * _INTERVAL_MONTH_US + microseconds <= _INT64_MAX:
+        raise SqlError(
+            f"Invalid INTERVAL, `{value_node.text()}` {leading.upper()} is out of range; an interval holds at most "
+            f"{_INT64_MAX:,} microseconds, counting a month as 30 days (about 292,000 years)."
+        )
 
     interval = (month, microseconds)
 
@@ -3370,6 +3419,16 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None, *, plan_contex
         return Not(centre=centre, alias=alias, arena=plan_context.expressions)
     if branch["op"] == "Minus":
         centre = build(branch["expr"], alias=alias, plan_context=plan_context)
+        # Fold `-INTERVAL '1' DAY` to the literal (-0, -1 day): an interval negates
+        # component-wise. A non-literal interval falls to `0 - expr` below, which the
+        # binder rewrites to `expr * -1` once it can see the operand is an INTERVAL.
+        if centre.node_type == NodeType.LITERAL and centre.type == _CT_INTERVAL:
+            months, microseconds = centre.value
+            months, microseconds = -months, -microseconds
+            if not _INT64_MIN <= months * _INTERVAL_MONTH_US + microseconds <= _INT64_MAX:
+                raise SqlError("Invalid INTERVAL, negating it puts it out of range.")
+            centre.value = (months, microseconds)
+            return centre
         # Constant-fold numeric literals (e.g. `-5`). An INTEGER literal must be
         # RE-TYPED from the negated value, not just have its value flipped: the
         # parser hands us `-N` as unary minus over the POSITIVE literal N, so a wide
