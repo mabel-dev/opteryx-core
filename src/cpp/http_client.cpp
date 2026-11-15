@@ -430,6 +430,16 @@ void discard_thread_multi() {
     }
 }
 
+// A retry after a TRANSPORT failure (a stall, a timeout, a reset - anything but an
+// HTTP status) must not ride the connection that failed. Over HTTP/1.1 an aborted
+// transfer costs curl its connection anyway; over HTTP/2 (GCS) an abort resets only
+// the stream, the connection stays cached, and the retry joins it again and fails the
+// same way however many retries there are. Seen 2026-11-14 on Cloud Run: ClickBench
+// scans failing `exhausted 2 retries (... stalled ...) received=0`, every attempt dead
+// (tests/unit/connectors/parquet_io/test_http_retry_h2.py). An HTTP status - a 503,
+// a 429 - came over a working connection, which the retry may keep.
+bool connection_suspect(CURLcode res) { return res != CURLE_OK; }
+
 }  // namespace
 
 namespace http_link {
@@ -615,6 +625,7 @@ std::vector<uint8_t> HttpClient::get(
     HttpCallStats* stats)
 {
     HttpTuning tuning = tuning_ptr ? *tuning_ptr : default_tuning();
+    bool fresh_connection = false;   // the last attempt failed in transport (connection_suspect)
 
     for (int attempt = 0; ; ++attempt) {
         CURL* easy = curl_easy_init();
@@ -624,6 +635,9 @@ std::vector<uint8_t> HttpClient::get(
         SocketGuard guard;
         StallWatch watch;
 
+        // The connection cache here is shared across threads (configure_share), so
+        // it cannot be dropped as get_many drops its thread's: dial past it instead.
+        if (fresh_connection) curl_easy_setopt(easy, CURLOPT_FRESH_CONNECT, 1L);
         curl_easy_setopt(easy, CURLOPT_URL,            url.c_str());
         curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
         apply_deadlines(easy, tuning, tuning.ceiling_ms, &watch);
@@ -678,6 +692,7 @@ std::vector<uint8_t> HttpClient::get(
         }
 
         if (stats) ++stats->retries;
+        fresh_connection = connection_suspect(res);
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
     }
 }
@@ -1025,6 +1040,11 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         }
 
         if (stats) stats->retries += retry_next.size();
+        // Every handle is out of the multi by now (fetch's cleanup), so dropping it
+        // closes its connections, the healthy ones with the dead; the retry re-dials.
+        for (size_t i : retry_next) {
+            if (connection_suspect(ctx[i].res)) { discard_thread_multi(); break; }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
         pending.swap(retry_next);
     }
@@ -1206,6 +1226,9 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 true, ctx[i].http_code);
         }
 
+        for (size_t i : retry_next) {   // as get_many: never retry on a failed connection
+            if (connection_suspect(ctx[i].res)) { discard_thread_multi(); break; }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms(attempt)));
         pending.swap(retry_next);
     }
