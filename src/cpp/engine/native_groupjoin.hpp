@@ -284,7 +284,7 @@ struct GroupJoinAccumSink : Sink {
                 // not a row-kind arm there, so the one loop lives here.
                 for (uint32_t k = 0; k < m; ++k) {
                     if (!sort_row_valid(cv, k)) continue;
-                    F.i128[slots[k]] += agg2_read_i128(cv, k);
+                    i128_sum_add(F.i128[slots[k]], agg2_read_i128(cv, k));
                     F.valid[slots[k]] += 1;
                 }
                 continue;
@@ -329,8 +329,11 @@ struct GroupJoinAccumSink : Sink {
                 case GBKind::SumF: case GBKind::AvgF:
                     each([&](size_t e) { D.f64[e] += S.f64[e]; D.valid[e] += S.valid[e]; });
                     break;
-                case GBKind::AvgI: case GBKind::SumD128: case GBKind::AvgD128:
+                case GBKind::AvgI:
                     each([&](size_t e) { D.i128[e] += S.i128[e]; D.valid[e] += S.valid[e]; });
+                    break;
+                case GBKind::SumD128: case GBKind::AvgD128:
+                    each([&](size_t e) { i128_sum_add(D.i128[e], S.i128[e]); D.valid[e] += S.valid[e]; });
                     break;
                 case GBKind::MinMaxNum: {
                     const bool want_max = st->specs[s].fn == AggFn::Max;

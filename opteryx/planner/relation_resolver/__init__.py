@@ -166,6 +166,112 @@ def subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
     return sub
 
 
+def _names_relation(qualifier: str, names) -> bool:
+    """`qualifier` (folded) names one of `names` (folded) by the binder's rule: exactly, or
+    as its trailing dotted segments (`partsupp` names `testdata.tpch.partsupp`)."""
+    suffix = f".{qualifier}"
+    return any(name == qualifier or name.endswith(suffix) for name in names)
+
+
+def _rename_sources(plan: LogicalPlan, relations: dict, shadowed: frozenset = frozenset()) -> None:
+    """Remap every relation-name reference in `plan`'s expressions through `relations`
+    (old alias, folded -> new alias), in place, descending into subquery plans.
+    A qualifier naming one of `shadowed` (folded relation names a subquery declares
+    itself) is the subquery's own and is left alone."""
+
+    def _mapped(qualifier: str):
+        # The binder's matching rule (`_candidates`), so a reference that bound before
+        # the rename binds after it: exact first, else ONE trailing-segment match.
+        # Several suffix matches are ambiguous - left unmapped, the binder refuses it.
+        folded = qualifier.lower()
+        if _names_relation(folded, shadowed):
+            return None
+        exact = relations.get(folded)
+        if exact is not None:
+            return exact
+        hits = [new for old, new in relations.items() if old.endswith(f".{folded}")]
+        return hits[0] if len(hits) == 1 else None
+
+    # One expression can be held by several steps at once: a derived table's Subquery
+    # boundary carries the very expression objects of the Project beneath it
+    # (`create_node_relation`), and `copy_sub_plan` preserves that sharing. The binder
+    # depends on it - it binds the Project's expression, and the boundary's is then
+    # already bound. Renaming each holder's copy separately split the one expression
+    # into two, leaving the boundary's unbound and referencing a relation no longer in
+    # scope at that step (`WITH v AS (SELECT s.h FROM (SELECT TRUNC(ts, 'HOUR') AS h
+    # FROM t) AS s) ...` failed with an ambiguous TRUNC over an untyped argument). A
+    # renamed expression is therefore memoised by the identity of the original, so
+    # holders of one expression keep sharing one. `_kept` pins the originals so an id
+    # cannot be recycled while the memo is live.
+    _renamed = {}
+    _kept = []
+
+    def _prop(property):
+        if is_expression(property):
+            memoised = _renamed.get(id(property))
+            if memoised is not None:
+                return memoised
+            _kept.append(property)
+            result = _prop_uncached(property)
+            _renamed[id(property)] = result
+            return result
+        return _prop_uncached(property)
+
+    def _prop_uncached(property):
+        # Expressions may be shared with the plan this one was copied from, so a
+        # renamed expression is a new one (copy-on-write), returned to its holder.
+        # A correlated subquery (EXISTS / IN / scalar, not yet rewritten to a join)
+        # carries its own plan, and that plan's references to OUTER relations
+        # (`EXISTS (SELECT ... WHERE l_orderkey = o.o_orderkey)`) must follow the
+        # rename too - left alone, `o` names nothing once the outer Scan is renamed.
+        # The plan's own relations shadow the outer ones, so their names are not mapped.
+        if is_expression(property) and property.node_type == NodeType.SUBQUERY:
+            inner = copy_sub_plan(property.value)
+            declared = {
+                node.alias.lower()
+                for _nid, node in inner.nodes(True)
+                if node.node_type in RELATION_STEP_TYPES and node.alias
+            }
+            _rename_sources(inner, relations, shadowed | declared)
+            return property.with_fields(value=inner)
+        if type(property) is LogicalColumn and property.source is not None:
+            mapped = _mapped(property.source)
+            if mapped is not None:
+                property = property.with_fields(source=mapped)
+        # A QUALIFIED wildcard (`p.*`) names a relation too, and names it as a plain
+        # string in `value` rather than as a LogicalColumn.source — so nothing above
+        # reaches it, and the tuple branch below walks straight past a bare string. Left
+        # unmapped it points at the alias the copy was renamed AWAY from, matches no
+        # relation in scope, and expands to NOTHING: every source column silently
+        # disappears from the copy, and the Project above it fails on a column that is
+        # plainly there in the original. `WITH c AS (SELECT p.* FROM $planets AS p)
+        # SELECT name FROM c` died with a raw `ValueError: not enough values to unpack`
+        # from the binder's `zip(*...)` over an empty expansion.
+        if (
+            is_expression(property)
+            and property.node_type == NodeType.WILDCARD
+            and property.value
+        ):
+            property = property.with_fields(
+                value=type(property.value)(_mapped(q) or q for q in property.value)
+            )
+        if isinstance(property, list):
+            return [_prop(p) for p in property]
+        if isinstance(property, tuple):
+            # ORDER BY entries are (expr, ascending, nulls_first) tuples — recurse into them too,
+            # or a spliced view/CTE keeps a dangling reference to its old alias
+            # (e.g. `ORDER BY o.observed_at` after `o`'s Scan is renamed away).
+            return tuple(_prop(p) for p in property)
+        if isinstance(property, dict):
+            return {k: _prop(v) for k, v in property.items()}
+        if is_expression(property):
+            return rewrite_children(property, _prop)
+        return property
+
+    for _nid, node in plan.nodes(True):
+        node.map_expressions(_prop)
+
+
 def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan_context):
     """
     When we include VIEWs and CTEs in a plan, we randomize the name of the
@@ -216,70 +322,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan
         node.alias = alias
         plan[nid] = node
 
-    # One expression can be held by several steps at once: a derived table's Subquery
-    # boundary carries the very expression objects of the Project beneath it
-    # (`create_node_relation`), and `copy_sub_plan` preserves that sharing. The binder
-    # depends on it - it binds the Project's expression, and the boundary's is then
-    # already bound. Renaming each holder's copy separately split the one expression
-    # into two, leaving the boundary's unbound and referencing a relation no longer in
-    # scope at that step (`WITH v AS (SELECT s.h FROM (SELECT TRUNC(ts, 'HOUR') AS h
-    # FROM t) AS s) ...` failed with an ambiguous TRUNC over an untyped argument). A
-    # renamed expression is therefore memoised by the identity of the original, so
-    # holders of one expression keep sharing one. `_kept` pins the originals so an id
-    # cannot be recycled while the memo is live.
-    _renamed = {}
-    _kept = []
-
-    def _prop(property):
-        if is_expression(property):
-            memoised = _renamed.get(id(property))
-            if memoised is not None:
-                return memoised
-            _kept.append(property)
-            result = _prop_uncached(property)
-            _renamed[id(property)] = result
-            return result
-        return _prop_uncached(property)
-
-    def _prop_uncached(property):
-        # Expressions may be shared with the plan this one was copied from, so a
-        # renamed expression is a new one (copy-on-write), returned to its holder.
-        if type(property) is LogicalColumn and property.source is not None:
-            mapped = relations.get(property.source.lower())
-            if mapped is not None:
-                property = property.with_fields(source=mapped)
-        # A QUALIFIED wildcard (`p.*`) names a relation too, and names it as a plain
-        # string in `value` rather than as a LogicalColumn.source — so nothing above
-        # reaches it, and the tuple branch below walks straight past a bare string. Left
-        # unmapped it points at the alias the copy was renamed AWAY from, matches no
-        # relation in scope, and expands to NOTHING: every source column silently
-        # disappears from the copy, and the Project above it fails on a column that is
-        # plainly there in the original. `WITH c AS (SELECT p.* FROM $planets AS p)
-        # SELECT name FROM c` died with a raw `ValueError: not enough values to unpack`
-        # from the binder's `zip(*...)` over an empty expansion.
-        if (
-            is_expression(property)
-            and property.node_type == NodeType.WILDCARD
-            and property.value
-        ):
-            property = property.with_fields(
-                value=type(property.value)(relations.get(q.lower(), q) for q in property.value)
-            )
-        if isinstance(property, list):
-            return [_prop(p) for p in property]
-        if isinstance(property, tuple):
-            # ORDER BY entries are (expr, ascending, nulls_first) tuples — recurse into them too,
-            # or a spliced view/CTE keeps a dangling reference to its old alias
-            # (e.g. `ORDER BY o.observed_at` after `o`'s Scan is renamed away).
-            return tuple(_prop(p) for p in property)
-        if isinstance(property, dict):
-            return {k: _prop(v) for k, v in property.items()}
-        if is_expression(property):
-            return rewrite_children(property, _prop)
-        return property
-
-    for nid, node in plan.nodes(True):
-        node.map_expressions(_prop)
+    _rename_sources(plan, relations)
 
     # Window and FramedWindow nodes carry a pre-minted output relation
     # (`$window-XXXXXX` / `$framedwindow-XXXXXX`) and pre-minted SchemaColumn

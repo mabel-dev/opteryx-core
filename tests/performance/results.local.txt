@@ -1,27 +1,26 @@
-make clickbench-rugo            3794ms (31-OCT) [0.37x] [0.9.175 @ 4137ms last clickbench]
-make clickbench-skene           5165ms (06-NOV) [0.51x]
-make clickbench-canon           5152ms (06-NOV) [0.49x] [0.9.175 @ 5485ms last clickbench]
-make clickbench-canon-single    5585ms (02-NOV) [0.55x]
-make clickbench-rugo-extended   7401ms (27-OCT) [0.40x]
-make clickbench-json          427180ms (12-OCT) [3-runs only] [396,240ms 07-NOV, 1 fail]
-make clickbench-avro          140630ms (12-OCT) [3-runs only]
-make clickbench-odata          99112ms (25-OCT) [3-runs only, 8 fails]
-make clickbench-orc             6486ms (29-OCT)
-make tpch-sf1                  265.4ms (07-NOV) [0.76x]
-make tpch-sf10                1440.1ms (07-NOV) [0.39x]
-make tpch-sf100              18973.5ms (07-NOV) [0.79x]
-make tpcds-sf001               697.9ms (07-NOV) [1.22x]
-make tpcds-sf1                1844.7ms (07-NOV) [1.15x]
-make ssb-sf1                   103.4ms (07-NOV) [0.88x]
-make ssb-sf10                  560.4ms (06-NOV) [0.66x]
-make ssb-sf100                5404.4ms (06-NOV) [0.69x]
-make medicare1                 114.1ms (27-OCT) [0.66x]
-make job                      3491.3ms (07-NOV) [0.54x]
-make h2o                      9682.6ms (06-NOV) [0.76x] [MEDIUM]
-make jsonbench-10-jsonl        862.8ms (22-OCT) [0.33x] [0.9.187 @ 954.0ms last JSONBench]
-make jsonbench-10-zstd        1624.0ms (27-OCT) [0.63x]
-make dash                       71.6ms (01-NOV) [0.82x]
-make signals                   168.1ms (18-OCT)
+make clickbench-rugo                       3794ms    (31-OCT) [0.37x] [0.9.175 @ 4137ms last clickbench]
+make clickbench-skene                      5165ms    (06-NOV) [0.51x]
+make clickbench-canon                      5152ms    (06-NOV) [0.49x] [0.9.175 @ 5485ms last clickbench]
+make clickbench-canon-single               5585ms    (02-NOV) [0.55x]
+make clickbench-rugo-extended              7401ms    (27-OCT) [0.40x]
+make clickbench-json                     427180ms    (12-OCT) [3-runs only] [396,240ms 07-NOV, 1 fail]
+make clickbench-avro                     140630ms    (12-OCT) [3-runs only]
+make clickbench-orc                        6486ms    (29-OCT)
+make tpch-sf1                             265.4ms    (07-NOV) [0.76x]
+make tpch-sf10                           1440.1ms    (07-NOV) [0.39x]
+make tpch-sf100                         18973.5ms    (07-NOV) [0.79x]
+make tpcds-sf001                          697.9ms    (07-NOV) [1.22x]
+make tpcds-sf1                           1844.7ms    (07-NOV) [1.15x]
+make ssb-sf1                              103.4ms    (07-NOV) [0.88x]
+make ssb-sf10                             560.4ms    (06-NOV) [0.66x]
+make ssb-sf100                           5404.4ms    (06-NOV) [0.69x]
+make medicare1                            114.1ms    (27-OCT) [0.66x]
+make job                                 3491.3ms    (07-NOV) [0.54x]
+make h2o                                 9682.6ms    (06-NOV) [0.76x] [MEDIUM]
+make jsonbench-10-jsonl                   862.8ms    (22-OCT) [0.33x] [0.9.187 @ 954.0ms last JSONBench]
+make jsonbench-10-zstd                   1624.0ms    (27-OCT) [0.63x]
+make dash                                  71.6ms    (01-NOV) [0.82x]
+make signals                              168.1ms    (18-OCT)
 
 make tpch-sf10-aistor                      2655ms    (07-NOV) [0.72x]
 make tpcds-sf10-aistor                    14672ms    (07-NOV)
@@ -36,4 +35,20 @@ make clickbench-aistor-canon-split-10      1633ms    (07-NOV) [0.71x] [10M rows]
 make clickbench-aistor-rugo-split-10       1424ms    (07-NOV) [0.64x] [10M rows]
 make h2o-small-aistor                       928ms    (07-NOV) [0.33x]
 
+make clickbench-odata                     99112ms    (25-OCT) [3-runs only, 8 fails]
+make tpch-sf001-odata                      5450ms    (15-NOV) [5 fails]
+make tpch-sf01-odata                       5721ms    (15-NOV) [5 fails]
+make tpch-sf1-odata                        6629ms    (15-NOV) [6 fails]
+make tpch-sf10-odata                      13905ms    (15-NOV) [5 fails]
+make tpch-sf100-odata                     37975ms    (15-NOV) [19 fails]
+
+make clickbench-sqlalchemy                62989ms    (15-NOV)
+make tpch-sf001-sqlalchemy                 1326ms    (16-NOV) [3 fails] [2.52x snowflake] [8.67x motherduck]
+make tpch-sf01-sqlalchemy                  1601ms    (15-NOV) [3 fails] [1.98x snowflake] [5.89x motherduck]
+make tpch-sf1-sqlalchemy                   3393ms    (15-NOV) [3 fails] [1.65x snowflake] [6.38x motherduck]
+make tpch-sf10-sqlalchemy                 10477ms    (15-NOV) [3 fails] [1.45x snowflake] [4.75x motherduck]
+make tpch-sf100-sqlalchemy               164007ms    (15-NOV) [4 fails]
+
 **** clickbench (125.6 seconds) <- Opteryx 0.26.8
+**** snowflake @ 16-NOV-2026
+**** motherduck @ 16-NOV-2026

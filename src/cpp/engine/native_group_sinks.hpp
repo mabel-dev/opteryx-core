@@ -759,6 +759,20 @@ inline bool agg2_sum_i64_add(int64_t& lane, int64_t raw, bool is_u64) noexcept {
     return !__builtin_add_overflow(lane, raw, &lane);
 }
 
+// DECIMAL128 SUM/AVG lanes: an exact int128 sum that overflows int128 becomes a
+// STICKY poison (INT128_MIN) instead of wrapping - the build's -fno-strict-overflow
+// makes the wrap defined, and a sum wrapped past 2^128 can land back inside the
+// DECIMAL(38) range as a wrong answer. Every add and merge keeps the poison, and the
+// emit refuses it: SUM because |poison| >= 10^38 (kDecimal128SumBound), AVG
+// explicitly. Refuses a group whose RUNNING sum passes ~1.7e38 even if its final sum
+// fits (values near the DECIMAL(38) maximum, mixed signs) - loud, never wrong, as
+// SUM's INT64 lane does.
+constexpr __int128 kI128SumPoison = static_cast<__int128>(static_cast<unsigned __int128>(1) << 127);
+inline void i128_sum_add(__int128& acc, __int128 v) noexcept {
+    if (acc == kI128SumPoison) return;
+    if (v == kI128SumPoison || __builtin_add_overflow(acc, v, &acc)) acc = kI128SumPoison;
+}
+
 // SUM/AVG of a whole morsel through draken's column reductions — the same
 // float_sum Vector.sum() runs, and exact_sum (int128, isum's domain) — instead
 // of agg2_update per row. False for a type neither covers (DECIMAL128, UUID,
@@ -875,7 +889,7 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
         __int128 raw = agg2_read_i128(v, row);
         // A UUID has no sum (MIN/MAX/ANY_VALUE only — the capture guard), and its
         // order keys would overflow the int128 accumulator.
-        if (v.type == DRAKEN_DECIMAL128) c.isum += raw;
+        if (v.type == DRAKEN_DECIMAL128) i128_sum_add(c.isum, raw);
         if (needs_minmax) {
             if (c.valid == 0 || raw < c.min128) c.min128 = raw;
             if (c.valid == 0 || raw > c.max128) c.max128 = raw;
@@ -1002,7 +1016,7 @@ inline void agg2_merge_moments(AggCell& into, const AggCell& from) noexcept {
 }
 
 inline void agg2_merge(AggCell& into, const AggCell& from) {
-    into.isum += from.isum;
+    i128_sum_add(into.isum, from.isum);
     agg2_merge_moments(into, from);
     if (from.valid > 0) {
         if (into.valid == 0 || from.min128 < into.min128) into.min128 = from.min128;
@@ -1243,6 +1257,49 @@ inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
                                 sext[g].len);
     });
 }
+
+// ---- SUM over DECIMAL ----------------------------------------------------------------
+// SUM(DECIMAL(p,s)) is DECIMAL(18,s): the widest precision the exact int64 lane holds
+// (binder.py `_aggregate_return_type`). Emitting the OPERAND's precision put sums past
+// 10^p under a descriptor they contradict, and a reader of that column (a result
+// parquet file) refused it - TPC-H Q1 at SF100 sums DECIMAL(15,2) past 10^15. A sum at
+// or past 10^18 is outside even the widened precision, so it fails loud rather than
+// being emitted as a value its own type cannot describe.
+constexpr int64_t kDecimalSumBound = 1000000000000000000LL;   // 10^18
+constexpr uint8_t kDecimalSumPrecision = 18;
+inline bool decimal_sum_fits(int64_t v) noexcept {
+    return v < kDecimalSumBound && v > -kDecimalSumBound;
+}
+// The operand's descriptor at the sum's precision, interned (process-lifetime pointer).
+inline const LogicalType* decimal_sum_logical(const LogicalType& operand,
+                                              uint8_t precision = kDecimalSumPrecision) {
+    LogicalType lt = operand;
+    lt.precision = precision;
+    return logical_type_intern(lt);
+}
+inline constexpr const char* kDecimalSumOverflowMsg =
+    "SUM overflow: exact DECIMAL sum reaches 10^18, past DECIMAL(18, scale) - "
+    "CAST the operand to DOUBLE to sum it approximately";
+
+// SUM over DECIMAL128 (DECIMAL(19..38, s)) is DECIMAL(38, s) on the same reasoning:
+// the widest precision there is. A sum at or past 10^38 - including an int128
+// overflow, which the lane holds as kI128SumPoison - fails loud.
+constexpr uint8_t kDecimal128SumPrecision = 38;
+constexpr __int128 decimal128_pow10(int n) {
+    __int128 v = 1;
+    for (int i = 0; i < n; ++i) v *= 10;
+    return v;
+}
+constexpr __int128 kDecimal128SumBound = decimal128_pow10(kDecimal128SumPrecision);   // 10^38
+inline bool decimal128_sum_fits(__int128 v) noexcept {
+    return v < kDecimal128SumBound && v > -kDecimal128SumBound;
+}
+inline constexpr const char* kDecimal128SumOverflowMsg =
+    "SUM overflow: exact DECIMAL sum reaches 10^38, past DECIMAL(38, scale) - "
+    "CAST the operand to DOUBLE to sum it approximately";
+inline constexpr const char* kDecimal128AvgOverflowMsg =
+    "AVG overflow: the exact DECIMAL sum it divides overflowed 128 bits - "
+    "CAST the operand to DOUBLE to average it approximately";
 
 // ---- fixed-width column emit at a given type/width ---------------------------------
 // `raws` carries widened int64 containers (float bit patterns for float types);
@@ -2033,19 +2090,50 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             // COUNT(col) / COUNT(DISTINCT col) over zero valid rows is 0, not NULL.
             return emit_fixed_column(L.valid, nullptr, n, DRAKEN_INT64, nullptr, err);
         case GBKind::SumI: {
-            // exact integer sums (overflow already failed loud at accumulate);
-            // DECIMAL keeps its type + descriptor.
-            DrakenType t = (meta.type == DRAKEN_DECIMAL) ? DRAKEN_DECIMAL : DRAKEN_INT64;
-            return emit_fixed_column(L.i64, valid_ok(), n, t,
-                                     (meta.type == DRAKEN_DECIMAL) ? meta.logical
-                                                                   : nullptr, err);
+            // exact integer sums (int64 overflow already failed loud at accumulate).
+            if (meta.type != DRAKEN_DECIMAL)
+                return emit_fixed_column(L.i64, valid_ok(), n, DRAKEN_INT64, nullptr, err);
+            // DECIMAL keeps its scale at precision 18 - see kDecimalSumBound.
+            if (meta.logical == nullptr) {
+                err.code = 1;
+                err.msg = "SUM(DECIMAL): operand carries no scale descriptor — "
+                          "fail loud, never a mis-scaled sum";
+                return CxxColumn{};
+            }
+            for (uint32_t i = 0; i < n; ++i) {
+                if (L.valid[i] > 0 && !decimal_sum_fits(L.i64[i])) {
+                    err.code = 1;
+                    err.msg = kDecimalSumOverflowMsg;
+                    return CxxColumn{};
+                }
+            }
+            return emit_fixed_column(L.i64, valid_ok(), n, DRAKEN_DECIMAL,
+                                     decimal_sum_logical(*meta.logical), err);
         }
         case GBKind::SumF:
             // The f64 lane's bits ARE the FLOAT64 output bits — reinterpret, no
             // intermediate copy (emit_fixed_column bulk-copies 8-byte lanes).
             return emit_fixed_column(reinterpret_cast<const int64_t*>(L.f64),
                                      valid_ok(), n, DRAKEN_FLOAT64, nullptr, err);
-        case GBKind::SumD128:
+        case GBKind::SumD128: {
+            // DECIMAL128 keeps its scale at precision 38 - see kDecimal128SumBound.
+            if (meta.logical == nullptr) {
+                err.code = 1;
+                err.msg = "SUM(DECIMAL): operand carries no scale descriptor — "
+                          "fail loud, never a mis-scaled sum";
+                return CxxColumn{};
+            }
+            for (uint32_t i = 0; i < n; ++i) {
+                if (L.valid[i] > 0 && !decimal128_sum_fits(L.i128[i])) {
+                    err.code = 1;
+                    err.msg = kDecimal128SumOverflowMsg;
+                    return CxxColumn{};
+                }
+            }
+            return emit_i128_lane_column(L.i128, L.valid, n,
+                                         decimal_sum_logical(*meta.logical, kDecimal128SumPrecision),
+                                         DRAKEN_DECIMAL128);
+        }
         case GBKind::MinMaxD128:
             return emit_i128_lane_column(L.i128, L.valid, n, meta.logical,
                                          meta.type == DRAKEN_UUID ? DRAKEN_UUID : DRAKEN_DECIMAL128);
@@ -2071,6 +2159,11 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
                 // AvgI and AvgD128 both sum in the exact int128 lane — the
                 // AVERAGE must survive sums that exceed INT64 (AVG(UserID)
                 // over 99M hash-scale ids is a real workload).
+                if (kind == GBKind::AvgD128 && L.i128[i] == kI128SumPoison) {
+                    err.code = 1;
+                    err.msg = kDecimal128AvgOverflowMsg;
+                    return CxxColumn{};
+                }
                 double num = (kind == GBKind::AvgF) ? L.f64[i]
                                                     : static_cast<double>(L.i128[i]);
                 double a = num / static_cast<double>(L.valid[i]) / denom_scale;
@@ -2617,7 +2710,7 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::QuantileState& me
                                AggFn fn, bool is_float, bool is_u64,
                                const UCDPartition& d, ErrCtx& err) {
     if (!d.raw128.empty()) {   // DECIMAL128: SUM/AVG only (exact int128 lane)
-        for (__int128 r : d.raw128) c.isum += r;
+        for (__int128 r : d.raw128) i128_sum_add(c.isum, r);
         c.valid += static_cast<int64_t>(d.raw128.size());
         return true;
     }
@@ -3818,7 +3911,7 @@ inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float, bool is_u64
         case GBKind::AvgD128:
             for (size_t k = 0; k < n; ++k) {
                 uint32_t e = D.pair_gid[k];
-                L.i128[e] += D.pair_raw128[k];
+                i128_sum_add(L.i128[e], D.pair_raw128[k]);
                 L.valid[e] += 1;
             }
             return true;
@@ -5328,8 +5421,8 @@ struct GroupBySink : Sink {
         for (uint32_t i = 0; i < rows; ++i) {
             if (!row_ok(i)) continue;
             const uint32_t k = gid[i] * R + (i & (R - 1));
-            acc[k] += d128 ? agg2_read_i128(v, i)
-                           : agg2_raw_as_i128(RD::at(vdata, vsel[i]), is_u64);
+            if (d128) i128_sum_add(acc[k], agg2_read_i128(v, i));
+            else acc[k] += agg2_raw_as_i128(RD::at(vdata, vsel[i]), is_u64);
             cnt[k] += 1;
         }
         for (uint32_t g = 0; g < G; ++g) {
@@ -5337,7 +5430,12 @@ struct GroupBySink : Sink {
             if (c == 0) continue;   // its partition may have no lanes this morsel
             auto& L = lanes_of(l.few_p[g]);
             const uint32_t e = l.few_e[g];
-            const __int128 part = (acc[g * R] + acc[g * R + 1]) + (acc[g * R + 2] + acc[g * R + 3]);
+            __int128 part = acc[g * R];
+            if (d128) {
+                for (uint32_t r = 1; r < R; ++r) i128_sum_add(part, acc[g * R + r]);
+            } else {
+                part = (acc[g * R] + acc[g * R + 1]) + (acc[g * R + 2] + acc[g * R + 3]);
+            }
             if (kind == GBKind::SumI) {
                 const __int128 t = static_cast<__int128>(L.i64[e]) + part;
                 if (t > INT64_MAX || t < INT64_MIN) {
@@ -5347,6 +5445,8 @@ struct GroupBySink : Sink {
                     return false;
                 }
                 L.i64[e] = static_cast<int64_t>(t);
+            } else if (d128) {
+                i128_sum_add(L.i128[e], part);
             } else {
                 L.i128[e] += part;
             }
@@ -5449,7 +5549,7 @@ struct GroupBySink : Sink {
                     if (!row_ok(i)) continue;
                     auto& L = lanes_of(gb_part(mkh[i]));
                     uint32_t e = l.mk_ent[i];
-                    L.i128[e] += agg2_read_i128(v, i);
+                    i128_sum_add(L.i128[e], agg2_read_i128(v, i));
                     L.valid[e] += 1;
                 }
                 break;
@@ -6430,7 +6530,7 @@ struct GroupBySink : Sink {
                 case GBKind::AvgD128:
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
                         uint32_t m = ge[e];
-                        D.i128[m] += S.i128[e];
+                        i128_sum_add(D.i128[m], S.i128[e]);
                         D.valid[m] += S.valid[e];
                     }
                     break;

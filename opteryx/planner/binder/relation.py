@@ -2727,8 +2727,9 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         if not values_node.values:
             raise UnsupportedSyntaxError("**INSERT** **VALUES** requires at least one row")
         source_column_count = len(values_node.values[0])
-        # Probe types from the first row (parser-resolved literal types).
-        source_types = [values_node.values[0][i].type for i in range(source_column_count)]
+        # The VALUES columns' types, unified over every row when the feeder was
+        # bound (dataset._values_column_type) - not the first row's alone.
+        source_types = [c.schema_column.column_type for c in values_node.columns]
         # Validate all rows have the same column count.
         for row in values_node.values:
             if len(row) != source_column_count:

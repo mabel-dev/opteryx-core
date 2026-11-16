@@ -1130,6 +1130,32 @@ clickbench-clickhouse-orc: ## ClickHouse local over the clickbench-orc shards, 1
 clickbench-odata: ## ClickBench against opteryx.app as OData reads of benchmarks.clickbench.q_00..q_42 (writes odata/results.local.json; CLIENT_ID/CLIENT_SECRET from Vaultwarden via dev/secret_store.py)
 	@$(PYTHON) tests/performance/clickbench/odata/runner.py
 
+clickbench-sqlalchemy: ## ClickBench against opteryx.app via opteryx-sqlalchemy over the same views benchmarks.clickbench.q_00..q_42, ENGINE time per job (writes sqlalchemy/results.local.json; CLIENT_ID/CLIENT_SECRET from Vaultwarden)
+	@$(PYTHON) tests/performance/clickbench/sqlalchemy/runner.py
+
+# TPC-H on opteryx.app: views benchmarks.tpch_sf<N>.q_01..q_22 (dev/tpch/web_views.sql) over
+# samples.tpch_sf<N>, N in 001 01 1 10 100 1000, e.g. `make tpch-sf10-odata`, `make tpch-sf10-sqlalchemy`.
+# Same runners as clickbench-odata / clickbench-sqlalchemy; results.local.tpch_sf<N>.json beside each.
+tpch-sf%-odata:
+	@$(PYTHON) tests/performance/clickbench/odata/runner.py --collection tpch_sf$*
+
+tpch-sf%-sqlalchemy:
+	@$(PYTHON) tests/performance/clickbench/sqlalchemy/runner.py --collection tpch_sf$*
+
+# Same 22 bodies on MotherDuck (database tpch_sf<N>, N in 001 01 1 10), ENGINE time from
+# md_information_schema.recent_queries; MOTHERDUCK_TOKEN from Vaultwarden. First run per scale:
+# `make tpch-sf10-motherduck MD_ARGS=--generate`. Writes tpch/motherduck/results.local.sf<N>.json.
+# Own uv env: MotherDuck refuses DuckDB 2.0 (latest supported 1.5.6), the shared env stays on 2.0.
+tpch-sf%-motherduck:
+	@uv run --no-project --python 3.14 --with duckdb==1.5.6 --with python-dotenv python tests/performance/tpch/motherduck/runner.py --scale $* $(MD_ARGS)
+
+# TPC-H on Snowflake for comparison: SNOWFLAKE_SAMPLE_DATA.TPCH_SF<N> for 1 10 100 1000; 001 and 01 read
+# OPTERYX_TPCH (loaded from testdata/ by tests/performance/tpch/snowflake/load.py), e.g. `make tpch-sf10-snowflake`.
+# SNOWFLAKE_WAREHOUSE (default COMPUTE_WH); results.local.sf<N>.json.
+tpch-sf%-snowflake:
+	@$(PYTHON) tests/performance/tpch/snowflake/runner.py --scale $* --warehouse $(or $(SNOWFLAKE_WAREHOUSE),COMPUTE_WH) \
+		--database $(if $(filter 001 01,$*),OPTERYX_TPCH,SNOWFLAKE_SAMPLE_DATA)
+
 jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)

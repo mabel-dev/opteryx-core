@@ -119,7 +119,16 @@ def _resolve_dtype_name(dtype):
     return str(name).upper()
 
 
-def vector_from_sequence(values, dtype=None):
+# DECIMAL and DECIMAL128 have no type without their precision and scale, so they are
+# built only from the caller's descriptor (`logical`). There is no default: one used to
+# build every DECIMAL as DECIMAL(18, 6), whatever the column was declared as.
+_DECIMAL_DISPATCH = {
+    "DECIMAL": _draken_native.vector_decimal_from_sequence,
+    "DECIMAL128": _draken_native.vector_decimal128_from_sequence,
+}
+
+
+def vector_from_sequence(values, dtype=None, logical=None):
     """Build a Draken Vector from a Python sequence.
 
     Parameters
@@ -133,6 +142,9 @@ def vector_from_sequence(values, dtype=None):
     dtype : None | str | DrakenType
         Physical type. `None` defaults to INT64. Pass a `DrakenType` enum
         member (from `draken.draken_native`) or a type-name string.
+    logical : None | LogicalType
+        The column's logical descriptor. REQUIRED for DECIMAL / DECIMAL128,
+        whose precision and scale it carries; ignored for every other type.
 
     Returns
     -------
@@ -141,17 +153,14 @@ def vector_from_sequence(values, dtype=None):
     Raises
     ------
     ValueError
-        If `dtype` resolves to an unsupported type name.
+        If `dtype` resolves to an unsupported type name, or is DECIMAL /
+        DECIMAL128 with no `logical` descriptor.
     TypeError
         If `dtype` is non-None and not str/.name-bearing.
 
     Notes
     -----
-    DECIMAL is dispatched with default precision=18, scale=6. Callers
-    requiring exact (precision, scale) should call
-    `draken.draken_native.vector_decimal_from_sequence(values, precision,
-    scale)` directly. Likewise FP16 requires `dimension` and is not
-    available through this dispatcher.
+    FP16 requires `dimension` and is not available through this dispatcher.
     """
     # Materialise iterables to a list — draken constructors expect a list.
     if not isinstance(values, list):
@@ -162,9 +171,14 @@ def vector_from_sequence(values, dtype=None):
     if type_name is None:
         return _draken_native.vector_int64_from_sequence(values)
 
-    # DECIMAL needs precision/scale; dispatch with sensible defaults.
-    if type_name == "DECIMAL":
-        return _draken_native.vector_decimal_from_sequence(values, 18, 6)
+    decimal_ctor = _DECIMAL_DISPATCH.get(type_name)
+    if decimal_ctor is not None:
+        if logical is None:
+            raise ValueError(
+                f"vector_from_sequence: a {type_name} vector needs its precision and "
+                "scale - pass the column's descriptor as `logical`"
+            )
+        return decimal_ctor(values, int(logical.precision), int(logical.scale))
 
     # The VARCHAR/NVARCHAR sequence edge is bytes-only — encode str elements once
     # here (the NVARCHAR builder shares the bytes-only string-from-sequence path).
@@ -175,6 +189,6 @@ def vector_from_sequence(values, dtype=None):
     if ctor is None:
         raise ValueError(
             f"vector_from_sequence: unsupported dtype name {type_name!r}. "
-            f"Supported: {sorted(_DTYPE_DISPATCH.keys()) + ['DECIMAL']}"
+            f"Supported: {sorted(_DTYPE_DISPATCH.keys()) + sorted(_DECIMAL_DISPATCH)}"
         )
     return ctor(values)

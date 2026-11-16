@@ -3891,16 +3891,19 @@ static __int128 decimal_to_unscaled128(PyObject* obj, uint8_t precision, uint8_t
 }
 
 // int128 unscaled value + scale → Python decimal.Decimal (preserves trailing zeros).
+// Built from the string "<unscaled>E-<scale>", which the Decimal constructor reads
+// EXACTLY. `Decimal(unscaled).scaleb(-scale)` (the int64 path's form) rounds to the
+// thread's context precision - 28 digits by default - so every DECIMAL128 value past
+// 28 significant digits read back silently rounded (99..9 x38 became 1.000..E+38).
 static nb::object unscaled128_to_py_decimal(__int128 unscaled, uint8_t scale) {
     PyObject* dec_type = get_decimal_type();
     PyObject* pyint = pylong_from_i128(unscaled);
-    PyObject* d = PyObject_CallOneArg(dec_type, pyint);
+    if (!pyint) throw nb::python_error();
+    PyObject* text = PyUnicode_FromFormat("%SE-%d", pyint, static_cast<int>(scale));
     Py_DECREF(pyint);
-    if (!d) throw nb::python_error();
-    PyObject* neg_scale = PyLong_FromLong(-static_cast<long>(scale));
-    if (!neg_scale) { Py_DECREF(d); throw nb::python_error(); }
-    PyObject* result = PyObject_CallMethod(d, "scaleb", "O", neg_scale);
-    Py_DECREF(neg_scale); Py_DECREF(d);
+    if (!text) throw nb::python_error();
+    PyObject* result = PyObject_CallOneArg(dec_type, text);
+    Py_DECREF(text);
     if (!result) throw nb::python_error();
     return nb::steal<nb::object>(result);
 }

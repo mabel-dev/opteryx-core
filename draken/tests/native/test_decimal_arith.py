@@ -17,7 +17,7 @@ For each op: add / sub / mul / div / mod / neg.
 """
 
 import pytest
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, localcontext
 
 import draken.draken_native as dn
 
@@ -284,7 +284,12 @@ class TestDecimalMul:
         vals_b = [Decimal(5), Decimal(11), big, Decimal(-(2**63)), Decimal(-3), Decimal(10**15), Decimal(-9)]
         a = dn.vector_decimal128_from_sequence(vals_a, precision=38, scale=0)
         b = dn.vector_decimal128_from_sequence(vals_b, precision=38, scale=0)
-        assert pylist(a.mul(b)) == [x * y for x, y in zip(vals_a, vals_b)]
+        # Expected products computed EXACTLY: the default 28-digit context rounds
+        # (2^63-1)^2, and that rounding only matched while readback rounded too.
+        with localcontext() as ctx:
+            ctx.prec = 80
+            expected = [x * y for x, y in zip(vals_a, vals_b)]
+        assert pylist(a.mul(b)) == expected
 
     def test_decimal128_mul_overflow_still_raises(self):
         a = dn.vector_decimal128_from_sequence([Decimal(1), Decimal(10**20)], precision=38, scale=0)

@@ -7,6 +7,7 @@
 import decimal
 from typing import Any, Dict, Optional, Tuple
 
+from draken.draken_native import DrakenType
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import (
     IncompatibleTypesError,
@@ -339,6 +340,17 @@ def _aggregate_return_type(node: Expression) -> Optional[_ColumnType]:
                 # breaks callers (e.g. UNION type-unification) which pick a
                 # cast kernel from the bound type but receive INT64 data.
                 return _CT_INT64
+            if name == "SUM" and param_type.physical == DrakenType.DECIMAL:
+                # A sum outgrows its operand's precision (TPC-H Q1 at SF100 sums
+                # DECIMAL(15,2) past 10^15), so it is typed at the widest precision
+                # the exact int64 lane holds and keeps the scale. The runtime emits
+                # the same descriptor and fails loud at 10^18 (kDecimalSumBound in
+                # native_group_sinks.hpp).
+                return _lt.DECIMAL(18, param_type.logical.scale)
+            if name == "SUM" and param_type.physical == DrakenType.DECIMAL128:
+                # The same, one tier up: DECIMAL(38, s), the widest precision there
+                # is; the runtime fails loud at 10^38 (kDecimal128SumBound).
+                return _lt.DECIMAL(38, param_type.logical.scale)
             return param_type  # ColumnType
     return None
 

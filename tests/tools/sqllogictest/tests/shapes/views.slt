@@ -91,6 +91,50 @@ ALTER VIEW ws.views.nonexistent_view AS SELECT * FROM $planets
 statement ok
 DROP VIEW ws.views.nonexistent_view
 
+# Outer-relation references in a view body must survive the view's relations being
+# renamed on expansion: an alias read from inside a correlated subquery (TPC-H Q4/Q21),
+# and a bare table name qualifying a column of `testdata.planets` (TPC-H Q16), both
+# outside and inside a subquery. Each read used to fail "Dataset `p` is referenced in
+# the query, but it does not appear in a FROM or JOIN clause".
+statement ok
+CREATE OR REPLACE VIEW ws.views.outer_alias AS SELECT p.id FROM testdata.planets AS p WHERE EXISTS (SELECT * FROM testdata.satellites WHERE planetId = p.id)
+
+query shape 7 1
+SELECT * FROM ws.views.outer_alias
+
+statement ok
+CREATE OR REPLACE VIEW ws.views.bare_name AS SELECT id FROM testdata.planets WHERE planets.id < 4
+
+query shape 3 1
+SELECT * FROM ws.views.bare_name
+
+statement ok
+CREATE OR REPLACE VIEW ws.views.bare_name_in_subquery AS SELECT id FROM testdata.planets WHERE EXISTS (SELECT * FROM testdata.satellites WHERE planetId = planets.id)
+
+query shape 7 1
+SELECT * FROM ws.views.bare_name_in_subquery
+
+# A body whose CTE is referenced twice (a shared CTE, TPC-H Q11/Q15/Q22). Binding the
+# body to record the view's schema left its manifest-less shared CTEs in the CREATE's
+# own plan, and CREATE failed "Scans require a file manifest".
+statement ok
+CREATE OR REPLACE VIEW ws.views.shared_cte AS WITH a AS (SELECT id FROM testdata.planets), b AS (SELECT MAX(id) AS m FROM a) SELECT id FROM a, b WHERE id = m
+
+query shape 1 1
+SELECT * FROM ws.views.shared_cte
+
+statement ok
+DROP VIEW ws.views.outer_alias
+
+statement ok
+DROP VIEW ws.views.bare_name
+
+statement ok
+DROP VIEW ws.views.bare_name_in_subquery
+
+statement ok
+DROP VIEW ws.views.shared_cte
+
 # Leave a clean workspace for the next run of this file. IF EXISTS because the CREATE
 # above is now refused, so test_01 is already gone.
 statement ok

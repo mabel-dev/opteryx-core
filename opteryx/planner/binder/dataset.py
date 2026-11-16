@@ -471,6 +471,88 @@ def _reject_ragged_values(node: PlanStep) -> None:
         )
 
 
+def _constant_values_cell(cell, context: BindingContext):
+    """A VALUES cell as the single literal it reduces to.
+
+    Everything that reads VALUES - this visitor's column types, INSERT's type checks,
+    the materialiser - reads each cell as a Literal. A cell that is an expression
+    (`CAST('1.5' AS DECIMAL(20,2))`, which the planner leaves to the native cast
+    kernel) died there with "'Cast' object has no attribute 'type'". So it is bound and
+    folded natively here, as SET's value is (set_ops.visit_set); anything that does not
+    reduce to one value is refused."""
+    from opteryx.compiled.planner.binder_core import inner_binder
+    from opteryx.expression.formatter import format_expression
+    from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
+
+    if cell.node_type == NodeType.LITERAL:
+        return cell
+    bound, _ = inner_binder(cell, context)
+    folded = fold_constants(bound, context.telemetry, plan_context=context.plan_context)
+    while folded.node_type == NodeType.NESTED:
+        folded = folded.centre
+    if folded.node_type != NodeType.LITERAL:
+        raise UnsupportedSyntaxError(
+            f"A {md_syntax('VALUES')} list holds values that can be worked out before the "
+            f"query runs, but `{format_expression(cell)}` does not reduce to a single value."
+        )
+    return folded
+
+
+def _values_column_type(cells):
+    """The type of a VALUES column: the type that represents EVERY row's cell.
+
+    It was the FIRST row's type, so `VALUES (CAST('1.25' AS DECIMAL(10,2))),
+    (99999999999999999999)` typed the column DECIMAL(10,2) and the second row was then
+    refused as unrepresentable. A VALUES column hands back one row's value, which is a
+    SELECTION - the rule CASE resolves its branches by (binder.py), applied the same way:
+    identical types stand, a DECIMAL/INTEGER mix takes compute_selection_result_type,
+    and anything else find_compatible_type (which refuses an incompatible mix). A NULL
+    cell belongs to any type, so it does not decide one."""
+    from opteryx.exceptions import IncompatibleTypesError
+    from opteryx.planner.binder.binder import _CASE_BLEND_FAMILIES
+    from opteryx.types.type_unification import compute_selection_result_type
+
+    decided = [cell for cell in cells if cell.value is not None]
+    if not decided:
+        return cells[0].type
+    types = [cell.type for cell in decided]
+    if all(ct == types[0] for ct in types):
+        return types[0]
+    # Only within one CASE family (all string, all numeric/DECIMAL, all DATE, ...):
+    # across families there is no value-preserving type, and a temporal cell's
+    # physical value converted to VARCHAR read back as a wrong string ('20455').
+    families = {
+        next((id(f) for f in _CASE_BLEND_FAMILIES if ct.category in f), None) for ct in types
+    }
+    if len(families) != 1 or None in families:
+        raise IncompatibleTypesError(
+            message=(
+                f"A {md_syntax('VALUES')} column holds {types[0]} in one row and "
+                f"{next(ct for ct in types if ct != types[0])} in another - every row of a "
+                "column must share a compatible type (all BOOLEAN, all string, all "
+                "numeric/DECIMAL, all DATE, all TIME, or all TIMESTAMP). Use CAST to align them."
+            )
+        )
+    unified = compute_selection_result_type([(cell.type, cell.value) for cell in decided])
+    return unified if unified is not None else _lt.find_compatible_type(types)
+
+
+def _conform_values_cells(cells, column_type) -> None:
+    """Each cell's value AS its column's (unified) type, as CASE conforms its literal
+    branches (binder.py): the column is built from the values, so a cell of another
+    type - `7` in a DECIMAL(3,1) column, `1` in a VARCHAR one - must be converted to the
+    column's type, never handed to its builder as-is. A value that does not convert
+    fails in parse_value, as it would in CASE."""
+    from opteryx.types.literal_values import native_literal_value
+    from opteryx.types.scalars.value_parsing import parse_value
+
+    for cell in cells:
+        if cell.value is None or cell.type == column_type:
+            continue
+        cell.value = native_literal_value(parse_value(column_type.category, cell.value), column_type)
+        cell.type = column_type
+
+
 def visit_function_dataset(
     self, node: PlanStep, context: BindingContext
 ) -> Tuple[PlanStep, BindingContext]:
@@ -482,13 +564,18 @@ def visit_function_dataset(
     node.connector = None
     if node.function == "VALUES":
         _reject_ragged_values(node)
+        node.values = [
+            tuple(_constant_values_cell(cell, context) for cell in row) for row in node.values
+        ]
         relation_name = node.alias or f"$values-{random_string()}"
         types = {}
         element_types = {}
         if len(node.values) > 0:
             for i, column in enumerate(node.column_aliases):
                 value = node.values[0][i]
-                types[column] = value.type  # ColumnType
+                column_type = _values_column_type([row[i] for row in node.values])
+                types[column] = column_type
+                _conform_values_cells([row[i] for row in node.values], column_type)
                 # Phase 2: element is embedded in ARRAY/VECTOR ColumnType.
                 _val_cat = value.type.category if isinstance(value.type, ColumnType) else value.type
                 if _val_cat in (LogicalCategory.ARRAY, LogicalCategory.VECTOR):

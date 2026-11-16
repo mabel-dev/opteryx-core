@@ -6532,9 +6532,11 @@ class _Compiler:
         physical = _physical_type(node.step.unnest_target.schema_column)
         if physical is None or physical == DrakenType.VARIANT:
             _unsupported("a CROSS JOIN UNNEST over a literal array of untyped elements")
+        # A DECIMAL element is built at its own precision/scale.
+        logical = node.step.unnest_target.schema_column.column_type.logical
 
         literal_morsel = Morsel.from_vectors(
-            [target_identity], [vector_from_sequence(values, dtype=physical)])
+            [target_identity], [vector_from_sequence(values, dtype=physical, logical=logical)])
 
         (p, layout) = self._compile_only_child(in_edges, "UnnestJoinNode", node)
 

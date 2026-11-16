@@ -1,0 +1,27 @@
+# Framed window SUM over integers is exact and fails loud past INT64 (2026-11-15).
+#
+# The window's running sum was a plain int64 `+=`: a frame sum past INT64 wrapped
+# silently into a wrong answer (GROUP BY's SUM fails loud there). It now accumulates
+# exactly in int128 and range-checks each frame's RESULT - never the running sum, which
+# adds the incoming row before dropping the outgoing one and so can pass INT64 on a
+# superset of a frame whose own sum fits.
+
+# a frame sum past INT64 is refused, never wrapped
+statement error (?s).*SUM overflow: exact integer sum exceeds INT64.*
+SELECT SUM(v) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM (SELECT v, g FROM (VALUES (9223372036854775807, 1), (1, 2)) AS t(v, g)) AS x
+
+# every one-row frame fits even though the running sum passes INT64 mid-slide
+query II
+SELECT g, SUM(v) OVER (ORDER BY g ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS s FROM (SELECT v, g FROM (VALUES (9223372036854775807, 1), (9223372036854775807, 2), (-5, 3)) AS t(v, g)) AS x ORDER BY g
+----
+1 9223372036854775807
+2 9223372036854775807
+3 -5
+
+# ordinary sums are unchanged
+query II
+SELECT g, SUM(v) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM (SELECT v, g FROM (VALUES (5, 1), (-2, 2), (10, 3)) AS t(v, g)) AS x ORDER BY g
+----
+1 5
+2 3
+3 13

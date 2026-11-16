@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <utility>
 #include <algorithm>
@@ -3083,12 +3084,15 @@ class ParquetIOPipeline {
         return pread(fd, bytes.data(), size, offset);
     }
 
+    // Called straight after the pread, so errno is still the pread's.
     static void check_local_read(int fd, ssize_t n, const std::string& path, int64_t size) {
+        const int err = errno;
         if (fd < 0) {
             throw std::runtime_error("Cannot open file: " + path);
         }
         if (n < 0) {
-            throw std::runtime_error("Read error: " + path);
+            throw std::runtime_error("Read error: " + path + " (fd " + std::to_string(fd) +
+                                     ": " + std::strerror(err) + ")");
         }
         if (static_cast<size_t>(n) != static_cast<size_t>(size)) {
             throw std::runtime_error("Short read: " + path +
@@ -4292,12 +4296,22 @@ class ParquetIOPipeline {
                 if (colfan) {
                     std::atomic<size_t> next{0};
                     std::atomic<bool> stop{false};
+                    // Never throws: on a pool helper an escaping exception is
+                    // std::terminate, and on this thread it would unwind past the
+                    // helpers still using this frame. It is recorded as the outer
+                    // catch records it (first error wins) and the fan-out stops.
                     auto claim_loop = [&]() {
                         DecodedColumn local;
                         colfan_tl_scratch = &local;
-                        for (size_t i; !stop.load(std::memory_order_relaxed) &&
-                                       (i = next.fetch_add(1)) < ncols_total;) {
-                            if (!decode_col(i, m)) stop.store(true);
+                        try {
+                            for (size_t i; !stop.load(std::memory_order_relaxed) &&
+                                           (i = next.fetch_add(1)) < ncols_total;) {
+                                if (!decode_col(i, m)) stop.store(true);
+                            }
+                        } catch (const std::exception& e) {
+                            stop.store(true);
+                            std::lock_guard<std::mutex> _rl(res_mu);
+                            if (result.success) { result.success = false; result.error = e.what(); }
                         }
                         colfan_tl_scratch = nullptr;
                     };

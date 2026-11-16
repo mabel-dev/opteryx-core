@@ -62,6 +62,7 @@ from opteryx.exceptions import md_code
 from opteryx.exceptions import md_syntax
 from opteryx.utils.sql import offset_of
 from opteryx.utils.sql import position_of
+from opteryx.utils.sql import split_sql_statements
 
 # One edit: where the replacement landed in the output, and what it replaced in the input.
 Edit = Tuple[int, int, int, int]
@@ -255,6 +256,9 @@ _ALTER_WORKSPACE = re.compile(
     re.IGNORECASE,
 )
 _DROP_WORKSPACE = re.compile(rf"^({_LEADING_TRIVIA}DROP\s+)WORKSPACE\b", re.IGNORECASE)
+# Text naming neither object type has nothing for _rewrite_object_types to do - checked
+# first so the common statement never pays for the batch split.
+_OBJECT_TYPE_WORD = re.compile(r"\b(?:COLLECTION|WORKSPACE)\b", re.IGNORECASE)
 
 # VERSION AS OF PREVIOUS -> VERSION AS OF 0. The parser's grammar for VERSION AS OF
 # only accepts a bare number literal (no PREVIOUS, no expression), so PREVIOUS has to
@@ -405,26 +409,42 @@ def _rewrite_object_types(text: str) -> Tuple[str, List[Edit]]:
     (DROP WORKSPACE's own object_type=="Function" branch lives in plan_drop,
     alongside DROP COLLECTION's object_type=="Schema" one).
 
-    All four anchor at the start of the statement, so nothing inside a literal, an
-    identifier or a subquery is at risk.
+    All four anchor at the start of A statement, so nothing inside a literal, an
+    identifier or a subquery is at risk. The text may be a semicolon-separated batch
+    (`Session.check` and other callers parse what they are handed whole), so each
+    statement is matched at its own start - anchoring on the text's start rewrote only
+    the first, and the second `CREATE COLLECTION` of a script failed to parse. The
+    statements are found by the split `Session` executes a batch with.
     """
+    if _OBJECT_TYPE_WORD.search(text) is None:
+        return text, []
+    pieces: List[str] = []
     edits: List[Edit] = []
-    for pattern, replacement in (
-        (_CREATE_COLLECTION, "SCHEMA"),
-        (_DROP_COLLECTION, "SCHEMA"),
-        (_ALTER_WORKSPACE, "FUNCTION"),
-        (_DROP_WORKSPACE, "FUNCTION"),
-    ):
-        match = pattern.match(text)
-        if match is None:
-            continue
-        start, end = match.end(1), match.end()
-        text = text[:start] + replacement + text[end:]
-        edits.append((start, len(replacement), start, end - start))
-        # Mutually exclusive - a statement cannot start with more than one of
-        # CREATE, DROP and ALTER - so the first hit is the only hit.
-        break
-    return text, edits
+    read_from = 0
+    shift = 0
+    for statement in split_sql_statements(text):
+        for pattern, replacement in (
+            (_CREATE_COLLECTION, "SCHEMA"),
+            (_DROP_COLLECTION, "SCHEMA"),
+            (_ALTER_WORKSPACE, "FUNCTION"),
+            (_DROP_WORKSPACE, "FUNCTION"),
+        ):
+            match = pattern.match(statement.text)
+            if match is None:
+                continue
+            start, end = statement.offset + match.end(1), statement.offset + match.end()
+            pieces.append(text[read_from:start])
+            pieces.append(replacement)
+            edits.append((start + shift, len(replacement), start, end - start))
+            shift += len(replacement) - (end - start)
+            read_from = end
+            # Mutually exclusive - a statement cannot start with more than one of
+            # CREATE, DROP and ALTER - so the first hit is the only hit.
+            break
+    if not edits:
+        return text, []
+    pieces.append(text[read_from:])
+    return "".join(pieces), edits
 
 
 def _rewrite_version_as_of_previous(text: str) -> Tuple[str, List[Edit]]:

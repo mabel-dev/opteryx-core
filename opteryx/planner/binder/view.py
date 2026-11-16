@@ -326,21 +326,45 @@ def _view_output_schema(node, context: BindingContext):
     from opteryx.types.schema import ColumnDescriptor
     from opteryx.types.schema import RelationDescriptor
 
-    bound_plan, _clean_sql, _ast = bind_statement(
-        operation=node.view_sql,
-        parameters=None,
-        # Row visibility filters restrict which ROWS a reader sees; they cannot
-        # add, remove or retype a column, so they have no bearing on the shape
-        # being recorded here.
-        visibility_filters=None,
-        execution_context=context.execution_context,
-        query_id=context.query_id,
-        telemetry=context.telemetry,
-        schema_only=True,
-        # the view body is bound inside the CREATE VIEW's own planning, so its
-        # columns are minted in this statement's table
-        plan_context=context.plan_context,
+    # The body's shared CTEs (a CTE it references twice, `WITH a AS (...), b AS (...
+    # FROM a) SELECT ... FROM a, b`) are the BODY's, bound schema-only with no
+    # Manifest. Left in this statement's registries, the CREATE's own physical planner
+    # compiled them as its own and refused their manifest-less scans - so the body
+    # binds against empty registries and the statement's are put back after.
+    plan_context = context.plan_context
+    statement_ctes = (
+        plan_context.shared_ctes,
+        plan_context.physical_shared_ctes,
+        plan_context.recursive_ctes,
+        plan_context.pending_shared_ctes,
     )
+    plan_context.shared_ctes = {}
+    plan_context.physical_shared_ctes = {}
+    plan_context.recursive_ctes = {}
+    plan_context.pending_shared_ctes = []
+    try:
+        bound_plan, _clean_sql, _ast = bind_statement(
+            operation=node.view_sql,
+            parameters=None,
+            # Row visibility filters restrict which ROWS a reader sees; they cannot
+            # add, remove or retype a column, so they have no bearing on the shape
+            # being recorded here.
+            visibility_filters=None,
+            execution_context=context.execution_context,
+            query_id=context.query_id,
+            telemetry=context.telemetry,
+            schema_only=True,
+            # the view body is bound inside the CREATE VIEW's own planning, so its
+            # columns are minted in this statement's table
+            plan_context=plan_context,
+        )
+    finally:
+        (
+            plan_context.shared_ctes,
+            plan_context.physical_shared_ctes,
+            plan_context.recursive_ctes,
+            plan_context.pending_shared_ctes,
+        ) = statement_ctes
 
     head = bound_plan[bound_plan.exit_point()]
 

@@ -287,6 +287,9 @@ struct FramedWindowSink : Sink, EmitSubset {
                       src[row_m[perm[0]]]->columns[static_cast<size_t>(fs.arg_col)].view.type);
             bool is_float = (dom == AggDomain::F64);
             bool is_i128 = (dom == AggDomain::I128);
+            // UINT64 raws are the value's bit pattern: read unsigned into the exact sum.
+            bool is_u64 = fs.arg_col >= 0 && dom == AggDomain::I64
+                && src[row_m[perm[0]]]->columns[static_cast<size_t>(fs.arg_col)].view.type == DRAKEN_UINT64;
             bool is_str = (dom == AggDomain::Str);
             if (is_str) {
                 // COUNT never reaches here (its domain is forced to I64 above — it
@@ -404,8 +407,14 @@ struct FramedWindowSink : Sink, EmitSubset {
                 continue;
             }
 
-            // SUM / COUNT / AVG — two-pointer running accumulation.
-            int64_t  sum_i64 = 0;
+            // SUM / COUNT / AVG — two-pointer running accumulation. Integer-family and
+            // DECIMAL operands accumulate EXACTLY in int128 (sum_i128), never int64: the
+            // running sum adds the incoming row before subtracting the outgoing one, so
+            // an int64 running sum could overflow (silently - signed wrap) on a superset
+            // of a frame whose own sum fits. The range is checked on each frame's
+            // RESULT instead: INT64 for integers, 10^18 for DECIMAL (kDecimalSumBound),
+            // failing loud like GROUP BY's SUM. int128 cannot overflow at any real scale
+            // (2^32 rows x 2^64 per value is 2^96).
             double   sum_f64 = 0.0;
             __int128 sum_i128 = 0;
             int64_t  count = 0;
@@ -418,20 +427,23 @@ struct FramedWindowSink : Sink, EmitSubset {
                 if (!sort_row_valid(v, ri)) return;
                 count += sign;
                 if (is_i128) {
-                    sum_i128 += sign * agg2_read_i128(v, ri);
+                    i128_sum_add(sum_i128, sign * agg2_read_i128(v, ri));
                 } else if (is_float) {
                     int64_t raw = agg2_read_raw(v, ri, true);
                     double d;
                     std::memcpy(&d, &raw, sizeof(d));
                     sum_f64 += sign * d;
                 } else {
-                    sum_i64 += sign * agg2_read_raw(v, ri, false);
+                    int64_t raw = agg2_read_raw(v, ri, false);
+                    __int128 val = is_u64 ? static_cast<__int128>(static_cast<uint64_t>(raw))
+                                          : static_cast<__int128>(raw);
+                    sum_i128 += sign * val;
                 }
             };
 
             for (size_t i = 0; i < n; ++i) {
                 if (i == 0 || part_start[i] != part_start[i - 1]) {
-                    sum_i64 = 0; sum_f64 = 0.0; sum_i128 = 0; count = 0;
+                    sum_f64 = 0.0; sum_i128 = 0; count = 0;
                     cur_lo = part_start[i];
                     cur_hi = part_start[i] - 1;
                 }
@@ -447,12 +459,40 @@ struct FramedWindowSink : Sink, EmitSubset {
                 if (empty) { res_valid[f][i] = 0; continue; }
                 res_valid[f][i] = 1;
                 if (fs.kind == WinAggFn::Sum) {
-                    if (is_i128) res_i128[f][i] = sum_i128;
+                    if (is_i128) {
+                        // The bound type is DECIMAL(38, s) - see kDecimal128SumBound.
+                        if (!decimal128_sum_fits(sum_i128)) {
+                            err.code = 1;
+                            err.msg = kDecimal128SumOverflowMsg;
+                            return;
+                        }
+                        res_i128[f][i] = sum_i128;
+                    }
                     else if (is_float) res_f64[f][i] = sum_f64;
-                    else res_i64[f][i] = sum_i64;
+                    else {
+                        if (fs.out_type == DRAKEN_DECIMAL) {
+                            // The bound type is DECIMAL(18, s) - see kDecimalSumBound.
+                            if (sum_i128 >= kDecimalSumBound || sum_i128 <= -kDecimalSumBound) {
+                                err.code = 1;
+                                err.msg = kDecimalSumOverflowMsg;
+                                return;
+                            }
+                        } else if (sum_i128 > INT64_MAX || sum_i128 < INT64_MIN) {
+                            err.code = 1;
+                            err.msg = "SUM overflow: exact integer sum exceeds INT64 — "
+                                      "fail loud, never a wrapped answer";
+                            return;
+                        }
+                        res_i64[f][i] = static_cast<int64_t>(sum_i128);
+                    }
                 } else {   // Avg — always FLOAT64
                     double total;
                     if (is_i128) {
+                        if (sum_i128 == kI128SumPoison) {
+                            err.code = 1;
+                            err.msg = kDecimal128AvgOverflowMsg;
+                            return;
+                        }
                         int scale = (fs.out_logical != nullptr &&
                                     fs.out_logical->kind == LogicalKind::DECIMAL)
                             ? fs.out_logical->scale : 0;
@@ -462,7 +502,7 @@ struct FramedWindowSink : Sink, EmitSubset {
                     } else if (is_float) {
                         total = sum_f64;
                     } else {
-                        total = static_cast<double>(sum_i64);
+                        total = static_cast<double>(sum_i128);
                     }
                     res_f64[f][i] = total / static_cast<double>(count);
                 }

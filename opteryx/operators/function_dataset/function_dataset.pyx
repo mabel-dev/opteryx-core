@@ -65,13 +65,16 @@ _EPOCH_DT = datetime.datetime(1970, 1, 1)
 def _column_metadata(columns):
     column_names = []
     column_types = []
+    column_logicals = []
 
     for column in columns:
         column_names.append(column.schema_column.identity)
         ct = column.schema_column.column_type
         column_types.append(ct.physical if ct is not None else None)
+        # DECIMAL's precision/scale - vector_from_sequence builds no DECIMAL without it.
+        column_logicals.append(ct.logical if ct is not None else None)
 
-    return column_names, column_types
+    return column_names, column_types, column_logicals
 
 
 def _as_list(values):
@@ -105,13 +108,13 @@ def _resolve_column_dtype(dtype, values):
     return None
 
 
-def _build_morsel_from_columns(column_names, column_types, column_values):
+def _build_morsel_from_columns(column_names, column_types, column_logicals, column_values):
     vectors = []
     for index, _ in enumerate(column_names):
         raw_dtype = column_types[index] if index < len(column_types) else None
         values = column_values[index] if index < len(column_values) else []
         dtype = _resolve_column_dtype(raw_dtype, values)
-        vectors.append(vector_from_sequence(values, dtype=dtype))
+        vectors.append(vector_from_sequence(values, dtype=dtype, logical=column_logicals[index]))
     return Morsel.from_vectors(column_names, vectors)
 
 
@@ -138,9 +141,9 @@ def _restore_temporal_series_args(args):
 
 
 def _generate_series(step):
-    column_names, column_types = _column_metadata(step.columns)
+    column_names, column_types, column_logicals = _column_metadata(step.columns)
     value_array = _as_list(series.generate_series(*_restore_temporal_series_args(step.args)))
-    return _build_morsel_from_columns(column_names, column_types, [value_array])
+    return _build_morsel_from_columns(column_names, column_types, column_logicals, [value_array])
 
 
 def _unnest(step):
@@ -150,8 +153,8 @@ def _unnest(step):
     else:
         list_items = step.args[0].value
 
-    column_names, column_types = _column_metadata(step.columns)
-    return _build_morsel_from_columns(column_names, column_types, [_as_list(list_items)])
+    column_names, column_types, column_logicals = _column_metadata(step.columns)
+    return _build_morsel_from_columns(column_names, column_types, column_logicals, [_as_list(list_items)])
 
 
 # A temporal literal carries its PHYSICAL value — `CAST('2026-10-01' AS DATE)` folds
@@ -208,7 +211,7 @@ def _temporal_vector(column, literals):
 
 
 def _values(step):
-    column_names, column_types = _column_metadata(step.columns)
+    column_names, column_types, column_logicals = _column_metadata(step.columns)
     vectors = []
     for index, column in enumerate(step.columns):
         # The binder has refused ragged rows, so every row has this cell.
@@ -218,7 +221,8 @@ def _values(step):
             continue
         values = [literal.value for literal in literals]
         dtype = _resolve_column_dtype(column_types[index], values)
-        vectors.append(vector_from_sequence(values, dtype=dtype))
+        # A DECIMAL column is built at its own precision/scale (`logical`).
+        vectors.append(vector_from_sequence(values, dtype=dtype, logical=column_logicals[index]))
     return Morsel.from_vectors(column_names, vectors)
 
 

@@ -188,7 +188,9 @@ def _commit_lock(relation_dir: str):
 class _CompactionLease:
     """The handle `claim_compaction_lease` returns: an OPTIMIZE pass's hold on
     its relation. A flock does not expire, so `renew` has nothing to extend and
-    `release` always reports the claim was still held."""
+    the first `release` always reports the claim was still held. A second
+    `release` holds nothing, closes nothing and reports False: closing the
+    descriptor number again could close a file someone else has since opened."""
 
     def __init__(self, relation_dir: str, relation_name: str, holder: str):
         try:
@@ -202,7 +204,10 @@ class _CompactionLease:
         return None
 
     def release(self) -> bool:
-        os.close(self._fd)
+        if self._fd < 0:
+            return False
+        fd, self._fd = self._fd, -1
+        os.close(fd)
         return True
 
 

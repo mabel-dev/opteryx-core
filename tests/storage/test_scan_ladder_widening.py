@@ -143,7 +143,7 @@ def test_widening_refuses_a_narrowing_and_a_descriptor_type():
     """
     import decimal
 
-    from draken.draken_native import DrakenType, vector_widen
+    from draken.draken_native import DrakenType, vector_decimal_from_sequence, vector_widen
     from draken.interop.vector_sequence import vector_from_sequence
 
     with pytest.raises(Exception) as err:
@@ -152,7 +152,7 @@ def test_widening_refuses_a_narrowing_and_a_descriptor_type():
 
     with pytest.raises(Exception) as err:
         vector_widen(
-            vector_from_sequence([decimal.Decimal("1.5")], DrakenType.DECIMAL),
+            vector_decimal_from_sequence([decimal.Decimal("1.5")], 18, 6),
             DrakenType.INT64,
         )
     assert "logical-type descriptor" in str(err.value)

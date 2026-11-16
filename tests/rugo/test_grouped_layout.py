@@ -35,6 +35,7 @@ import pyarrow as pa  # test oracle only
 import pyarrow.parquet as pq  # test oracle only
 
 from draken.draken_native import DrakenType
+from draken.draken_native import vector_decimal_from_sequence
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from rugo import parquet as rp
@@ -210,7 +211,7 @@ def _rich_morsel(n, seed=42):
             vector_from_sequence(highcard, DrakenType.VARCHAR),
             vector_from_sequence(d32, DrakenType.DATE32),
             vector_from_sequence(boo, DrakenType.BOOL),
-            vector_from_sequence(dec, DrakenType.DECIMAL),
+            vector_decimal_from_sequence(dec, 18, 6),
         ],
     )
 

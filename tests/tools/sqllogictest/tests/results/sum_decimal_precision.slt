@@ -1,0 +1,93 @@
+# SUM(DECIMAL(p,s)) is DECIMAL(18,s), not the operand's DECIMAL(p,s) (2026-11-15).
+#
+# A sum outgrows its operand's precision. TPC-H Q1 at SF100 sums DECIMAL(15,2) past
+# 10^15: the sum was emitted under the operand's DECIMAL(15,2), the result parquet
+# file declared that precision for values it could not hold, and reading the file
+# back failed "decimal: value exceeds declared precision". Each SUM path is written
+# through CTAS (a real parquet write) and read back. A sum reaching 10^18 is past
+# even DECIMAL(18,s) and fails loud.
+
+# ungrouped
+statement ok
+CREATE TABLE cat.wt.sum_ungrouped AS SELECT SUM(d) AS s FROM (SELECT CAST(v AS DECIMAL(15,2)) AS d FROM (VALUES (9000000000000.00), (9000000000000.00), (1.25)) AS t(v)) AS x
+
+query T
+SELECT CAST(s AS VARCHAR) FROM cat.wt.sum_ungrouped
+----
+18000000000001.25
+
+# grouped
+statement ok
+CREATE TABLE cat.wt.sum_grouped AS SELECT g, SUM(d) AS s FROM (SELECT CAST(v AS DECIMAL(15,2)) AS d, g FROM (VALUES (9000000000000.00, 1), (9000000000000.00, 1), (1.25, 2)) AS t(v, g)) AS x GROUP BY g
+
+query IT
+SELECT g, CAST(s AS VARCHAR) FROM cat.wt.sum_grouped ORDER BY g
+----
+1 18000000000000.00
+2 1.25
+
+# DISTINCT
+statement ok
+CREATE TABLE cat.wt.sum_distinct AS SELECT SUM(DISTINCT d) AS s FROM (SELECT CAST(v AS DECIMAL(15,2)) AS d FROM (VALUES (9000000000000.00), (8000000000000.00), (8000000000000.00)) AS t(v)) AS x
+
+query T
+SELECT CAST(s AS VARCHAR) FROM cat.wt.sum_distinct
+----
+17000000000000.00
+
+# framed window
+statement ok
+CREATE TABLE cat.wt.sum_window AS SELECT g, SUM(d) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM (SELECT CAST(v AS DECIMAL(15,2)) AS d, g FROM (VALUES (9000000000000.00, 1), (9000000000000.00, 2), (1.25, 3)) AS t(v, g)) AS x
+
+query IT
+SELECT g, CAST(s AS VARCHAR) FROM cat.wt.sum_window ORDER BY g
+----
+1 9000000000000.00
+2 18000000000000.00
+3 18000000000001.25
+
+# 10^18 is past DECIMAL(18,2): refused, grouped and windowed alike
+statement error (?s).*SUM overflow: exact DECIMAL sum reaches 10\^18.*
+SELECT SUM(CAST(v AS DECIMAL(18,2))) FROM (VALUES (9000000000000000.00), (9000000000000000.00)) AS t(v)
+
+statement error (?s).*SUM overflow: exact DECIMAL sum reaches 10\^18.*
+SELECT SUM(d) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM (SELECT CAST(v AS DECIMAL(18,2)) AS d, g FROM (VALUES (9000000000000000.00, 1), (9000000000000000.00, 2)) AS t(v, g)) AS x
+
+# ---- DECIMAL128: SUM(DECIMAL(19..38, s)) is DECIMAL(38, s) -------------------------
+#
+# The same bug one tier up: the sum kept the operand's precision. It is now
+# DECIMAL(38, s), refused at 10^38. The exact int128 sum also refuses an int128
+# overflow instead of wrapping (a sum wrapped past 2^128 can land back in range).
+
+statement ok
+CREATE TABLE cat.wt.sum128_grouped AS SELECT g, SUM(d) AS s FROM (SELECT CAST(v AS DECIMAL(20,2)) AS d, g FROM (VALUES ('999999999999999999.99', 1), ('999999999999999999.99', 1), ('1.25', 2)) AS t(v, g)) AS x GROUP BY g
+
+query IT
+SELECT g, CAST(s AS VARCHAR) FROM cat.wt.sum128_grouped ORDER BY g
+----
+1 1999999999999999999.98
+2 1.25
+
+statement ok
+CREATE TABLE cat.wt.sum128_window AS SELECT g, SUM(d) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM (SELECT CAST(v AS DECIMAL(20,2)) AS d, g FROM (VALUES ('999999999999999999.99', 1), ('999999999999999999.99', 2), ('1.25', 3)) AS t(v, g)) AS x
+
+query IT
+SELECT g, CAST(s AS VARCHAR) FROM cat.wt.sum128_window ORDER BY g
+----
+1 999999999999999999.99
+2 1999999999999999999.98
+3 2000000000000000001.23
+
+# 10^38 is past DECIMAL(38, s): refused, ungrouped and windowed
+statement error (?s).*SUM overflow: exact DECIMAL sum reaches 10\^38.*
+SELECT SUM(CAST(v AS DECIMAL(38,0))) FROM (VALUES ('99999999999999999999999999999999999999'), ('99999999999999999999999999999999999999')) AS t(v)
+
+statement error (?s).*SUM overflow: exact DECIMAL sum reaches 10\^38.*
+SELECT SUM(d) OVER (ORDER BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM (SELECT CAST(v AS DECIMAL(38,0)) AS d, g FROM (VALUES ('99999999999999999999999999999999999999', 1), ('99999999999999999999999999999999999999', 2)) AS t(v, g)) AS x
+
+# an int128 overflow is refused, never wrapped - for AVG too, which divides that sum
+statement error (?s).*SUM overflow: exact DECIMAL sum reaches 10\^38.*
+SELECT g, SUM(d) FROM (SELECT CAST(v AS DECIMAL(38,0)) AS d, g FROM (VALUES ('99999999999999999999999999999999999999', 1), ('99999999999999999999999999999999999999', 1), ('99999999999999999999999999999999999999', 1)) AS t(v, g)) AS x GROUP BY g
+
+statement error (?s).*AVG overflow: the exact DECIMAL sum it divides overflowed 128 bits.*
+SELECT AVG(CAST(v AS DECIMAL(38,0))) FROM (VALUES ('99999999999999999999999999999999999999'), ('99999999999999999999999999999999999999'), ('99999999999999999999999999999999999999')) AS t(v)

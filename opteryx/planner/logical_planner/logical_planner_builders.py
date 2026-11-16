@@ -3354,10 +3354,37 @@ def trim_string(branch, alias: Optional[List[str]] = None, key=None, *, plan_con
     )
 
 
+def _tuple_element_value(node, plan_context):
+    """A tuple element as a Literal: itself, or the constant expression folded natively.
+    A column is not a value a literal list can hold - refused as before, not bound
+    against an empty scope (which would misreport it as a column that does not exist)."""
+    from opteryx.expression import get_all_nodes_of_type
+
+    if node.node_type == NodeType.LITERAL:
+        return node
+    if get_all_nodes_of_type(node, (NodeType.IDENTIFIER, NodeType.WILDCARD)):
+        raise UnsupportedSyntaxError(
+            f"A literal list holds values, not columns - `{format_expression(node)}` "
+            "names a column."
+        )
+    folded = _bind_and_fold(node, plan_context, "tuple-literal")
+    if folded.node_type != NodeType.LITERAL:
+        raise UnsupportedSyntaxError(
+            f"A literal list holds values that can be worked out before the query runs, "
+            f"but `{format_expression(node)}` does not reduce to a single value."
+        )
+    return folded
+
+
 def tuple_literal(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # Tuples can have values of different types
     # if they all are the same type, be explicit about it
     node_values = [build(t, plan_context=plan_context) for t in branch]
+    # A tuple literal holds VALUES. An element that is an expression is folded to the
+    # value it reduces to: reading `.value` off it took a CAST's TARGET TYPE NAME, so
+    # `(CAST('1.25' AS DECIMAL(10,2)), ...)` became ('DECIMAL', ...) - a wrong value
+    # typed ARRAY<VARIANT>. One that does not reduce to a single value is refused.
+    node_values = [_tuple_element_value(t, plan_context) for t in node_values]
     values = [t.value for t in node_values]
 
     # Infer element ColumnType: homogeneous only. A NULL element belongs to any

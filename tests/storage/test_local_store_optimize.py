@@ -271,6 +271,20 @@ def test_a_second_compaction_is_refused_while_one_holds_the_lease(connector):
     assert os.path.exists(os.path.join(connector._relation_dir("t"), COMPACTION_LOCK))
 
 
+def test_a_second_release_does_not_close_someone_elses_descriptor(connector, tmp_path):
+    """The released descriptor's number is reused by the next open; a second release
+    used to close it again, killing that unrelated file under its owner."""
+    connector.create_relation("t", _schema())
+    lease = connector.claim_compaction_lease("t", "first")
+    assert lease.release() is True
+    other = os.open(tmp_path / "other", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        assert lease.release() is False
+        os.fstat(other)  # raises EBADF if the second release closed it
+    finally:
+        os.close(other)
+
+
 # --- the contract -----------------------------------------------------------------
 
 
