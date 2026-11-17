@@ -41,6 +41,7 @@ from opteryx.connectors import DiskConnector
 
 N_ROWS = 20000
 ENC_PLAIN = 0
+ENC_DELTA_BINARY_PACKED = 5
 ENC_RLE_DICTIONARY = 8
 ENC_ALP = 10
 
@@ -290,13 +291,13 @@ def test_alp_unknown_compression_mode_is_refused():
 # ---- type-aware admission -----------------------------------------------------------------------
 
 
-def _patch_page_encoding(buf, encoding):
-    """Rewrite the (single) PLAIN data page of a rugo-written file to `encoding`.
+def _patch_page_encoding(buf, encoding, written=ENC_PLAIN):
+    """Rewrite the (single) `written`-encoded data page of a rugo-written file to `encoding`.
 
-    rugo writes DataPageHeader fields 2..4 as encoding=PLAIN, RLE, RLE: compact
-    thrift i32 fields with zigzag varints 0x00, 0x06, 0x06.
+    rugo writes DataPageHeader fields 2..4 as encoding=<written>, RLE, RLE: compact
+    thrift i32 fields with zigzag varints <2*written>, 0x06, 0x06.
     """
-    pattern = b"\x15\x00\x15\x06\x15\x06"
+    pattern = b"\x15" + bytes([written * 2]) + b"\x15\x06\x15\x06"
     at = buf.find(pattern)
     assert at > 0 and buf.find(pattern, at + 1) == -1
     patched = bytearray(buf)
@@ -314,7 +315,45 @@ def test_alp_page_on_an_int_column_is_refused():
     morsel = Morsel.from_vectors(["x"], [vector_from_sequence([1, 2, 3], dtype=DrakenType.INT64)])
     buf = rp.write_parquet(morsel, dictionary=False, compression="none", bloom_filters=False)
     with pytest.raises(RuntimeError, match=r"unsupported page encoding 10 \(ALP\) for int64"):
-        _read(_patch_page_encoding(buf, ENC_ALP))
+        _read(_patch_page_encoding(buf, ENC_ALP, written=ENC_DELTA_BINARY_PACKED))
+
+
+# ---- DELTA_BINARY_PACKED (5) writer: non-dictionary INT32/INT64 chunks ---------------------------
+
+
+def _delta_cases():
+    rng = random.Random(5)
+    cases = []
+    for dtype, lo, hi in ((DrakenType.INT16, -(1 << 15), (1 << 15) - 1),
+                          (DrakenType.INT32, -(1 << 31), (1 << 31) - 1),
+                          (DrakenType.INT64, -(1 << 63), (1 << 63) - 1)):
+        for n in (1, 2, 31, 32, 33, 128, 129, 130, 70_001):  # block/miniblock edges; full range wraps
+            cases.append((dtype, [rng.randint(lo, hi) for _ in range(n)]))
+        cases.append((dtype, list(range(max(lo, -50_000), min(hi, 50_000)))))  # zero-width miniblocks
+        cases.append((dtype, [lo, hi] * 300))                # widest possible swings
+        cases.append((dtype, [None if i % 7 == 0 else rng.randint(-1000, 1000) for i in range(5_000)]))
+        cases.append((dtype, [None] * 300))                  # all-null chunk
+        cases.append((dtype, [None] * 64 + [5] + [None] * 64))
+    return cases
+
+
+@pytest.mark.parametrize("dtype,values", _delta_cases(),
+                         ids=lambda v: v.name if isinstance(v, DrakenType) else str(len(v)))
+def test_delta_binary_packed_writer_round_trip(dtype, values):
+    morsel = Morsel.from_vectors(["x"], [vector_from_sequence(values, dtype=dtype)])
+    buf = rp.write_parquet(morsel, dictionary=False, max_rows_per_row_group=40_000,
+                           max_page_bytes=4096)
+    meta = _chunk_meta(buf)
+    assert ENC_DELTA_BINARY_PACKED in meta.encodings and ENC_PLAIN not in meta.encodings
+    assert _read(buf) == values
+    key = lambda v: (v is None, v)
+    assert sorted((r[0] for r in _engine_rows(buf, "SELECT x FROM {t}")), key=key) == sorted(values, key=key)
+
+
+def test_delta_binary_packed_not_used_for_dictionary_chunks():
+    morsel = Morsel.from_vectors(["x"], [vector_from_sequence([1, 2] * 5_000, dtype=DrakenType.INT64)])
+    meta = _chunk_meta(rp.write_parquet(morsel))
+    assert ENC_RLE_DICTIONARY in meta.encodings and ENC_DELTA_BINARY_PACKED not in meta.encodings
 
 
 if __name__ == "__main__":  # pragma: no cover

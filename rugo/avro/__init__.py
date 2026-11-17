@@ -21,7 +21,7 @@ Reader design and limits: docs/AVRO_READER_DESIGN.md; writer: docs/AVRO_WRITER_D
 """
 
 import json
-from typing import Callable, Iterable, Optional, Sequence, Union
+from typing import Callable, Iterable, Mapping, Optional, Sequence, Union
 
 from rugo.rugo_native import read_avro as _read_avro
 from rugo.rugo_native import read_avro_metadata as _read_avro_metadata
@@ -152,14 +152,31 @@ def read_metadata(source: Source) -> AvroMetadata:
     )
 
 
+Metadata = Mapping[str, Union[str, bytes]]
+
+
+def _writer_options(schema, metadata, json_columns) -> tuple:
+    """The native writer's forms: schema as JSON text, metadata as a dict, json_columns
+    as a list."""
+    return (
+        _schema_text(schema),
+        None if metadata is None else dict(metadata),
+        None if json_columns is None else list(json_columns),
+    )
+
+
 def write_avro(
     morsel,
     codec: str = "deflate",
     block_bytes: int = 1 << 20,
-    record_name: str = "record",
+    record_name: Optional[str] = None,
     sync_marker: Optional[bytes] = None,
     max_threads: int = 0,
-    dictionary: bool = True,
+    dictionary: Optional[bool] = None,
+    schema: Optional[Union[str, dict]] = None,
+    metadata: Optional[Metadata] = None,
+    json_columns: Optional[Sequence[str]] = None,
+    json_bytes: Optional[str] = None,
 ) -> bytes:
     """Serialize a Morsel to Avro object container bytes (docs/AVRO_WRITER_DESIGN.md).
 
@@ -182,24 +199,48 @@ def write_avro(
     sync_marker: 16 bytes for the file's sync marker; None = random.
     max_threads: blocks are encoded and compressed on up to this many threads; 0 = every
         core. The bytes written are the same for any value.
-    dictionary: True (default) writes a VARCHAR / NVARCHAR column as an Avro enum when
-        every value is a valid Avro name, it has at most 4,096 distinct values, and the
-        enum is smaller than the strings; rugo reads it back dictionary-encoded.
+    dictionary: True (the default when None) writes a VARCHAR / NVARCHAR column as an
+        Avro enum when every value is a valid Avro name, it has at most 4,096 distinct
+        values, and the enum is smaller than the strings; rugo reads it back
+        dictionary-encoded. Not with `schema`.
     A column name that is not a valid Avro name ([A-Za-z_][A-Za-z0-9_]*) or appears
     twice raises ValueError — nothing is renamed.
+
+    Writing to a given schema (docs/AVRO_WRITER_DESIGN.md §15):
+    schema: the file's Avro schema (dict or JSON text), written to the header verbatim
+        — attributes such as Iceberg's field-id survive. Its root is a record whose
+        fields are the morsel's columns by name (any column order; a missing or extra
+        column raises, naming it). A plain column is written per its field: `["null", T]`
+        (null first) or a required T (a NULL raises), with T matching the column's type
+        exactly (a narrower integer into `long` is allowed). Not with `record_name` or
+        `dictionary`.
+    metadata: extra header entries, {str: str | bytes}, after the writer's own; an
+        `avro.*` key raises.
+    json_columns: columns holding JSON text, each row encoded against its schema field —
+        records, arrays, maps, enums, unions at any depth. Strict: a missing required
+        field, an unknown key or a wrong JSON type raises, naming the row and field path;
+        integers must be exact; a union is JSON null or the value itself.
+    json_bytes: 'base64' — the JSON form of `bytes` / `fixed` values; required when a
+        JSON column's field holds either.
     """
+    schema, metadata, json_columns = _writer_options(schema, metadata, json_columns)
     return _write_avro(morsel, codec=codec, block_bytes=block_bytes,
                        record_name=record_name, sync_marker=sync_marker,
-                       max_threads=max_threads, dictionary=dictionary)
+                       max_threads=max_threads, dictionary=dictionary, schema=schema,
+                       metadata=metadata, json_columns=json_columns, json_bytes=json_bytes)
 
 
 def open_avro_writer(
     sink: Callable[[bytes], object],
     codec: str = "deflate",
     block_bytes: int = 1 << 20,
-    record_name: str = "record",
+    record_name: Optional[str] = None,
     sync_marker: Optional[bytes] = None,
     max_threads: int = 0,
+    schema: Optional[Union[str, dict]] = None,
+    metadata: Optional[Metadata] = None,
+    json_columns: Optional[Sequence[str]] = None,
+    json_bytes: Optional[str] = None,
 ):
     """Open a streaming Avro writer. `sink` is a callable taking bytes (`f.write`).
 
@@ -213,11 +254,14 @@ def open_avro_writer(
     boundaries give a different (equally valid) block layout. Avro has no footer: after
     an exception the sink holds a valid file of the blocks it received. A writer that
     never saw a batch raises ValueError on a clean exit (no schema, no file). Options as
-    write_avro.
+    write_avro (without `dictionary`); with `schema`, every field is written as the
+    schema says, required fields included.
     """
+    schema, metadata, json_columns = _writer_options(schema, metadata, json_columns)
     return _open_avro_writer(sink, codec=codec, block_bytes=block_bytes,
                              record_name=record_name, sync_marker=sync_marker,
-                             max_threads=max_threads)
+                             max_threads=max_threads, schema=schema, metadata=metadata,
+                             json_columns=json_columns, json_bytes=json_bytes)
 
 
 def write_avro_stream(
@@ -225,12 +269,18 @@ def write_avro_stream(
     sink: Callable[[bytes], object],
     codec: str = "deflate",
     block_bytes: int = 1 << 20,
-    record_name: str = "record",
+    record_name: Optional[str] = None,
     sync_marker: Optional[bytes] = None,
     max_threads: int = 0,
+    schema: Optional[Union[str, dict]] = None,
+    metadata: Optional[Metadata] = None,
+    json_columns: Optional[Sequence[str]] = None,
+    json_bytes: Optional[str] = None,
 ) -> int:
     """Write every Morsel of `morsels` to `sink` as one Avro file (see open_avro_writer);
     returns the number of rows written. An empty iterable raises ValueError."""
+    schema, metadata, json_columns = _writer_options(schema, metadata, json_columns)
     return _write_avro_stream(morsels, sink, codec=codec, block_bytes=block_bytes,
                               record_name=record_name, sync_marker=sync_marker,
-                              max_threads=max_threads)
+                              max_threads=max_threads, schema=schema, metadata=metadata,
+                              json_columns=json_columns, json_bytes=json_bytes)

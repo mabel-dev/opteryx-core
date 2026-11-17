@@ -194,6 +194,10 @@ struct SchemaField {
   bool nullable = true;
   // Draken logical-descriptor kind (see ColumnStats::draken_logical_kind).
   int draken_logical_kind = 0;
+  // The column's schema field_id (-1 = absent); for a 3-level LIST, each level's
+  // element field_id from the outermost down (-1 where absent), else empty.
+  int32_t field_id = -1;
+  std::vector<int32_t> element_field_ids;
 };
 
 struct FileStats {

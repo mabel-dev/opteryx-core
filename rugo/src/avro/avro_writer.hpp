@@ -97,6 +97,19 @@ struct WriteOptions {
     bool        have_sync = false;              // false: 16 random bytes
     uint8_t     sync[16] = {};
     size_t      max_threads = 0;                // block encode + compress threads; 0 = every core
+    // Caller-supplied schema (doc §15): the file's Avro schema, verbatim, a record whose
+    // fields match the batch's columns by name. Empty = derived from the columns.
+    std::string schema;
+    // Extra header entries (doc §15), written after the writer's own, in this order.
+    // An `avro.*` key, or one the writer writes itself, is refused.
+    std::vector<std::string> metadata_keys;
+    std::vector<std::string> metadata_values;
+    // Columns holding JSON text, encoded per row against their schema field (doc §15).
+    // Requires `schema`.
+    std::vector<std::string> json_columns;
+    // JSON `bytes` / `fixed` values are base64 text. Without it a JSON column whose
+    // field reaches bytes or fixed is refused.
+    bool        json_bytes_base64 = false;
 };
 
 // Rows per block, at most (keeps the reader's whole-block batching granular).
@@ -132,6 +145,16 @@ std::string schema_json(const std::vector<FieldSpec>& fields, const std::string&
                         std::vector<FieldPlan>& plans);
 
 struct BlockEncoder;  // per-worker encode + compress state (avro_writer.cpp)
+class Schema;        // avro_schema.hpp: a caller-supplied schema, parsed
+struct Node;
+
+// A JSON column's rows of the current batch, encoded during the length pass (one
+// buffer per length task) and copied into the block by the write pass.
+struct JsonRows {
+    std::vector<std::vector<uint8_t>> task_bytes;
+    std::vector<uint64_t> start;  // per row: offset into its task's buffer
+    std::vector<uint32_t> len;    // per row: encoded size, branch byte included
+};
 
 // A container file being written. Construction validates the fields, builds the
 // schema and emits the header; each write_batch encodes its rows into one or more
@@ -166,7 +189,20 @@ private:
     void encode_block(BlockEncoder& enc, const WriteColumn* cols, uint32_t first, uint32_t count,
                       uint64_t payload_bytes, std::vector<uint8_t>& out) const;
 
-    std::vector<FieldSpec>   fields_;
+    void plan_schema(const std::vector<FieldSpec>& fields, std::vector<FieldPlan>& plans,
+                     std::vector<std::string>& types) const;
+    void encode_json_rows(size_t k, const WriteColumn& col, uint32_t first, uint32_t count, size_t task,
+                          uint64_t* row_len);
+
+    std::vector<FieldSpec>   fields_;    // the first batch's columns, in batch order
+    // With a caller schema: the schema, its root fields' nodes, and for each schema field
+    // k the batch column written at position k (order_[k]); plans_ / types_ are then in
+    // schema order. Without one, the order is the batch's and order_ is empty.
+    std::unique_ptr<Schema>  schema_;
+    std::vector<const Node*> nodes_;
+    std::vector<size_t>      order_;
+    std::vector<uint8_t>     is_json_;   // per schema field: written from JSON text
+    std::vector<JsonRows>    json_;      // per schema field; used by JSON columns only
     std::vector<FieldPlan>   plans_;     // per field: the encoding chosen from its FieldSpec
     std::vector<std::string> types_;     // per field: its Avro type JSON (the T of ["null", T])
     WriteOptions             opts_;

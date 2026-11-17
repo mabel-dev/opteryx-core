@@ -283,3 +283,51 @@ Coverage matrix: every supported type × {all-valid, with-nulls, all-null} ×
 - Nested types (LIST/MAP/STRUCT) — out of scope; would require repetition
   levels and is a separate initiative.
 - Streaming/file-handle sink — deferred (bytes first).
+
+## 10. Schema field ids (`field_ids=`) — BUILT 2026-11-17
+
+Why: Iceberg readers (DuckDB, Spark, Trino, PyIceberg) match Parquet columns by the
+schema `field_id` (SchemaElement field 9), not by name; a data file without ids reads
+as all-NULL. The Iceberg write path passes Iceberg's ids here.
+
+API (`rugo.parquet`, same on `rugo.rugo_native`):
+
+```python
+write_parquet(morsel, ..., narrow_held_budget_bytes=0, field_ids=None) -> bytes
+open_parquet_writer(sink, ..., narrow_held_budget_bytes=0, field_ids=None)
+```
+
+`field_ids` is `{column name: id}` — by NAME, as `bloom_filters`, `alp` and
+`sorted_by` already name columns. Every column must be named and no other: a column
+with no id, or a name that is not a column, raises ValueError naming it. A scalar
+column takes an `int`; an ARRAY column takes a sequence of `1 + depth` ints — its own
+id, then each list level's element id (Iceberg's `element-id`): for depth 2,
+`(column_id, outer_element_id, inner_element_id)`. Ids are `0..2^31-1` (`bool` is not
+an int here). The streaming writer applies the same ids to every row group.
+
+Layout: field 9 is written after fields ≤ 8 and before `logicalType` (10), so field
+ids stay ascending in every SchemaElement branch (decimal, date, time, timestamp,
+uuid, interval, UTF8, INTEGER(width, signed), bare). For a LIST, the outer LIST group
+carries the column id; level k's element id goes on the next LIST group named
+`element`, or on the leaf at the last level; the repeated `list` group has none
+(parquet-mr / Arrow layout).
+
+Without `field_ids` (or with `None`), nothing is written and the file is
+byte-identical to before (tested).
+
+Read back: `read_metadata(...).schema_columns[i].field_id` (-1 when absent) and
+`.element_field_ids` (a tuple, outermost first, for a 3-level LIST; else `()`).
+
+`patch_columns` and `append_row_groups` rebuild the footer from the source schema, so
+they now carry `field_id` and element ids across, as they already carry the draken
+logical kind. Append compares ids as part of the column shape: appending files with
+different ids raises instead of relabelling. A coalescing append re-writes fragments
+with `write_parquet(**write_options)`, so those options must include the same
+`field_ids`: when `base` carries ids and `write_options` has no `field_ids`, the
+coalescing append raises ValueError rather than risk a result with the ids dropped.
+
+Tests: `tests/rugo/test_parquet_field_ids.py`. These cover every schema branch plus
+LIST depth 1 and 2, with pyarrow's `PARQUET:field_id` and rugo's `read_metadata`
+as oracles. They also check the data is unchanged by ids, that output is
+byte-identical without them, the streaming writer, patch and append, and every
+refusal.

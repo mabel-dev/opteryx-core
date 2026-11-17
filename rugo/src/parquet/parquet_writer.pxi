@@ -192,7 +192,7 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
                   Py_ssize_t row_groups_per_block=DEFAULT_ROW_GROUPS_PER_BLOCK,
                   alp=False, bint statistics=True,
                   Py_ssize_t narrow_chunk_bytes=0, Py_ssize_t narrow_run_blocks=0,
-                  Py_ssize_t narrow_held_budget_bytes=0):
+                  Py_ssize_t narrow_held_budget_bytes=0, dict field_ids=None):
     """Serialize a Morsel to a parquet file (bytes).
 
     compression: "zstd" (default) or "none". Anything else raises ValueError.
@@ -269,6 +269,13 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
         statistics=False with an active page index (page_index=True and
         max_page_bytes > 0) raises ValueError — pass page_index=False.
 
+    field_ids: {column name: id} writing each column's parquet schema field_id
+        (SchemaElement field 9; Iceberg matches columns by it). Every column must
+        be named, and no other. A scalar column takes an int; an ARRAY column
+        takes a sequence of 1 + depth ints: its own id, then each list level's
+        element id (Iceberg's element-id). Ids are 0..2^31-1. None (default)
+        writes no ids — the file is byte-identical to before.
+
     Supported column types: INT8/16/32/64, UINT8/16/32/64, FLOAT32/64, BOOL,
     VARCHAR, NVARCHAR, VARBINARY, DATE32, TIMESTAMP64, TIME32/64, INTERVAL,
     DECIMAL, DECIMAL128, UUID (FLBA(16) + UUID annotation), ARRAY, and all-null
@@ -287,7 +294,8 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
                    max_rows_per_row_group, max_page_bytes, None,
                    sorted_by, sorted_descending, profile, page_index,
                    row_groups_per_block, alp, statistics,
-                   narrow_chunk_bytes, narrow_run_blocks, narrow_held_budget_bytes)[0]
+                   narrow_chunk_bytes, narrow_run_blocks, narrow_held_budget_bytes,
+                   field_ids)[0]
 
 
 def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
@@ -321,6 +329,44 @@ def write_parquet_with_bounds(Morsel morsel not None, str compression="zstd",
                    narrow_chunk_bytes, narrow_run_blocks, narrow_held_budget_bytes)
 
 
+cdef int32_t _field_id_value(str col, object v) except -1:
+    if type(v) is not int or v < 0 or v > 2147483647:
+        raise ValueError("write_parquet: field_ids[%r] must be an int in 0..2^31-1, got %r"
+                         % (col, v))
+    return <int32_t>v
+
+
+cdef void _apply_field_ids(vector[ColumnInput]& cols, list names, dict field_ids) except *:
+    """Set each column's schema field_id (and an ARRAY's element ids) from
+    {name: id}: every column must be named, and nothing else."""
+    cdef size_t i
+    cdef int k
+    cdef str nm
+    cdef set seen = set()
+    cdef object v
+    for i in range(cols.size()):
+        nm = names[i].decode("utf-8") if type(names[i]) is bytes else names[i]
+        if nm not in field_ids:
+            raise ValueError("write_parquet: field_ids has no id for column %r" % (nm,))
+        seen.add(nm)
+        v = field_ids[nm]
+        if not cols[i].is_array:
+            cols[i].field_id = _field_id_value(nm, v)
+            continue
+        if type(v) is not list and type(v) is not tuple or len(v) != cols[i].array_depth + 1:
+            raise ValueError(
+                "write_parquet: column %r is an ARRAY of depth %d; field_ids[%r] must be "
+                "a sequence of %d ids (the column's, then each list level's element id), got %r"
+                % (nm, cols[i].array_depth, nm, cols[i].array_depth + 1, v))
+        cols[i].field_id = _field_id_value(nm, v[0])
+        cols[i].element_ids.clear()
+        for k in range(cols[i].array_depth):
+            cols[i].element_ids.push_back(_field_id_value(nm, v[k + 1]))
+    for nm in field_ids:
+        if nm not in seen:
+            raise ValueError("write_parquet: field_ids names %r, which is not a column" % (nm,))
+
+
 cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filters,
              bint use_dict=True, Py_ssize_t max_rows_per_row_group=DEFAULT_ROWS_PER_ROW_GROUP,
              Py_ssize_t max_page_bytes=0, object stream_writer=None,
@@ -329,7 +375,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
              Py_ssize_t row_groups_per_block=DEFAULT_ROW_GROUPS_PER_BLOCK,
              object alp=False, bint statistics=True,
              Py_ssize_t narrow_chunk_bytes=0, Py_ssize_t narrow_run_blocks=0,
-             Py_ssize_t narrow_held_budget_bytes=0):
+             Py_ssize_t narrow_held_budget_bytes=0, dict field_ids=None):
     cdef int codec
     cdef int profile_id = _resolve_profile("write_parquet", compression, profile)
     # Resolve the bloom-filter request: all-eligible / none / a name set.
@@ -1373,6 +1419,8 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         if _an not in names and _an.encode("utf-8") not in names:
             raise ValueError("write_parquet: alp names column %r, which is not in the morsel"
                              % (_an,))
+    if field_ids is not None:
+        _apply_field_ids(cols, names, field_ids)
 
     # Streaming path: hand this batch to the stateful writer as ONE row group
     # (the whole morsel); it places a block once it holds row_groups_per_block
@@ -1471,6 +1519,7 @@ cdef class _StreamingParquetWriter:
     cdef bint _sorted_descending
     cdef bint _closed
     cdef bint _finished
+    cdef dict _field_ids
 
     def __cinit__(self, object sink, str compression="zstd", object bloom_filters=True,
                   bint dictionary=True, Py_ssize_t max_page_bytes=0,
@@ -1479,7 +1528,7 @@ cdef class _StreamingParquetWriter:
                   Py_ssize_t row_groups_per_block=DEFAULT_ROW_GROUPS_PER_BLOCK,
                   object alp=False, bint statistics=True,
                   Py_ssize_t narrow_chunk_bytes=0, Py_ssize_t narrow_run_blocks=0,
-                  Py_ssize_t narrow_held_budget_bytes=0):
+                  Py_ssize_t narrow_held_budget_bytes=0, dict field_ids=None):
         if not callable(sink):
             raise TypeError("open_parquet_writer: sink must be a callable taking bytes")
         _check_layout_params("open_parquet_writer", 0, row_groups_per_block,
@@ -1506,6 +1555,7 @@ cdef class _StreamingParquetWriter:
         self._page_index = page_index
         self._sorted_by = sorted_by
         self._sorted_descending = sorted_descending
+        self._field_ids = field_ids
         self._closed = False
         self._finished = False
         self._w = new StreamingParquetWriter(codec, profile_id, <size_t>max_page_bytes,
@@ -1546,7 +1596,9 @@ cdef class _StreamingParquetWriter:
                 self._dictionary, 0, self._max_page_bytes, stream_writer=self,
                 sorted_by=self._sorted_by, sorted_descending=self._sorted_descending,
                 profile=self._profile, page_index=self._page_index,
-                row_groups_per_block=DEFAULT_ROW_GROUPS_PER_BLOCK, alp=self._alp)
+                row_groups_per_block=DEFAULT_ROW_GROUPS_PER_BLOCK, alp=self._alp,
+                statistics=True, narrow_chunk_bytes=0, narrow_run_blocks=0,
+                narrow_held_budget_bytes=0, field_ids=self._field_ids)
 
     @property
     def held_narrow_bytes(self):
@@ -1614,7 +1666,7 @@ def open_parquet_writer(sink, str compression="zstd", bloom_filters=True,
                         Py_ssize_t row_groups_per_block=DEFAULT_ROW_GROUPS_PER_BLOCK,
                         alp=False, bint statistics=True,
                         Py_ssize_t narrow_chunk_bytes=0, Py_ssize_t narrow_run_blocks=0,
-                        Py_ssize_t narrow_held_budget_bytes=0):
+                        Py_ssize_t narrow_held_budget_bytes=0, dict field_ids=None):
     """Open a streaming, bounded-memory parquet writer.
 
     `sink` is a callable taking bytes; the writer calls it with each block of
@@ -1635,13 +1687,14 @@ def open_parquet_writer(sink, str compression="zstd", bloom_filters=True,
     Every batch must share the same column schema. sorted_by /
     sorted_descending: see write_parquet — the hint applies to every row
     group written by this writer. statistics: see write_parquet (False with an
-    active page index raises ValueError).
+    active page index raises ValueError). field_ids: see write_parquet; applied
+    to every row group (checked against each batch's columns).
     """
     return _StreamingParquetWriter(sink, compression, bloom_filters, dictionary,
                                    max_page_bytes, sorted_by, sorted_descending,
                                    profile, page_index, row_groups_per_block, alp,
                                    statistics, narrow_chunk_bytes, narrow_run_blocks,
-                                   narrow_held_budget_bytes)
+                                   narrow_held_budget_bytes, field_ids)
 
 
 def write_parquet_stream(morsel_iter, sink, str compression="zstd",

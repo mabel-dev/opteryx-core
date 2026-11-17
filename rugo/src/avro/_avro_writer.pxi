@@ -56,6 +56,11 @@ cdef extern from "avro/avro_writer.hpp" namespace "rugo::avro":
         cbool have_sync
         uint8_t sync[16]
         size_t max_threads
+        string schema
+        vector[string] metadata_keys
+        vector[string] metadata_values
+        vector[string] json_columns
+        cbool json_bytes_base64
 
     # std::invalid_argument -> ValueError (bad codec / name / type / block size);
     # std::runtime_error -> RuntimeError; std::logic_error (a writer bug) -> the
@@ -123,11 +128,38 @@ cdef inline void _avro_fill_column(FieldSpec* spec, WriteColumn* col, object nm,
 
 
 cdef void _avro_options(WriteOptions* opts, str caller, str codec, size_t block_bytes,
-                        str record_name, object sync_marker, size_t max_threads) except *:
+                        str record_name, object sync_marker, size_t max_threads,
+                        str schema, dict metadata, list json_columns, str json_bytes) except *:
     opts.codec = parse_write_codec(codec.encode("utf-8"))
     opts.block_bytes = block_bytes
-    opts.record_name = record_name.encode("utf-8")
+    if schema is not None and record_name is not None:
+        raise ValueError("%s: record_name does not apply with a schema (the schema names the record)" % caller)
+    opts.record_name = ("record" if record_name is None else record_name).encode("utf-8")
     opts.max_threads = max_threads
+    if schema is not None:
+        opts.schema = schema.encode("utf-8")
+    cdef object k, val
+    if metadata is not None:
+        for k, val in metadata.items():
+            if type(k) is not str:
+                raise TypeError("%s: metadata keys must be str" % caller)
+            if type(val) is str:
+                val = (<str>val).encode("utf-8")
+            elif type(val) is not bytes:
+                raise TypeError("%s: metadata value for '%s' must be str or bytes" % (caller, k))
+            opts.metadata_keys.push_back((<str>k).encode("utf-8"))
+            opts.metadata_values.push_back(<bytes>val)
+    if json_columns is not None:
+        for k in json_columns:
+            if type(k) is not str:
+                raise TypeError("%s: json_columns must be column names (str)" % caller)
+            opts.json_columns.push_back((<str>k).encode("utf-8"))
+    if json_bytes is None:
+        opts.json_bytes_base64 = False
+    elif json_bytes == "base64":
+        opts.json_bytes_base64 = True
+    else:
+        raise ValueError("%s: json_bytes must be 'base64' (or None)" % caller)
     cdef bytes sync
     cdef int i
     if sync_marker is None:
@@ -181,8 +213,9 @@ cdef void _avro_one_shot(vector[FieldSpec]& fields, vector[WriteColumn]& cols,
 
 
 def write_avro(Morsel morsel not None, str codec="deflate", size_t block_bytes=1 << 20,
-               str record_name="record", sync_marker=None, size_t max_threads=0,
-               bint dictionary=True):
+               str record_name=None, sync_marker=None, size_t max_threads=0,
+               object dictionary=None, str schema=None, dict metadata=None,
+               list json_columns=None, str json_bytes=None):
     """Serialize a Morsel to Avro object container bytes.
 
     Design: docs/AVRO_WRITER_DESIGN.md. Every field is `["null", T]`; the root record
@@ -192,7 +225,8 @@ def write_avro(Morsel morsel not None, str codec="deflate", size_t block_bytes=1
     codec: 'null', 'deflate' (default), 'snappy', 'zstandard' or 'bzip2'.
     block_bytes: a block holds rows until their encoded size reaches this many bytes
         (at most 65,536 rows); the last block of a batch may be smaller.
-    record_name: the root record's name, a valid Avro name.
+    record_name: the root record's name, a valid Avro name (default 'record'). Not with
+        `schema`.
     sync_marker: 16 bytes to use as the file's sync marker (None = random); lets two
         writes of the same rows compare byte for byte.
     max_threads: blocks are encoded and compressed on up to this many threads (0 =
@@ -204,11 +238,20 @@ def write_avro(Morsel morsel not None, str codec="deflate", size_t block_bytes=1
     A column with no nulls is written as plain T rather than ["null", T] (a one-shot
     write sees the whole column; open_avro_writer cannot, so streamed fields keep the
     union and strings stay strings).
+    schema: the file's Avro schema as JSON text, written verbatim; a record whose
+        fields are the morsel's columns by name (docs/AVRO_WRITER_DESIGN.md §15). Each
+        plain column is written per its field; `dictionary` does not apply.
+    metadata: extra header entries {str: str | bytes}; avro.* keys are refused.
+    json_columns: columns of JSON text, each row encoded against its schema field.
+    json_bytes: 'base64' — how JSON carries bytes / fixed values.
     Raises ValueError for a column name that is not a valid Avro name, a duplicate
     name, a type Avro cannot carry, an unknown codec, or a morsel with no columns.
     """
     cdef WriteOptions opts
-    _avro_options(&opts, "write_avro", codec, block_bytes, record_name, sync_marker, max_threads)
+    _avro_options(&opts, "write_avro", codec, block_bytes, record_name, sync_marker, max_threads,
+                  schema, metadata, json_columns, json_bytes)
+    if schema is not None and dictionary is not None:
+        raise ValueError("write_avro: dictionary does not apply with a schema (the schema decides each field)")
     cdef vector[FieldSpec] fields
     cdef vector[WriteColumn] cols
     cdef list keepalive = []
@@ -216,7 +259,8 @@ def write_avro(Morsel morsel not None, str codec="deflate", size_t block_bytes=1
     cdef uint32_t nrows = <uint32_t>morsel.num_rows
     cdef vector[vector[uint32_t]] codes
     codes.resize(fields.size())
-    _avro_one_shot(fields, cols, codes, dictionary, max_threads)
+    if schema is None:
+        _avro_one_shot(fields, cols, codes, dictionary is None or bool(dictionary), max_threads)
 
     cdef AvroWriter* w = new AvroWriter(fields, opts)
     cdef vector[vector[uint8_t]] chunks
@@ -253,13 +297,15 @@ cdef class _StreamingAvroWriter:
     cdef bint _closed
 
     def __cinit__(self, object sink, str codec="deflate", size_t block_bytes=1 << 20,
-                  str record_name="record", sync_marker=None, size_t max_threads=0):
+                  str record_name=None, sync_marker=None, size_t max_threads=0,
+                  str schema=None, dict metadata=None, list json_columns=None,
+                  str json_bytes=None):
         self._w = NULL
         self._closed = False
         if not callable(sink):
             raise TypeError("open_avro_writer: sink must be a callable taking bytes")
         _avro_options(&self._opts, "open_avro_writer", codec, block_bytes, record_name,
-                      sync_marker, max_threads)
+                      sync_marker, max_threads, schema, metadata, json_columns, json_bytes)
         self._sink = sink
 
     def __dealloc__(self):
@@ -326,19 +372,27 @@ cdef class _StreamingAvroWriter:
 
 
 def open_avro_writer(sink, str codec="deflate", size_t block_bytes=1 << 20,
-                     str record_name="record", sync_marker=None, size_t max_threads=0):
+                     str record_name=None, sync_marker=None, size_t max_threads=0,
+                     str schema=None, dict metadata=None, list json_columns=None,
+                     str json_bytes=None):
     """Open a streaming Avro writer: `sink` is a callable taking bytes. Options as
-    write_avro. Use as a context manager; call write_batch(morsel) per batch."""
-    return _StreamingAvroWriter(sink, codec, block_bytes, record_name, sync_marker, max_threads)
+    write_avro (without `dictionary`). Use as a context manager; call
+    write_batch(morsel) per batch. With `schema`, the header (schema and metadata)
+    is fixed up front and every batch is written against it."""
+    return _StreamingAvroWriter(sink, codec, block_bytes, record_name, sync_marker, max_threads,
+                                schema, metadata, json_columns, json_bytes)
 
 
 def write_avro_stream(morsel_iter, sink, str codec="deflate", size_t block_bytes=1 << 20,
-                      str record_name="record", sync_marker=None, size_t max_threads=0):
+                      str record_name=None, sync_marker=None, size_t max_threads=0,
+                      str schema=None, dict metadata=None, list json_columns=None,
+                      str json_bytes=None):
     """Write every Morsel of `morsel_iter` to `sink` as one Avro file; returns the
     number of rows written. An iterator that yields nothing raises ValueError (there
     is no schema to write a file with)."""
     cdef _StreamingAvroWriter w = _StreamingAvroWriter(
-        sink, codec, block_bytes, record_name, sync_marker, max_threads)
+        sink, codec, block_bytes, record_name, sync_marker, max_threads,
+        schema, metadata, json_columns, json_bytes)
     with w:
         for m in morsel_iter:
             w.write_batch(m)

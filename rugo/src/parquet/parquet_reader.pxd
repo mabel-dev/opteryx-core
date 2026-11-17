@@ -114,6 +114,8 @@ cdef extern from "metadata.hpp":
         string logical_type
         bint nullable
         int draken_logical_kind
+        int field_id
+        vector[int] element_field_ids
 
     cdef cppclass FileStats:
         long long num_rows

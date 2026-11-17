@@ -16,6 +16,9 @@
 #include <climits>
 
 #include "avro_container.hpp"                // take_bz_internal_error
+#include "avro_schema.hpp"                   // a caller-supplied schema (doc §15)
+#include "base64/_base64.h"                  // mabel b64tobin_len (exported by draken_native)
+#include "yyjson.h"
 #include "../_column_names.hpp"               // shared duplicate-name refusal
 #include "bzlib.h"
 #include "compression/stream_decompress.hpp"  // crc32_update: the CRC the reader verifies with
@@ -128,6 +131,7 @@ enum class Enc : uint8_t {
     Ipv4,            // UINT32 + IPV4 descriptor -> long + "opteryx.type": "IPV4"
     Enum,            // VARCHAR / NVARCHAR with symbols -> enum, codes from the edge's analysis
     Array,           // DRAKEN_ARRAY: offsets over a child chain; the leaf has its own Enc
+    Json,            // JSON text encoded per row against a caller-schema field (doc §15)
 };
 
 // The smallest fixed width that holds every unscaled value of DECIMAL(p, s) as two's
@@ -631,6 +635,7 @@ void with_scalar(Enc e, uint32_t width, Fn&& fn) {
         case Enc::Null:   // handled by the caller (every value null)
         case Enc::Enum:   // handled by the caller (codes from the edge)
         case Enc::Array:  // handled by the caller (child chain)
+        case Enc::Json:   // handled by the caller (rows encoded in the length pass)
             break;
     }
     throw std::logic_error("Avro writer: no scalar encoder for a field the schema admitted");
@@ -755,6 +760,378 @@ void check_array_chain(const FieldSpec& f, const WriteColumn& col) {
         if (last != 0) refuse(name + " has elements but no child vector");
     }
 }
+
+
+// ---- caller-supplied schema (doc §15) ----
+
+const char* logical_name(Logical l) {
+    switch (l) {
+        case Logical::None: return "";
+        case Logical::Date: return "date";
+        case Logical::TimeMillis: return "time-millis";
+        case Logical::TimeMicros: return "time-micros";
+        case Logical::TimestampMillis: return "timestamp-millis";
+        case Logical::TimestampMicros: return "timestamp-micros";
+        case Logical::Uuid: return "uuid";
+        case Logical::Decimal: return "decimal";
+    }
+    return "?";
+}
+
+// A schema node for a message: `long`, `long (timestamp-micros)`, `fixed rugo.d (decimal(9, 2))`,
+// `["null", record x]`.
+std::string node_desc(const Node* n) {
+    if (n->kind == Kind::Union) {
+        const std::string v = node_desc(n->value_branch());
+        return n->null_branch == 0 ? "[\"null\", " + v + "]" : "[" + v + ", \"null\"]";
+    }
+    std::string s = kind_name(n->kind);
+    if (!n->full_name.empty()) s += " " + n->full_name;
+    if (n->logical == Logical::Decimal)
+        s += " (decimal(" + std::to_string(n->precision) + ", " + std::to_string(n->scale) + "))";
+    else if (n->logical != Logical::None)
+        s += std::string(" (") + logical_name(n->logical) + ")";
+    return s;
+}
+
+// Whether encoder `e` (chosen for a value of Draken type `t`, descriptor `spec`) writes
+// exactly the values schema node `n` holds — the same bytes a derived schema would have
+// carried, never a conversion. For a fixed decimal, sets `width` to the field's size.
+bool scalar_fits(Enc e, DrakenType t, const ElemSpec& spec, const Node* n, uint8_t& width) {
+    switch (n->kind) {
+        case Kind::Boolean: return n->logical == Logical::None && e == Enc::Bool;
+        case Kind::Int:
+            if (n->logical == Logical::None) return e == Enc::I8 || e == Enc::I16 || e == Enc::I32 || e == Enc::U8 || e == Enc::U16;
+            if (n->logical == Logical::Date) return e == Enc::Date;
+            if (n->logical == Logical::TimeMillis)
+                return e == Enc::TimeMs32 || e == Enc::TimeMs32FromS || e == Enc::TimeMs64 || e == Enc::TimeMs64FromS;
+            return false;
+        case Kind::Long:
+            // Every narrower integer is the same zigzag varint as a long.
+            if (n->logical == Logical::None)
+                return e == Enc::I8 || e == Enc::I16 || e == Enc::I32 || e == Enc::U8 || e == Enc::U16 ||
+                       e == Enc::I64 || e == Enc::U32 || e == Enc::Ipv4;
+            if (n->logical == Logical::TimeMicros) return e == Enc::TimeUs64;
+            if (n->logical == Logical::TimestampMillis) return e == Enc::TsMs || e == Enc::TsMsFromS;
+            if (n->logical == Logical::TimestampMicros) return e == Enc::TsUs;
+            return false;
+        case Kind::Float: return n->logical == Logical::None && e == Enc::F32;
+        case Kind::Double: return n->logical == Logical::None && e == Enc::F64;
+        case Kind::String:
+            return (n->logical == Logical::None || n->logical == Logical::Uuid) && e == Enc::Str && t != DRAKEN_VARBINARY;
+        case Kind::Bytes: return n->logical == Logical::None && e == Enc::Str && t == DRAKEN_VARBINARY;
+        case Kind::Fixed:
+            if (n->logical == Logical::Uuid) return e == Enc::UuidFixed && n->fixed_size == 16;
+            if (n->logical == Logical::Decimal) {
+                if (e != Enc::DecFixed64 && e != Enc::DecFixed128) return false;
+                if (n->precision != spec.precision || n->scale != spec.scale) return false;
+                // The schema parser guarantees the size holds the precision; it must also
+                // not exceed the column's storage (the encoder narrows, never widens).
+                if (n->fixed_size > (e == Enc::DecFixed64 ? 8u : 16u)) return false;
+                width = static_cast<uint8_t>(n->fixed_size);
+                return true;
+            }
+            return false;
+        default: return false;
+    }
+}
+
+// The plan of a plain (non-JSON) column written into schema field type `ft`: its own
+// encoder, checked against the field (scalar_fits). The plain encoders write a union as
+// `["null", T]` with null first and an array's items as `["null", T]`; a field shaped
+// otherwise is refused here, pointing at the JSON flag, which writes any shape.
+FieldPlan plan_plain(const FieldSpec& f, const Node* ft, std::string& type_json) {
+    const std::string col = "column '" + f.name + "'";
+    const std::string want = node_desc(ft);
+    type_json = want;
+    FieldPlan plan;
+    plan.branch = ft->kind == Kind::Union;
+    const Node* n = ft;
+    if (plan.branch) {
+        if (ft->null_branch != 0)
+            refuse(col + ": the schema field is " + want + "; a plain column writes [\"null\", T] (null first) — "
+                   "flag it as a JSON column to write this union");
+        n = ft->value_branch();
+    }
+    if (f.type == DRAKEN_NULL) {
+        if (!plan.branch) refuse(col + " is a typeless NULL column but the schema field is required (" + want + ")");
+        plan.enc = static_cast<uint8_t>(Enc::Null);
+        return plan;
+    }
+    NamedTypes named;
+    std::string derived;
+    if (f.type != DRAKEN_ARRAY) {
+        if (!f.elements.empty()) refuse(col + " is not an ARRAY but has element types");
+        const ElemSpec e{f.type, f.logical_kind, f.unit, f.scale, f.precision};
+        const Enc enc = choose_scalar(col, e, named, derived, plan.width);
+        if (!scalar_fits(enc, f.type, e, n, plan.width))
+            refuse(col + " is " + type_name(f.type) + " written as " + derived + ", but the schema field is " + want);
+        plan.enc = static_cast<uint8_t>(enc);
+        return plan;
+    }
+    if (f.logical_kind != 0) refuse(col + " is an ARRAY carrying a logical descriptor");
+    plan.enc = static_cast<uint8_t>(Enc::Array);
+    plan.depth = 1;
+    plan.leaf = static_cast<uint8_t>(Enc::I32);  // unused when no element is ever written
+    const Node* cur = n;
+    size_t i = 0;
+    for (;;) {
+        if (cur->kind != Kind::Array) refuse(col + " is an ARRAY but the schema has " + node_desc(cur) + " there");
+        const Node* items = cur->items;
+        if (items->kind != Kind::Union || items->null_branch != 0)
+            refuse(col + ": a plain ARRAY column writes [\"null\", T] items, but the schema's items are " +
+                   node_desc(items) + " — flag it as a JSON column to write these items");
+        items = items->value_branch();
+        if (i == f.elements.size()) break;  // no element anywhere: only null or empty arrays
+        const ElemSpec& e = f.elements[i++];
+        if (e.type == DRAKEN_ARRAY) {
+            if (e.logical_kind != 0) refuse(col + ": a nested ARRAY carries a logical descriptor");
+            if (i == f.elements.size()) refuse(col + ": the element chain ends on an ARRAY");
+            ++plan.depth;
+            cur = items;
+            continue;
+        }
+        if (i != f.elements.size()) refuse(col + ": a scalar element is followed by more levels");
+        const Enc leaf = choose_scalar(col + " (its elements)", e, named, derived, plan.leaf_width);
+        if (!scalar_fits(leaf, e.type, e, items, plan.leaf_width))
+            refuse(col + ": its elements are " + type_name(e.type) + " but the schema's items are " + node_desc(items));
+        plan.leaf = static_cast<uint8_t>(leaf);
+        break;
+    }
+    return plan;
+}
+
+// The path below `n` of the first bytes / fixed node, or false. The schema parser
+// refuses recursive types, so the walk ends.
+bool reaches_bytes(const Node* n, std::string& path) {
+    switch (n->kind) {
+        case Kind::Bytes:
+        case Kind::Fixed: return true;
+        case Kind::Union: return reaches_bytes(n->value_branch(), path);
+        case Kind::Array: return reaches_bytes(n->items, path += "[]") || (path.resize(path.size() - 2), false);
+        case Kind::Map: return reaches_bytes(n->values, path += "{}") || (path.resize(path.size() - 2), false);
+        case Kind::Record:
+            for (const Field& f : n->fields) {
+                const size_t at = path.size();
+                path += "." + f.name;
+                if (reaches_bytes(f.type, path)) return true;
+                path.resize(at);
+            }
+            return false;
+        default: return false;
+    }
+}
+
+bool b64_char(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/';
+}
+
+// Encodes one JSON value against a schema node, strictly (doc §15): every type must be
+// the JSON the field calls for, records carry exactly their fields (a missing nullable
+// field is null), integers are exact, bytes / fixed are base64. Appends to `out`.
+struct JsonEncoder {
+    struct Seg { std::string_view name; int64_t index; };
+
+    std::vector<uint8_t>& out;
+    const std::string& column;
+    bool b64;
+    uint64_t row = 0;
+    std::vector<Seg> path;
+    std::vector<uint8_t> scratch;
+
+    [[noreturn]] void bad(const std::string& msg) const {
+        std::string p = "column '" + column + "'";
+        for (const Seg& s : path) {
+            if (s.index >= 0) p += "[" + std::to_string(s.index) + "]";
+            else p += "." + std::string(s.name);
+        }
+        refuse("row " + std::to_string(row) + ", " + p + ": " + msg);
+    }
+    [[noreturn]] void wrong(yyjson_val* v, const char* want) const {
+        bad(std::string("expected ") + want + ", got JSON " + yyjson_get_type_desc(v));
+    }
+
+    int64_t exact_int(yyjson_val* v) const {
+        if (yyjson_is_sint(v)) return yyjson_get_sint(v);
+        if (yyjson_is_uint(v)) {
+            const uint64_t u = yyjson_get_uint(v);
+            if (u > static_cast<uint64_t>(INT64_MAX)) bad(std::to_string(u) + " is beyond the range of a long");
+            return static_cast<int64_t>(u);
+        }
+        if (yyjson_is_real(v)) bad("expected an integer, got a number with a fraction or an exponent, or beyond 64 bits");
+        wrong(v, "an integer");
+    }
+
+    // A JSON number as a float / double: an integer must be exactly representable
+    // (|x| <= 2^mant_bits), never rounded.
+    double number(yyjson_val* v, int mant_bits) const {
+        if (yyjson_is_real(v)) return yyjson_get_real(v);
+        if (!yyjson_is_int(v)) wrong(v, "a number");
+        const uint64_t lim = uint64_t{1} << mant_bits;
+        if (yyjson_is_uint(v)) {
+            const uint64_t u = yyjson_get_uint(v);
+            if (u > lim) bad(std::to_string(u) + " cannot be represented exactly");
+            return static_cast<double>(u);
+        }
+        const int64_t x = yyjson_get_sint(v);
+        if (x < -static_cast<int64_t>(lim)) bad(std::to_string(x) + " cannot be represented exactly");
+        return static_cast<double>(x);
+    }
+
+    // Strict base64 (padding only at the end) into `scratch`.
+    void base64(yyjson_val* v) {
+        if (!yyjson_is_str(v)) wrong(v, "base64 text");
+        const char* s = yyjson_get_str(v);
+        const size_t n = yyjson_get_len(v);
+        if (n % 4 != 0) bad("is not base64 (its length is not a multiple of 4)");
+        size_t pad = 0;
+        if (n >= 1 && s[n - 1] == '=') ++pad;
+        if (n >= 2 && s[n - 2] == '=') ++pad;
+        for (size_t i = 0; i < n - pad; ++i)
+            if (!b64_char(s[i])) bad("is not base64 (byte " + std::to_string(i) + ")");
+        const size_t want = n / 4 * 3 - pad;
+        scratch.resize(n / 4 * 3);
+        void* end = n ? b64tobin_len(scratch.data(), s, n) : scratch.data();
+        if (end == nullptr || static_cast<size_t>(static_cast<uint8_t*>(end) - scratch.data()) != want)
+            bad("is not base64");
+        scratch.resize(want);
+    }
+
+    void encode(yyjson_val* v, const Node* n) {
+        switch (n->kind) {
+            case Kind::Null:
+                if (!yyjson_is_null(v)) wrong(v, "null");
+                return;
+            case Kind::Boolean:
+                if (!yyjson_is_bool(v)) wrong(v, "a boolean");
+                out.push_back(yyjson_get_bool(v) ? 1 : 0);
+                return;
+            case Kind::Int: {
+                const int64_t x = exact_int(v);
+                if (x < INT32_MIN || x > INT32_MAX) bad(std::to_string(x) + " is beyond the range of an int");
+                append_long(out, x);
+                return;
+            }
+            case Kind::Long: append_long(out, exact_int(v)); return;
+            case Kind::Float: {
+                const float f = static_cast<float>(number(v, 24));
+                append_bytes(out, &f, 4);
+                return;
+            }
+            case Kind::Double: {
+                const double d = number(v, 53);
+                append_bytes(out, &d, 8);
+                return;
+            }
+            case Kind::String:
+                if (!yyjson_is_str(v)) wrong(v, "a string");
+                append_long(out, static_cast<int64_t>(yyjson_get_len(v)));
+                append_bytes(out, yyjson_get_str(v), yyjson_get_len(v));
+                return;
+            case Kind::Bytes:
+                base64(v);
+                append_long(out, static_cast<int64_t>(scratch.size()));
+                append_bytes(out, scratch.data(), scratch.size());
+                return;
+            case Kind::Fixed:
+                base64(v);
+                if (scratch.size() != n->fixed_size)
+                    bad("is " + std::to_string(scratch.size()) + " bytes but the field is fixed(" +
+                        std::to_string(n->fixed_size) + ")");
+                append_bytes(out, scratch.data(), scratch.size());
+                return;
+            case Kind::Enum: {
+                if (!yyjson_is_str(v)) wrong(v, "an enum symbol (string)");
+                const std::string_view sym(yyjson_get_str(v), yyjson_get_len(v));
+                // shortcut: linear symbol search; index the symbols if a large enum shows up hot.
+                for (size_t k = 0; k < n->symbols.size(); ++k)
+                    if (n->symbols[k] == sym) { append_long(out, static_cast<int64_t>(k)); return; }
+                bad("'" + std::string(sym) + "' is not a symbol of enum " + n->full_name);
+            }
+            case Kind::Array: {
+                if (!yyjson_is_arr(v)) wrong(v, "an array");
+                const size_t cnt = yyjson_arr_size(v);
+                if (cnt) {
+                    append_long(out, static_cast<int64_t>(cnt));
+                    size_t idx, max;
+                    yyjson_val* item;
+                    path.push_back(Seg{{}, 0});
+                    yyjson_arr_foreach(v, idx, max, item) {
+                        path.back().index = static_cast<int64_t>(idx);
+                        encode(item, n->items);
+                    }
+                    path.pop_back();
+                }
+                out.push_back(0);
+                return;
+            }
+            case Kind::Map: {
+                if (!yyjson_is_obj(v)) wrong(v, "an object (map)");
+                const size_t cnt = yyjson_obj_size(v);
+                if (cnt) {
+                    append_long(out, static_cast<int64_t>(cnt));
+                    std::unordered_set<std::string_view> seen;
+                    size_t idx, max;
+                    yyjson_val *key, *val;
+                    yyjson_obj_foreach(v, idx, max, key, val) {
+                        const std::string_view k(yyjson_get_str(key), yyjson_get_len(key));
+                        if (!seen.insert(k).second) bad("map key '" + std::string(k) + "' appears twice");
+                        append_long(out, static_cast<int64_t>(k.size()));
+                        append_bytes(out, k.data(), k.size());
+                        path.push_back(Seg{k, -1});
+                        encode(val, n->values);
+                        path.pop_back();
+                    }
+                }
+                out.push_back(0);
+                return;
+            }
+            case Kind::Record: {
+                if (!yyjson_is_obj(v)) wrong(v, "an object (record)");
+                size_t present = 0;
+                for (const Field& f : n->fields) {
+                    path.push_back(Seg{f.name, -1});
+                    yyjson_val* fv = yyjson_obj_getn(v, f.name.data(), f.name.size());
+                    if (fv == nullptr) {
+                        // An absent field is null when the field allows it; `default` is not consulted.
+                        if (f.type->kind != Kind::Union) bad("the required field is missing");
+                        append_long(out, f.type->null_branch);
+                    } else {
+                        ++present;
+                        encode(fv, f.type);
+                    }
+                    path.pop_back();
+                }
+                if (yyjson_obj_size(v) != present) {
+                    std::unordered_set<std::string_view> seen;
+                    size_t idx, max;
+                    yyjson_val *key, *val;
+                    yyjson_obj_foreach(v, idx, max, key, val) {
+                        const std::string_view k(yyjson_get_str(key), yyjson_get_len(key));
+                        bool known = false;
+                        for (const Field& f : n->fields) known = known || f.name == k;
+                        if (!known) bad("'" + std::string(k) + "' is not a field of record " + n->full_name);
+                        if (!seen.insert(k).second) bad("field '" + std::string(k) + "' appears twice");
+                    }
+                }
+                return;
+            }
+            case Kind::Union:
+                if (yyjson_is_null(v)) {
+                    append_long(out, n->null_branch);
+                } else {
+                    append_long(out, n->null_branch == 0 ? 1 : 0);
+                    encode(v, n->value_branch());
+                }
+                return;
+        }
+        throw std::logic_error("Avro writer: a schema kind the JSON encoder does not know");
+    }
+};
+
+struct DocFree {
+    void operator()(yyjson_doc* d) const { yyjson_doc_free(d); }
+};
 
 }  // namespace
 
@@ -1158,7 +1535,67 @@ struct BlockEncoder {
 AvroWriter::AvroWriter(std::vector<FieldSpec> fields, const WriteOptions& opts)
     : fields_(std::move(fields)), opts_(opts) {
     if (opts_.block_bytes == 0) refuse("block_bytes must be positive");
-    schema_json_ = build_schema(fields_, opts_.record_name, plans_, types_);
+    if (opts_.metadata_keys.size() != opts_.metadata_values.size())
+        throw std::logic_error("Avro writer: metadata keys and values differ in count");
+    {
+        std::unordered_set<std::string> seen;
+        for (const std::string& k : opts_.metadata_keys) {
+            if (k.rfind("avro.", 0) == 0) refuse("metadata key '" + k + "' is reserved (avro.* keys belong to the format)");
+            if (k == "rugo.created_by") refuse("metadata key 'rugo.created_by' is written by the writer itself");
+            if (!seen.insert(k).second) refuse("metadata key '" + k + "' is given twice");
+        }
+    }
+    if (opts_.schema.empty()) {
+        if (!opts_.json_columns.empty()) refuse("json_columns needs a schema to encode the JSON against");
+        if (opts_.json_bytes_base64) refuse("json_bytes was given but there is no schema (and so no JSON column)");
+        schema_json_ = build_schema(fields_, opts_.record_name, plans_, types_);
+    } else {
+        // The root must be a record (Schema::parse would wrap anything else as one).
+        {
+            yyjson_doc* d = yyjson_read(opts_.schema.data(), opts_.schema.size(), 0);
+            if (d == nullptr) refuse("the schema is not valid JSON");
+            const std::unique_ptr<yyjson_doc, DocFree> doc(d);
+            yyjson_val* root = yyjson_doc_get_root(d);
+            yyjson_val* t = yyjson_is_obj(root) ? yyjson_obj_get(root, "type") : nullptr;
+            if (!yyjson_is_str(t) || std::string_view(yyjson_get_str(t), yyjson_get_len(t)) != "record")
+                refuse("the schema must be a record (its fields are the columns)");
+        }
+        try {
+            schema_ = std::make_unique<Schema>(Schema::parse(opts_.schema.data(), opts_.schema.size()));
+        } catch (const std::runtime_error& e) {
+            refuse(e.what());  // the parser's message names the schema path; a bad schema is the caller's input
+        }
+        rugo::require_unique_column_names(
+            "Avro writer: cannot write", fields_.size(), [&](size_t i) -> const std::string& { return fields_[i].name; });
+        std::unordered_map<std::string, size_t> by_name;
+        for (size_t i = 0; i < fields_.size(); ++i) by_name.emplace(fields_[i].name, i);
+        std::vector<uint8_t> used(fields_.size(), 0);
+        std::unordered_map<std::string, size_t> field_pos;
+        for (const Field& f : schema_->root()->fields) {
+            auto it = by_name.find(f.name);
+            if (it == by_name.end()) refuse("the schema's field '" + f.name + "' has no column in the batch");
+            field_pos.emplace(f.name, order_.size());
+            order_.push_back(it->second);
+            nodes_.push_back(f.type);
+            used[it->second] = 1;
+        }
+        for (size_t i = 0; i < fields_.size(); ++i)
+            if (!used[i]) refuse("column '" + fields_[i].name + "' is not a field of the schema");
+        is_json_.assign(nodes_.size(), 0);
+        for (const std::string& name : opts_.json_columns) {
+            auto it = field_pos.find(name);
+            if (it == field_pos.end()) refuse("json_columns names '" + name + "', which is not a column");
+            if (is_json_[it->second]) refuse("json_columns names '" + name + "' twice");
+            is_json_[it->second] = 1;
+            std::string where;
+            if (!opts_.json_bytes_base64 && reaches_bytes(nodes_[it->second], where))
+                refuse("column '" + name + "' is JSON and its schema field holds bytes / fixed at '" + name + where +
+                       "'; say how JSON carries bytes with json_bytes='base64'");
+        }
+        json_.resize(nodes_.size());
+        plan_schema(fields_, plans_, types_);
+        schema_json_ = opts_.schema;
+    }
     threads_ = opts_.max_threads ? opts_.max_threads
                                  : std::max<size_t>(1, std::thread::hardware_concurrency());
     if (!opts_.have_sync) {
@@ -1177,13 +1614,17 @@ void AvroWriter::emit_header() {
     static constexpr uint8_t kMagic[4] = {'O', 'b', 'j', 1};
     std::vector<uint8_t> h;
     append_bytes(h, kMagic, 4);
-    append_long(h, 3);  // one map block of three entries
+    append_long(h, 3 + static_cast<int64_t>(opts_.metadata_keys.size()));  // one map block
     append_string(h, "avro.schema");
     append_string(h, schema_json_);
     append_string(h, "avro.codec");
     append_string(h, codec_name(opts_.codec));
     append_string(h, "rugo.created_by");
     append_string(h, RUGO_PARQUET_CREATED_BY);
+    for (size_t i = 0; i < opts_.metadata_keys.size(); ++i) {
+        append_string(h, opts_.metadata_keys[i]);
+        append_string(h, opts_.metadata_values[i]);
+    }
     append_long(h, 0);  // end of the map
     append_bytes(h, opts_.sync, 16);
     chunks_.push_back(std::move(h));
@@ -1199,6 +1640,18 @@ void AvroWriter::check_fields(const std::vector<FieldSpec>& fields) const {
                    "' in the first batch (every batch must share the first batch's schema)");
     std::vector<FieldPlan> plans;
     std::vector<std::string> types;
+    if (schema_) {
+        for (size_t i = 0; i < fields.size(); ++i)
+            if (fields[i].type != fields_[i].type)
+                refuse("column '" + fields[i].name + "' is " + type_name(fields[i].type) + " in this batch but " +
+                       type_name(fields_[i].type) + " in the first batch (every batch must share the first batch's schema)");
+        plan_schema(fields, plans, types);
+        for (size_t k = 0; k < plans.size(); ++k)
+            if (!(plans[k] == plans_[k]))
+                refuse("column '" + fields[order_[k]].name + "' is written differently in this batch than in the first "
+                       "(every batch must share the first batch's schema)");
+        return;
+    }
     build_schema(fields, opts_.record_name, plans, types);
     for (size_t i = 0; i < fields.size(); ++i) {
         const FieldSpec& f = fields[i];
@@ -1206,6 +1659,59 @@ void AvroWriter::check_fields(const std::vector<FieldSpec>& fields) const {
             refuse("column '" + f.name + "' is " + type_name(f.type) + " written as " + types[i] + " in this batch but " +
                    type_name(fields_[i].type) + " written as " + types_[i] +
                    " in the first batch (every batch must share the first batch's schema)");
+    }
+}
+
+void AvroWriter::plan_schema(const std::vector<FieldSpec>& fields, std::vector<FieldPlan>& plans,
+                             std::vector<std::string>& types) const {
+    plans.assign(nodes_.size(), FieldPlan{});
+    types.assign(nodes_.size(), std::string());
+    for (size_t k = 0; k < nodes_.size(); ++k) {
+        const FieldSpec& f = fields[order_[k]];
+        if (!is_json_[k]) {
+            plans[k] = plan_plain(f, nodes_[k], types[k]);
+            continue;
+        }
+        if (f.type != DRAKEN_VARCHAR && f.type != DRAKEN_NVARCHAR && f.type != DRAKEN_VARIANT && f.type != DRAKEN_NULL)
+            refuse("column '" + f.name + "' is a JSON column but is " + type_name(f.type) +
+                   " (JSON text is VARCHAR, NVARCHAR or VARIANT)");
+        plans[k].enc = static_cast<uint8_t>(Enc::Json);
+        plans[k].branch = nodes_[k]->kind == Kind::Union;
+        types[k] = "JSON as " + node_desc(nodes_[k]);
+    }
+}
+
+void AvroWriter::encode_json_rows(size_t k, const WriteColumn& col, uint32_t first, uint32_t count, size_t task,
+                                  uint64_t* row_len) {
+    JsonRows& jr = json_[k];
+    std::vector<uint8_t>& out = jr.task_bytes[task];
+    out.clear();
+    const Node* n = nodes_[k];
+    const DrakenVector* v = col.vec;
+    const bool all_null = v->type == DRAKEN_NULL;
+    const auto* sa = all_null ? nullptr : static_cast<const DrakenStringArena*>(v->data);
+    JsonEncoder enc{out, fields_[order_[k]].name, opts_.json_bytes_base64};
+    for (uint32_t i = first; i < first + count; ++i) {
+        const size_t at = out.size();
+        enc.row = rows_written_ + i;
+        if (all_null || (v->validity != nullptr && !row_valid(v->validity, i))) {
+            if (n->kind != Kind::Union) enc.bad("is null but its schema field is required (" + node_desc(n) + ")");
+            append_long(out, n->null_branch);
+        } else {
+            const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
+            yyjson_read_err err;
+            // Not INSITU: yyjson copies the text, so the const_cast never writes.
+            yyjson_doc* d = yyjson_read_opts(const_cast<char*>(reinterpret_cast<const char*>(str_data(slot, sa->arena))),
+                                             str_length(slot), 0, nullptr, &err);
+            if (d == nullptr)
+                enc.bad(std::string("is not valid JSON (") + err.msg + " at byte " + std::to_string(err.pos) + ")");
+            const std::unique_ptr<yyjson_doc, DocFree> doc(d);
+            enc.encode(yyjson_doc_get_root(d), n);
+        }
+        if (out.size() - at > UINT32_MAX) enc.bad("encodes to more than 4 GiB");
+        jr.start[i] = at;
+        jr.len[i] = static_cast<uint32_t>(out.size() - at);
+        row_len[i] += jr.len[i];
     }
 }
 
@@ -1226,12 +1732,25 @@ void AvroWriter::write_batch(const std::vector<FieldSpec>& fields, const WriteCo
                    std::to_string(nrows));
         if (draken_type_is_string_storage(v->type)) check_string_storage(fields_[c], v, nrows);
         if (v->type == DRAKEN_ARRAY) check_array_chain(fields_[c], cols[c]);
-        if (!plans_[c].branch && column_has_nulls(v))
-            refuse("column '" + fields_[c].name + "' is written as required (no nulls) but this batch has a null");
-        if (static_cast<Enc>(plans_[c].enc) == Enc::Enum) {
-            if (cols[c].enum_codes == nullptr) refuse("column '" + fields_[c].name + "' is an enum but has no codes");
-        } else if (cols[c].enum_codes != nullptr) {
-            refuse("column '" + fields_[c].name + "' has enum codes but is not an enum");
+    }
+    // With a caller schema the columns are written in the schema's field order.
+    std::vector<WriteColumn> ordered;
+    const WriteColumn* enc_cols = cols;
+    if (schema_) {
+        ordered.resize(order_.size());
+        for (size_t k = 0; k < order_.size(); ++k) ordered[k] = cols[order_[k]];
+        enc_cols = ordered.data();
+    }
+    for (size_t k = 0; k < plans_.size(); ++k) {
+        const std::string& name = fields_[schema_ ? order_[k] : k].name;
+        const Enc e = static_cast<Enc>(plans_[k].enc);
+        // A JSON column's null in a required field is refused per row, naming it.
+        if (e != Enc::Json && !plans_[k].branch && column_has_nulls(enc_cols[k].vec))
+            refuse("column '" + name + "' is written as required (no nulls) but this batch has a null");
+        if (e == Enc::Enum) {
+            if (enc_cols[k].enum_codes == nullptr) refuse("column '" + name + "' is an enum but has no codes");
+        } else if (enc_cols[k].enum_codes != nullptr) {
+            refuse("column '" + name + "' has enum codes but is not an enum");
         }
     }
     if (nrows == 0) return;
@@ -1240,10 +1759,20 @@ void AvroWriter::write_batch(const std::vector<FieldSpec>& fields, const WriteCo
     row_len_.assign(nrows, 0);
     uint64_t* row_len = row_len_.data();
     const size_t len_tasks = (static_cast<size_t>(nrows) + kLengthChunkRows - 1) / kLengthChunkRows;
+    // A JSON column is parsed and encoded once, here; the write pass copies its rows.
+    for (size_t k = 0; k < json_.size(); ++k) {
+        if (!is_json_[k]) continue;
+        json_[k].task_bytes.resize(len_tasks);
+        json_[k].start.resize(nrows);
+        json_[k].len.resize(nrows);
+    }
     run_tasks(len_tasks, std::min(threads_, len_tasks), [&](size_t t, size_t) {
         const uint32_t first = static_cast<uint32_t>(t * kLengthChunkRows);
         const uint32_t count = std::min<uint32_t>(kLengthChunkRows, nrows - first);
-        for (size_t c = 0; c < fields_.size(); ++c) length_dispatch(plans_[c], cols[c], first, count, row_len);
+        for (size_t c = 0; c < plans_.size(); ++c) {
+            if (static_cast<Enc>(plans_[c].enc) == Enc::Json) encode_json_rows(c, enc_cols[c], first, count, t, row_len);
+            else length_dispatch(plans_[c], enc_cols[c], first, count, row_len);
+        }
     });
 
     // Cut rows into blocks of at least block_bytes (a single larger row is its own block),
@@ -1269,7 +1798,7 @@ void AvroWriter::write_batch(const std::vector<FieldSpec>& fields, const WriteCo
     while (encoders_.size() < workers) encoders_.push_back(std::make_unique<BlockEncoder>());
     std::vector<std::vector<uint8_t>> out(cuts.size());
     run_tasks(cuts.size(), workers, [&](size_t b, size_t w) {
-        encode_block(encoder(w), cols, cuts[b].first, cuts[b].count, cuts[b].bytes, out[b]);
+        encode_block(encoder(w), enc_cols, cuts[b].first, cuts[b].count, cuts[b].bytes, out[b]);
     });
     for (std::vector<uint8_t>& chunk : out) chunks_.push_back(std::move(chunk));
     rows_written_ += nrows;
@@ -1286,7 +1815,18 @@ void AvroWriter::encode_block(BlockEncoder& enc, const WriteColumn* cols, uint32
         enc.cursor[r] = p;
         p += row_len[first + r];
     }
-    for (size_t c = 0; c < fields_.size(); ++c) write_dispatch(plans_[c], cols[c], first, count, enc.cursor.data());
+    for (size_t c = 0; c < plans_.size(); ++c) {
+        if (static_cast<Enc>(plans_[c].enc) != Enc::Json) {
+            write_dispatch(plans_[c], cols[c], first, count, enc.cursor.data());
+            continue;
+        }
+        const JsonRows& jr = json_[c];
+        for (uint32_t r = 0; r < count; ++r) {
+            const uint32_t i = first + r;
+            std::memcpy(enc.cursor[r], jr.task_bytes[i / kLengthChunkRows].data() + jr.start[i], jr.len[i]);
+            enc.cursor[r] += jr.len[i];
+        }
+    }
 
     // Every row's cursor must now sit exactly at the next row's start: a disagreement
     // between an encoder's len and put would otherwise corrupt the block silently.

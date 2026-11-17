@@ -69,6 +69,8 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         int int_bit_width
         bint is_array
         int array_depth
+        int32_t field_id
+        vector[int32_t] element_ids
         PType elem_type
         bint elem_is_utf8
         const uint8_t* rep_levels

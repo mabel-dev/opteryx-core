@@ -139,6 +139,9 @@ inline ColumnInput shape_from_schema_element(const SchemaElement &e) {
   // the footer without it would strip the descriptor off every untouched
   // column — the exact silent loss this side channel exists to stop.
   ci.draken_logical_kind = e.draken_logical_kind;
+  // Field ids (Iceberg matches columns by them) are carried for the same reason:
+  // a rebuilt footer without them would read as all-NULL in an Iceberg reader.
+  ci.field_id = e.field_id;
 
   if (e.logical_type == "array") {
     // A LIST is one leaf column chunk however deep it nests, so its pages copy
@@ -147,6 +150,13 @@ inline ColumnInput shape_from_schema_element(const SchemaElement &e) {
     // source. DROP and RENAME therefore cost a LIST column nothing to carry.
     const SchemaElement *leaf = list_leaf_and_depth(e, ci.array_depth);
     ci.is_array = true;
+    bool any_elem_id = false;
+    for (const SchemaElement *n = &e; n != leaf;) {
+      n = &n->children[0].children[0];  // list_leaf_and_depth checked this shape
+      ci.element_ids.push_back(n->field_id);
+      any_elem_id = any_elem_id || n->field_id >= 0;
+    }
+    if (!any_elem_id) ci.element_ids.clear();  // empty = none, as the writer holds it
     ci.elem_type = ptype_from_reader_name(leaf->physical_type);
     // Everything that consumes an array shape reads elem_type (`is_array ?
     // elem_type : type`); keeping the two agreeing means a stray read of
@@ -1038,7 +1048,8 @@ inline bool same_column_shape(const ColumnInput &a, const ColumnInput &b) {
          a.is_unsigned == b.is_unsigned && a.int_bit_width == b.int_bit_width &&
          a.is_array == b.is_array && a.array_depth == b.array_depth &&
          a.elem_type == b.elem_type && a.elem_is_utf8 == b.elem_is_utf8 &&
-         a.draken_logical_kind == b.draken_logical_kind;
+         a.draken_logical_kind == b.draken_logical_kind &&
+         a.field_id == b.field_id && a.element_ids == b.element_ids;
 }
 
 // One source of an append: a complete parquet file and which of its row groups

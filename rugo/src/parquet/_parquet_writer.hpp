@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -95,8 +96,8 @@ enum PType : int32_t {
 };
 
 // Encoding / codec / page / repetition / converted-type enum values.
-enum { ENC_PLAIN = 0, ENC_PLAIN_DICTIONARY = 2, ENC_RLE = 3, ENC_RLE_DICTIONARY = 8,
-       ENC_ALP = 10 };
+enum { ENC_PLAIN = 0, ENC_PLAIN_DICTIONARY = 2, ENC_RLE = 3, ENC_DELTA_BINARY_PACKED = 5,
+       ENC_RLE_DICTIONARY = 8, ENC_ALP = 10 };
 enum { CODEC_UNCOMPRESSED = 0, CODEC_ZSTD = 6 };
 
 // ---- keep-compressed floor ----
@@ -180,6 +181,12 @@ struct StrSlice {
 struct ColumnInput {
   std::string name;
   PType type;
+  // SchemaElement.field_id (thrift field 9) — Iceberg's column id; -1 = none
+  // written. For an ARRAY, `element_ids[k]` is the id of LIST level k's element
+  // (Iceberg's element-id): the nested LIST group named "element" at level k+1,
+  // and the leaf for the last. Empty = none written; else array_depth entries.
+  int32_t field_id = -1;
+  std::vector<int32_t> element_ids;
   bool is_utf8 = false; // BYTE_ARRAY annotated as STRING (ConvertedType UTF8)
 
   const uint8_t *validity = nullptr; // bit per row, 1=valid; NULL => all valid
@@ -791,9 +798,87 @@ inline void encode_values_alp(const ColumnInput &col, size_t num_rows,
                                 "(column '" + col.name + "')");
 }
 
+// ---- DELTA_BINARY_PACKED (non-dictionary INT32/INT64 chunks) ----
+//
+// Spec shape: header <block=128><miniblocks=4><count><zigzag first value>, then
+// per block <zigzag min delta><4 bit widths><4 x 32 values bit-packed LSB-first>;
+// miniblocks past the last value keep a zero width and carry no body. Deltas
+// wrap in the column's own width (U), which the reader's int64-sum-then-cast
+// reproduces.
+inline bool delta_eligible(const ColumnInput &col) {
+  return !col.is_array && !col.alp && (col.type == PT_INT32 || col.type == PT_INT64);
+}
+
+inline void put_uleb128(std::vector<uint8_t> &out, uint64_t v) {
+  while (v >= 0x80) { out.push_back((uint8_t)(v | 0x80)); v >>= 7; }
+  out.push_back((uint8_t)v);
+}
+
+template <typename T, typename U>
+inline void delta_encode(const T *v, const uint8_t *validity, size_t num_rows,
+                         std::vector<uint8_t> &out) {
+  constexpr size_t kBlock = 128, kMini = 4, kPerMini = 32;
+  std::vector<T> vals;
+  vals.reserve(num_rows);
+  for (size_t i = 0; i < num_rows; i++)
+    if (is_valid(validity, i)) vals.push_back(v[i]);
+  const size_t n = vals.size();
+  auto zigzag = [](int64_t x) { return ((uint64_t)x << 1) ^ (uint64_t)(x >> 63); };
+  put_uleb128(out, kBlock);
+  put_uleb128(out, kMini);
+  put_uleb128(out, n);
+  put_uleb128(out, zigzag(n ? (int64_t)vals[0] : 0));
+
+  U deltas[kBlock];
+  for (size_t start = 1; start < n; start += kBlock) {
+    const size_t cnt = std::min(kBlock, n - start);
+    T min_d = std::numeric_limits<T>::max();
+    for (size_t j = 0; j < cnt; j++) {
+      const U d = (U)vals[start + j] - (U)vals[start + j - 1];
+      deltas[j] = d;
+      if ((T)d < min_d) min_d = (T)d;
+    }
+    for (size_t j = 0; j < cnt; j++) deltas[j] -= (U)min_d;
+    for (size_t j = cnt; j < kBlock; j++) deltas[j] = 0;
+    put_uleb128(out, zigzag((int64_t)min_d));
+
+    uint8_t widths[kMini];
+    for (size_t m = 0; m < kMini; m++) {
+      U acc = 0;
+      for (size_t j = m * kPerMini; j < (m + 1) * kPerMini; j++) acc |= deltas[j];
+      widths[m] = acc ? (uint8_t)(64 - __builtin_clzll((uint64_t)acc)) : 0;
+    }
+    out.insert(out.end(), widths, widths + kMini);
+
+    for (size_t m = 0; m < kMini && m * kPerMini < cnt; m++) {
+      const unsigned w = widths[m];
+      if (w == 0) continue;
+      const size_t at = out.size();
+      out.resize(at + 4 * w);  // 32 values * w bits / 8
+      uint8_t *dst = out.data() + at;
+      unsigned __int128 bits = 0;
+      unsigned nbits = 0;
+      for (size_t j = m * kPerMini; j < (m + 1) * kPerMini; j++) {
+        bits |= (unsigned __int128)(uint64_t)deltas[j] << nbits;
+        nbits += w;
+        while (nbits >= 8) { *dst++ = (uint8_t)bits; bits >>= 8; nbits -= 8; }
+      }
+    }
+  }
+}
+
+inline void encode_values_delta(const ColumnInput &col, size_t num_rows,
+                                std::vector<uint8_t> &out) {
+  if (col.type == PT_INT32) delta_encode<int32_t, uint32_t>(col.i32, col.validity, num_rows, out);
+  else if (col.type == PT_INT64) delta_encode<int64_t, uint64_t>(col.i64, col.validity, num_rows, out);
+  else throw std::runtime_error("parquet writer: DELTA_BINARY_PACKED applies to INT32 and INT64 "
+                                "columns only (column '" + col.name + "')");
+}
+
 // The encoding of a non-dictionary chunk's data pages.
 inline int32_t data_page_encoding(const ColumnInput &col) {
-  return col.alp ? ENC_ALP : ENC_PLAIN;
+  if (col.alp) return ENC_ALP;
+  return delta_eligible(col) ? ENC_DELTA_BINARY_PACKED : ENC_PLAIN;
 }
 
 // ---- column statistics ----
@@ -1408,6 +1493,7 @@ inline PageBuild build_data_page(const ColumnInput &col, size_t num_rows,
   put_u32_le(body, (uint32_t)def.size());
   body.insert(body.end(), def.begin(), def.end());
   if (col.alp) encode_values_alp(col, num_rows, body);
+  else if (delta_eligible(col)) encode_values_delta(col, num_rows, body);
   else encode_values(col, num_rows, body);
 
   size_t uncompressed_body = body.size();
@@ -2447,7 +2533,8 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
 // for narrow and unsigned integer columns: the physical type stays INT32/INT64
 // and a conformant reader recovers the declared width and signedness. Field 10
 // is the last field in a SchemaElement, preserving ascending field-id order.
-inline void emit_int_logical(TCompactWriter &w, int bit_width, bool is_signed) {
+inline void emit_int_logical(TCompactWriter &w, int bit_width, bool is_signed,
+                             int32_t field_id = -1) {
   // Emits the legacy ConvertedType (field 6) AND the modern logicalType union
   // (field 10); the caller owns the enclosing SchemaElement struct's
   // structBegin/structEnd. Both are written because some readers (DuckDB) key
@@ -2466,6 +2553,7 @@ inline void emit_int_logical(TCompactWriter &w, int bit_width, bool is_signed) {
          : bit_width == 32 ? CONV_UINT_32
          : CONV_UINT_64;
   w.writeI32Field(6, conv);            // ConvertedType INT_N / UINT_N
+  if (field_id >= 0) w.writeI32Field(9, field_id);  // field_id, between 8 and 10
   w.writeFieldHeader(CT_STRUCT, 10);   // logicalType
   w.structBegin();                     //   LogicalType union
   w.writeFieldHeader(CT_STRUCT, 10);   //   INTEGER member (union field id 10)
@@ -2475,6 +2563,12 @@ inline void emit_int_logical(TCompactWriter &w, int bit_width, bool is_signed) {
   w.writeBoolField(2, is_signed);      //       isSigned
   w.structEnd();                       //     IntType
   w.structEnd();                       //   LogicalType union
+}
+
+// SchemaElement.field_id (9): written after fields <= 8 and before logicalType
+// (10), keeping field ids ascending; -1 writes nothing (no-id files unchanged).
+inline void emit_field_id(TCompactWriter &w, int32_t id) {
+  if (id >= 0) w.writeI32Field(9, id);
 }
 
 inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols) {
@@ -2501,12 +2595,14 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       // (the element of the enclosing list is itself a list). Mirrors Arrow/
       // PyArrow's encoding, e.g. depth 2:
       //   name(List) -> list -> element(List) -> list -> element(leaf).
+      auto elem_id = [&](int k) { return c.element_ids.empty() ? -1 : c.element_ids[k]; };
       for (int lvl = 0; lvl < c.array_depth; lvl++) {
         w.structBegin();                           // LIST group
         w.writeI32Field(3, REP_OPTIONAL);          // repetition_type
         w.writeStringField(4, lvl == 0 ? c.name : std::string("element"));
         w.writeI32Field(5, 1);                     // num_children
         w.writeI32Field(6, CONV_LIST);             // converted_type LIST
+        emit_field_id(w, lvl == 0 ? c.field_id : elem_id(lvl - 1));
         w.writeFieldHeader(CT_STRUCT, 10);         // logicalType
         w.structBegin();                           //   LogicalType union
         w.writeFieldHeader(CT_STRUCT, 3);          //   LIST member
@@ -2529,7 +2625,9 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       if (c.elem_type == PT_BYTE_ARRAY && c.elem_is_utf8)
         w.writeI32Field(6, CONV_UTF8);
       if (c.int_bit_width > 0)                    // narrow/unsigned leaf annotation
-        emit_int_logical(w, c.int_bit_width, !c.is_unsigned);
+        emit_int_logical(w, c.int_bit_width, !c.is_unsigned, elem_id(c.array_depth - 1));
+      else
+        emit_field_id(w, elem_id(c.array_depth - 1));
       w.structEnd();
       continue;
     }
@@ -2546,6 +2644,7 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.writeI32Field(6, CONV_DECIMAL);
       w.writeI32Field(7, c.dec_scale);             // scale
       w.writeI32Field(8, c.dec_precision);         // precision
+      emit_field_id(w, c.field_id);
       w.writeFieldHeader(CT_STRUCT, 10);           // logicalType
       w.structBegin();                             //   LogicalType union
       w.writeFieldHeader(CT_STRUCT, 5);            //   DECIMAL member
@@ -2556,6 +2655,7 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.structEnd();
     } else if (c.logical == LK_DATE) {
       w.writeI32Field(6, CONV_DATE);
+      emit_field_id(w, c.field_id);
       w.writeFieldHeader(CT_STRUCT, 10);
       w.structBegin();                             // LogicalType union
       w.writeFieldHeader(CT_STRUCT, 6);            // DATE member
@@ -2565,9 +2665,11 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
     } else if (c.logical == LK_INTERVAL) {
       // FLBA(12); only ConvertedType INTERVAL (no LogicalType union member).
       w.writeI32Field(6, CONV_INTERVAL);
+      emit_field_id(w, c.field_id);
     } else if (c.logical == LK_UUID) {
       // FLBA(16); LogicalType UUID (union member 14, empty UUIDType). There is
       // no ConvertedType for UUID.
+      emit_field_id(w, c.field_id);
       w.writeFieldHeader(CT_STRUCT, 10);
       w.structBegin();                             // LogicalType union
       w.writeFieldHeader(CT_STRUCT, 14);           // UUID member
@@ -2579,6 +2681,7 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
         w.writeI32Field(6, CONV_TIME_MILLIS);
       else if (c.ts_unit == TU_MICROS)
         w.writeI32Field(6, CONV_TIME_MICROS);
+      emit_field_id(w, c.field_id);
       w.writeFieldHeader(CT_STRUCT, 10);
       w.structBegin();                             // LogicalType union
       w.writeFieldHeader(CT_STRUCT, 7);            // TIME member
@@ -2598,6 +2701,7 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
         w.writeI32Field(6, CONV_TIMESTAMP_MILLIS);
       else if (c.ts_unit == TU_MICROS)
         w.writeI32Field(6, CONV_TIMESTAMP_MICROS);
+      emit_field_id(w, c.field_id);
       w.writeFieldHeader(CT_STRUCT, 10);
       w.structBegin();                             // LogicalType union
       w.writeFieldHeader(CT_STRUCT, 8);            // TIMESTAMP member
@@ -2613,13 +2717,16 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
       w.structEnd();
     } else if (c.type == PT_BYTE_ARRAY && c.is_utf8) {
       w.writeI32Field(6, CONV_UTF8);               // converted_type
+      emit_field_id(w, c.field_id);
     } else if (c.int_bit_width > 0) {
       // Narrow and/or unsigned integer column: physical INT32/INT64 +
       // INTEGER(width, isSigned) logicalType. Bits are the signed reinterpret;
       // a conformant reader recovers the declared width and signedness. INT32
       // and INT64 carry no annotation (int_bit_width == 0) — the physical type
       // already states them exactly.
-      emit_int_logical(w, c.int_bit_width, !c.is_unsigned);
+      emit_int_logical(w, c.int_bit_width, !c.is_unsigned, c.field_id);
+    } else {
+      emit_field_id(w, c.field_id);                // no annotation at all
     }
     w.structEnd();
   }

@@ -1,6 +1,6 @@
 # Avro writer (rugo) — design and plan
 
-Status: §12 RULED 2026-10-16 (every recommendation stands as written). Phases 1–5 BUILT 2026-10-16 (§13) — the plan is complete. Signed off 2026-10-16: `make q` and `make slt` green.
+Status: §12 RULED 2026-10-16 (every recommendation stands as written). Phases 1–5 BUILT 2026-10-16 (§13) — the plan is complete. Signed off 2026-10-16: `make q` and `make slt` green. §15 (caller schema, header metadata, JSON-as-nested columns, for Iceberg manifests) BUILT 2026-11-17.
 Date: 2026-10-15 (plan), 2026-10-16 (rulings)
 Reader design (the other half of this format): `docs/AVRO_READER_DESIGN.md`.
 Parquet writer precedent (the API and build shape this follows): `docs/PARQUET_WRITER_DESIGN.md`.
@@ -34,6 +34,8 @@ Out (refused, loud, naming the column) — see §5 for each:
 - Column names that are not valid Avro names. No sanitising.
 - Maps, records, enums as OUTPUT types: Draken has no struct/map/enum vector, so
   nothing produces them. (VARIANT is JSON text → `string`.)
+  **Superseded for caller schemas (§15, 2026-11-17):** with a caller-supplied schema,
+  records, maps, enums, fixed and any union order are written from JSON-text columns.
 - Schema evolution, aliases, defaults, non-null defaults: a writer writes one schema.
 - Writing from the SQL engine. RULED 2026-10-10: Avro is available to the engine only
   through `READ_AVRO`, never as a stored-dataset format. No engine write path is added
@@ -654,3 +656,127 @@ One thread against fastavro: 48× (null), 4.6× (deflate), 9.8× (zstandard); ag
 327×, 23×, 64×. On every core: 206×, 48×, 85× and 1,416×, 239×, 553×. Sizes (deflate):
 rugo 23,353,640 B, fastavro 25,362,648 B, avro 23,849,307 B. Results:
 rugo.dev `benchmarks/results/2026-10-16-avro-write.json`.
+
+## 15. Writing to a caller-supplied schema (Iceberg manifests) — BUILT 2026-11-17
+
+Why: Opteryx writes Iceberg tables, and the architect ruled every file rugo's — data
+files by the Parquet writer, manifests and manifest lists by this one. Those need nested
+records, maps (Iceberg's array of `{key, value}` records with `"logicalType": "map"`),
+`field-id` / `element-id` attributes, required fields and extra header entries. Draken
+has no struct/map vector, so the architect chose: an explicit caller schema, and nested
+columns carried as JSON text flagged to be encoded as Avro. Nothing Iceberg-specific is
+in rugo: the surface is generic Avro.
+
+### 15.1 API
+
+Every writer entry takes the same four options (Python facade `rugo.avro`, native
+`rugo.rugo_native`):
+
+```python
+write_avro(morsel, codec="deflate", block_bytes=1 << 20, record_name=None, sync_marker=None,
+           max_threads=0, dictionary=None,
+           schema=None, metadata=None, json_columns=None, json_bytes=None) -> bytes
+open_avro_writer(sink, codec="deflate", block_bytes=1 << 20, record_name=None, sync_marker=None,
+                 max_threads=0, schema=None, metadata=None, json_columns=None, json_bytes=None)
+write_avro_stream(morsels, sink, ..., schema=None, metadata=None, json_columns=None,
+                  json_bytes=None) -> int
+```
+
+- `schema`: dict or JSON text (native: text). Written to `avro.schema` **verbatim** —
+  `field-id`, `doc`, `default`, `logicalType: map` and every other attribute survive.
+- `metadata`: `{str: str | bytes}`; written after `avro.schema`, `avro.codec`,
+  `rugo.created_by`, in the mapping's order.
+- `json_columns`: names of columns whose rows are JSON text to encode against their field.
+- `json_bytes`: `"base64"` or None — how JSON carries `bytes` / `fixed`.
+- `record_name` and `dictionary` now default to None (= `"record"` / True, as before);
+  with a schema, passing either raises — the schema names the record and decides
+  every field.
+
+With none of the four given the file is byte-identical to before (the header still
+has three entries; tested).
+
+C++: four `WriteOptions` fields (`schema`, `metadata_keys`/`metadata_values`,
+`json_columns`, `json_bytes_base64`). The schema is parsed by the reader's own
+`Schema::parse` (one parser, one set of refusals), and the root must be a record.
+
+### 15.2 Plain columns against the schema
+
+Columns match the schema's top-level fields **by name**, in any column order; the file is
+written in schema field order. A schema field with no column, or a column with no field,
+raises naming it (duplicates were already refused). A plain column is written by its
+own encoder (§6) and must fit the field exactly — `scalar_fits`, no conversion:
+
+| field | column |
+|---|---|
+| `boolean` | BOOL |
+| `int` | INT8/16/32, UINT8/16 |
+| `long` | any of the above, INT64, UINT32, IPV4 (the same zigzag varint) |
+| `float` / `double` | FLOAT32 / FLOAT64 |
+| `string` (incl. `uuid`) | VARCHAR, NVARCHAR, VARIANT |
+| `bytes` | VARBINARY |
+| `int date`, `int time-millis`, `long time-micros`, `long timestamp-*` | the §5 logical column with that encoding |
+| `fixed decimal(p, s)` | DECIMAL / DECIMAL128 with the same p, s; the field's size (≤ storage width) is used |
+| `fixed(16) uuid` | UUID |
+| `array` | ARRAY whose every level's items are `["null", T]` |
+| `["null", T]` | as T, plus the union byte; a typeless NULL column fits only here |
+
+A required field (not a union) gets no union byte; a NULL in it raises (the existing
+"written as required" refusal). Refused for **plain** columns, pointing at the JSON flag:
+a `[T, "null"]` union (the plain encoders put null first), array items that are not
+`["null", T]`, records, maps, enums.
+
+### 15.3 JSON columns
+
+A `json_columns` column is VARCHAR / NVARCHAR / VARIANT (or a typeless NULL column). Each
+row is parsed once (yyjson, strict RFC 8259 — no comments, NaN or trailing commas) in the
+length pass, encoded into a per-length-task buffer, and copied by the write pass — so
+it stays two passes, parallel by row range, and the bytes do not depend on the thread
+count. A SQL NULL row is the union's null branch; in a required field it raises.
+
+Rules — strict, nothing coerced:
+- `record` ← JSON object with exactly its fields. A missing field is null when its type is
+  a union with null, else "the required field is missing" (`default` is not consulted).
+  An unknown key or a repeated key raises.
+- `map` ← JSON object (keys are the map keys; a repeated key raises). `array` ← JSON array.
+  Iceberg's `logicalType: map` arrays are plain arrays of `{"key": .., "value": ..}` objects.
+- union ← JSON `null` selects the null branch, any other value the other branch (plain
+  JSON, not Avro's `{"type": value}` form); either branch order.
+- `int` / `long` ← a JSON integer, exact: yyjson reads integers as int64/uint64, never
+  through a double, so 2^62 + 1 round-trips; a fraction, exponent, out-of-range value
+  (`int` beyond 32 bits, `long` beyond int64) raises.
+- `float` / `double` ← a JSON number; an integer must be exact in the type (|x| ≤ 2^24 / 2^53).
+- `string` ← JSON string; `boolean` ← true/false; `null` ← null; `enum` ← one of its symbols.
+- `bytes` / `fixed` ← base64 text, only with `json_bytes="base64"` (decoded by mabel's
+  `b64tobin_len`, the codec rugo and draken already ship). Strict: length a multiple of
+  4, padding only at the end; `fixed` must decode to exactly its size. A JSON column whose
+  field reaches bytes / fixed without `json_bytes` is refused when the writer opens,
+  naming the path.
+- Logical types under JSON take their underlying JSON form (a `date` is the integer day,
+  a decimal is base64 two's complement).
+
+Every refusal names the row (0-based across the whole stream) and the field path, e.g.
+`row 2, column 'data_file'.lower_bounds[0].value: is not base64`.
+
+### 15.4 Header metadata
+
+Refused: a key starting `avro.` (the format's), `rugo.created_by` (the writer writes it),
+a repeated key. Values are bytes; a str is UTF-8 encoded.
+
+### 15.5 Not done (named, not built)
+
+- A stream with a schema still needs one batch before close (the file is header-only
+  otherwise, which a caller schema could make legal; nobody asked).
+- Plain-column `[T, "null"]` unions and required array items (use the JSON flag).
+- An enum symbol search is linear per value (shortcut comment in the code).
+
+### 15.6 Verification
+
+`tests/rugo/test_avro_writer_schema.py` (47 tests): an Iceberg manifest
+(`manifest_entry` → `data_file` → `partition` record, `lower_bounds` map of
+`{key:int, value:bytes}`, `split_offsets` array of required longs, values beyond 2^53)
+and a manifest list, read by fastavro, by rugo (round trip + field-id resolution through
+a reader schema), and by **PyIceberg's own `AvroFile`** with its v2 read schemas
+(`MANIFEST_ENTRY_SCHEMAS[2]`, `MANIFEST_LIST_FILE_SCHEMAS[2]`, field-id resolution, the
+manifest written against PyIceberg's generated full v2 `manifest_entry` schema). Plus
+every refusal above, streaming = one-shot bytes, 150k rows across length tasks and
+blocks identical at 1 and 4 threads, and base64 lengths that take the NEON/AVX2 path.

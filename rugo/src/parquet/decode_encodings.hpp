@@ -8,7 +8,9 @@
 // Non-template implementations live in decode_encodings.cpp.
 
 #include "decode_primitives.hpp"
+#include <algorithm>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "core/append_buffer.h"
@@ -129,99 +131,53 @@ static inline bool delta_header_valid(uint64_t block_size, uint64_t num_minibloc
          block_size % num_miniblocks == 0 && (block_size / num_miniblocks) % 32u == 0;
 }
 
-// Decode DELTA_BINARY_PACKED for int32 or int64 columns.
-// Returns the number of values decoded, or -1 on error.
-template <typename T>
-static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
-                                       int32_t num_values,
-                                       std::vector<T> &values) {
-  if (data_size < 4) return -1;
+// 32 LSB-first W-bit values from `src` (4*W bytes) into `out`. W is a template
+// parameter so every shift and mask is a compile-time constant and the loop
+// unrolls. Each value is one unaligned 8-byte load (plus a ninth byte only for
+// W >= 58), so `src` needs kUnpack32Slack readable bytes past its 4*W.
+static constexpr size_t kUnpack32Slack = 9;
 
-  const uint8_t *ptr = data;
-  const uint8_t *end = data + data_size;
-
-  values.clear();
-  values.reserve(num_values);
-
-  // Header
-  uint64_t block_size = ReadUnsignedVarint(ptr, end);
-  if (block_size == 0 || ptr >= end) return -1;
-
-  uint64_t num_miniblocks = ReadUnsignedVarint(ptr, end);
-  if (num_miniblocks == 0 || ptr >= end) return -1;
-
-  /* total_value_count */ ReadUnsignedVarint(ptr, end);
-  if (ptr >= end) return -1;
-
-  int64_t first_value = ReadZigZagVarint(ptr, end);
-  if (ptr > end) return -1;
-
-  values.push_back(static_cast<T>(first_value));
-  if (num_values == 1) return 1;
-
-  int32_t decoded = 1;
-  if (!delta_header_valid(block_size, num_miniblocks)) return -1;
-  uint32_t values_per_miniblock = static_cast<uint32_t>(block_size / num_miniblocks);
-
-  while (decoded < num_values && ptr < end) {
-    int64_t min_delta = ReadZigZagVarint(ptr, end);
-    if (ptr > end) break;
-
-    std::vector<uint8_t> bit_widths;
-    bit_widths.reserve(num_miniblocks);
-    for (uint64_t mb = 0; mb < num_miniblocks && ptr < end; mb++) {
-      bit_widths.push_back(*ptr++);
-    }
-    if (bit_widths.size() != num_miniblocks) break;
-
-    for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
-      uint8_t bit_width = bit_widths[mb];
-      // Corrupt input ends the decode outright: a `break` here only left this
-      // block, and the outer loop then re-read the miniblock's data bytes as the
-      // next block's header - zero bytes "decoding" as a run of the first value.
-      // Returning short lets the caller's count check raise.
-      if (bit_width > 64) return decoded;  // ReadPackedLSB holds widths <= 64
-
-      if (bit_width == 0) {
-        // All deltas in this miniblock equal min_delta; no data bytes needed.
-        for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
-          T last = values.back();
-          values.push_back(last + static_cast<T>(min_delta));
-          decoded++;
-        }
-      } else {
-        const uint64_t bytes_needed =
-            (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (bytes_needed > static_cast<uint64_t>(end - ptr)) return decoded;
-
-        for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
-          const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
-
-          T last = values.back();
-          values.push_back(last + static_cast<T>(min_delta + (int64_t)delta));
-          decoded++;
-        }
-        ptr += bytes_needed;
-      }
-    }
+template <unsigned W>
+static inline void Unpack32(const uint8_t *__restrict__ src, uint64_t *__restrict__ out) {
+  constexpr uint64_t mask = W == 64 ? ~0ULL : ((1ULL << W) - 1ULL);
+#pragma GCC unroll 32
+  for (unsigned i = 0; i < 32; ++i) {
+    const unsigned bit = i * W;
+    const unsigned off = bit & 7u;
+    uint64_t v = ReadLE64U(src + (bit >> 3)) >> off;
+    if (W + off > 64) v |= (uint64_t)src[(bit >> 3) + 8] << (64 - off);
+    out[i] = v & mask;
   }
-
-  return decoded;
 }
 
-// Pointer-output variant: decodes directly into a caller-owned buffer with
-// capacity >= num_values, instead of a std::vector. Same algorithm as the
-// vector overload above (kept in sync manually — no shared body because the
-// running "last value" source differs: out[decoded-1] vs values.back()).
-// Used on hot paths where the destination (a pre-sized ext_* buffer or a
-// pre-reserved result vector slot) is already known, so decoding into a
-// temporary vector and then std::copy-ing it over is a wasted allocation +
-// extra full pass.
-// Returns the number of values decoded, or -1 on error.
+// Static dispatch of Unpack32 over the miniblock width (1..64).
+static inline void Unpack32Width(const uint8_t *src, unsigned w, uint64_t *out) {
+  switch (w) {
+#define RUGO_U32(W) case W: Unpack32<W>(src, out); return;
+    RUGO_U32(1)  RUGO_U32(2)  RUGO_U32(3)  RUGO_U32(4)  RUGO_U32(5)  RUGO_U32(6)  RUGO_U32(7)  RUGO_U32(8)
+    RUGO_U32(9)  RUGO_U32(10) RUGO_U32(11) RUGO_U32(12) RUGO_U32(13) RUGO_U32(14) RUGO_U32(15) RUGO_U32(16)
+    RUGO_U32(17) RUGO_U32(18) RUGO_U32(19) RUGO_U32(20) RUGO_U32(21) RUGO_U32(22) RUGO_U32(23) RUGO_U32(24)
+    RUGO_U32(25) RUGO_U32(26) RUGO_U32(27) RUGO_U32(28) RUGO_U32(29) RUGO_U32(30) RUGO_U32(31) RUGO_U32(32)
+    RUGO_U32(33) RUGO_U32(34) RUGO_U32(35) RUGO_U32(36) RUGO_U32(37) RUGO_U32(38) RUGO_U32(39) RUGO_U32(40)
+    RUGO_U32(41) RUGO_U32(42) RUGO_U32(43) RUGO_U32(44) RUGO_U32(45) RUGO_U32(46) RUGO_U32(47) RUGO_U32(48)
+    RUGO_U32(49) RUGO_U32(50) RUGO_U32(51) RUGO_U32(52) RUGO_U32(53) RUGO_U32(54) RUGO_U32(55) RUGO_U32(56)
+    RUGO_U32(57) RUGO_U32(58) RUGO_U32(59) RUGO_U32(60) RUGO_U32(61) RUGO_U32(62) RUGO_U32(63) RUGO_U32(64)
+#undef RUGO_U32
+  default: break;  // callers reject w > 64 and route w == 0 separately
+  }
+}
+
+// Decode DELTA_BINARY_PACKED for int32 or int64 columns into a caller-owned
+// buffer with capacity >= num_values (the hot path: a pre-sized ext_* buffer or
+// a pre-reserved result slot). Returns the number of values decoded, or -1 on
+// error. Deltas are summed in the column's unsigned width, so they wrap exactly
+// as the writer produced them.
 template <typename T>
 static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
                                        int32_t num_values,
                                        T *out) {
+  using U = std::make_unsigned_t<T>;
+  if (num_values == 0) return 0;  // all-null page: the header still carries a first value
   if (data_size < 4) return -1;
 
   const uint8_t *ptr = data;
@@ -245,51 +201,73 @@ static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
 
   int32_t decoded = 1;
   if (!delta_header_valid(block_size, num_miniblocks)) return -1;
-  uint32_t values_per_miniblock = static_cast<uint32_t>(block_size / num_miniblocks);
+  const uint32_t values_per_miniblock = static_cast<uint32_t>(block_size / num_miniblocks);
+  const uint32_t groups_per_miniblock = values_per_miniblock / 32u;
 
+  U last = static_cast<U>(out[0]);
+  if (num_miniblocks > static_cast<uint64_t>(end - ptr)) return decoded;  // widths cannot fit
+  std::vector<uint8_t> bit_widths(num_miniblocks);
+  uint64_t deltas[32];
   while (decoded < num_values && ptr < end) {
     int64_t min_delta = ReadZigZagVarint(ptr, end);
     if (ptr > end) break;
+    const U md = static_cast<U>(min_delta);
 
-    std::vector<uint8_t> bit_widths;
-    bit_widths.reserve(num_miniblocks);
-    for (uint64_t mb = 0; mb < num_miniblocks && ptr < end; mb++) {
-      bit_widths.push_back(*ptr++);
-    }
-    if (bit_widths.size() != num_miniblocks) break;
+    if (num_miniblocks > static_cast<uint64_t>(end - ptr)) break;
+    std::memcpy(bit_widths.data(), ptr, num_miniblocks);
+    ptr += num_miniblocks;
 
     for (uint64_t mb = 0; mb < num_miniblocks && decoded < num_values; mb++) {
-      uint8_t bit_width = bit_widths[mb];
+      const uint8_t bit_width = bit_widths[mb];
       // Corrupt input ends the decode outright: a `break` here only left this
       // block, and the outer loop then re-read the miniblock's data bytes as the
       // next block's header - zero bytes "decoding" as a run of the first value.
       // Returning short lets the caller's count check raise.
-      if (bit_width > 64) return decoded;  // ReadPackedLSB holds widths <= 64
+      if (bit_width > 64) return decoded;
 
       if (bit_width == 0) {
         // All deltas in this miniblock equal min_delta; no data bytes needed.
-        for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
-          T last = out[decoded - 1];
-          out[decoded] = last + static_cast<T>(min_delta);
-          decoded++;
-        }
-      } else {
-        const uint64_t bytes_needed =
-            (static_cast<uint64_t>(values_per_miniblock) * bit_width + 7) / 8;
-        if (bytes_needed > static_cast<uint64_t>(end - ptr)) return decoded;
-
-        for (uint32_t i = 0; i < values_per_miniblock && decoded < num_values; i++) {
-          const uint64_t delta = ReadPackedLSB(ptr, (size_t)bytes_needed, i, bit_width);
-
-          T last = out[decoded - 1];
-          out[decoded] = last + static_cast<T>(min_delta + (int64_t)delta);
-          decoded++;
-        }
-        ptr += bytes_needed;
+        const uint32_t take = std::min<uint32_t>(values_per_miniblock, (uint32_t)(num_values - decoded));
+        for (uint32_t i = 0; i < take; i++) { last += md; out[decoded++] = static_cast<T>(last); }
+        continue;
       }
+      const uint64_t bytes_needed = static_cast<uint64_t>(values_per_miniblock) * bit_width / 8;
+      if (bytes_needed > static_cast<uint64_t>(end - ptr)) return decoded;
+
+      const size_t group_bytes = 4u * bit_width;
+      for (uint32_t g = 0; g < groups_per_miniblock && decoded < num_values; g++) {
+        const uint8_t *src = ptr + (size_t)g * group_bytes;
+        if ((size_t)(end - src) >= group_bytes + kUnpack32Slack) {
+          Unpack32Width(src, bit_width, deltas);
+        } else {
+          uint8_t padded[4 * 64 + kUnpack32Slack] = {0};  // page tail: never read past `end`
+          std::memcpy(padded, src, group_bytes);
+          Unpack32Width(padded, bit_width, deltas);
+        }
+        const uint32_t take = std::min<uint32_t>(32u, (uint32_t)(num_values - decoded));
+        for (uint32_t i = 0; i < take; i++) {
+          last += md + static_cast<U>(deltas[i]);
+          out[decoded++] = static_cast<T>(last);
+        }
+      }
+      ptr += bytes_needed;
     }
   }
 
+  return decoded;
+}
+
+// std::vector-output form for the non-hot callers (DELTA_BYTE_ARRAY prefix and
+// suffix lengths, DELTA_LENGTH_BYTE_ARRAY lengths): one algorithm, delegated.
+template <typename T>
+static int32_t DecodeDeltaBinaryPacked(const uint8_t *data, size_t data_size,
+                                       int32_t num_values,
+                                       std::vector<T> &values) {
+  values.clear();
+  if (num_values <= 0) return num_values == 0 ? 0 : -1;
+  values.resize((size_t)num_values);
+  const int32_t decoded = DecodeDeltaBinaryPacked<T>(data, data_size, num_values, values.data());
+  values.resize(decoded > 0 ? (size_t)decoded : 0u);
   return decoded;
 }
 

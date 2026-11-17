@@ -1003,6 +1003,18 @@ static std::string ResolveArrayLogicalType(const SchemaElement &elem) {
   return "array<" + child_type + ">";
 }
 
+// A top-level column's field ids: its own, and for a 3-level LIST each level's
+// element id (the shape write_schema emits; any other shape leaves the list empty).
+static void SetFieldIds(const SchemaElement &elem, SchemaField &field) {
+  field.field_id = elem.field_id;
+  const SchemaElement *cur = &elem;
+  while (cur->logical_type == "array" && cur->children.size() == 1 &&
+         cur->children[0].children.size() == 1) {
+    cur = &cur->children[0].children[0];
+    field.element_field_ids.push_back(cur->field_id);
+  }
+}
+
 static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
                             bool is_top_level,
                             std::vector<SchemaField> &columns,
@@ -1018,6 +1030,7 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
       field.physical_type = "struct";
       field.logical_type = "json";
       field.nullable = nullable;
+      SetFieldIds(elem, field);
       columns.push_back(std::move(field));
     }
 
@@ -1040,6 +1053,7 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
       field.physical_type = "struct";
       field.logical_type = "json";
       field.nullable = nullable;
+      SetFieldIds(elem, field);
       columns.push_back(std::move(field));
     }
     map[canonical] = "json";
@@ -1057,6 +1071,7 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
       field.physical_type = "list";
       field.logical_type = array_type;
       field.nullable = nullable;
+      SetFieldIds(elem, field);
       columns.push_back(std::move(field));
     }
 
@@ -1094,6 +1109,7 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
       // no null state of its own — an absent value is an EMPTY list, never a
       // null one — so only an optional ancestor can make this column nullable.
       field.nullable = ancestor_optional;
+      SetFieldIds(elem, field);
       columns.push_back(std::move(field));
     }
 
@@ -1113,6 +1129,7 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
         elem.physical_type.empty() ? logical : elem.physical_type;
     field.logical_type = logical;
     field.nullable = nullable;
+    SetFieldIds(elem, field);
     columns.push_back(std::move(field));
   }
 

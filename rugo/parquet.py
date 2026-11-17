@@ -958,7 +958,7 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                   row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK,
                   alp=False, statistics: bool = True,
                   narrow_chunk_bytes: int = 0, narrow_run_blocks: int = 0,
-                  narrow_held_budget_bytes: int = 0) -> bytes:
+                  narrow_held_budget_bytes: int = 0, field_ids=None) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
@@ -1053,6 +1053,14 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
         A page index is per-page min/max, so statistics=False with an active
         page index (page_index=True and max_page_bytes > 0) raises ValueError;
         pass page_index=False.
+    field_ids: {column name: id} — writes each column's schema field_id
+        (SchemaElement field 9), which Iceberg readers (DuckDB, Spark, Trino,
+        PyIceberg) match columns by. Every column must be named, and no other
+        (ValueError names the column). A scalar column takes an int; an ARRAY
+        column takes a sequence of 1 + depth ints: its own id, then each list
+        level's element id (Iceberg's element-id). Ids are 0..2^31-1. None
+        (default) writes no ids and the file is byte-identical to before. Read
+        back as SchemaColumn.field_id / .element_field_ids (read_metadata).
     """
     return _native.write_parquet(morsel, compression=compression,
                                  bloom_filters=bloom_filters,
@@ -1066,7 +1074,8 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                                  alp=alp, statistics=statistics,
                                  narrow_chunk_bytes=narrow_chunk_bytes,
                                  narrow_run_blocks=narrow_run_blocks,
-                                 narrow_held_budget_bytes=narrow_held_budget_bytes)
+                                 narrow_held_budget_bytes=narrow_held_budget_bytes,
+                                 field_ids=None if field_ids is None else dict(field_ids))
 
 
 def write_parquet_fast(morsel, compression: str = "zstd",
@@ -1144,7 +1153,7 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                         row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK,
                         alp=False, statistics: bool = True,
                         narrow_chunk_bytes: int = 0, narrow_run_blocks: int = 0,
-                        narrow_held_budget_bytes: int = 0):
+                        narrow_held_budget_bytes: int = 0, field_ids=None):
     """Open a streaming, bounded-memory Parquet writer.
 
     Unlike write_parquet (whole morsel in, whole file out), this writes one row
@@ -1176,6 +1185,8 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
             bounded by narrow_held_budget_bytes (plus one block) when set; the
             writer's `held_narrow_bytes`, `peak_held_narrow_bytes`,
             `narrow_demoted_columns` and `narrow_budget_closes` report it.
+        field_ids: as write_parquet; checked against, and applied to, every
+            row group's columns.
 
     Returns a context manager:
 
@@ -1196,7 +1207,8 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                                        alp=alp, statistics=statistics,
                                        narrow_chunk_bytes=narrow_chunk_bytes,
                                        narrow_run_blocks=narrow_run_blocks,
-                                       narrow_held_budget_bytes=narrow_held_budget_bytes)
+                                       narrow_held_budget_bytes=narrow_held_budget_bytes,
+                                       field_ids=None if field_ids is None else dict(field_ids))
 
 
 def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
@@ -1335,6 +1347,16 @@ def append_row_groups(
     if small <= max_small_row_groups:
         return _native.append_row_groups(
             [(data, [i for s, i, _ in groups if s == n]) for n, data in enumerate(sources)]
+        )
+
+    # Coalescing re-writes fragments with write_options: a file carrying field ids
+    # must be given them, or a fully-coalesced result would silently lose them.
+    if "field_ids" not in write_options and any(
+        c.field_id >= 0 for c in read_metadata(base).schema_columns
+    ):
+        raise ValueError(
+            "append_row_groups: the files carry parquet field ids; pass the same "
+            "field_ids= in write_options so coalesced row groups keep them"
         )
 
     # Contiguous segments of the result, in order: (source bytes, [row groups]).

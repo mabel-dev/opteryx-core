@@ -416,6 +416,11 @@ cdef class SchemaColumn:
     # annotation for this column — "don't know", never "no descriptor". Parquet
     # has no logical type for these kinds, so `logical_type` above cannot say it.
     cdef readonly int draken_logical_kind
+    # The schema field_id (parquet SchemaElement 9; Iceberg's column id), -1 when
+    # the file has none; for a LIST column, each level's element id, outermost
+    # first (-1 where absent), else ().
+    cdef readonly int field_id
+    cdef readonly tuple element_field_ids
 
     def __repr__(self):
         return (
@@ -509,6 +514,8 @@ cdef SchemaColumn _make_schema_column(parquet_reader.SchemaField& field):
     col.logical_type = field.logical_type.decode("utf-8")
     col.nullable = field.nullable
     col.draken_logical_kind = field.draken_logical_kind
+    col.field_id = field.field_id
+    col.element_field_ids = tuple(field.element_field_ids)
     return col
 
 
