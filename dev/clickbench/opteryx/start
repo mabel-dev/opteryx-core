@@ -7,5 +7,11 @@ if [ -f server.pid ] && kill -0 "$(cat server.pid)" 2>/dev/null; then
     exit 0
 fi
 
+# Per-query spill store: a GROUP BY or ORDER BY whose state passes its memory
+# budget spills here instead of failing (q19, q33-q35 on 16 GB). Its contents
+# are scoped to one query and discarded when it ends - it is not a cache.
+export KVSTORE_LOCATION="file://$PWD/spill"
+mkdir -p spill
+
 nohup "$HOME/opteryx_venv/bin/python" server.py >>server.log 2>&1 &
 echo $! > server.pid
