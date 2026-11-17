@@ -183,9 +183,10 @@ struct ParsedColumn {
 // head_types: one ValueType byte per column_names entry — head_value_types over the
 // UNFILTERED input — the type hint for undeclared columns (see extract_column). A size
 // mismatch throws std::invalid_argument.
+// Each column's spans and copied bytes in `map` are released once that column is built.
 std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
-    const ColumnMap&                           map,
+    ColumnMap&                                 map,
     const std::vector<std::string>&            column_names,
     const std::vector<uint8_t>&                head_types,
     size_t                                     max_threads,

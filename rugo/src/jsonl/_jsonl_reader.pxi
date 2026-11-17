@@ -172,7 +172,7 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
     # std::invalid_argument on a declared-type mismatch -> translated to Python ValueError.
     vector[ParsedColumn] parse_all_columns(
         const uint8_t* buffer,
-        const ColumnMap& columns,
+        ColumnMap& columns,
         const vector[string]& column_names,
         const vector[uint8_t]& head_types,
         size_t max_threads,

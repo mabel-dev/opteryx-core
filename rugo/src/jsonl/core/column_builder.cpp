@@ -1470,7 +1470,7 @@ static ParsedColumn parse_nested_column(
 // the caller wraps each ParsedColumn under the GIL.
 std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             source,
-    const ColumnMap&                           map,
+    ColumnMap&                                 map,
     const std::vector<std::string>&            column_names,
     const std::vector<uint8_t>&                head_types,
     size_t                                     max_threads,
@@ -1494,6 +1494,12 @@ std::vector<ParsedColumn> parse_all_columns(
     const size_t cap = std::min(hw, max_threads ? max_threads : hw);
     size_t nt = std::min(cap, ncols);
 
+    // Done with column c: free its spans and copied bytes now, not after every column is
+    // built — otherwise each copied column is held twice while the others build.
+    auto release = [&](size_t c) {
+        std::vector<FieldSpan>().swap(map.cols[c]);
+        ByteArena().swap(map.arena[c]);
+    };
     auto do_one = [&](size_t c, const RowExec& rows) {
         const std::vector<FieldSpan>& col = map.cols[c];
         // The bytes this column's spans index: its arena when build_columns copied it,
@@ -1525,6 +1531,7 @@ std::vector<ParsedColumn> parse_all_columns(
         // reference the original buffer (scr.bases says which).
         out[c] = parse_typed_column(scr, context, rows);
     };
+    auto build = [&](size_t c, const RowExec& rows) { do_one(c, rows); release(c); };
 
     // Two parallel shapes, chosen by width and NEVER combined (see RowExec: nesting one
     // inside the other self-deadlocks the pool).
@@ -1545,14 +1552,14 @@ std::vector<ParsedColumn> parse_all_columns(
     if (ncols * 4 <= cap && cap > 1) {
         BS::thread_pool<> pool(cap);
         const RowExec rows(&pool, cap);
-        for (size_t c = 0; c < ncols; ++c) do_one(c, rows);
+        for (size_t c = 0; c < ncols; ++c) build(c, rows);
         return out;
     }
 
     // Wide: one task per column, rows walked serially inside each. Unchanged.
     const RowExec serial_rows;
     if (nt <= 1) {
-        for (size_t c = 0; c < ncols; ++c) do_one(c, serial_rows);
+        for (size_t c = 0; c < ncols; ++c) build(c, serial_rows);
         return out;
     }
 
@@ -1560,7 +1567,7 @@ std::vector<ParsedColumn> parse_all_columns(
     std::vector<std::future<void>> futs;
     futs.reserve(ncols);
     for (size_t c = 0; c < ncols; ++c)
-        futs.push_back(pool.submit_task([&, c]() { do_one(c, serial_rows); }));
+        futs.push_back(pool.submit_task([&, c]() { build(c, serial_rows); }));
     for (auto& f : futs) f.get();
     return out;
 }

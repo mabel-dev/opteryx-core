@@ -24,9 +24,9 @@ PyObject* wrap_column(ParsedColumn& pc) {
         return draken_vector_own_string_dict(pc.slots, pc.arena, pc.arena_len, pc.codes,
                                              pc.data_length, pc.validity, pc.length, pc.type);
     if (pc.is_string)
-        return draken_vector_own_string(pc.slots, pc.arena, pc.arena_len,
-                                        pc.validity, pc.length, pc.type,
-                                        /*keyhash=*/nullptr);   // E37: jsonl producer = task #5
+        return draken_vector_own_string_adopting(pc.slots, pc.arena, pc.arena_len,
+                                                 pc.validity, pc.length, pc.type,
+                                                 /*keyhash=*/nullptr);   // E37: jsonl producer = task #5
     // A declared IPV4/TIMESTAMP/DECIMAL column carries a logical-type descriptor,
     // which lives on the Vector's owner rather than in the frozen DrakenVector —
     // so it has to be attached at construction. own_raw_logical is own_raw when

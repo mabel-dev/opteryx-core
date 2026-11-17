@@ -247,6 +247,21 @@ PyObject* draken_vector_own_string(
     // verbatim on the resulting DrakenStringArena; never inferred from arena_len.
     bool              payloads_elided = false);
 
+// draken_vector_own_string_adopting — draken_vector_own_string without the arena copy:
+// the Vector takes `arena` as its own buffer (VectorOwner::arena_buf) instead of copying
+// it into the slot block and freeing it. Same contract otherwise: every buffer is
+// transferred on entry, success or failure. For producers whose arena is large enough
+// that holding it twice at once matters.
+PyObject* draken_vector_own_string_adopting(
+    DrakenStringSlot* slots,
+    uint8_t*          arena,
+    size_t            arena_len,
+    uint8_t*          validity,
+    uint32_t          length,
+    DrakenType        type,
+    const uint64_t*   keyhash = nullptr,
+    bool              payloads_elided = false);
+
 // draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
 //
 // Same unified DrakenVector as draken_vector_own_string; the only difference is that
