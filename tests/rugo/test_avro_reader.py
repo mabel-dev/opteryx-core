@@ -681,7 +681,7 @@ def _dec_bytes(unscaled):
 def test_connect_decimal_precision_placeholder_reads_as_38():
     values = [12345, -1, 10**38 - 1]
     res, rows = _rugo_rows(_container(CONNECT_DEC64, b"".join(_dec_bytes(v) for v in values), len(values)))
-    assert rows["c"] == [decimal.Decimal(v).scaleb(-2) for v in values]
+    assert rows["c"] == [decimal.Decimal(f"{v}E-2") for v in values]  # string ctor is exact; scaleb rounds to context prec (28)
 
 
 def test_connect_decimal_placeholder_value_wider_than_38_fails():
