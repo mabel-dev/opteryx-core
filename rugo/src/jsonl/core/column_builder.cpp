@@ -381,6 +381,15 @@ static uint8_t* own_validity_from_scr(StringColumnResult& scr, uint32_t n) {
 }
 }  // namespace
 
+// A string slot addresses its bytes with a uint32_t arena offset (string_slot.h); past
+// 4 GiB the offsets wrap and later rows overwrite earlier ones.
+static void require_arena_fits(size_t arena_bytes) {
+    if (arena_bytes > UINT32_MAX)
+        throw std::length_error("read_jsonl: a column holds " + std::to_string(arena_bytes) +
+                                " bytes of string values; a column holds at most " +
+                                std::to_string(UINT32_MAX) + " (4 GiB)");
+}
+
 // Parse a column into VARCHAR string buffers (slots + arena + validity). No Python —
 // safe off the GIL. Wrapped into a Vector later by wrap_column().
 static ParsedColumn parse_varchar_column(StringColumnResult& scr, const RowExec& rows) {
@@ -407,6 +416,7 @@ static ParsedColumn parse_varchar_column(StringColumnResult& scr, const RowExec&
     for (size_t ri = 0; ri < ranges.size(); ++ri)
         chunk_base[ri + 1] = chunk_base[ri] + chunk_bytes[ri];
     const size_t arena_size = chunk_base.back();
+    require_arena_fits(arena_size);
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         draken_malloc(static_cast<size_t>(n) * sizeof(DrakenStringSlot)));
@@ -674,6 +684,10 @@ static bool fill_string_array_column(
         return ok;
     });
     if (!ok) { draken_free(offsets); draken_free(child_validity); return false; }
+    if (arena_size > UINT32_MAX) {
+        draken_free(offsets); draken_free(child_validity);
+        require_arena_fits(arena_size);  // throws
+    }
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         draken_malloc(std::max<size_t>(total_elements, 1) * sizeof(DrakenStringSlot)));
@@ -1282,6 +1296,10 @@ static bool parse_nested_text_dict(const SpanBases& source, const std::vector<Fi
     size_t arena_len = 0;
     for (uint32_t c = 0; c < K; ++c)
         if (global.len[c] > STR_INLINE_MAX) arena_len += global.len[c];
+    if (arena_len > UINT32_MAX) {
+        draken_free(codes);
+        require_arena_fits(arena_len);  // throws
+    }
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         draken_malloc(static_cast<size_t>(K) * sizeof(DrakenStringSlot)));
     uint8_t* arena = arena_len ? static_cast<uint8_t*>(draken_malloc(arena_len)) : nullptr;

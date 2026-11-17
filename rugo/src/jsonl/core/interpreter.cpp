@@ -1176,6 +1176,15 @@ static RecordSet build_head(const uint8_t* buffer, size_t buffer_length, size_t 
     }
 }
 
+// Record `rec`'s non-null value for top-level key `key`, or nullptr.
+template <typename Record>
+static const FieldSpan* head_value(const Record& rec, const uint8_t* buffer, const std::string& key) {
+    for (const FieldSpan& s : rec)
+        if (s.key_width == key.size() && std::memcmp(buffer + s.key_start, key.data(), s.key_width) == 0)
+            return is_null(buffer, s.value_start, s.value_start + s.value_width - 1) ? nullptr : &s;
+    return nullptr;
+}
+
 std::vector<uint8_t> head_value_types(const uint8_t* buffer, size_t buffer_length,
                                       const std::vector<std::string>& columns,
                                       const ParseContext& context) {
@@ -1187,11 +1196,8 @@ std::vector<uint8_t> head_value_types(const uint8_t* buffer, size_t buffer_lengt
         const ColumnSpec sp = parse_column_spec(columns[c]);
         if (sp.nested) continue;
         for (size_t r = 0; r < limit; ++r) {
-            const FieldSpan* f = nullptr;
-            for (const FieldSpan& s : head[r])
-                if (s.key_width == sp.key.size() &&
-                    std::memcmp(buffer + s.key_start, sp.key.data(), s.key_width) == 0) { f = &s; break; }
-            if (f == nullptr || is_null(buffer, f->value_start, f->value_start + f->value_width - 1)) continue;
+            const FieldSpan* f = head_value(head[r], buffer, sp.key);
+            if (f == nullptr) continue;
             types[c] = f->type;
             break;
         }
@@ -1199,11 +1205,19 @@ std::vector<uint8_t> head_value_types(const uint8_t* buffer, size_t buffer_lengt
     return types;
 }
 
+// A column whose head-sample values are wider than this is not copied while parsing:
+// copying buys locality for short values the builders would otherwise re-read strided; a
+// long value is read sequentially either way, and its copy is a second (then, merged, a
+// third) copy of the column's bytes held at once.
+static constexpr uint32_t kCopyMaxWidth = 32;  // measured: no-copy never lost from 32 B up, even in 40-column rows
+
 std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_length,
                                        const std::vector<std::string>& columns,
                                        const ParseContext& context) {
-    const std::vector<uint8_t> types = head_value_types(buffer, buffer_length, columns, context);
     std::vector<uint8_t> copy(columns.size(), 1);
+    if (buffer_length == 0) return copy;
+    const RecordSet head = build_head(buffer, buffer_length, context.infer_sample_size);
+    const size_t limit = std::min(context.infer_sample_size, head.num_records());
     for (size_t c = 0; c < columns.size(); ++c) {
         const ColumnSpec sp = parse_column_spec(columns[c]);
         const auto it = context.explicit_schema.find(columns[c]);
@@ -1211,8 +1225,18 @@ std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_leng
         const bool declared_structured = it != context.explicit_schema.end() &&
             rugo::parse_declared_type(it->second, &dt) && rugo::declared_is_structured(dt.type);
         if (sp.as_json || declared_structured) { copy[c] = 0; continue; }
-        copy[c] = (types[c] == static_cast<uint8_t>(ValueType::Object) ||
-                   types[c] == static_cast<uint8_t>(ValueType::Array)) ? 0 : 1;
+        if (sp.nested) continue;  // the head map does not resolve a sub-value; they are short
+        uint8_t type = static_cast<uint8_t>(ValueType::Unknown);
+        uint32_t widest = 0;
+        for (size_t r = 0; r < limit; ++r) {
+            const FieldSpan* f = head_value(head[r], buffer, sp.key);
+            if (f == nullptr) continue;
+            if (type == static_cast<uint8_t>(ValueType::Unknown)) type = f->type;
+            widest = std::max(widest, f->value_width);
+        }
+        copy[c] = (type == static_cast<uint8_t>(ValueType::Object) ||
+                   type == static_cast<uint8_t>(ValueType::Array) ||
+                   widest > kCopyMaxWidth) ? 0 : 1;
     }
     return copy;
 }
