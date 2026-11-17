@@ -28,8 +28,9 @@ openpyxl
 # and CI previously had none, so every catalog-backed test either skipped or
 # never ran. Installed WITHOUT the [parquet] extra deliberately - that extra
 # pulls the published rugo wheel, which would shadow the in-tree rugo built by
-# `make compile`.
-opteryx-catalog
+# `make compile`. [s3] (boto3) is for the opteryx-iceberg suite regression_suite.yaml
+# runs: its S3 INSERTs write through opteryx_catalog's S3FileIO.
+opteryx-catalog[s3]
 
 # test oracles only - never imported by opteryx/, rugo/, or draken/
 pyarrow
