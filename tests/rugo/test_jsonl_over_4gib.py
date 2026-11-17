@@ -26,13 +26,14 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from rugo.rugo_native import read_jsonl
 
-PAD = "x" * 4000
+PAD = " " * 4000
 FOUR_GIB = 1 << 32
 TARGET = FOUR_GIB + (256 << 20)  # past 4 GiB by 256 MiB
 
 
 def _line(n):
-    return f'{{"i":{n},"s":"s{n % 1000}","o":{{"k":"k{n % 7}","n":{n}}},"pad":"{PAD}"}}\n'
+    # Pad is whitespace, not a column: an unprojected read of a 4 GB pad column needs ~18 GB, over a 16 GB CI runner.
+    return f'{{"i":{n},"s":"s{n % 1000}","o":{{"k":"k{n % 7}","n":{n}}}{PAD}}}\n'
 
 
 @pytest.fixture(scope="module")
