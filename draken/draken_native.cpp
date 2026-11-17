@@ -2529,15 +2529,21 @@ extern "C" PyObject* draken_vector_own_dict(
 // make_string_from_sequence (DrakenStringArena header || slots[] || arena_bytes) so that
 // _slot_fields determinism with vector_from_string_sequence holds automatically. Validity
 // stays as a separate OwnedBuffer (same pattern as dict-encoded string vectors).
-extern "C" PyObject* draken_vector_own_string(
+//
+// adopt_arena (draken_vector_own_string_adopting): the block holds the header and slots
+// only, and the caller's arena becomes the Vector's arena_buf instead of being copied in -
+// the layout the engine's scans already emit (string_block_borrowing_arena). A copy holds
+// the column's bytes twice at once, which for a multi-GiB column is the read's peak.
+static PyObject* own_string_impl(
     DrakenStringSlot* slots,
     uint8_t*          arena,
     size_t            arena_len,
     uint8_t*          validity,
     uint32_t          length,
     DrakenType        type,
-    const uint64_t*   keyhash,   // E37: per-row hash seed (length entries) or nullptr; COPIED
-    bool              payloads_elided)
+    const uint64_t*   keyhash,
+    bool              payloads_elided,
+    bool              adopt_arena)
 {
     // Step 1: take ownership of all three caller buffers immediately via RAII.
     // If any allocation fails below, destructors free them. If we succeed, we
@@ -2572,7 +2578,7 @@ extern "C" PyObject* draken_vector_own_string(
             (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
         const size_t slots_bytes = (length > 0u ? (size_t)length : 1u) * sizeof(DrakenStringSlot);
         const size_t arena_start = struct_end + slots_bytes;
-        const size_t total       = arena_start + arena_len;
+        const size_t total       = arena_start + (adopt_arena ? 0u : arena_len);
         const size_t alloc_size  = total > 0u ? total : sizeof(DrakenStringArena);
 
         uint8_t* block = static_cast<uint8_t*>(draken_malloc(alloc_size));
@@ -2582,21 +2588,24 @@ extern "C" PyObject* draken_vector_own_string(
 
         DrakenStringArena* sa     = reinterpret_cast<DrakenStringArena*>(block);
         DrakenStringSlot*  dslots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
-        uint8_t*           darena = (arena_len > 0u) ? (block + arena_start) : nullptr;
+        uint8_t*           darena = (arena_len > 0u) ? (adopt_arena ? arena : block + arena_start)
+                                                     : nullptr;
 
-        // Step 3: copy caller's slots and arena bytes into consolidated block.
+        // Step 3: copy caller's slots (and, unless adopted, arena bytes) into the block.
         if (length > 0u && slots)
             std::memcpy(dslots, slots, (size_t)length * sizeof(DrakenStringSlot));
-        if (arena_len > 0u && arena)
+        if (!adopt_arena && arena_len > 0u && arena)
             std::memcpy(darena, arena, arena_len);
 
-        // Step 4: release guards and free the caller's original buffers.
-        // release() prevents the destructor from double-freeing. draken_free(nullptr) is safe.
+        // Step 4: release guards and free the caller's original buffers (an adopted arena
+        // moves to the VectorOwner instead). release() prevents the destructor from
+        // double-freeing. draken_free(nullptr) is safe.
         void*    raw_slots = slots_guard.release();
         void*    raw_arena = arena_guard.release();
         uint8_t* raw_valid = validity_guard.release();
         draken_free(raw_slots);
-        draken_free(raw_arena);
+        OwnedBuffer<uint8_t> adopted(adopt_arena ? static_cast<uint8_t*>(raw_arena) : nullptr);
+        if (!adopt_arena) draken_free(raw_arena);
         // validity is taken into val_buf (still owned, freed by VectorOwner on GC).
         OwnedBuffer<uint8_t> val_buf(raw_valid);
 
@@ -2614,7 +2623,8 @@ extern "C" PyObject* draken_vector_own_string(
         // Step 6: construct DrakenVector (dense; flags set by draken_vector_from_dense).
         DrakenVector v = draken_vector_from_dense(sa, length, type, raw_valid);
 
-        VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf),
+                          OwnedBuffer<void>(nullptr), std::move(adopted));
         // E37: attach a COPY of the carried per-row seed (dense: length entries).
         if (keyhash != nullptr && length > 0u) {
             uint64_t* kh = static_cast<uint64_t*>(
@@ -2638,6 +2648,24 @@ extern "C" PyObject* draken_vector_own_string(
         PyErr_SetString(PyExc_RuntimeError, e.what());
         return nullptr;
     }
+}
+
+extern "C" PyObject* draken_vector_own_string(
+    DrakenStringSlot* slots, uint8_t* arena, size_t arena_len, uint8_t* validity,
+    uint32_t length, DrakenType type,
+    const uint64_t* keyhash,   // E37: per-row hash seed (length entries) or nullptr; COPIED
+    bool payloads_elided)
+{
+    return own_string_impl(slots, arena, arena_len, validity, length, type, keyhash,
+                           payloads_elided, /*adopt_arena=*/false);
+}
+
+extern "C" PyObject* draken_vector_own_string_adopting(
+    DrakenStringSlot* slots, uint8_t* arena, size_t arena_len, uint8_t* validity,
+    uint32_t length, DrakenType type, const uint64_t* keyhash, bool payloads_elided)
+{
+    return own_string_impl(slots, arena, arena_len, validity, length, type, keyhash,
+                           payloads_elided, /*adopt_arena=*/true);
 }
 
 // draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
