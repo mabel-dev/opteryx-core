@@ -31,10 +31,14 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <exception>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/buffers.h"
@@ -164,6 +168,22 @@ inline std::vector<int64_t> redistribute(const std::vector<Group>& groups, int64
 }  // namespace file_stats_detail
 
 class FileStatsAccumulator {
+    // One thread's working buffers.
+    struct Scratch {
+        std::vector<int64_t> ordinal;
+        std::vector<uint64_t> hashes;
+        std::vector<uint32_t> ids;
+
+        const uint32_t* identity(uint32_t n) {
+            if (ids.size() < n) {
+                const size_t from = ids.size();
+                ids.resize(n);
+                for (size_t i = from; i < n; ++i) ids[i] = static_cast<uint32_t>(i);
+            }
+            return ids.data();
+        }
+    };
+
 public:
     explicit FileStatsAccumulator(std::vector<DrakenType> physical)
         : physical_(std::move(physical)), columns_(physical_.size()) {}
@@ -171,44 +191,46 @@ public:
     size_t column_count() const { return columns_.size(); }
     int64_t uncompressed_size() const { return uncompressed_; }
 
-    // One row group's column at `position`.
-    void add(size_t position, const VectorOwner& owner) {
-        using namespace file_stats_detail;
-        Column& c = columns_.at(position);
-        const DrakenVector& v = owner.vec;
-        const DrakenType category = physical_[position];
-        const uint32_t n = v.length;
-
-        if (v.type != DRAKEN_ARRAY) hash_into(owner, c.kmv);
-        if (v.validity != nullptr) c.nulls += count_nulls(v);
-        if (is_integer(category) && c.sum_ok) fold_sum(c, v);
-
-        const int64_t bytes = column_nbytes(owner);
-        c.nbytes += bytes;
-        uncompressed_ += bytes;
-
-        if (compressible(category) && has_ordinal_kernel(v.type) && n > 0) fold_ordinal(c, v, category);
-
-        if (draken::ops::is_string_type(category)) {
-            draken::ops::char_class_stats(v, c.chars);
-        } else if (category == DRAKEN_ARRAY) {
-            fold_list_lengths(c, v);
+    // One row group: `owners[k]` is its column at position k. The columns are
+    // independent, so they are spread over threads, biggest first; GIL-free.
+    // Own threads, not the engine pool: the pool's workers can all be parked on
+    // the full output queue this call is what drains.
+    void add_row_group(const std::vector<const VectorOwner*>& owners) {
+        if (owners.size() != columns_.size()) {
+            throw std::invalid_argument("a row group of a different column count");
         }
+        std::vector<size_t> order(owners.size());
+        std::vector<int64_t> bytes(owners.size());
+        for (size_t k = 0; k < owners.size(); ++k) {
+            order[k] = k;
+            bytes[k] = column_nbytes(*owners[k]);
+            uncompressed_ += bytes[k];
+        }
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return bytes[a] > bytes[b]; });
 
-        if (category == DRAKEN_ARRAY && owner.child_owner) {
-            const VectorOwner& child = *owner.child_owner;
-            if (child.vec.type != DRAKEN_ARRAY) hash_into(child, c.element_kmv);
-            if (has_ordinal_kernel(child.vec.type) && child.vec.length > 0) {
-                ordinal_.resize(child.vec.length);
-                draken_ordinalize(child.vec, ordinal_.data(), child.vec.length);
-                int64_t lo = 0, hi = 0;
-                if (draken::ops::ordinal_min_max(ordinal_.data(), identity(child.vec.length), child.vec.length, lo, hi)) {
-                    c.element_min = c.element_any ? std::min(c.element_min, lo) : lo;
-                    c.element_max = c.element_any ? std::max(c.element_max, hi) : hi;
-                    c.element_any = true;
+        std::atomic<size_t> next{0};
+        std::exception_ptr failure;
+        std::mutex failure_lock;
+        auto work = [&] {
+            Scratch scratch;
+            for (size_t i = next.fetch_add(1); i < order.size(); i = next.fetch_add(1)) {
+                const size_t k = order[i];
+                try {
+                    add_column(k, *owners[k], bytes[k], scratch);
+                } catch (...) {
+                    std::lock_guard<std::mutex> hold(failure_lock);
+                    if (!failure) failure = std::current_exception();
+                    next.store(order.size());
+                    return;
                 }
             }
-        }
+        };
+        const size_t threads = std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), order.size());
+        std::vector<std::thread> helpers;
+        for (size_t t = 1; t < threads; ++t) helpers.emplace_back(work);
+        work();
+        for (std::thread& h : helpers) h.join();
+        if (failure) std::rethrow_exception(failure);
     }
 
     // The per-column statistics into file `row` of `m` (whose columns are the
@@ -266,6 +288,44 @@ public:
     }
 
 private:
+    // The statistics of one row group's column at `position` (`bytes` its
+    // footprint), into that column's own state only - safe beside the others.
+    void add_column(size_t position, const VectorOwner& owner, int64_t bytes, Scratch& s) {
+        using namespace file_stats_detail;
+        Column& c = columns_[position];
+        const DrakenVector& v = owner.vec;
+        const DrakenType category = physical_[position];
+        const uint32_t n = v.length;
+
+        if (v.type != DRAKEN_ARRAY) hash_into(owner, c.kmv, s);
+        if (v.validity != nullptr) c.nulls += count_nulls(v);
+        if (is_integer(category) && c.sum_ok) fold_sum(c, v);
+        c.nbytes += bytes;
+
+        if (compressible(category) && has_ordinal_kernel(v.type) && n > 0) fold_ordinal(c, v, category, s);
+
+        if (draken::ops::is_string_type(category)) {
+            draken::ops::char_class_stats(v, c.chars);
+        } else if (category == DRAKEN_ARRAY) {
+            fold_list_lengths(c, v);
+        }
+
+        if (category == DRAKEN_ARRAY && owner.child_owner) {
+            const VectorOwner& child = *owner.child_owner;
+            if (child.vec.type != DRAKEN_ARRAY) hash_into(child, c.element_kmv, s);
+            if (has_ordinal_kernel(child.vec.type) && child.vec.length > 0) {
+                s.ordinal.resize(child.vec.length);
+                draken_ordinalize(child.vec, s.ordinal.data(), child.vec.length);
+                int64_t lo = 0, hi = 0;
+                if (draken::ops::ordinal_min_max(s.ordinal.data(), s.identity(child.vec.length), child.vec.length, lo, hi)) {
+                    c.element_min = c.element_any ? std::min(c.element_min, lo) : lo;
+                    c.element_max = c.element_any ? std::max(c.element_max, hi) : hi;
+                    c.element_any = true;
+                }
+            }
+        }
+    }
+
     struct Column {
         file_stats_detail::Kmv kmv;
         int64_t nulls = 0;
@@ -315,52 +375,44 @@ private:
         return static_cast<int64_t>(bytes);
     }
 
-    void hash_into(const VectorOwner& owner, file_stats_detail::Kmv& kmv) {
+    static void hash_into(const VectorOwner& owner, file_stats_detail::Kmv& kmv, Scratch& s) {
         const uint32_t n = owner.vec.length;
         if (n == 0) return;
-        hashes_.resize(n);
+        s.hashes.resize(n);
         char error[256] = {0};
-        if (draken_hash_rows(&owner, hashes_.data(), error, sizeof(error)) != 0) {
+        if (draken_hash_rows(&owner, s.hashes.data(), error, sizeof(error)) != 0) {
             throw std::invalid_argument(std::string("file statistics: ") + error);
         }
-        for (uint32_t i = 0; i < n; ++i) kmv.add(hashes_[i]);
+        for (uint32_t i = 0; i < n; ++i) kmv.add(s.hashes[i]);
     }
 
-    const uint32_t* identity(uint32_t n) {
-        if (identity_.size() < n) {
-            const size_t from = identity_.size();
-            identity_.resize(n);
-            for (size_t i = from; i < n; ++i) identity_[i] = static_cast<uint32_t>(i);
-        }
-        return identity_.data();
-    }
-
-    void fold_ordinal(Column& c, const DrakenVector& v, DrakenType category) {
+    static void fold_ordinal(Column& c, const DrakenVector& v, DrakenType category, Scratch& s) {
         using namespace file_stats_detail;
         const uint32_t n = v.length;
-        ordinal_.resize(n);
-        draken_ordinalize(v, ordinal_.data(), n);
-        const uint32_t* sel = identity(n);
+        s.ordinal.resize(n);
+        draken_ordinalize(v, s.ordinal.data(), n);
+        const int64_t* ordinal = s.ordinal.data();
+        const uint32_t* sel = s.identity(n);
         int64_t gmin = 0, gmax = 0;
-        if (!draken::ops::ordinal_min_max(ordinal_.data(), sel, n, gmin, gmax)) return;   // every row null
+        if (!draken::ops::ordinal_min_max(ordinal, sel, n, gmin, gmax)) return;   // every row null
         c.lo = c.any ? std::min(c.lo, gmin) : gmin;
         c.hi = c.any ? std::max(c.hi, gmax) : gmax;
         c.any = true;
         if (category == DRAKEN_BOOL) {
             int64_t counts[2] = {0, 0};
-            draken::ops::histogram_bucket(ordinal_.data(), sel, n, 0, 1, 2, counts);
+            draken::ops::histogram_bucket(ordinal, sel, n, 0, 1, 2, counts);
             c.false_count += counts[0];
             c.true_count += counts[1];
             return;
         }
         if (gmax > gmin) {
             Group g{gmin, gmax, std::vector<int64_t>(static_cast<size_t>(kFineHistogramBins), 0), 0};
-            draken::ops::histogram_bucket(ordinal_.data(), sel, n, gmin, gmax, kFineHistogramBins, g.fine.data());
+            draken::ops::histogram_bucket(ordinal, sel, n, gmin, gmax, kFineHistogramBins, g.fine.data());
             for (int64_t count : g.fine) g.non_null += count;
             c.groups.push_back(std::move(g));
         } else {
             int64_t non_null = 0;
-            draken::ops::histogram_bucket(ordinal_.data(), sel, n, gmin, gmax, 1, &non_null);
+            draken::ops::histogram_bucket(ordinal, sel, n, gmin, gmax, 1, &non_null);
             c.groups.push_back(Group{gmin, gmax, {}, non_null});
         }
     }
@@ -381,9 +433,6 @@ private:
     std::vector<DrakenType> physical_;
     std::vector<Column> columns_;
     int64_t uncompressed_ = 0;
-    std::vector<int64_t> ordinal_;
-    std::vector<uint64_t> hashes_;
-    std::vector<uint32_t> identity_;
 };
 
 }  // namespace opteryx::planner

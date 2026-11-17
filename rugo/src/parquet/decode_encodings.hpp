@@ -120,7 +120,7 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
                                         draken::AppendBuffer<int32_t> &run_counts);
 
 // ---------------------------------------------------------------------------
-// DELTA_BINARY_PACKED (encoding id 4) -- template; must live in header
+// DELTA_BINARY_PACKED (encoding id 5) -- template; must live in header
 // ---------------------------------------------------------------------------
 
 // Spec shape (as parquet-cpp enforces): block size a multiple of 128 and

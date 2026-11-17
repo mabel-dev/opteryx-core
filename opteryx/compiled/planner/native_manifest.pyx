@@ -449,7 +449,7 @@ cdef extern from "planner/file_stats.hpp" namespace "opteryx::planner":
         FileStatsAccumulator(vector[DrakenType] physical)
         size_t column_count()
         int64_t uncompressed_size()
-        void add(size_t position, const VectorOwner& owner) except +
+        void add_row_group(const vector[const VectorOwner*]& owners) except + nogil
         void write(CNativeManifest& m, size_t row, vector[vector[uint64_t]]& min_k,
                    vector[vector[int64_t]]& histogram, vector[vector[int64_t]]& char_class) except +
 
@@ -1805,7 +1805,7 @@ cdef class FileStats:
 
     def add_row_group(self, morsel):
         cdef vector[DrakenType] physical
-        cdef size_t position
+        cdef vector[const VectorOwner*] owners
         cdef PyObject* handle
         names = tuple(name.decode("utf-8") if type(name) is bytes else name for name in morsel.column_names)
         vectors = [morsel._cxx_column(name) for name in morsel.column_names]
@@ -1817,12 +1817,14 @@ cdef class FileStats:
             self._accumulator = new FileStatsAccumulator(physical)
         elif names != self._columns:
             raise ValueError(f"a row group of columns {names} in a file of columns {self._columns}")
-        for position in range(len(vectors)):
-            vector = vectors[position]
+        for vector in vectors:
             # a draken Vector wrapper or the native Vector itself
             native = vector if type(vector) is _NativeVector else vector._nb
             handle = <PyObject*>native
-            self._accumulator.add(position, draken_owner_unwrap(handle)[0])
+            owners.push_back(draken_owner_unwrap(handle))
+        # `vectors` keeps every owner alive across the GIL-free call
+        with nogil:
+            self._accumulator.add_row_group(owners)
 
     @property
     def uncompressed_size(self):
