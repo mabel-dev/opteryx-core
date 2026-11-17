@@ -47,7 +47,18 @@ SERVER = os.path.abspath(
 R = 2000        # rows per row group
 N_RG = 8        # row groups -> 2 blocks of 4 for a wide column, 1 run for a narrow one
 N = R * N_RG
-T = 4096        # narrow threshold: lo/flag are a few hundred bytes, a/s/f 16-30 KB (uncompressed)
+T = 4096        # narrow threshold: lo/flag are a few hundred bytes, a/s/f 10-30 KB (uncompressed)
+# `a` is row i in the high bits over 40 random low bits: sorted and unique (row-group
+# pruning works on it) but ~41 bits/value under rugo's DELTA int encoding, so it stays
+# WIDE — a plain range(n) packs to ~0 bits/value and would be placed as a narrow run.
+A_SHIFT = 40
+
+
+def _a_values(n):
+    import random
+
+    rng = random.Random(5)
+    return [(i << A_SHIFT) | rng.getrandbits(A_SHIFT) for i in range(n)]
 
 
 def _morsel(n=N):
@@ -56,7 +67,7 @@ def _morsel(n=N):
     rng = random.Random(3)
     return Morsel.from_vectors(
         [b"a", b"s", b"lo", b"flag", b"f"],
-        [vector_from_sequence(list(range(n)), DrakenType.INT64),
+        [vector_from_sequence(_a_values(n), DrakenType.INT64),
          vector_from_sequence([f"{rng.randrange(10**12):012d}-{i}" for i in range(n)], DrakenType.VARCHAR),
          vector_from_sequence([("x", "y", "z")[i % 3] for i in range(n)], DrakenType.VARCHAR),
          vector_from_sequence([i % 7 == 0 for i in range(n)], DrakenType.BOOL),
@@ -202,11 +213,13 @@ def test_select_star_falls_back_to_blocks_of_four(served):
 
 
 def test_pruned_row_group_costs_what_the_grouped_file_costs(served):
-    # a = 9000 lives in row group 4 (rows 8000..9999): min/max pruning keeps ONE
+    # row 9000's `a` lives in row group 4 (rows 8000..9999): min/max pruning keeps ONE
     # row group, a one-member block on both layouts. The narrow chunk comes from
     # the run instead of the block, which moves bytes, not requests: fetch ops
     # and GETs are the grouped file's exactly.
-    for sql in ("SELECT a, lo FROM {rel} WHERE a = 9000", "SELECT lo FROM {rel} WHERE a = 9000"):
+    a9000 = _a_values(N)[9000]
+    for sql in (f"SELECT a, lo FROM {{rel}} WHERE a = {a9000}",
+                f"SELECT lo FROM {{rel}} WHERE a = {a9000}"):
         expected = _local(sql, served, "pc")
         assert len(expected) == 1 and expected[0][-1] == "x"
         rows_pc, gets_pc, ops_pc = _run(sql.format(rel="pcfb_pc.pc" + GAP0))
@@ -220,7 +233,7 @@ def test_range_predicate_over_a_narrow_column_is_one_fetch(served):
     # rows 8000..15999 = block 2 exactly: pruning keeps row groups 4-7, and the
     # residual filter still reads `a`, so this is a wide projection — one block
     # of four, the a chunks as one range and the lo slice of the run as another.
-    sql = "SELECT lo FROM {rel} WHERE a >= 8000"
+    sql = f"SELECT lo FROM {{rel}} WHERE a >= {8000 << A_SHIFT}"
     expected = sorted(_local(sql, served, "pc"))
     assert len(expected) == 4 * R
     rows, gets, ops = _run(sql.format(rel="pcfb_pc.pc" + GAP0))

@@ -79,9 +79,11 @@ def _plain_file(path):
                               DrakenType.VARCHAR),
          vector_from_sequence([i * 0.25 for i in range(N)], DrakenType.FLOAT64)],
     )
+    # 4096, not 2048: `a` is DELTA (~0 bits/value), so a finer grid's index costs
+    # more than 10% of the projected bytes and the reader's cost gate declines it.
     with open(path, "wb") as f:
         f.write(rp.write_parquet(m, compression="none", max_rows_per_row_group=R,
-                                 max_page_bytes=2048))
+                                 max_page_bytes=4096))
 
 
 def _v2_file(path):

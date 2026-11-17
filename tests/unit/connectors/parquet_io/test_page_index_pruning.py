@@ -337,12 +337,25 @@ def test_the_ab_arm_disables_pruning_entirely():
 # writer could do this, the whole optimisation was inert on our own data.
 
 
+def _fixture_p():
+    # Random 63-bit values: incompressible under DELTA and zstd, ~160 KB per row group.
+    import random
+
+    rng = random.Random(11)
+    return [rng.getrandbits(63) for _ in range(N)]
+
+
 def _rugo_fixture(tmp, page_index=True, max_page_bytes=16384):
     """The same shape as _table(), written by rugo instead of pyarrow.
 
     `s` is low-cardinality and gets auto-dictionary-encoded, so this also pins
     that a DICT chunk splits into several data pages — a single-page dict chunk
     would index at row-group granularity and prune nothing.
+
+    `p` is the payload: rugo writes x DELTA_BINARY_PACKED, where a sorted run
+    costs ~0 bits/value, so x/s/n alone are a few hundred bytes per row group and
+    the reader's index cost gate (index > 10% of projected bytes) rightly declines.
+    Tests that need the index read project `p` so the scan is worth pruning.
     """
     from draken.interop.vector_sequence import vector_from_sequence
     from draken.morsels.morsel import Morsel
@@ -351,11 +364,12 @@ def _rugo_fixture(tmp, page_index=True, max_page_bytes=16384):
 
     t = _table()
     morsel = Morsel.from_vectors(
-        ["x", "s", "n"],
+        ["x", "s", "n", "p"],
         [
             Vector(vector_from_sequence(t["x"].to_pylist(), "INT64")),
             Vector(vector_from_sequence(t["s"].to_pylist(), "VARCHAR")),
             Vector(vector_from_sequence(t["n"].to_pylist(), "INT32")),
+            Vector(vector_from_sequence(_fixture_p(), "INT64")),
         ],
     )
     path = os.path.join(tmp, f"rugo_{'on' if page_index else 'off'}_{os.getpid()}.parquet")
@@ -384,13 +398,14 @@ def test_rugo_written_file_prunes_pages(page_index):
             assert cc.has_offset_index is page_index
 
         needle = 33_333
-        out, shapes, diag = _scan(path, ["x", "s", "n"], [("x", "Eq", needle)])
+        out, shapes, diag = _scan(path, ["x", "s", "n", "p"], [("x", "Eq", needle)])
 
     keep = [v == needle for v in out["x"]]
     exp = _expected(pc.field("x") == needle)
     assert _survivors(out["x"], keep) == exp["x"].to_pylist()
     assert _survivors(out["s"], keep) == exp["s"].to_pylist()
     assert _survivors(out["n"], keep) == exp["n"].to_pylist()
+    assert _survivors(out["p"], keep) == [_fixture_p()[needle]]
 
     if page_index:
         assert diag["page_index_pages_pruned"] > 0
@@ -408,7 +423,7 @@ def test_rugo_dict_chunk_splits_into_pages():
     only do if its code stream was split across several data pages."""
     with tempfile.TemporaryDirectory() as tmp:
         path, _ = _rugo_fixture(tmp)
-        out, shapes, diag = _scan(path, ["x", "s"], [("s", "Eq", b"k07")])
+        out, shapes, diag = _scan(path, ["x", "s", "p"], [("s", "Eq", b"k07")])
     keep = [v == "k07" for v in out["s"]]
     exp = _expected(pc.field("s") == "k07")
     assert _survivors(out["x"], keep) == exp["x"].to_pylist()
@@ -442,6 +457,7 @@ def test_rugo_streaming_writer_index_offsets_are_absolute():
     t = _table()
     x = t["x"].to_pylist()
     s = t["s"].to_pylist()
+    p = _fixture_p()  # payload, see _rugo_fixture
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, f"streamed_{os.getpid()}.parquet")
@@ -451,9 +467,10 @@ def test_rugo_streaming_writer_index_offsets_are_absolute():
                 for rg in range(N_ROW_GROUPS):
                     lo, hi = rg * ROW_GROUP_SIZE, (rg + 1) * ROW_GROUP_SIZE
                     w.write_row_group(Morsel.from_vectors(
-                        ["x", "s"],
+                        ["x", "s", "p"],
                         [Vector(vector_from_sequence(x[lo:hi], "INT64")),
-                         Vector(vector_from_sequence(s[lo:hi], "VARCHAR"))],
+                         Vector(vector_from_sequence(s[lo:hi], "VARCHAR")),
+                         Vector(vector_from_sequence(p[lo:hi], "INT64"))],
                     ))
 
         md = pq.ParquetFile(path).metadata
@@ -464,7 +481,7 @@ def test_rugo_streaming_writer_index_offsets_are_absolute():
                 assert md.row_group(rg).column(c).has_offset_index
 
         needle = 33_333
-        out, _, diag = _scan(path, ["x", "s"], [("x", "Eq", needle)])
+        out, _, diag = _scan(path, ["x", "s", "p"], [("x", "Eq", needle)])
 
     keep = [v == needle for v in out["x"]]
     exp = _expected(pc.field("x") == needle)
@@ -486,12 +503,12 @@ def test_a_chunk_that_does_not_split_gets_no_index():
     column single-page, which indexed 303 of 420 ClickBench chunks for nothing.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        # Budget chosen so the 8-byte column splits and the others do not:
-        # x needs 20_000*8 = 160_000 B to stay whole, s and n need less.
+        # Budget chosen so the 8-byte columns split and the others do not:
+        # x and p need 20_000*8 = 160_000 B to stay whole, s and n need less.
         _, md = _rugo_fixture(tmp, page_index=True, max_page_bytes=150_000)
         got = {md.schema.column(c).name: md.row_group(0).column(c).has_column_index
                for c in range(md.num_columns)}
-        assert got == {"x": True, "s": False, "n": False}, got
+        assert got == {"x": True, "s": False, "n": False, "p": True}, got
         for c in range(md.num_columns):
             cc = md.row_group(0).column(c)
             assert cc.has_column_index is cc.has_offset_index
@@ -523,11 +540,12 @@ def test_int_range_prunes_pages_and_keeps_every_match():
         # Inside one row group ([20_000, 40_000)) and several 2 048-row x pages
         # wide, so pages fall wholly inside (PASS) as well as outside (FAIL).
         lo, hi = 25_100, 33_900
-        out, _, diag = _scan(path, ["x", "n"], [("x", "GtEq", lo), ("x", "Lt", hi)])
+        out, _, diag = _scan(path, ["x", "n", "p"], [("x", "GtEq", lo), ("x", "Lt", hi)])
     x, n = _fixture_columns()
     keep = [lo <= v < hi for v in out["x"]]
     assert _survivors(out["x"], keep) == [v for v in x if lo <= v < hi]
     assert _survivors(out["n"], keep) == [n[v] for v in x if lo <= v < hi]
+    assert _survivors(out["p"], keep) == _fixture_p()[lo:hi]
     assert diag["page_index_pages_pruned"] > 0
     assert len(out["x"]) < ROW_GROUP_SIZE
     # x is unique, sorted and never NULL: pages wholly inside [lo, hi) settle PASS.
@@ -537,7 +555,7 @@ def test_int_range_prunes_pages_and_keeps_every_match():
 def test_int_range_on_a_nullable_column_never_keeps_nulls_as_matches():
     with tempfile.TemporaryDirectory() as tmp:
         path, _ = _rugo_fixture(tmp)
-        out, _, diag = _scan(path, ["x", "n"], [("n", "Gt", 5), ("n", "LtEq", 7)])
+        out, _, diag = _scan(path, ["x", "n", "p"], [("n", "Gt", 5), ("n", "LtEq", 7)])
     x, n = _fixture_columns()
     keep = [v is not None and 5 < v <= 7 for v in out["n"]]
     assert _survivors(out["x"], keep) == [i for i in x if n[i] is not None and 5 < n[i] <= 7]
@@ -551,7 +569,7 @@ def test_contradictory_range_prunes_every_page_of_the_surviving_row_group():
     0 survives them; the intersected range is empty and fails every page."""
     with tempfile.TemporaryDirectory() as tmp:
         path, _ = _rugo_fixture(tmp)
-        out, _, diag = _scan(path, ["x", "s"], [("x", "Gt", 50), ("x", "Lt", 10)])
+        out, _, diag = _scan(path, ["x", "s", "p"], [("x", "Gt", 50), ("x", "Lt", 10)])
     assert out["x"] == []
     assert diag["page_index_row_groups_pruned"] >= 1
 
@@ -591,7 +609,8 @@ def test_sql_range_answer_through_the_native_scan(where, pred, prunes):
         os.chdir(tmp)
         try:
             opteryx.register_workspace("pirange", DiskConnector)
-            sql = f"SELECT COUNT(*) AS c, SUM(x) AS s, COUNT(n) AS cn FROM pirange.t WHERE {where}"
+            sql = (f"SELECT COUNT(*) AS c, SUM(x) AS s, COUNT(n) AS cn, MAX(p) AS mp "
+                   f"FROM pirange.t WHERE {where}")
             session = opteryx.session()
             morsel = Morsel.combine(list(session.execute_to_morsels(sql)))
             diags = session.telemetry.get("io_scan_diagnostics") or []
@@ -607,6 +626,8 @@ def test_sql_range_answer_through_the_native_scan(where, pred, prunes):
     assert got["c"] == len(rows)
     assert got["s"] == (sum(rows) if rows else None)
     assert got["cn"] == sum(1 for i in rows if n[i] is not None)
+    p = _fixture_p()
+    assert got["mp"] == (max(p[i] for i in rows) if rows else None)
 
 
 # ── range settlement: ALL-PASS row groups / pages skip the predicate column ───
@@ -669,10 +690,11 @@ def _ordered(rows):
     ],
 )
 def test_settled_scan_answers_exactly(where, pred):
-    rows, settled = _sql_rows(f"SELECT n, s FROM pirange.t WHERE {where}")
+    rows, settled = _sql_rows(f"SELECT n, s, p FROM pirange.t WHERE {where}")
     x, n = _fixture_columns()
     s = _fixture_s()
-    assert _ordered(rows) == _ordered((n[i], s[i]) for i in x if pred(i))
+    p = _fixture_p()
+    assert _ordered(rows) == _ordered((n[i], s[i], p[i]) for i in x if pred(i))
     assert settled > 0
 
 

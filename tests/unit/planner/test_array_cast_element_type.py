@@ -232,17 +232,19 @@ def test_json_text_literal_still_routes_to_the_native_kernel():
 
 
 @pytest.mark.parametrize(
-    "sql",
+    "sql, message",
     [
-        "SELECT (id, name) FROM $planets",
-        "SELECT (1, 2) FROM $planets",
-        "SELECT DISTINCT (id, name) FROM $planets",
-        "SELECT DISTINCT (1, 2) FROM $planets",
+        # Columns in a literal list are refused where the list is built.
+        ("SELECT (id, name) FROM $planets", "holds values, not columns"),
+        ("SELECT (1, 2) FROM $planets", "cannot be projected"),
+        # DISTINCT + a tuple is the DISTINCT ON mistake, refused with that hint.
+        ("SELECT DISTINCT (id, name) FROM $planets", "DISTINCT ON"),
+        ("SELECT DISTINCT (1, 2) FROM $planets", "DISTINCT ON"),
     ],
 )
-def test_parenthesised_value_list_is_still_refused(sql):
+def test_parenthesised_value_list_is_still_refused(sql, message):
     """The guard's original purpose — `SELECT (a, b)` is not a row constructor here."""
-    with pytest.raises(UnsupportedSyntaxError, match="cannot be projected"):
+    with pytest.raises(UnsupportedSyntaxError, match=message):
         _rows(f"{sql} LIMIT 1")
 
 

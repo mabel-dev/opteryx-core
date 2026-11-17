@@ -2347,6 +2347,16 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
+    # `SELECT DISTINCT (a, b)` is the DISTINCT ON mistake: give that hint before the tuple
+    # builder refuses `(a, b)`'s columns with its generic literal-list message.
+    if ast_branch["Select"].get("distinct") == "Distinct" and any(
+        "Tuple" in (item.get("UnnamedExpr") or item.get("ExprWithAlias", {}).get("expr") or {})
+        for item in ast_branch["Select"].get("projection") or []
+    ):
+        raise UnsupportedSyntaxError(
+            "A value list cannot be projected in the **SELECT** clause — did you mean **DISTINCT ON**(cols) cols **FROM** ?"
+        )
+
     # groups
     _projection = [
         _strip_outer_nesting(p)
