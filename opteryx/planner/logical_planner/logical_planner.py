@@ -8016,6 +8016,36 @@ def _compaction_is_filtered(relation: str) -> PermissionsError:
     )
 
 
+def _materialization_is_filtered(target: str, source: str) -> PermissionsError:
+    """The error a row-filtered materialized-view build or refresh is refused with.
+
+    See `apply_visibility_filters` for why this refuses instead of exempting.
+    """
+    return PermissionsError(
+        f"Materialized view {md_code(target)} cannot be built or refreshed by this "
+        f"caller: row-level visibility filters apply to {md_code(source)} for them, "
+        "and the view is itself row-filtered for its readers. Materialized under the "
+        "filter it would hold only the caller's rows, and every other reader would "
+        "find theirs missing. Refresh it as an identity the filters do not apply to."
+    )
+
+
+def _filter_key_matches(relation, visibility_filters: dict, pattern_keys) -> bool:
+    """Whether any visibility filter key (exact or pattern) covers `relation`.
+
+    A key whose value is `None` is "no filter" and does not count; `[]` is the
+    deny-all and does.
+    """
+    if relation is None:
+        return False
+    if visibility_filters.get(relation) is not None:
+        return True
+    return any(
+        visibility_filters[key] is not None and fnmatch.fnmatchcase(relation, key)
+        for key in pattern_keys
+    )
+
+
 def apply_visibility_filters(
     logical_plan: LogicalPlan, visibility_filters: dict, telemetry,
     *,
@@ -8067,6 +8097,22 @@ def apply_visibility_filters(
     a compaction scan must not be narrowed, by column OR by row - and stated
     here, once, rather than at the binder's two call sites, so a third caller
     cannot miss it.
+
+    ⛔ A FILTERED MATERIALIZATION OF A ROW-FILTERED VIEW IS REFUSED, for the
+    same reason. `CREATE MATERIALIZED VIEW` and `REFRESH MATERIALIZED VIEW`
+    write what they read into a relation OTHER callers then read - through
+    their own filter, if the view sits in a filtered namespace. Materialized
+    under the refresher's filter, the view holds only the refresher's rows and
+    every other reader silently finds nothing. Observed on
+    `platform.billing.charges_daily_*`: after their refresh triggers moved to an
+    identity billed to the house account (Sep 2026), every refresh rebuilt them
+    with `billing_account = 'opteryx'` only, and every tenant's charges read as
+    zero for two months without an error anywhere.
+
+    Scoped to views whose TARGET is itself covered by a filter key. A view in
+    an unfiltered namespace (a user's own rollup of their billing rows) has no
+    other readers to short-change, so its filtered build is just a filtered
+    read and proceeds as one.
     """
     pattern_keys = [
         key
@@ -8079,6 +8125,18 @@ def apply_visibility_filters(
         for _, node in logical_plan.nodes(True)
     )
 
+    # The row-filtered materialized view this plan builds or refreshes, if any.
+    materialized_target = next(
+        (
+            node.relation_name
+            for _, node in logical_plan.nodes(True)
+            if node.node_type == LogicalPlanStepType.Insert
+            and (getattr(node, "is_refresh", None) or getattr(node, "is_materialized_view", None))
+            and _filter_key_matches(node.relation_name, visibility_filters, pattern_keys)
+        ),
+        None,
+    )
+
     for nid, node in list(logical_plan.nodes(True)):
         if node.node_type == LogicalPlanStepType.Scan:
             # `None` is "no filter for this relation" and is not a match, which is
@@ -8088,6 +8146,8 @@ def apply_visibility_filters(
             if filter_dnf is not None:
                 if is_compaction:
                     raise _compaction_is_filtered(node.relation)
+                if materialized_target is not None:
+                    raise _materialization_is_filtered(materialized_target, node.relation)
                 _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, plan_context=plan_context)
 
             # A scan with no relation name (a subquery, a function scan) has nothing
@@ -8102,6 +8162,10 @@ def apply_visibility_filters(
                     if pattern_dnf is not None:
                         if is_compaction:
                             raise _compaction_is_filtered(node.relation)
+                        if materialized_target is not None:
+                            raise _materialization_is_filtered(
+                                materialized_target, node.relation
+                            )
                         _insert_visibility_filter(
                             logical_plan, nid, node, pattern_dnf, telemetry,
                             plan_context=plan_context,
