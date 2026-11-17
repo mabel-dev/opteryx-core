@@ -61,10 +61,11 @@ def _morsel(n, seed=7, grow=False):
     value for the first block's rows and random strings after — tiny in block
     0, ~20 KB per chunk later (the sorted-data case that demotes)."""
     rng = random.Random(seed)
+    ints = random.Random(seed + 1)   # random so DELTA_BINARY_PACKED cannot shrink `a` below T
     return Morsel.from_vectors(
         NAMES,
         [
-            vector_from_sequence(list(range(n)), DrakenType.INT64),
+            vector_from_sequence([ints.randrange(2**62) for _ in range(n)], DrakenType.INT64),
             vector_from_sequence([f"{rng.randrange(10**12):012d}-{i}" for i in range(n)], DrakenType.VARCHAR),
             vector_from_sequence([("x", "y", "z")[i % 3] for i in range(n)], DrakenType.VARCHAR),
             vector_from_sequence([i % 7 == 0 for i in range(n)], DrakenType.BOOL),
@@ -221,7 +222,7 @@ def test_a_column_is_classified_by_its_largest_first_block_chunk():
     n = 8 * R
     m = Morsel.from_vectors(
         [b"a", b"spike"],
-        [vector_from_sequence(list(range(n)), DrakenType.INT64),
+        [vector_from_sequence([rng.randrange(2**62) for _ in range(n)], DrakenType.INT64),
          vector_from_sequence([f"{rng.randrange(10**12):012d}-{i}" if i < R else "same"
                                for i in range(n)], DrakenType.VARCHAR)])
     big = 6 * 1024
@@ -367,7 +368,8 @@ def test_with_bounds_and_stream_accept_the_option():
     m = _morsel(6 * R)
     data, bounds = rp.write_parquet_with_bounds(m, compression="none", max_rows_per_row_group=R,
                                                 narrow_chunk_bytes=T)
-    assert bounds[0] == (0, 6 * R - 1)
+    a = m.to_arrow().column("a").to_pylist()
+    assert bounds[0] == (min(a), max(a))
     assert _classes(data)["lo"] and not _classes(data)["a"]
     chunks = []
     n = rp.write_parquet_stream((m.slice(lo, R) for lo in range(0, 6 * R, R)), chunks.append,

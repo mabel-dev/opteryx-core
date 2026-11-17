@@ -970,7 +970,9 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
     bloom_filters: True (all equality-friendly columns), False, or an iterable
         of column names. Split-block bloom filters; floats/bools are excluded.
     dictionary: True (default) dictionary-encodes eligible columns; False
-        forces PLAIN everywhere.
+        disables dictionary encoding. A chunk that is not dictionary-encoded is
+        written DELTA_BINARY_PACKED when its parquet physical type is
+        INT32/INT64 (array leaves excepted), PLAIN otherwise.
     max_rows_per_row_group: maximum rows per row group (default 2^16 = 65536,
         the engine's measured best morsel size). Pass 0 to write a single row
         group regardless of size.

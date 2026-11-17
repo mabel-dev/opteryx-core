@@ -46,6 +46,7 @@ PAGE_DICTIONARY = 2
 PAGE_DATA = 0
 ENC_PLAIN = 0
 ENC_RLE_DICTIONARY = 8
+ENC_DELTA_BINARY_PACKED = 5   # the writer's encoding for non-dictionary INT32/INT64 chunks
 
 
 def _footer(buf: bytes):
@@ -196,13 +197,13 @@ def test_encoding_stats_state_every_page():
     assert wide.dictionary_page_offset is None
     pages = _data_pages(buf, fmd, "wide")
     assert pages > 1
-    assert [(s.page_type, s.encoding, s.count) for s in wide.encoding_stats] == [(PAGE_DATA, ENC_PLAIN, pages)]
+    assert [(s.page_type, s.encoding, s.count) for s in wide.encoding_stats] == [(PAGE_DATA, ENC_DELTA_BINARY_PACKED, pages)]
 
 
 def test_single_page_chunk_states_one_data_page():
     buf = write_parquet(_morsel(i=("INT64", list(range(100)))), dictionary=False, bloom_filters=False)
     meta = _chunk(_footer(buf), "i").meta_data
-    assert [(s.page_type, s.encoding, s.count) for s in meta.encoding_stats] == [(PAGE_DATA, ENC_PLAIN, 1)]
+    assert [(s.page_type, s.encoding, s.count) for s in meta.encoding_stats] == [(PAGE_DATA, ENC_DELTA_BINARY_PACKED, 1)]
 
 
 # ---- size_statistics ------------------------------------------------------------------------------

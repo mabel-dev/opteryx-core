@@ -211,7 +211,10 @@ def write_parquet(Morsel morsel not None, str compression="zstd",
         (VARCHAR/NVARCHAR/VARBINARY/VARIANT, INT8/16/32/64, FLOAT32/64, DATE32,
         TIMESTAMP64). A column arriving dict/constant-shaped keeps its existing
         dictionary (zero re-hash); a low-cardinality dense column is
-        auto-dictionaried; otherwise PLAIN. False forces PLAIN everywhere.
+        auto-dictionaried; otherwise not dictionary-encoded. False disables
+        dictionary encoding. A chunk that is not dictionary-encoded is written
+        DELTA_BINARY_PACKED when its parquet physical type is INT32/INT64
+        (array leaves excepted), PLAIN otherwise.
     max_rows_per_row_group: maximum rows per row group (default 65 536, the
         engine's measured best morsel size). Pass 0 to write a single row
         group regardless of size. Array columns split the same as scalar
