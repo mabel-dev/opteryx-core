@@ -33,6 +33,7 @@
 #include "_parquet_writer.hpp"
 #include "decode.hpp"
 #include "decode_page.hpp"
+#include "decode_primitives.hpp"
 #include "metadata.hpp"
 #include "thrift.hpp"
 
@@ -329,12 +330,17 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
 
   TInput in{src + cs.data_page_offset, src + src_len};
   PageHeader ph = ParsePageHeader(in);
-  if (ph.page_type != PAGE_DATA || ph.is_v2 || ph.encoding != ENC_PLAIN ||
-      ph.num_values != 1)
+  // The writer DELTA-encodes every non-dictionary INT32/INT64 chunk, so an int
+  // donor arrives DELTA_BINARY_PACKED; everything else arrives PLAIN.
+  const bool is_int = cc.shape.type == PT_INT32 || cc.shape.type == PT_INT64;
+  const bool is_delta = ph.encoding == ENC_DELTA_BINARY_PACKED;
+  if (ph.page_type != PAGE_DATA || ph.is_v2 || ph.num_values != 1 ||
+      !(ph.encoding == ENC_PLAIN || (is_delta && is_int)))
     throw std::runtime_error(
-        "parquet patch: donor must hold a single PLAIN v1 data page");
+        "parquet patch: donor must hold a single v1 data page, PLAIN (or "
+        "DELTA_BINARY_PACKED for INT32/INT64)");
 
-  // body = [4-byte LE def-rle length][def rle][PLAIN value]
+  // body = [4-byte LE def-rle length][def rle][PLAIN value | DELTA stream]
   const uint8_t *body = in.p;
   if ((size_t)(in.end - body) < (size_t)ph.compressed_page_size)
     throw std::runtime_error("parquet patch: donor data page runs past the end of the file");
@@ -352,6 +358,33 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
     if (avail < n)
       throw std::runtime_error("parquet patch: donor value is truncated");
   };
+
+  if (is_delta) {
+    // DELTA header: <block size><miniblocks per block><total count><zigzag first
+    // value>. A one-value stream's value IS the first value; no block follows.
+    const uint8_t *p = val;
+    auto varint_ok = [&](const uint8_t *start) {
+      if (p == start || (p[-1] & 0x80))
+        throw std::runtime_error("parquet patch: donor DELTA header is truncated");
+    };
+    const uint8_t *s = p;
+    ReadUnsignedVarint(p, body_end);  // block size
+    varint_ok(s);
+    s = p;
+    ReadUnsignedVarint(p, body_end);  // miniblocks per block
+    varint_ok(s);
+    s = p;
+    const uint64_t count = ReadUnsignedVarint(p, body_end);
+    varint_ok(s);
+    if (count != 1)
+      throw std::runtime_error("parquet patch: donor DELTA stream must hold exactly one value");
+    s = p;
+    const int64_t first = ReadZigZagVarint(p, body_end);
+    varint_ok(s);
+    if (cc.shape.type == PT_INT32) cc.v_i32 = (int32_t)first;
+    else cc.v_i64 = first;
+    return cc;
+  }
 
   switch (cc.shape.type) {
   case PT_INT32:

@@ -1386,11 +1386,14 @@ def build_column_donor(column_name: str, column_type: "ColumnType", value: objec
     Args:
         column_name: Name the new column will carry
         column_type: Declared type of the new column
-        value: The fill value for existing rows, or None for NULL
+        value: The fill value for existing rows, or None for NULL. A temporal
+            arrives in a literal's native form: DATE as int days, TIMESTAMP and
+            TIME as int microseconds.
 
     Returns:
         The donor parquet file's bytes.
     """
+    import datetime
     from decimal import Decimal
 
     import rugo.parquet as _rugo_parquet
@@ -1422,16 +1425,26 @@ def build_column_donor(column_name: str, column_type: "ColumnType", value: objec
         )
         vector = builder(values, logical.precision, logical.scale)
     elif logical is not None and logical.kind == LogicalKind.TIMESTAMP:
+        if value is not None:
+            values = [datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=value)]
         vector = _draken.vector_timestamp_from_sequence(
             values, _UNIT_TO_SQL[logical.unit], logical.offset_minutes
         )
     elif logical is not None and logical.kind == LogicalKind.TIME:
+        if value is not None:
+            values = [(datetime.datetime.min + datetime.timedelta(microseconds=value)).time()]
         builder = (
             _draken.vector_time32_from_sequence
             if physical == _draken.DrakenType.TIME32
             else _draken.vector_time64_from_sequence
         )
         vector = builder(values, _UNIT_TO_SQL[logical.unit])
+    elif physical == _draken.DrakenType.DATE32:
+        from opteryx.types.timestamps._datetime_conversion import int64_days_to_date
+
+        vector = vector_from_sequence(
+            [None if value is None else int64_days_to_date(value)], dtype=physical
+        )
     else:
         # Everything else is fully described by its physical type. IPV4 rides a
         # plain UINT32 here on purpose: parquet has no notion of it, and the

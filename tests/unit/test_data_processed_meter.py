@@ -16,7 +16,6 @@ ruling these tests pin.
 """
 
 import os
-import platform
 import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
@@ -24,6 +23,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from opteryx.compiled.structures.memory_pool import flush_chunk_cache
 from opteryx.managers.billing import BillingEventType
 
 
@@ -35,12 +35,6 @@ def _run(sql: str):
     return session._telemetry
 
 
-@pytest.mark.xfail(
-    platform.machine().lower() in ("x86_64", "amd64"),
-    strict=True,
-    reason="Known failing on x86 Linux: a local parquet scan reports io_bytes_fetched == 0 "
-    "(CI run 2026-10-25), so the meter has nothing to compare against. Not yet diagnosed.",
-)
 def test_meter_is_not_the_compressed_fetch_volume():
     """The regression this whole change exists for.
 
@@ -48,6 +42,9 @@ def test_meter_is_not_the_compressed_fetch_volume():
     come out ABOVE the fetched one. Equality would mean the meter had silently
     gone back to reporting `bytes_fetched`.
     """
+    # A chunk cache hit fetches nothing, so an earlier test's read of this file
+    # would leave nothing to compare against - read it cold.
+    flush_chunk_cache()
     telemetry = _run("SELECT * FROM testdata.astronauts")
 
     logical = telemetry.billing_bytes

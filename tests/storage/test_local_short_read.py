@@ -34,7 +34,10 @@ def test_short_local_read_raises_not_aborts(tmp_path, monkeypatch):
         f.write(data[:-200_000] + footer)
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(Exception, match="Short read"):
+    # The chunk straddling the cut reads the appended footer bytes and fails to
+    # decompress; the chunks past it read short. Which column's worker throws first
+    # is timing, and either one proves the fan-out raises instead of aborting.
+    with pytest.raises(Exception, match="Short read|Snappy decompression failed"):
         for _ in opteryx.session().execute_to_morsels("SELECT * FROM short ORDER BY EventTime LIMIT 10"):
             pass
     shutil.rmtree(tmp_path / "short")

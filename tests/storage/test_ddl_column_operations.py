@@ -26,6 +26,7 @@ expected to treat them differently. When that insert gap closes they should move
 straight into `_DATA_TYPES` and need no new test code.
 """
 
+import datetime
 import json
 
 import pyarrow.parquet as pq
@@ -364,6 +365,14 @@ def test_add_column_backfills_null_for_existing_rows(tmp_path):
         ("VARCHAR", "'backfilled'", "backfilled"),
         ("BOOL", "TRUE", True),
         ("INT16", "7", 7),
+        ("INT64", "-7", -7),
+        ("INT32", "-2147483648", -2147483648),
+        ("DATE", "CAST('2024-01-02' AS DATE)", datetime.date(2024, 1, 2)),
+        (
+            "TIMESTAMP",
+            "CAST('2024-01-02 03:04:05.123456' AS TIMESTAMP)",
+            datetime.datetime(2024, 1, 2, 3, 4, 5, 123456),
+        ),
     ],
 )
 def test_add_column_with_literal_default_backfills(tmp_path, sql_type, literal, expected):
@@ -380,6 +389,41 @@ def test_add_column_with_literal_default_backfills(tmp_path, sql_type, literal, 
 
     rows = sorted(_rows(session, "SELECT * FROM ws.events"), key=lambda r: r["id"])
     assert [r["extra"] for r in rows] == [expected, expected]
+
+
+def test_add_column_time_default_matches_an_inserted_time(tmp_path):
+    """A TIME default reads back exactly as the same value INSERTed into a TIME
+    column does - the donor is written by the same path as any other write."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, inserted TIME)")
+    session_exec(
+        session, "INSERT INTO ws.events VALUES (1, CAST('03:04:05.123456' AS TIME))"
+    )
+
+    session_exec(
+        session,
+        "ALTER TABLE ws.events ADD COLUMN extra TIME DEFAULT CAST('03:04:05.123456' AS TIME)",
+    )
+
+    (row,) = _rows(session, "SELECT * FROM ws.events")
+    assert row["extra"] == row["inserted"]
+
+
+@pytest.mark.parametrize(
+    "sql_type,literal",
+    [("DATE", "'2024-01-02'"), ("DATE", "19724"), ("TIMESTAMP", "'2024-01-02 03:04:05'"), ("TIME", "42")],
+)
+def test_add_column_temporal_default_of_another_type_rejected(tmp_path, sql_type, literal):
+    """A temporal column takes only a default of its own type - an INTEGER 19724
+    must not be read as a day count - exactly as INSERT refuses a mismatch."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64)")
+    session_exec(session, "INSERT INTO ws.events VALUES (1)")
+
+    with pytest.raises(UnsupportedSyntaxError, match="CAST"):
+        session_exec(
+            session, f"ALTER TABLE ws.events ADD COLUMN extra {sql_type} DEFAULT {literal}"
+        )
 
 
 def test_add_column_non_literal_default_rejected(tmp_path):

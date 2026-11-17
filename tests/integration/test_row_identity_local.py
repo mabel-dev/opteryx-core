@@ -14,6 +14,7 @@ Each is checked against the rows the statement must leave, computed here.
 """
 
 import os
+import random
 import sys
 
 import pytest
@@ -36,8 +37,11 @@ ROWS = 12_000
 
 def _seed():
     # High-entropy payloads keep the compressed chunks large against their page index,
-    # which is what the reader's page-pruning cost gate weighs.
-    return [(i, (i * 2654435761) % 2147483647, (i * 40503 + 7) % 1000003) for i in range(ROWS)]
+    # which is what the reader's page-pruning cost gate weighs. They must be random, not
+    # a linear sequence mod p: DELTA_BINARY_PACKED packs those (two distinct deltas) to
+    # almost nothing and the gate then correctly declines the index.
+    rng = random.Random(20261117)
+    return [(i, rng.getrandbits(31), rng.getrandbits(20)) for i in range(ROWS)]
 
 
 @pytest.fixture

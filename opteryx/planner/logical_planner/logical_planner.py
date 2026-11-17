@@ -4853,6 +4853,21 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
                         "values, not expressions - a default that isn't a constant would "
                         "need evaluating once per existing row, which this statement never does."
                     )
+                # A temporal literal holds its physical int (days / us), the same
+                # value an INTEGER literal holds - so the donor can only read it
+                # right if the literal IS that temporal type, as INSERT requires.
+                temporal = (LogicalCategory.DATE, LogicalCategory.TIMESTAMP, LogicalCategory.TIME)
+                default_category = default_expr.type.category
+                if (
+                    column_type.category in temporal
+                    and default_category != LogicalCategory.NULL
+                    and default_category != column_type.category
+                ):
+                    raise UnsupportedSyntaxError(
+                        f"**ALTER TABLE ... ADD COLUMN** DEFAULT for '{column_name}' is "
+                        f"{default_expr.type}, which is not compatible with {column_type}. "
+                        f"Use CAST(... AS {column_type}) instead."
+                    )
                 default_value = default_expr.value
             else:
                 raise UnsupportedSyntaxError(
