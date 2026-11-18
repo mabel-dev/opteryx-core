@@ -769,6 +769,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               int64_t ndv_estimate)
         void set_groupby_topk(size_t p, cppvector[SortKeySpec] keys, size_t k,
                               bint ties) except +
+        void set_groupby_having(size_t p, void* instrs, int count, cppvector[int] col_idx,
+                                cppvector[void*] lit_dv, ExprFilterFn fn,
+                                cppvector[int] const_col_idx,
+                                cppvector[void*] const_scalar_dv) except +
         void set_groupby_seed(size_t p, GroupSeed seed) except +
         void set_groupby_key_ranges(size_t p, cppvector[int64_t] lo, cppvector[int64_t] hi,
                                     cppvector[uint8_t] known, int64_t rows) except +
@@ -2420,12 +2424,16 @@ cdef class NativePlan:
         if _root and "://" not in _root:
             self._e.set_spill_root(_root.encode("utf-8"))
         self._e.set_sort_run_bytes(_config.SORT_RUN_BYTES)
-        # Unset: an eighth of the container (cgroup limit when set, else physical RAM).
+        # Unset: the container's headroom past 11 GiB, halved, floored at a sixteenth
+        # (container = cgroup limit when set, else physical RAM). See config.GROUPBY_SPILL_BYTES.
+        # shortcut: 11 GiB / 2 fitted to TPC-H SF100 Q18 on the 14.5 GiB fleet node (4 GiB
+        # cache reserve); refit, or trigger on charged memory, if node shapes change.
         if _config.GROUPBY_SPILL_BYTES is None:
             from opteryx.compiled.platform import cgroup_memory_limit_bytes
             from opteryx.compiled.platform import physical_memory_total_bytes
+            container = cgroup_memory_limit_bytes() or physical_memory_total_bytes()
             self._e.set_groupby_spill_bytes(
-                (cgroup_memory_limit_bytes() or physical_memory_total_bytes()) // 8)
+                max((container - (11 << 30)) // 2, container // 16))
         else:
             self._e.set_groupby_spill_bytes(_config.GROUPBY_SPILL_BYTES)
 
@@ -3091,6 +3099,23 @@ cdef class NativePlan:
         keys; ``ties`` = the ORDER BY continues past them, so groups tied with the
         k-th are kept for the HeapSort above to order."""
         self._e.set_groupby_topk(p, _sort_spec_from_list(keys), k, ties)
+
+    def set_groupby_having(self, size_t p, CompiledBytecode bc, list layout):
+        """Run HAVING inside the GROUP BY sink on pipeline ``p``, over its output
+        ``layout`` (emitted keys + aggregates), before the output buffer: groups it
+        rejects are never buffered or spilled. Same program contract as
+        ``add_expr_filter``."""
+        if not bytecode_is_c_native_predicate(bc):
+            raise ValueError("set_groupby_having requires a c-native "
+                             "bool-final program — the compiler must reject earlier")
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        cdef cppvector[int] no_const_col_idx
+        cdef cppvector[void*] no_const_scalar_dv
+        _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+        self.held.append(bc)
+        self._e.set_groupby_having(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
+                                   _expr_filter_tramp, no_const_col_idx, no_const_scalar_dv)
 
     def set_distinct_sink(self, size_t p, list on_idx, size_t buf, int64_t ndv_estimate):
         """``on_idx`` = dedup key column indices; empty list = every column.
