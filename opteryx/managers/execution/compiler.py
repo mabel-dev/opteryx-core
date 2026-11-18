@@ -2797,7 +2797,9 @@ class _Compiler:
             self._groupby_sinks[node.identity] = (
                 p, [spec[0] for spec in specs], [spec[1] for spec in specs],
                 having is None and not set_masks, frozenset(out_layout))
-            self._apply_having(p2, having, out_layout)
+            # Without ROLLUP the sink's output IS out_layout, so HAVING can run inside
+            # its finalize: rejected groups never reach (or spill from) the buffer.
+            self._apply_having(p2, having, out_layout, sink_pipeline=None if set_masks else p)
             return p2, out_layout
 
         if kind == "DistinctNode":
@@ -3263,12 +3265,17 @@ class _Compiler:
         emitted = set(_live_positions(group_cols, live))
         return [position in emitted for position in range(len(group_cols))]
 
-    def _apply_having(self, p, having, layout):
+    def _apply_having(self, p, having, layout, sink_pipeline=None):
         """HAVING rides ON the grouped aggregate step (`having_condition` — there
         is NO separate FilterNode in the plan). Silently ignoring it returned
         UNFILTERED groups — a wrong answer. Lower it as a post-aggregate c-native
         filter over the aggregate's output layout (group keys + agg result
-        columns)."""
+        columns).
+
+        `sink_pipeline` names a GROUP BY sink whose output layout is `layout`: the
+        filter then runs inside its finalize, before the output buffer. A HAVING that
+        needs a computed ARRAY operand hoisted into its own column cannot (the hoist is
+        an operator, and the sink runs none), so it filters after the buffer instead."""
         if having is None:
             return
         # Same computed-ARRAY-operand hoist as the FilterNode branch (see
@@ -3280,6 +3287,9 @@ class _Compiler:
         # The group keys the aggregate emitted are columns now; read them as columns.
         having = self._bind_precomputed_subexpressions(having, hoisted_layout)
         bc = self._lower_expression(having, "a HAVING predicate")
+        if sink_pipeline is not None and hoisted_layout == layout:
+            self.nplan.set_groupby_having(sink_pipeline, bc, list(layout))
+            return
         self.nplan.add_expr_filter(p, bc, hoisted_layout)
         if hoisted_layout != layout:
             indices = [hoisted_layout.index(identity) for identity in layout]
@@ -5911,7 +5921,7 @@ class _Compiler:
         self._groupby_sinks[node.identity] = (
             ep, [spec[0] for spec in specs], [spec[1] for spec in specs],
             having is None, frozenset(out_layout))
-        self._apply_having(p2, having, out_layout)
+        self._apply_having(p2, having, out_layout, sink_pipeline=ep)
         return p2, out_layout
 
     @staticmethod

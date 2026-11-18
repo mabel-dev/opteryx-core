@@ -1752,6 +1752,27 @@ public:
         }
         it->second->set_key_ranges(std::move(lo), std::move(hi), std::move(known), rows);
     }
+    // HAVING inside the GroupBySink that pipeline `p` sinks into: the predicate runs over
+    // finalize's output (emitted keys + aggregates, the sink's output layout) before the
+    // output buffer, so rejected groups are never buffered or spilled. Plan-time only.
+    void set_groupby_having(size_t p, void* instrs, int count, std::vector<int> col_idx,
+                            std::vector<void*> lit_dv, ExprFilterFn fn,
+                            std::vector<int> const_col_idx,
+                            std::vector<void*> const_scalar_dv) {
+        auto it = groupby_sinks_.find(p);
+        if (it == groupby_sinks_.end() || pipelines[p]->sink.get() != it->second) {
+            throw std::runtime_error(
+                "set_groupby_having: pipeline does not sink into a GROUP BY");
+        }
+        ExprProgram prog;
+        prog.instrs = instrs;
+        prog.count = count;
+        prog.col_idx = std::move(col_idx);
+        prog.lit_dv = std::move(lit_dv);
+        prog.const_col_idx = std::move(const_col_idx);
+        prog.const_scalar_dv = std::move(const_scalar_dv);
+        it->second->having = std::make_unique<ExprFilterOperator>(std::move(prog), fn);
+    }
     // GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md):
     // arm the GroupBySink that pipeline `p` sinks into. `keys` index the sink's
     // aggregate specs (col_idx = spec position), in ORDER BY order; `ties` = the

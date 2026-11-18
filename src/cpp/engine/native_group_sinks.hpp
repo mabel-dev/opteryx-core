@@ -4659,6 +4659,11 @@ struct GroupBySink : Sink {
     SpillEnv* spill_env = nullptr;
     size_t spill_bytes = 0;
 
+    // HAVING (set by the engine at plan time), run over finalize's output before the
+    // output buffer: a group it rejects is never buffered, so never spilled. nullptr =
+    // none here (the compiler then filters after the buffer, or there is no HAVING).
+    std::unique_ptr<Operator> having;
+
     // `kemit` has one entry per key (invariant enforced at the binding, which is the
     // only construction site and can raise) — false = hash the key, never store it.
     GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
@@ -5222,6 +5227,20 @@ struct GroupBySink : Sink {
             l.spill_pile[p].push_back(std::move(data));
         }
         if (l.spill_pile_bytes >= spill_unit_bytes(g)) spill_windows(g, l, l.spill_pile, err);
+    }
+
+    // HAVING over one worker's finalize output, in place: rejected rows dropped, empty
+    // morsels removed. False = the predicate failed; the error is latched in `err`.
+    bool apply_having_(std::vector<MorselPtr>& ms, OperatorState* st, ErrCtx& err) {
+        if (!having) return true;
+        size_t kept = 0;
+        for (MorselPtr& m : ms) {
+            MorselPtr out_m;
+            if (having->execute(m, *st, out_m, err) == OpResult::EMIT) ms[kept++] = std::move(out_m);
+            if (err.code != 0) return false;
+        }
+        ms.resize(kept);
+        return true;
     }
 
     size_t spill_unit_bytes(const GroupByGlobal& g) const {
@@ -7607,6 +7626,7 @@ struct GroupBySink : Sink {
         auto worker = [&](unsigned tid) {
             std::vector<MorselPtr> local_out;
             std::vector<uint32_t> sel;
+            std::unique_ptr<OperatorState> hst = having ? having->make_state() : nullptr;
             for (;;) {
                 const size_t c = next.fetch_add(1);
                 if (c >= nchunks) break;
@@ -7618,6 +7638,7 @@ struct GroupBySink : Sink {
                 finish_and_emit(g, out_part, nullptr, local_out, errs[tid]);
                 if (errs[tid].code != 0) break;
             }
+            if (!apply_having_(local_out, hst.get(), errs[tid])) return;
             if (!local_out.empty()) {
                 std::lock_guard<std::mutex> lk(out_mtx);
                 for (MorselPtr& m : local_out) {
@@ -7908,12 +7929,14 @@ struct GroupBySink : Sink {
         std::vector<ErrCtx> errs(nt);
         auto worker = [&](unsigned tid) {
             std::vector<MorselPtr> local_out;
+            std::unique_ptr<OperatorState> hst = having ? having->make_state() : nullptr;
             for (;;) {
                 size_t p = next_part.fetch_add(1);
                 if (p >= kGBParts) break;
                 if (!load_spilled(g, p, spill_claims[p], spill_masks, errs[tid])) break;
                 merge_and_emit_partition(g, p, local_out, errs[tid]);
                 if (errs[tid].code != 0) break;
+                if (!apply_having_(local_out, hst.get(), errs[tid])) break;
                 // Handed to the output buffer per partition, never held to the end of
                 // the merge: the buffer is what bounds (and spills) the output.
                 for (MorselPtr& m : local_out) {
