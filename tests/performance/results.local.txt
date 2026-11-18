@@ -6,6 +6,7 @@ make clickbench-rugo-extended              7401ms    (27-OCT) [0.40x]
 make clickbench-json                     427180ms    (12-OCT) [3-runs only] [396,240ms 07-NOV, 1 fail]
 make clickbench-avro                     140630ms    (12-OCT) [3-runs only]
 make clickbench-orc                        6486ms    (29-OCT)
+make clickbench-iceberg
 make tpch-sf1                             265.4ms    (07-NOV) [0.76x]
 make tpch-sf10                           1440.1ms    (07-NOV) [0.39x]
 make tpch-sf100                         18973.5ms    (07-NOV) [0.79x]

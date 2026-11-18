@@ -25,7 +25,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <execinfo.h>
+#if !defined(__EMSCRIPTEN__)
+#include <execinfo.h>        // backtrace for the opt-in alloc trace; wasm has none
+#endif
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -107,9 +109,13 @@ static inline void draken_alloc_trace(const char* what, void* p, size_t req) {
     if (asize < tc->min_sz || asize > tc->max_sz) return;
     fprintf(stderr, "%s TRACE: ptr=%p req=%zu size=%zu%s\n", what, p, req, asize,
             draken_slab_owns(p) ? " tier=slab" : "");
+#if defined(__EMSCRIPTEN__)
+    fprintf(stderr, "(no backtrace on wasm)\n");
+#else
     void* bt[32];
     int bt_sz = backtrace(bt, 32);
     backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
+#endif
     fprintf(stderr, "-- end %s TRACE --\n", what);
     fflush(stderr);
 }

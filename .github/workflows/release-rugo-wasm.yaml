@@ -1,0 +1,111 @@
+name: Release rugo wasm to rugo.dev
+
+# rugo's WebAssembly footer reader (rugo/wasm), hosted on rugo.dev (GitHub Pages,
+# mabel-dev/rugo.dev, served from docs/). Same release decision as the PyPI
+# wheels (`rugo-*` / `all-*` tags) but a SEPARATE workflow, so a wasm failure
+# never blocks the wheel publish and vice versa.
+#
+# workflow_dispatch builds and tests only — it never deploys. Deploy runs on a
+# tag push alone.
+#
+# Published layout (keeps rugo_footer.mjs's `./dist/rugo.mjs` import valid):
+#   https://rugo.dev/wasm/rugo_footer.mjs   JS API (blobSource / httpSource / readFooter)
+#   https://rugo.dev/wasm/dist/rugo.mjs     emscripten glue
+#   https://rugo.dev/wasm/dist/rugo.wasm
+#   https://rugo.dev/wasm/VERSION           rugo/__version__.py at build time
+on:
+  push:
+    tags:
+      - 'rugo-*'
+      - 'all-*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build + test wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      # Pinned to the toolchain the spike was measured on (emcc 6.0.12).
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 6.0.12
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # build.sh prints brotli sizes; python3 (preinstalled) reads build_common.py.
+      - name: Install brotli
+        run: sudo apt-get update && sudo apt-get install -y brotli
+
+      - name: Build
+        run: rugo/wasm/build.sh
+
+      - name: Test footer reader (Blob.slice + HTTP Range, vs native figures)
+        run: node rugo/wasm/test_footer.mjs
+
+      - name: Test codec probe (gzip/zstd round-trip, brotli refused)
+        run: node rugo/wasm/test_codecs.mjs
+
+      - name: Stage site files
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' rugo/__version__.py)
+          if [ -z "${VERSION}" ]; then
+            echo "ERROR: could not read __version__ from rugo/__version__.py" >&2
+            exit 1
+          fi
+          mkdir -p site/dist
+          cp rugo/wasm/rugo_footer.mjs site/
+          cp rugo/wasm/dist/rugo.mjs rugo/wasm/dist/rugo.wasm site/dist/
+          echo "${VERSION}" > site/VERSION
+          ls -la site site/dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rugo-wasm
+          path: site/
+
+  # The default GITHUB_TOKEN cannot write to another repo; RUGO_DEV_RELEASE_TOKEN
+  # (contents: write on mabel-dev/rugo.dev) is the credential release-rugo.yaml
+  # already uses for the rugo.dev release notes.
+  deploy:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: rugo-wasm
+          path: site
+
+      - name: Check out mabel-dev/rugo.dev
+        uses: actions/checkout@v4.1.7
+        with:
+          repository: mabel-dev/rugo.dev
+          token: ${{ secrets.RUGO_DEV_RELEASE_TOKEN }}
+          path: rugo.dev
+
+      - name: Publish to docs/wasm
+        working-directory: rugo.dev
+        run: |
+          set -euo pipefail
+          rm -rf docs/wasm
+          mkdir -p docs/wasm
+          cp -R ../site/. docs/wasm/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/wasm
+          if git diff --cached --quiet; then
+            echo "docs/wasm unchanged — nothing to publish"
+            exit 0
+          fi
+          git commit -m "rugo wasm $(cat docs/wasm/VERSION) (${GITHUB_REF_NAME})"
+          git push
