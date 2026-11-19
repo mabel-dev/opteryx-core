@@ -451,6 +451,9 @@ static inline uint64_t draken_vector_projected_arena_bytes(const DrakenVector* v
 // as a layout shift, so every shared field offset and a few tag values are
 // pinned here.
 // =============================================================================
+// Two targets, each pinned: LP64 (every native build) and wasm32 (rugo/wasm,
+// 4-byte pointers; no Cython consumers). Any other pointer width is refused.
+#if UINTPTR_MAX == UINT64_MAX
 DRAKEN_STATIC_ASSERT(sizeof(DrakenVector) == 40, "DrakenVector must be 40 bytes on LP64");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, data)        == 0,  "DrakenVector.data offset drift");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, selection)   == 8,  "DrakenVector.selection offset drift");
@@ -459,6 +462,18 @@ DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, length)      == 20, "DrakenVector.le
 DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, validity)    == 24, "DrakenVector.validity offset drift");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, type)        == 32, "DrakenVector.type offset drift");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, flags)       == 36, "DrakenVector.flags must land in tail padding at offset 36");
+#elif defined(__EMSCRIPTEN__) && UINTPTR_MAX == UINT32_MAX
+DRAKEN_STATIC_ASSERT(sizeof(DrakenVector) == 28, "DrakenVector must be 28 bytes on wasm32");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, data)        == 0,  "DrakenVector.data offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, selection)   == 4,  "DrakenVector.selection offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, data_length) == 8,  "DrakenVector.data_length offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, length)      == 12, "DrakenVector.length offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, validity)    == 16, "DrakenVector.validity offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, type)        == 20, "DrakenVector.type offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, flags)       == 24, "DrakenVector.flags offset drift (wasm32)");
+#else
+#error "draken: DrakenVector layout is pinned for LP64 and wasm32 only"
+#endif
 
 // Pin the DrakenType underlying integer width and representative tag values.
 // A renumber silently breaks the runtime dispatch key for every cimport site.
@@ -466,10 +481,17 @@ DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, flags)       == 36, "DrakenVector.fl
 // owns_buffers, so adding it did NOT grow the struct. Pinned so a future field
 // has to be a deliberate decision (and so this one cannot silently drift into
 // the DrakenType slot on a platform that packs differently).
+#if UINTPTR_MAX == UINT64_MAX
 DRAKEN_STATIC_ASSERT(sizeof(DrakenStringArena) == 56, "DrakenStringArena size drift");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, owns_buffers)    == 48, "DrakenStringArena.owns_buffers offset drift");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, payloads_elided) == 49, "DrakenStringArena.payloads_elided must land in the padding after owns_buffers");
 DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, type)            == 52, "DrakenStringArena.type offset drift");
+#else  // wasm32 (the #error above refuses anything else)
+DRAKEN_STATIC_ASSERT(sizeof(DrakenStringArena) == 32, "DrakenStringArena size drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, owns_buffers)    == 24, "DrakenStringArena.owns_buffers offset drift (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, payloads_elided) == 25, "DrakenStringArena.payloads_elided must land in the padding after owns_buffers (wasm32)");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenStringArena, type)            == 28, "DrakenStringArena.type offset drift (wasm32)");
+#endif
 
 DRAKEN_STATIC_ASSERT(sizeof(DrakenType) == 4, "DrakenType underlying type must be 4 bytes");
 DRAKEN_STATIC_ASSERT(DRAKEN_INT64  == 4,   "DrakenType tag renumbered: DRAKEN_INT64");

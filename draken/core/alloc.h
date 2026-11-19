@@ -33,7 +33,7 @@
 #if defined(__APPLE__)
 #include <malloc/malloc.h>   // malloc_size
 #define DRAKEN_USABLE_SIZE(p) malloc_size(p)
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__EMSCRIPTEN__)
 #include <malloc.h>          // malloc_usable_size
 #define DRAKEN_USABLE_SIZE(p) malloc_usable_size(p)
 #else
@@ -43,6 +43,14 @@
 #include "mem_account.h"
 #include "slab_pool.h"
 
+// wasm32 has no address space for the pool's reservation (64+ GiB): there the
+// system allocator is the only tier and the slab branches below compile out.
+#if defined(__EMSCRIPTEN__)
+#define DRAKEN_HAS_SLAB 0
+#else
+#define DRAKEN_HAS_SLAB 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,12 +58,20 @@ extern "C" {
 // 1 when p was handed out by the slab pool. Two loads and one compare; false
 // for NULL and before the pool exists (base == end == 0).
 static inline int draken_slab_owns(const void* p) {
+#if DRAKEN_HAS_SLAB
     return ((uintptr_t)p - draken_slab_base) < (draken_slab_end - draken_slab_base);
+#else
+    (void)p;
+    return 0;
+#endif
 }
 
 // Usable size of any draken-allocated block, whichever tier holds it.
 static inline size_t draken_usable_size(const void* p) {
-    return draken_slab_owns(p) ? draken_slab_usable_size(p) : DRAKEN_USABLE_SIZE((void*)p);
+#if DRAKEN_HAS_SLAB
+    if (draken_slab_owns(p)) return draken_slab_usable_size(p);
+#endif
+    return DRAKEN_USABLE_SIZE((void*)p);
 }
 
 // Process memory account (mem_account.h): system-tier blocks of at least
@@ -122,9 +138,12 @@ static inline void draken_alloc_trace(const char* what, void* p, size_t req) {
 
 static inline void* draken_malloc(size_t size) {
     void* p;
+#if DRAKEN_HAS_SLAB
     if (size >= DRAKEN_SLAB_MIN) {
         p = draken_slab_alloc(size);
-    } else {
+    } else
+#endif
+    {
         p = malloc(size);
         draken_mem_note_alloc(p);
     }
@@ -143,9 +162,11 @@ static inline void* draken_calloc(size_t count, size_t size) {
     const size_t total = count * size;
     if (size != 0 && total / size != count) {
         p = nullptr;   // overflow, as calloc would refuse
+#if DRAKEN_HAS_SLAB
     } else if (total >= DRAKEN_SLAB_MIN) {
         p = draken_slab_alloc(total);
         if (p != nullptr) memset(p, 0, total);
+#endif
     } else {
         p = calloc(count, size);
         draken_mem_note_alloc(p);
@@ -164,6 +185,7 @@ static inline void* draken_realloc(void* ptr, size_t size) {
     void* p;
     if (ptr == nullptr) {
         p = draken_malloc(size);
+#if DRAKEN_HAS_SLAB
     } else if (draken_slab_owns(ptr)) {
         if (size >= DRAKEN_SLAB_MIN) {
             p = draken_slab_realloc(ptr, size);
@@ -183,6 +205,7 @@ static inline void* draken_realloc(void* ptr, size_t size) {
             draken_mem_note_free(ptr);
             free(ptr);
         }
+#endif
     } else {
         draken_mem_note_free(ptr);
         p = realloc(ptr, size);
@@ -196,12 +219,15 @@ static inline void* draken_realloc(void* ptr, size_t size) {
 
 static inline void* draken_aligned_malloc(size_t size, size_t alignment) {
     void* p = nullptr;
+#if DRAKEN_HAS_SLAB
     if (size >= DRAKEN_SLAB_MIN) {
         // Pool blocks are DRAKEN_SLAB_MIN-aligned (class blocks) or slot-aligned
         // (runs): an alignment up to the slot is met by a run, above it refused.
         if (alignment > DRAKEN_SLAB_SLOT) return nullptr;
         p = draken_slab_alloc(alignment > DRAKEN_SLAB_MIN && size < DRAKEN_SLAB_SLOT ? DRAKEN_SLAB_SLOT : size);
-    } else {
+    } else
+#endif
+    {
         // posix_memalign requires alignment to be a power of two and a multiple of
         // sizeof(void*); clamp small alignments up (over-alignment is harmless).
         if (alignment < sizeof(void*)) alignment = sizeof(void*);
@@ -221,10 +247,12 @@ static inline void draken_free(void* ptr) {
      * Config is resolved once at process start (see draken_trace_config).
      */
     draken_alloc_trace("DRAKEN_FREE", ptr, 0);
+#if DRAKEN_HAS_SLAB
     if (draken_slab_owns(ptr)) {
         draken_slab_free(ptr);
         return;
     }
+#endif
     draken_mem_note_free(ptr);
     free(ptr);
 }

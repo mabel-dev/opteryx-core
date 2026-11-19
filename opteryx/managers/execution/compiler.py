@@ -605,9 +605,6 @@ def _null_fill_type(sc):
         if not _element_chain(sc.column_type):
             return None
         return pt.value, _logical_tuple(sc.column_type)
-    if pt == DrakenType.VARIANT:
-        # VARIANT reads as VARCHAR (the `string_types` tag `_classify_scan_columns` sends).
-        return DrakenType.VARCHAR.value, None
     return pt.value, _logical_tuple(sc.column_type)
 
 
@@ -3599,11 +3596,9 @@ class _Compiler:
                 # / DK_POOL string). Carry the declared physical type so the native
                 # Source tags each vector byte-identically to the trampoline path.
                 # VARIANT is German-string storage holding JSON text (buffers.h), so
-                # it is a string column here; like the trampoline's `_string_type_for`
-                # it is tagged VARCHAR (the tag only selects the wrapper, the bytes
-                # are identical).
+                # it is a string column here, tagged VARIANT like every other.
                 kinds.append("varchar")
-                string_types.append(DrakenType.VARCHAR.value if pt == DrakenType.VARIANT else pt.value)
+                string_types.append(pt.value)
                 widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)

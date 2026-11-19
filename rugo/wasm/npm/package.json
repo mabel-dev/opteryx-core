@@ -1,0 +1,23 @@
+{
+  "name": "@opteryx/rugo",
+  "description": "Rugo's Parquet, ORC and Avro readers compiled to WebAssembly, for browser and Node. Parquet reads only the byte ranges it needs via Blob.slice or HTTP Range.",
+  "license": "Apache-2.0",
+  "homepage": "https://rugo.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mabel-dev/opteryx-core.git",
+    "directory": "rugo/wasm"
+  },
+  "keywords": ["parquet", "orc", "avro", "wasm", "webassembly", "metadata", "schema", "rugo", "opteryx"],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./rugo_footer.d.ts",
+      "default": "./rugo_footer.mjs"
+    }
+  },
+  "files": ["rugo_footer.mjs", "rugo_footer.d.ts", "dist/rugo.mjs", "dist/rugo.wasm"],
+  "engines": {
+    "node": ">=24"
+  }
+}

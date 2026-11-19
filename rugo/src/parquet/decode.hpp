@@ -349,7 +349,8 @@ static_assert(sizeof(DecodedColumn) ==
 // slice-assign in reset(), so this is not a correctness guard — it exists so a
 // new scalar's DEFAULT gets covered by the test (rle_last_code == -1 is the
 // reason that matters). LP64 layout, both targets.
-static_assert(sizeof(DecodedColumnMeta) == 104,
+// wasm32 (4-byte pointers) is exempt: the tripwire is pinned on the LP64 targets.
+static_assert(sizeof(void*) != 8 || sizeof(DecodedColumnMeta) == 104,
               "DecodedColumnMeta gained or lost a scalar: assert its default in "
               "decoded_column_reset_test.cpp.");
 

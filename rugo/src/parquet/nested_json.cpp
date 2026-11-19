@@ -7,6 +7,7 @@
 #include "interop/value_format.hpp"   // fmt_*, json_string, LogicalDesc units
 #include "ops/float_ops.h"            // fp_canon: the same -0.0 / NaN canon as the scan
 #include "base64/_base64.h"           // mabel bintob64 / b64_encoded_size
+#include "variant_binary.hpp"         // VARIANT values held as Variant binary
 
 namespace rugo {
 namespace nested {
@@ -18,7 +19,9 @@ using rugo_text::U_US;
 
 namespace {
 
-enum class NK : uint8_t { Scalar, Struct, List, Map, Repeated, Missing };
+// Variant / VValue / VObject / VList: a VARIANT group and the parts of its shredding
+// (parquet-format VariantShredding.md). See Builder::vvalue.
+enum class NK : uint8_t { Scalar, Struct, List, Map, Repeated, Missing, Variant, VValue, VObject, VList };
 enum class SK : uint8_t { Bool, Int, UInt, F32, F64, String, Binary, Date, Timestamp, Time, Decimal, Uuid };
 
 struct Node {
@@ -35,6 +38,10 @@ struct Node {
     int unit = U_US;
     int scale = 0;
     bool is_unsigned = false;
+    // VValue: its `value` leaf (plan leaf index; -1 = the group has none) and the def
+    // level at which that leaf is non-null. `children` holds its typed_value, if any.
+    int32_t value_leaf = -1;
+    int32_t value_def = 0;
 };
 
 [[noreturn]] void fail(const std::string& column, const std::string& what) {
@@ -171,6 +178,105 @@ struct Builder {
                      (lt.empty() ? "" : "' / '" + lt) + "'");
     }
 
+    // ── VARIANT (parquet-format VariantShredding.md) ────────────────────────────
+
+    // One {value, typed_value} pair: the VARIANT group itself, a shredded object's field, or a
+    // shredded array's element. `g` is the group holding the pair (present iff def >= gdef) and
+    // `base` the file position of its first leaf. The spec reads these columns BY NAME, so the
+    // plan takes `value` first and `typed_value` second whatever order the file holds them in.
+    Node vvalue(const SchemaElement& g, int32_t gdef, int32_t acc_rep, int32_t base) {
+        Node v;
+        v.kind = NK::VValue;
+        v.key = member_key(g.name);
+        v.def = gdef;
+        v.first_leaf = leaf_ctr;
+        const SchemaElement* value = nullptr;
+        const SchemaElement* typed = nullptr;
+        int32_t value_at = 0, typed_at = 0, at = base;
+        for (const SchemaElement& c : g.children) {
+            if (c.name == "value") { value = &c; value_at = at; }
+            else if (c.name == "typed_value") { typed = &c; typed_at = at; }
+            else if (!(c.name == "metadata" && g.logical_type == "variant"))
+                fail(column, "VARIANT group '" + g.full_name + "' has an unexpected field '" + c.name + "'");
+            at += count_leaves(c);
+        }
+        if (value == nullptr && typed == nullptr)
+            fail(column, "VARIANT group '" + g.full_name + "' has neither value nor typed_value");
+        if (value != nullptr) {
+            if (!value->children.empty() || value->physical_type != "byte_array" || value->repetition_type == 2)
+                fail(column, "'" + value->full_name + "' is not the binary a VARIANT value is held in");
+            v.value_leaf = leaf_ctr;
+            v.value_def = gdef + (value->repetition_type == 1 ? 1 : 0);
+            file_ctr = value_at;
+            take_leaf();
+        }
+        if (typed != nullptr) {
+            if (typed->repetition_type == 2)
+                fail(column, "'" + typed->full_name + "' is a repeated field, which a shredded VARIANT cannot hold");
+            Node t;
+            t.def = gdef + (typed->repetition_type == 1 ? 1 : 0);
+            t.first_leaf = leaf_ctr;
+            file_ctr = typed_at;
+            if (typed->children.empty()) {
+                scalar(*typed, t);
+                take_leaf();
+            } else if (typed->logical_type == "array") {
+                t.kind = NK::VList;
+                const SchemaElement* rp = typed->children.size() == 1 ? &typed->children[0] : nullptr;
+                if (rp == nullptr || rp->repetition_type != 2 || rp->children.size() != 1 ||
+                    rp->children[0].children.empty() || rp->children[0].repetition_type != 0)
+                    fail(column, "shredded array '" + typed->full_name + "' is not the standard "
+                                 "group { repeated group { required group element } } shape");
+                t.rep_def = t.def + 1;
+                t.rep_level = acc_rep + 1;
+                t.children.push_back(vvalue(rp->children[0], t.rep_def, t.rep_level, typed_at));
+            } else if (typed->logical_type == "struct") {
+                t.kind = NK::VObject;
+                int32_t field_at = typed_at;
+                for (const SchemaElement& f : typed->children) {
+                    if (f.children.empty() || f.repetition_type != 0 || f.logical_type != "struct")
+                        fail(column, "shredded field '" + f.full_name + "' is not a required group of value / typed_value");
+                    t.children.push_back(vvalue(f, t.def, acc_rep, field_at));
+                    field_at += count_leaves(f);
+                }
+            } else {
+                fail(column, "'" + typed->full_name + "' is annotated '" + typed->logical_type +
+                             "', which a shredded VARIANT cannot hold");
+            }
+            t.n_leaves = leaf_ctr - t.first_leaf;
+            v.children.push_back(std::move(t));
+        }
+        v.n_leaves = leaf_ctr - v.first_leaf;
+        return v;
+    }
+
+    // The VARIANT group `e`; `n` arrives with its key, def and first_leaf set. Its plan leaves are
+    // metadata, then the {value, typed_value} pair.
+    Node variant(const SchemaElement& e, Node n, int32_t acc_rep) {
+        n.kind = NK::Variant;
+        const int32_t base = file_ctr;
+        const SchemaElement* md = nullptr;
+        int32_t md_at = 0, at = base;
+        for (const SchemaElement& c : e.children) {
+            if (c.name == "metadata") { md = &c; md_at = at; }
+            at += count_leaves(c);
+        }
+        if (md == nullptr || !md->children.empty() || md->physical_type != "byte_array" || md->repetition_type != 0)
+            fail(column, "VARIANT '" + e.full_name + "' has no required binary metadata field");
+        Node m;
+        m.sk = SK::Binary;
+        m.def = n.def;
+        m.first_leaf = leaf_ctr;
+        m.n_leaves = 1;
+        file_ctr = md_at;
+        take_leaf();
+        n.children.push_back(std::move(m));
+        n.children.push_back(vvalue(e, n.def, acc_rep, base));
+        file_ctr = at;
+        n.n_leaves = leaf_ctr - n.first_leaf;
+        return n;
+    }
+
     // `acc_def` / `acc_rep`: levels contributed by everything ABOVE `e`.
     Node build(const SchemaElement& e, int32_t acc_def, int32_t acc_rep, int di = -1) {
         if (e.repetition_type == 2) {
@@ -200,6 +306,12 @@ struct Builder {
         n.key = member_key(e.name);
         n.def = counted ? acc_def : acc_def + (e.repetition_type == 1 ? 1 : 0);
         n.first_leaf = leaf_ctr;
+
+        if (e.logical_type == "variant") {
+            if (di >= 0)
+                fail(column, "the table declares a nested shape for '" + e.full_name + "', which the file holds as a VARIANT");
+            return variant(e, std::move(n), acc_rep);
+        }
 
         if (e.children.empty()) {
             scalar(e, n);
@@ -556,6 +668,78 @@ struct Assembler {
         return f.pos < f.n && rep_at(f) == n.rep_level;
     }
 
+    // ── VARIANT ─────────────────────────────────────────────────────────────────
+
+    // What a {value, typed_value} pair held: nothing (both null), the Variant null, or a value.
+    enum class VR : uint8_t { Missing, Null, Value };
+
+    // Render one {value, typed_value} pair, consuming its entry from every leaf under it.
+    // Nothing is written when it is Missing.
+    VR vvalue(const Node& v, const variant::Metadata& md) {
+        const uint8_t* vp = nullptr;
+        uint32_t vlen = 0;
+        bool has_value = false;
+        if (v.value_leaf >= 0) {
+            Leaf& l = L[v.value_leaf];
+            if (l.pos >= l.n) bad("levels exhausted before the row ended");
+            if (def_at(l) >= v.value_def) { str_value(l, vp, vlen); has_value = true; }
+            ++l.pos;
+        }
+        if (!v.children.empty()) {
+            const Node& t = v.children[0];
+            Leaf& f = L[t.first_leaf];
+            if (f.pos >= f.n) bad("levels exhausted before the row ended");
+            const int32_t d = def_at(f);
+            if (d >= t.def) {
+                if (t.kind == NK::VObject) {
+                    // Shredded members in schema order, then the residual object's (ruling D6,
+                    // docs/parquet_variant_design.md).
+                    bool first = true;
+                    o.push_back('{');
+                    for (const Node& c : t.children) {
+                        const size_t mark = o.size();
+                        if (!first) o.push_back(',');
+                        o.append(c.key);
+                        if (vvalue(c, md) == VR::Missing) o.resize(mark);
+                        else first = false;
+                    }
+                    if (has_value) variant::object_members(o, md, vp, vlen, first);
+                    o.push_back('}');
+                    return VR::Value;
+                }
+                if (has_value) bad("a VARIANT holds both a value and a shredded typed_value that is not an object");
+                if (t.kind == NK::VList) {
+                    if (d < t.rep_def) { o.append("[]"); skip1(t); return VR::Value; }
+                    o.push_back('[');
+                    for (;;) {
+                        if (vvalue(t.children[0], md) == VR::Missing) bad("a shredded VARIANT array has a missing element");
+                        if (!more(t)) break;
+                        o.push_back(',');
+                    }
+                    o.push_back(']');
+                    return VR::Value;
+                }
+                emit_scalar(t, f);
+                ++f.pos;
+                return VR::Value;
+            }
+            skip1(t);
+        }
+        if (!has_value) return VR::Missing;
+        if (variant::is_null(vp, vlen)) { o.append("null"); return VR::Null; }
+        variant::render(o, md, vp, vlen);
+        return VR::Value;
+    }
+
+    // The VARIANT group `n`, known present: read its metadata, render its value.
+    VR variant_value(const Node& n) {
+        Leaf& ml = L[n.children[0].first_leaf];
+        const uint8_t* p; uint32_t len;
+        str_value(ml, p, len);
+        ++ml.pos;
+        return vvalue(n.children[1], variant::parse_metadata(p, len));
+    }
+
     void render(const Node& n) {
         switch (n.kind) {
         case NK::Scalar: {
@@ -610,6 +794,17 @@ struct Assembler {
         case NK::Missing:
             o.append("null");     // a member the table declares and this file does not have
             return;
+        case NK::Variant: {
+            const Leaf& f = L[n.first_leaf];
+            if (f.pos >= f.n) bad("levels exhausted before the row ended");
+            if (def_at(f) < n.def) { o.append("null"); skip1(n); return; }
+            if (variant_value(n) == VR::Missing) o.append("null");
+            return;
+        }
+        case NK::VValue:
+        case NK::VObject:
+        case NK::VList:
+            bad("a shredded VARIANT part outside a VARIANT group");
         case NK::Map: {
             const Leaf& f = L[n.first_leaf];
             if (f.pos >= f.n) bad("levels exhausted before the row ended");
@@ -685,8 +880,20 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
             continue;
         }
         const size_t mark = a.o.size();
-        a.render(root);
+        // A top-level VARIANT that is the Variant null (or holds nothing) is SQL NULL, as a JSON
+        // null read through `->` is; nested inside another value it stays `null`.
+        bool is_null = false;
+        if (root.kind == NK::Variant) is_null = a.variant_value(root) != Assembler::VR::Value;
+        else a.render(root);
         if (!selected) { a.o.resize(mark); continue; }
+        if (is_null) {
+            a.o.resize(mark);
+            offs.push_back(0);
+            lens.push_back(0);
+            ++n_out;
+            any_null = true;
+            continue;
+        }
         if (a.o.size() > UINT32_MAX) fail(plan.name, "rendered JSON exceeds 4 GiB for one row group");
         offs.push_back(static_cast<uint32_t>(mark));
         lens.push_back(static_cast<int32_t>(a.o.size() - mark));

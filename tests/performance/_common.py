@@ -404,12 +404,7 @@ def register_aistor_workspace() -> None:
     os.environ["AWS_ACCESS_KEY_ID"] = access_key
     os.environ["AWS_SECRET_ACCESS_KEY"] = secret_key
 
-    repo_parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    for sibling in ("opteryx-iceberg", "opteryx-catalog"):
-        path = os.path.join(repo_parent, sibling)
-        if path not in sys.path:
-            sys.path.insert(1, path)
-
+    _add_iceberg_siblings()
     from opteryx_iceberg import IcebergMetastore
 
     from opteryx.connectors import register_workspace
@@ -431,4 +426,50 @@ def register_aistor_workspace() -> None:
             "s3.secret-access-key": secret_key,
             "s3.region": AISTOR_REGION,
         },
+    )
+
+
+def _add_iceberg_siblings() -> None:
+    """Put the sibling checkouts ../opteryx-iceberg and ../opteryx-catalog on sys.path."""
+    repo_parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    for sibling in ("opteryx-iceberg", "opteryx-catalog"):
+        path = os.path.join(repo_parent, sibling)
+        if path not in sys.path:
+            sys.path.insert(1, path)
+
+
+# ---------------------------------------------------------------------------
+# Local Iceberg workspace — `make clickbench-iceberg`
+# ---------------------------------------------------------------------------
+
+# `iceberg.clickbench.hits`: the ClickBench `opteryx-iceberg` entry's table built on
+# this machine - same create.sql / insert.sql, so every data file, manifest and
+# manifest list is written by Opteryx - but on a pyiceberg SQL (sqlite) catalog
+# and file:// storage, so no catalog server, object store or network is involved.
+LOCAL_ICEBERG_WORKSPACE = "iceberg"
+LOCAL_ICEBERG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "hits_iceberg"))
+
+
+def local_iceberg_properties() -> dict:
+    """pyiceberg catalog properties of the local Iceberg workspace."""
+    return {
+        "uri": f"sqlite:///{LOCAL_ICEBERG_DIR}/catalog.db",
+        "warehouse": f"file://{LOCAL_ICEBERG_DIR}/warehouse",
+    }
+
+
+def register_local_iceberg_workspace() -> None:
+    """Bind workspace `iceberg` to the local SQL catalog under scratch/hits_iceberg."""
+    _add_iceberg_siblings()
+    from opteryx_iceberg import IcebergMetastore
+
+    from opteryx.connectors import register_workspace
+    from opteryx.connectors.opteryx_connector import OpteryxConnector
+
+    register_workspace(
+        LOCAL_ICEBERG_WORKSPACE,
+        OpteryxConnector,
+        catalog=IcebergMetastore,
+        catalog_type="sql",
+        **local_iceberg_properties(),
     )

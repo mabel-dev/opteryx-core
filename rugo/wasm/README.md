@@ -45,7 +45,7 @@ Python layer is mostly rendering.
 ## 3. Proof of concept (`rugo/wasm/`)
 
 `rugo/wasm/` has no `__init__`, so neither wheel ships it. It is its own
-distribution, hosted on rugo.dev (see Publishing below).
+distribution, on rugo.dev and npm (see Publishing below).
 
 | File | Purpose |
 |---|---|
@@ -57,6 +57,8 @@ distribution, hosted on rugo.dev (see Publishing below).
 | `crosscheck.py` | Compares wasm JSON against native rugo on the same file |
 | `rugo_codecs_probe.cpp`, `test_codecs.mjs` | Codec size probe + gzip/zstd round-trip test |
 | `test_footer.mjs` | CI gate: committed file through `Blob.slice` and HTTP Range, checked against native rugo's figures; refuses non-parquet input |
+| `rugo_footer.d.ts` | TypeScript types for `rugo_footer.mjs`; the JSON shape mirrors `render()` in `rugo_wasm.cpp` |
+| `npm/` | `package.json` + npm README for `@opteryx/rugo`; CI stages the built files next to them |
 
 Build flags: `-O3 -fwasm-exceptions` (rugo throws on malformed input). Single-threaded,
 no pthreads, so no COOP/COEP. `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY=4GB`, `FILESYSTEM=0`.
@@ -72,17 +74,22 @@ node rugo/wasm/bench_node.mjs <file.parquet> [--http]
 
 `.github/workflows/release-rugo-wasm.yaml` is triggered by the same tags as the rugo
 wheels (`rugo-*`, `all-*`), but it is a separate workflow, so neither release can block
-the other. It runs `build.sh` and both tests on emsdk 6.0.12, then commits the bundle
-to `mabel-dev/rugo.dev` under `docs/wasm/` using the existing `RUGO_DEV_RELEASE_TOKEN`.
-`workflow_dispatch` runs build and test only, without deploying.
+the other. It runs `build.sh` and both tests on emsdk 6.0.12, then publishes to two
+channels as independent jobs. `workflow_dispatch` runs build and test only, without
+deploying. The version is always `rugo/__version__.py`, the same number as the PyPI wheel.
+
+**rugo.dev** commits the bundle to `mabel-dev/rugo.dev` under `docs/wasm/` using the
+existing `RUGO_DEV_RELEASE_TOKEN`:
 
 ```
-https://rugo.dev/wasm/rugo_footer.mjs   JS API
+https://rugo.dev/wasm/<version>/...       immutable; re-publishing different bytes is refused
+https://rugo.dev/wasm/rugo_footer.mjs     latest: JS API
 https://rugo.dev/wasm/dist/rugo.{mjs,wasm}
 https://rugo.dev/wasm/VERSION
 ```
 
-`docs/wasm/` is replaced on each release, so the URLs are not versioned.
+**npm** publishes `@opteryx/rugo` under the `alpha` dist-tag, through npm trusted
+publishing (OIDC, no token secret, provenance attached).
 
 ## 4. Measurements (Apple Silicon, emcc 6.0.12, Node 26.13, desktop-app Chromium)
 

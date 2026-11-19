@@ -1081,6 +1081,17 @@ clickbench-orc: ## Run ClickBench through READ_ORC over the rugo split converted
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (orc) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant orc
 
+clickbench-iceberg: ## Run ClickBench on a local Iceberg table written by Opteryx from the upstream split (builds scratch/hits_iceberg from scratch/hits on first run)
+	@# The ClickBench `opteryx-iceberg` entry's own create.sql + insert.sql
+	@# (dev/clickbench/build_iceberg_local.py), so the data files, manifests and
+	@# manifest lists are Opteryx's, as on the c6a - but on a sqlite catalog and local
+	@# files, so no catalog server, object store or network is measured. Gated on a
+	@# stamp: the build fails (and removes its directory) unless the row count matches.
+	@test -f scratch/hits_iceberg.entry-v1 || { rm -rf scratch/hits_iceberg && $(PYTHON) dev/clickbench/build_iceberg_local.py && touch scratch/hits_iceberg.entry-v1; }
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (iceberg) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant iceberg
+
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile

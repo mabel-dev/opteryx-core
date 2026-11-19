@@ -379,6 +379,11 @@ static std::string ParseLogicalType(TInput &in) {
       result = "float16";
       break;
     }
+    case 16: { // VARIANT (VariantType { 1: optional i8 specification_version })
+      SkipStruct(in);
+      result = "variant";
+      break;
+    }
     default:
       std::cerr << "Skipping unknown logical type id " << fh.id << " type "
                 << (int)fh.type << "\n";
@@ -1023,20 +1028,24 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
   const std::string canonical = CanonicalizeColumnName(
       elem.full_name.empty() ? elem.name : elem.full_name);
 
-  if (elem.logical_type == "struct") {
+  // A VARIANT group (metadata + value [+ typed_value]) is folded from its leaves into
+  // one JSON value per row exactly as a STRUCT is (nested_json.hpp); only the type it
+  // reports differs.
+  if (elem.logical_type == "struct" || elem.logical_type == "variant") {
+    const char *as = elem.logical_type == "variant" ? "variant" : "json";
     if (is_top_level) {
       SchemaField field;
       field.name = canonical;
       field.physical_type = "struct";
-      field.logical_type = "json";
+      field.logical_type = as;
       field.nullable = nullable;
       SetFieldIds(elem, field);
       columns.push_back(std::move(field));
     }
 
-    map[canonical] = "json";
+    map[canonical] = as;
     if (elem.name != canonical) {
-      map[elem.name] = "json";
+      map[elem.name] = as;
     }
 
     for (const auto &child : elem.children) {

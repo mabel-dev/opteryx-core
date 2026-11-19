@@ -31,13 +31,13 @@ class _Col:
         self.column_type = type("CT", (), {"physical": physical, "logical": None})()
 
 
-def test_classifier_admits_variant_as_varchar_kind():
+def test_classifier_admits_variant_as_a_string_kind_tagged_variant():
     kinds, string_types, _dec, _lc, _wid, bad = _Compiler._classify_scan_columns(
         None, [_Col(DrakenType.VARIANT), _Col(DrakenType.NVARCHAR)])
     assert bad is None
     assert kinds == ["varchar", "varchar"]
-    # VARIANT is JSON text in German-string storage: it is scanned and tagged as VARCHAR.
-    assert string_types == [DrakenType.VARCHAR.value, DrakenType.NVARCHAR.value]
+    # VARIANT is JSON text in German-string storage: scanned as a string, tagged VARIANT.
+    assert string_types == [DrakenType.VARIANT.value, DrakenType.NVARCHAR.value]
 
 
 def _drain(sql):

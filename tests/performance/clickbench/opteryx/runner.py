@@ -47,6 +47,10 @@ class Dataset(enum.Enum):
     # against DuckDB reading the same table on AIStor (SAME_FILES_BASELINES).
     AISTOR_CANON_SPLIT_10 = "aistor.clickbench.hits_canon_split_10"
     AISTOR_RUGO_SPLIT_10 = "aistor.clickbench.hits_rugo_typed_split_10"
+    # Local Iceberg table written by Opteryx from FULL_SPLIT with the ClickBench
+    # opteryx-iceberg entry's create.sql / insert.sql, on a sqlite catalog and local
+    # files (dev/clickbench/build_iceberg_local.py, tests/performance/_common.py).
+    LOCAL_ICEBERG = "iceberg.clickbench.hits"
 
 
 REMOTE_DATASETS = {
@@ -79,6 +83,7 @@ VARIANT_DATASETS = {
     "json": Dataset.FULL_SPLIT_JSON,
     "avro": Dataset.FULL_SPLIT_AVRO,
     "orc": Dataset.FULL_SPLIT_ORC,
+    "iceberg": Dataset.LOCAL_ICEBERG,
     "aistor-canon-split": Dataset.AISTOR_CANON_SPLIT,
     "aistor-canon-single": Dataset.AISTOR_CANON_SINGLE,
     "aistor-rugo-split": Dataset.AISTOR_RUGO_SPLIT,
@@ -289,7 +294,9 @@ if __name__ == "__main__":  # pragma: no cover
     from _common import aistor_network_path
     from _common import check_network_path_unchanged
     from _common import open_results_csv
+    from _common import LOCAL_ICEBERG_DIR
     from _common import register_aistor_workspace
+    from _common import register_local_iceberg_workspace
 
     parser = argparse.ArgumentParser(description="ClickBench Performance Test")
     parser.add_argument(
@@ -334,6 +341,7 @@ if __name__ == "__main__":  # pragma: no cover
         "`json` runs against upstream's hits.json.gz split into zstd shards (scratch/hits_json); "
         "`avro` runs READ_AVRO over the rugo split converted to deflate Avro shards (scratch/hits_avro); "
         "`orc` runs READ_ORC over the rugo split converted to zstd ORC shards written by pyarrow (scratch/hits_orc); "
+        "`iceberg` against a local Iceberg table Opteryx wrote from scratch/hits (scratch/hits_iceberg); "
         "`aistor-*` against the remote Iceberg tables on AIStor "
         "(default: the rugo 262k-row-group split, scratch/hits_rugo_262k)",
     )
@@ -356,6 +364,14 @@ if __name__ == "__main__":  # pragma: no cover
         register_aistor_workspace()
         dataset_path = f"iceberg {os.environ['AISTOR_ENDPOINT']} warehouse {AISTOR_WAREHOUSE}"
         dataset_entries = "remote"
+    elif DATASET == Dataset.LOCAL_ICEBERG:
+        # The catalog answers whether the table exists; the directory check only
+        # stops a run against a build that never happened.
+        if not os.path.isfile(os.path.join(LOCAL_ICEBERG_DIR, "catalog.db")):
+            raise FileNotFoundError(f"{LOCAL_ICEBERG_DIR} has no catalog - run make clickbench-iceberg")
+        register_local_iceberg_workspace()
+        dataset_path = LOCAL_ICEBERG_DIR
+        dataset_entries = "iceberg"
     else:
         # Hard-fails if the variant's dataset is absent or empty. `--variant skene`
         # silently ran against parquet for as long as the mapping was wrong; the only

@@ -1,18 +1,22 @@
-name: Release rugo wasm to rugo.dev
+name: Release rugo wasm to rugo.dev + npm
 
-# rugo's WebAssembly footer reader (rugo/wasm), hosted on rugo.dev (GitHub Pages,
-# mabel-dev/rugo.dev, served from docs/). Same release decision as the PyPI
-# wheels (`rugo-*` / `all-*` tags) but a SEPARATE workflow, so a wasm failure
-# never blocks the wheel publish and vice versa.
+# rugo's WebAssembly footer reader (rugo/wasm), published to two channels:
+#   - rugo.dev (GitHub Pages, mabel-dev/rugo.dev, served from docs/)
+#   - npm as @opteryx/rugo, under the `alpha` dist-tag
+# Same release decision as the PyPI wheels (`rugo-*` / `all-*` tags) but a
+# SEPARATE workflow, so a wasm failure never blocks the wheel publish and vice
+# versa. The two channels are independent jobs. The version is always
+# rugo/__version__.py, the same number as the PyPI wheel.
 #
 # workflow_dispatch builds and tests only — it never deploys. Deploy runs on a
 # tag push alone.
 #
-# Published layout (keeps rugo_footer.mjs's `./dist/rugo.mjs` import valid):
-#   https://rugo.dev/wasm/rugo_footer.mjs   JS API (blobSource / httpSource / readFooter)
-#   https://rugo.dev/wasm/dist/rugo.mjs     emscripten glue
-#   https://rugo.dev/wasm/dist/rugo.wasm
-#   https://rugo.dev/wasm/VERSION           rugo/__version__.py at build time
+# rugo.dev layout (keeps rugo_footer.mjs's `./dist/rugo.mjs` import valid):
+#   https://rugo.dev/wasm/<version>/...     immutable per release
+#   https://rugo.dev/wasm/rugo_footer.mjs   latest: JS API (blobSource / httpSource / readFooter)
+#   https://rugo.dev/wasm/dist/rugo.mjs     latest: emscripten glue
+#   https://rugo.dev/wasm/dist/rugo.wasm    latest
+#   https://rugo.dev/wasm/VERSION           latest: rugo/__version__.py at build time
 on:
   push:
     tags:
@@ -66,11 +70,28 @@ jobs:
           echo "${VERSION}" > site/VERSION
           ls -la site site/dist
 
+      # npm always publishes the package-root README, so the package is staged
+      # from rugo/wasm/npm/ (package.json + README) rather than from rugo/wasm/.
+      - name: Stage npm package
+        run: |
+          set -euo pipefail
+          mkdir -p npm-pkg/dist
+          cp rugo/wasm/npm/package.json rugo/wasm/npm/README.md LICENSE npm-pkg/
+          cp rugo/wasm/rugo_footer.mjs rugo/wasm/rugo_footer.d.ts npm-pkg/
+          cp rugo/wasm/dist/rugo.mjs rugo/wasm/dist/rugo.wasm npm-pkg/dist/
+          (cd npm-pkg && npm pkg set version="$(cat ../site/VERSION)" && npm pack --dry-run)
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: rugo-wasm
           path: site/
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rugo-wasm-npm
+          path: npm-pkg/
 
   # The default GITHUB_TOKEN cannot write to another repo; RUGO_DEV_RELEASE_TOKEN
   # (contents: write on mabel-dev/rugo.dev) is the credential release-rugo.yaml
@@ -97,8 +118,17 @@ jobs:
         working-directory: rugo.dev
         run: |
           set -euo pipefail
-          rm -rf docs/wasm
-          mkdir -p docs/wasm
+          VERSION=$(cat ../site/VERSION)
+          DEST="docs/wasm/${VERSION}"
+          # A released version's URLs are immutable: same bytes is a no-op, different bytes is refused.
+          if [ -e "${DEST}" ] && ! diff -r ../site "${DEST}"; then
+            echo "ERROR: ${DEST} already published with different contents; bump rugo/__version__.py" >&2
+            exit 1
+          fi
+          mkdir -p "${DEST}"
+          cp -R ../site/. "${DEST}/"
+          # Latest = top level. Version dirs start with a digit; everything else is the previous latest.
+          find docs/wasm -mindepth 1 -maxdepth 1 ! -name '[0-9]*' -exec rm -rf {} +
           cp -R ../site/. docs/wasm/
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -109,3 +139,33 @@ jobs:
           fi
           git commit -m "rugo wasm $(cat docs/wasm/VERSION) (${GITHUB_REF_NAME})"
           git push
+
+  # npm trusted publishing (OIDC): no token secret. The trusted publisher for
+  # @opteryx/rugo must be configured on npmjs.com against this workflow file.
+  # Provenance is attached automatically. Re-publishing an existing version is
+  # refused by the registry, the same as PyPI.
+  publish-npm:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download npm package
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: rugo-wasm-npm
+          path: npm-pkg
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # Trusted publishing needs npm >= 11.5.1; Node 24's bundled npm can be older.
+      - name: Install npm
+        run: npm install -g npm@11.20.0
+
+      - name: Publish @opteryx/rugo (alpha)
+        working-directory: npm-pkg
+        run: npm publish --tag alpha --access public
