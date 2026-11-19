@@ -231,12 +231,15 @@ GROUPBY_SPILL_BYTES: Optional[int] = (
 """Bytes of group state a GROUP BY queues in memory before it writes further windows to
 spill and merges them back one hash partition at a time (ruled 2026-11-12). The queue
 itself stays in memory, so this is what the GROUP BY holds, not what it frees. Unset,
-the budget is an eighth of the container's memory (the cgroup limit when set, else
-physical RAM). A fraction, because no fixed figure fits both a 16 GB node and a 32 GB
-one; an eighth, because the budget counts key and aggregate-state bytes and the store
-holds about 1.66x that: measured 2026-11-12 on TPC-H SF100 Q18 (4.51 GiB of state), a
-1.8 GiB budget peaks at 8.54 GB charged and a 3.6 GiB one at 12.79 GB, against 13.19 GB
-unspilled. 0 = never spill. Only fixed-width aggregates spill (COUNT, SUM, AVG, numeric
+the budget is (container - 11 GiB) / 2, floored at container / 16, where container is
+the cgroup limit when set, else physical RAM (ruled 2026-11-18, superseding an eighth).
+Headroom, not a fraction: what else a query holds (the 4 GiB cache reserve, scans,
+joins, allocator retention) is roughly fixed, so a fraction small enough for a 14.5 GiB
+node (1.75 GiB here) spills on a 32 GB box that has room (10 GiB here, above every
+ClickBench query's state; Q32 is 6.41 GiB). The budget counts key and aggregate-state
+bytes and the store holds about 1.66x that: measured 2026-11-12 on TPC-H SF100 Q18
+(4.51 GiB of state), charged peak = ~4.8 GB + ~2 GB per GiB of budget (1.8 GiB -> 8.54 GB,
+3.6 GiB -> 12.79 GB, unspilled 13.19 GB). 0 = never spill. Only fixed-width aggregates spill (COUNT, SUM, AVG, numeric
 MIN/MAX, STDDEV/VAR, CORR); a GROUP BY with any other aggregate stays in memory. A
 spillable GROUP BY that reaches the budget with spill unconfigured (KVSTORE_LOCATION)
 fails loud."""
