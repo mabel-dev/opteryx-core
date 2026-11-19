@@ -1,0 +1,67 @@
+# HAVING runs inside the GROUP BY sink's finalize (2026-11-18).
+#
+# It used to filter after the sink's output buffer, so every group was buffered
+# first - ClickBench Q28 put 3.0M groups (484 MB of MIN(Referer) alone) into the
+# buffer for a HAVING that kept 77, and spilled them. These pin the answers on
+# each path: aggregate / key / string-aggregate predicates, all rejected, an
+# aggregate not in the SELECT, a heap sort above, the parallel finalize (100k
+# groups), and ROLLUP (which still filters after the buffer).
+
+query II
+SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 5 ORDER BY planetId
+----
+5 67
+6 61
+7 27
+8 14
+
+query II
+SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY planetId HAVING planetId > 6 ORDER BY planetId
+----
+7 27
+8 14
+9 5
+
+query II
+SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 1000
+----
+
+query IT
+SELECT planetId, MIN(name) AS m FROM testdata.satellites GROUP BY planetId HAVING MIN(name) > 'M' ORDER BY planetId
+----
+3 Moon
+
+query I
+SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING SUM(radius) > 1000 ORDER BY planetId
+----
+3
+5
+6
+7
+8
+
+query II
+SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 2
+----
+5 67
+6 61
+
+# 100,000 groups: the multi-threaded finalize. Residue 1 is the only one seen 4 times.
+query II
+SELECT COUNT(*) AS n, SUM(k) AS s FROM (SELECT g % 100000 AS k, COUNT(*) AS c FROM generate_series(1, 300001) AS g GROUP BY g % 100000 HAVING COUNT(*) = 4) AS t
+----
+1 1
+
+# ...and every other residue 3 times: 99,999 groups kept across all partitions.
+query II
+SELECT COUNT(*) AS n, SUM(k) AS s FROM (SELECT g % 100000 AS k, COUNT(*) AS c FROM generate_series(1, 300001) AS g GROUP BY g % 100000 HAVING COUNT(*) = 3) AS t
+----
+99999 4999949999
+
+query II
+SELECT planetId, COUNT(*) AS c FROM testdata.satellites GROUP BY ROLLUP(planetId) HAVING COUNT(*) > 20 ORDER BY planetId
+----
+NULL 177
+5 67
+6 61
+7 27
