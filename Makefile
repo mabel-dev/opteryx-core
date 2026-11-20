@@ -225,6 +225,7 @@ q:
 	@$(MAKE) --no-print-directory gb-block-store-test
 	@$(MAKE) --no-print-directory slab-pool-test
 	@$(MAKE) --no-print-directory packed-codes-test
+	@$(MAKE) --no-print-directory variant-encode-test
 	@$(MAKE) --no-print-directory carchar-set-test
 	@$(MAKE) --no-print-directory pipeline-latch-test
 
@@ -525,6 +526,36 @@ packed-codes-test: ## Build and run the one-pass packed dictionary code decoder 
 	    -o /tmp/opteryx-tests/packed_codes_test
 	@/tmp/opteryx-tests/packed_codes_test
 	$(call print_green,"✓ packed dictionary code tests passed")
+
+VARIANT_ENCODE_INCLUDES = -I$(CURDIR)/rugo/src/parquet -I$(CURDIR)/draken -I$(CURDIR)/draken/core \
+    -I$(CURDIR)/draken/simd -I$(CURDIR)/third_party/yyjson/src -I$(CURDIR)/third_party/fastfloat \
+    -I$(CURDIR)/third_party/mabel -I$(CURDIR)/third_party/mabel/base64 -I$(CURDIR)/third_party/mabel/carchar \
+    -I$(CURDIR)/third_party/cyan4973 -I$(CURDIR)/third_party/jkjeon/include -I$(CURDIR)/third_party/ankerl \
+    -I$(CURDIR)
+
+variant-encode-test: ## Build and run the JSON -> Variant encoder / shredder tests under ASan/UBSan
+	$(call print_blue,"Building and running Variant encoder tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@clang -std=c11 -O1 -g -w -fsanitize=address,undefined $(VARIANT_ENCODE_INCLUDES) -c \
+	    $(CURDIR)/third_party/yyjson/src/yyjson.c -o /tmp/opteryx-tests/variant_encode_yyjson.o
+	@clang -std=c11 -O1 -g -w -fsanitize=address,undefined $(VARIANT_ENCODE_INCLUDES) -c \
+	    $(CURDIR)/third_party/mabel/base64/_base64.c -o /tmp/opteryx-tests/variant_encode_b64.o
+	@clang -std=c11 -O1 -g -w -fsanitize=address,undefined $(VARIANT_ENCODE_INCLUDES) -c \
+	    $(CURDIR)/third_party/mabel/base64/_base64_dispatch.c -o /tmp/opteryx-tests/variant_encode_b64_dispatch.o
+	@clang -std=c11 -O1 -g -w -fsanitize=address,undefined $(VARIANT_ENCODE_INCLUDES) -c \
+	    $(CURDIR)/third_party/mabel/base64/_base64_neon.c -o /tmp/opteryx-tests/variant_encode_b64_neon.o
+	@clang -std=c11 -O1 -g -w -fsanitize=address,undefined $(VARIANT_ENCODE_INCLUDES) -c \
+	    $(CURDIR)/third_party/mabel/base64/_base64_avx2.c -o /tmp/opteryx-tests/variant_encode_b64_avx2.o
+	@clang -std=c11 -O1 -g -w -fsanitize=address,undefined $(VARIANT_ENCODE_INCLUDES) -c \
+	    $(CURDIR)/third_party/mabel/base64/_base64_rvv.c -o /tmp/opteryx-tests/variant_encode_b64_rvv.o
+	@clang++ -std=c++20 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    $(VARIANT_ENCODE_INCLUDES) $(CURDIR)/rugo/src/parquet/variant_encode_test.cpp \
+	    /tmp/opteryx-tests/variant_encode_yyjson.o /tmp/opteryx-tests/variant_encode_b64.o \
+	    /tmp/opteryx-tests/variant_encode_b64_dispatch.o /tmp/opteryx-tests/variant_encode_b64_neon.o \
+	    /tmp/opteryx-tests/variant_encode_b64_avx2.o /tmp/opteryx-tests/variant_encode_b64_rvv.o \
+	    -o /tmp/opteryx-tests/variant_encode_test
+	@/tmp/opteryx-tests/variant_encode_test
+	$(call print_green,"✓ Variant encoder tests passed")
 
 page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse + page-predicate tests
 	$(call print_blue,"Building and running PageIndex tests...")

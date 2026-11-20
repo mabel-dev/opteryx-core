@@ -329,7 +329,7 @@ page indexes.
 Every rugo Parquet write of a DRAKEN_VARIANT column (CTAS, INSERT, dataset writes, OPTIMIZE
 rewrites) — one path, no option.
 
-### 5.4 Step 3 build contract — encoder/inference BUILDING; writer integration awaits W1–W6
+### 5.4 Step 3 build contract — encoder/inference BUILT 2026-11-20; writer integration awaits W1–W7
 
 Found by reading the writer the step has to fit into. **W#** are the architect's.
 
@@ -381,6 +381,11 @@ returns the FIRST match today (yyjson), so the encoder keeps the first and drops
 answers are unchanged, the whole-value text loses the repeats. *Alternative:* refuse the row.
 *Recommend keep-first* — same reasoning as D3(a).
 
+**W7 — A number no double can hold** (`1e999`, `1e-999`). D3(a) stores "the rest" as a double;
+these would become infinity or zero, and infinity reads back as `null` — a different value,
+not a re-rendering. *Built as: the row is refused, naming the number.* *Alternative:* store
+the infinity/zero and accept it. Say if D3(a) was meant to cover it.
+
 **Mine (defaults I will pick and measure, not rulings):** the inference constants — shred an
 object field when it is present in at least 1 row in 64 of the rows its parent object is, its
 dominant type covers at least half of its occurrences, to a depth of 8 and a cap of 128
@@ -394,6 +399,19 @@ shredded fields per file; typed DECIMAL leaves at the dominant scale, precision 
   literal's own scale; the rest → double;
 - strings → short string (< 64 bytes) or string; `true`/`false`/`null` → their primitives;
 - a row whose text is SQL NULL is a null group; a JSON `null` is a Variant null in `value`.
+
+**Built (2026-11-20), not yet called by the writer:**
+- `rugo/src/parquet/variant_encode.hpp` — `classify_number` (D3), `RowEncoder` (JSON value →
+  Variant binary; the row's `metadata`), `Seen` (what the first row group holds at each path,
+  and the shredding it decides), `Shredder` (rows → the group's leaf columns: per-row
+  definition levels and values, in schema order). A row is parsed with draken's own flags and
+  parse arena, so what `->` reads is what this writes.
+- `rugo/src/parquet/variant_encode_test.cpp`, `make variant-encode-test` (in `make q`, under
+  ASan/UBSan): 35 documents against the exact text the DECODER renders from the encoding;
+  4,000 rows of 17 shapes shredded by the schema learnt from them and put back together by a
+  reference reassembly written from the spec, compared with the unshredded value (numbers as
+  their source bytes); the learnt schema, the definition levels, and the refusals.
+- Not yet proven: that another reader (DuckDB) reads the result — that needs the file, so W1.
 
 ## 6. Sequencing
 
