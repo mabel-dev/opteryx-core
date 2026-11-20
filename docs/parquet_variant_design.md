@@ -3,7 +3,8 @@
 **Status:** RULED 2026-11-19. §6 step 1 (whole-value read) BUILT 2026-11-19. Step 2 (path
 pushdown) BUILT 2026-11-19 for both forms — files that hold the column as a VARIANT and files
 that hold it as JSON text — on `READ_PARQUET` and on Parquet tables (§4.3). Pruning (2b),
-Step 3 (writer) STARTED 2026-11-20: build contract in §5.4. Step 4 not started.
+Step 3 (writer) BUILT 2026-11-20 as ruled (W1–W7 "as recommended", §5.4): every rugo write of a
+VARIANT column writes a shredded Parquet VARIANT. Step 4 not started.
 **Rulings:** D1 yes (JSON text in memory) · D2 yes (automatic shredding, no setting) ·
 D3 as recommended (INT64 / own-scale DECIMAL; the rest stored as double, canonical
 rendering accepted) · D4 keep (string-form VARIANT files stay readable, no migration) ·
@@ -301,8 +302,9 @@ unpushed, by construction. A row the scan's prefilter or a row admission drops i
 - The catalog (`opteryx-catalog`, `add_files`) refuses to register a VARIANT-form file ("row
   group is missing column(s) ['data']"), so a TABLE mixing forms cannot exist until step 3
   teaches it; the mixed case is tested through `READ_PARQUET` globs.
-- The standalone `rugo.parquet.read_parquet` does not take path names; asked for
-  `["id", "data"]` on a VARIANT file it returned `id` alone, with no error (not looked into).
+- The standalone `rugo.parquet.read_parquet` does not take path names. ~~Asked for `["id",
+  "data"]` on a VARIANT file it returned `id` alone~~ — it returns the VARIANT as its JSON text
+  since step 3 (W3). A STRUCT/MAP named there still returns nothing, with no error (unchanged).
 
 **Not in this step:** skipping `metadata` when a row group's residual chunks are all-null
 (a per-row-group read plan; decide from a profile in step 4), and pruning (step 2b, below).
@@ -329,7 +331,7 @@ page indexes.
 Every rugo Parquet write of a DRAKEN_VARIANT column (CTAS, INSERT, dataset writes, OPTIMIZE
 rewrites) — one path, no option.
 
-### 5.4 Step 3 build contract — encoder/inference BUILT 2026-11-20; writer integration awaits W1–W7
+### 5.4 Step 3 build contract — BUILT 2026-11-20 (W1–W7 ruled "as recommended")
 
 Found by reading the writer the step has to fit into. **W#** are the architect's.
 
@@ -367,9 +369,10 @@ would come with it, by the same code); at the least it must refuse a group loudl
 a file from its schema tree and refuses a group ("patching struct columns is not supported
 yet") — so it will refuse any file holding a VARIANT, whichever column is patched. *Recommend:*
 teach it to carry a group's chunks through byte for byte (it already does that for chunks it
-does not touch); patching the VARIANT column itself stays refused. `append_row_groups` already
-requires identical schemas, which two files with different shreddings do not have: correct
-as it is (they are refused, and OPTIMIZE re-encodes).
+does not touch); patching the VARIANT column itself stays refused. ~~`append_row_groups` correct
+as it is~~ — wrong, found while building: it rebuilds its shapes the same way, so it refuses
+ANY file holding a VARIANT ("is a STRUCT"), loudly. Its only caller is the catalog's manifest
+append, and manifests hold no VARIANT, so it is left as it is.
 
 **W5 — The catalog (`../opteryx-catalog`).** `add_files` refuses a VARIANT-form file ("row
 group is missing column(s) ['data']"). Engine writes do not go through it (the engine
@@ -411,7 +414,47 @@ shredded fields per file; typed DECIMAL leaves at the dominant scale, precision 
   4,000 rows of 17 shapes shredded by the schema learnt from them and put back together by a
   reference reassembly written from the spec, compared with the unshredded value (numbers as
   their source bytes); the learnt schema, the definition levels, and the refusals.
-- Not yet proven: that another reader (DuckDB) reads the result — that needs the file, so W1.
+- ~~Not yet proven: that another reader (DuckDB) reads the result~~ — proven, below.
+
+**Built (2026-11-20), the writer:**
+- W1 — `ColumnInput` gains `path`, `groups` (`SchemaGroup`: the group elements written before a
+  leaf), `leaf_required`, `levels` + `max_def`. `write_schema` emits the groups (VARIANT
+  annotation, `specification_version` 1, on the top group), `write_column_chunk` the leaf's
+  path, `page_def_levels` a leaf's own levels in plain and dictionary pages, and row-group and
+  page slicing offset them. `rugo/src/parquet/variant_columns.hpp` (`VariantColumn`) turns a
+  `Shredder` into the leaves: group depth by parity (VARIANT, then typed_value groups and
+  field groups alternating), never by name — a field may itself be named `typed_value`.
+- The edge (`parquet_writer.pxi`): a VARIANT is shredded with the shredding learnt from its first
+  `max_rows_per_row_group` rows (`write_parquet`), or from the first `write_row_group` and kept
+  for the file (`open_parquet_writer`). Field ids go on the VARIANT's group; `field_ids`,
+  `write_parquet_with_bounds` (keyed by the morsel's column) and the unique-name check count
+  top-level fields, not leaves. `sorted_by`, a named `bloom_filters` entry and a named `alp`
+  entry naming a VARIANT are refused; leaves get no bloom filter, no page index (shortcut, in
+  `page_index_bound_kind`), no `rugo.sum` and no `rugo.ndv`/`rugo.mcv` entry (those name
+  top-level fields). Leaves are dictionary-eligible as any column (Bool excepted).
+- W3 — `rugo_native` compiles `nested_json.cpp`; `read_parquet` folds a VARIANT (only a VARIANT —
+  a STRUCT/MAP reads as before) into its JSON text, a VARCHAR column
+  (`rugo/src/parquet/variant_fold.hpp`). Shortcut: a projection holding a VARIANT decodes
+  serially (the parallel reader materializes leaves on its workers before they could be folded).
+- W4 — the patcher gives each top-level element its real first chunk (`schema_leaf_count`; it
+  used the SCHEMA index, which is wrong after any multi-leaf element) and carries a VARIANT's
+  leaves through as leaf columns (`carry_variant_leaves`); a shredded LIST under the VARIANT is
+  refused, as is any drop/rename/retype naming the VARIANT.
+- Tests: `tests/unit/connectors/parquet_io/test_variant_write.py` (27). DuckDB reads our files
+  as it reads its own (every value, every writer option, a streamed file, a patched file);
+  opteryx's paths, pushed and not, answer from our file as from DuckDB's; integers past int64
+  and 38-digit decimals round-trip exactly (DuckDB and us). The table fixture of
+  `test_parquet_variant_extraction.py` now holds both forms — the CTAS file (shredded) and a
+  JSON-text file added beside it — which is the W2 transition.
+- Found, not changed: DuckDB rewrites an empty object key to `element<n>` when it converts JSON
+  to VARIANT (its own files hold `element4`); it reads an empty key from our files correctly.
+- Found, NOT a VARIANT issue, FIXED 2026-11-20 (architect: "fix it"): `patch_columns`
+  re-declared a REQUIRED column OPTIONAL over pages that carry no definition levels, so a
+  patched file with a REQUIRED column (DuckDB writes them for NOT NULL) did not read (DuckDB:
+  "Out of buffer"). `shape_from_schema_element` now carries the repetition; a column the patcher
+  writes itself (ADD, a re-encoding retype) is OPTIONAL; `append_row_groups` refuses files that
+  differ in it. Tests: the REQUIRED block of `tests/storage/test_parquet_patch_columns.py`.
+- Not measured: write speed and file size against the JSON-text form; the inference constants.
 
 ## 6. Sequencing
 

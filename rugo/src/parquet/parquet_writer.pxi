@@ -19,6 +19,7 @@ cimport cython
 
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int8_t, int16_t, int32_t, int64_t
 from libc.string cimport memcpy
+from libcpp.memory cimport shared_ptr
 from libcpp.pair cimport pair
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -73,6 +74,9 @@ from parquet_writer cimport (
     AppendSegment,
     AppendParquetRowGroups,
     StreamingParquetWriter,
+    ShredType,
+    VariantColumn,
+    infer_variant,
     PT_INT32,
     PT_INT64,
     PT_FLOAT,
@@ -339,20 +343,29 @@ cdef int32_t _field_id_value(str col, object v) except -1:
     return <int32_t>v
 
 
-cdef void _apply_field_ids(vector[ColumnInput]& cols, list names, dict field_ids) except *:
+cdef void _apply_field_ids(vector[ColumnInput]& cols, list names, list owners,
+                           dict field_ids) except *:
     """Set each column's schema field_id (and an ARRAY's element ids) from
-    {name: id}: every column must be named, and nothing else."""
+    {name: id}: every column must be named, and nothing else. `owners[i]` is the
+    morsel column cols[i] was written from; a VARIANT is many leaves, and its id
+    goes on its top-level group, at the leaf that opens it."""
     cdef size_t i
     cdef int k
     cdef str nm
     cdef set seen = set()
     cdef object v
     for i in range(cols.size()):
-        nm = names[i].decode("utf-8") if type(names[i]) is bytes else names[i]
+        v = names[owners[i]]
+        nm = v.decode("utf-8") if type(v) is bytes else v
+        if cols[i].path.size() > 0 and (cols[i].groups.size() == 0 or not cols[i].groups[0].top):
+            continue
         if nm not in field_ids:
             raise ValueError("write_parquet: field_ids has no id for column %r" % (nm,))
         seen.add(nm)
         v = field_ids[nm]
+        if cols[i].path.size() > 0:
+            cols[i].groups[0].field_id = _field_id_value(nm, v)
+            continue
         if not cols[i].is_array:
             cols[i].field_id = _field_id_value(nm, v)
             continue
@@ -451,8 +464,18 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     null_store.reserve(ncols)
     level_store.reserve(2 * ncols)
 
-    # Per-column (physical type, is_utf8, logical kind) for bound decoding.
+    # Per-ColumnInput (physical type, is_utf8, logical kind) for bound decoding,
+    # None for a VARIANT leaf; `owners` is the morsel column each was written from.
     cdef list kinds = []
+    cdef list owners = []
+    # VARIANT columns, written as their shredded leaves: each owns the buffers its
+    # leaves point into, so it lives until the write below returns.
+    cdef vector[shared_ptr[VariantColumn]] variants
+    cdef ShredType shred
+    cdef size_t variant_k = 0
+    cdef size_t first_leaf
+    cdef Py_ssize_t sample
+    cdef str vname
 
     cdef Vector v
     cdef const DrakenVector* dv
@@ -572,6 +595,54 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         # dictionary: `data` holds dict_n unique values and `selection` the
         # per-row codes. Eligible-type branches preserve it (set did_preserve);
         # the codes are stamped centrally after the type dispatch.
+        if t == DRAKEN_VARIANT:
+            # Written as its shredded group, one ColumnInput per leaf
+            # (docs/parquet_variant_design.md §5.4). The shredding is learnt from the
+            # file's first row group and kept for the rest of the file.
+            vname = names[i].decode("utf-8") if type(names[i]) is bytes else names[i]
+            if sorted_by_name is not None and vname == sorted_by_name:
+                raise ValueError("write_parquet: sorted_by names column %r, a VARIANT, "
+                                 "which has no order" % (vname,))
+            if bloom_by_name and vname in bloom_names:
+                raise ValueError("write_parquet: bloom_filters names column %r, a VARIANT, "
+                                 "which is written without a bloom filter" % (vname,))
+            if alp_by_name and names[i] in alp_names:
+                raise ValueError("write_parquet: alp names column %r, which is not "
+                                 "FLOAT32/FLOAT64" % (vname,))
+            arena = <DrakenStringArena*>dv.data
+            tmps = vector[StrSlice]()
+            tmps.resize(nrows)
+            with nogil:
+                for j in range(nrows):
+                    slot = &arena.slots[sel[j]]
+                    ss.ptr = str_data(slot, arena.arena)
+                    ss.len = str_length(slot)
+                    tmps[j] = ss
+            str_store.push_back(tmps)
+            if stream_writer is not None and (<_StreamingParquetWriter>stream_writer)._shred_known:
+                if variant_k >= (<_StreamingParquetWriter>stream_writer)._shred.size():
+                    raise ValueError("write_parquet: column %r is a VARIANT, and the first "
+                                     "row group has fewer" % (vname,))
+                shred = (<_StreamingParquetWriter>stream_writer)._shred[variant_k]
+            else:
+                sample = nrows
+                if 0 < max_rows_per_row_group < nrows:
+                    sample = max_rows_per_row_group
+                with nogil:
+                    shred = infer_variant(str_store.back().data(), dv.validity, <size_t>sample)
+                if stream_writer is not None:
+                    (<_StreamingParquetWriter>stream_writer)._shred.push_back(shred)
+            variant_k += 1
+            variants.push_back(shared_ptr[VariantColumn](new VariantColumn(ci.name, shred)))
+            first_leaf = cols.size()
+            with nogil:
+                variants.back().get().append(str_store.back().data(), dv.validity,
+                                             <size_t>nrows, use_dict, cols)
+            for j in range(<Py_ssize_t>first_leaf, <Py_ssize_t>cols.size()):
+                owners.append(i)
+                kinds.append(None)
+            continue
+
         did_preserve = False
         dict_n = dv.data_length
         dict_shape = use_dict and dict_n >= 1 and dict_n < <uint32_t>nrows
@@ -733,9 +804,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             ci.type = PT_BOOLEAN
             ci.boolean = bool_store.back().data()
 
-        elif (t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR
-              or t == DRAKEN_VARBINARY or t == DRAKEN_VARIANT):
-            # VARIANT is German-string-backed JSON text -> written as a STRING.
+        elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
             arena = <DrakenStringArena*>dv.data
             tmps = vector[StrSlice]()
             with nogil:
@@ -757,7 +826,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                     ci.dict_enabled = use_dict
             str_store.push_back(tmps)
             ci.type = PT_BYTE_ARRAY
-            ci.is_utf8 = (t != DRAKEN_VARBINARY)  # VARIANT/VARCHAR/NVARCHAR -> UTF8
+            ci.is_utf8 = (t != DRAKEN_VARBINARY)  # VARCHAR/NVARCHAR -> UTF8
             ci.strs = str_store.back().data()
 
         elif t == DRAKEN_FLOAT32:
@@ -1389,7 +1458,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         if t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
                  DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_TIME32, DRAKEN_TIME64,
                  DRAKEN_DECIMAL, DRAKEN_DECIMAL128, DRAKEN_UUID, DRAKEN_VARCHAR,
-                 DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_VARIANT):
+                 DRAKEN_NVARCHAR, DRAKEN_VARBINARY):
             if bloom_all:
                 ci.bloom = True
             elif bloom_by_name:
@@ -1416,6 +1485,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 ci.sorted_nulls_first = not sorted_descending
 
         kinds.append((<int>ci.type, bool(ci.is_utf8), <int>ci.logical))
+        owners.append(i)
         cols.push_back(ci)
 
     for _an in alp_requested:
@@ -1423,7 +1493,9 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             raise ValueError("write_parquet: alp names column %r, which is not in the morsel"
                              % (_an,))
     if field_ids is not None:
-        _apply_field_ids(cols, names, field_ids)
+        _apply_field_ids(cols, names, owners, field_ids)
+    if stream_writer is not None:
+        (<_StreamingParquetWriter>stream_writer)._shred_known = True
 
     # Streaming path: hand this batch to the stateful writer as ONE row group
     # (the whole morsel); it places a block once it holds row_groups_per_block
@@ -1452,14 +1524,15 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef bytes data = PyBytes_FromStringAndSize(<const char*>out.data(), out.size())
     if not want_bounds:
         return data, None
-    return data, _decode_bounds(kinds, stats)
+    return data, _decode_bounds(kinds, owners, stats)
 
 
-cdef object _decode_bounds(list kinds, vector[ColumnStats]& stats):
+cdef object _decode_bounds(list kinds, list owners, vector[ColumnStats]& stats):
     """Build {col_index: (min_value, max_value)} of typed Python values for
-    bound-eligible plain columns (INT64/FLOAT64/BOOL/UTF8 string). Logical-typed
-    columns (date/timestamp/decimal), VARBINARY, and stat-less columns are
-    skipped — matching the storage layer's bound contract."""
+    bound-eligible plain columns (INT64/FLOAT64/BOOL/UTF8 string), keyed by the
+    morsel's column index. Logical-typed columns (date/timestamp/decimal),
+    VARBINARY, VARIANT and stat-less columns are skipped — matching the storage
+    layer's bound contract."""
     import struct
     cdef dict bounds = {}
     cdef Py_ssize_t i
@@ -1467,7 +1540,7 @@ cdef object _decode_bounds(list kinds, vector[ColumnStats]& stats):
     cdef bint is_utf8
     cdef bytes mn, mx
     for i in range(len(kinds)):
-        if not stats[i].has_minmax:
+        if kinds[i] is None or not stats[i].has_minmax:
             continue
         ptype, is_utf8, logical = kinds[i]
         if logical != <int>LK_NONE:
@@ -1477,16 +1550,16 @@ cdef object _decode_bounds(list kinds, vector[ColumnStats]& stats):
         mx = PyBytes_FromStringAndSize(<const char*>stats[i].max_bytes.data(),
                                        stats[i].max_bytes.size())
         if ptype == <int>PT_INT64:
-            bounds[i] = (int.from_bytes(mn, "little", signed=True),
+            bounds[owners[i]] = (int.from_bytes(mn, "little", signed=True),
                          int.from_bytes(mx, "little", signed=True))
         elif ptype == <int>PT_FLOAT:
-            bounds[i] = (struct.unpack("<f", mn)[0], struct.unpack("<f", mx)[0])
+            bounds[owners[i]] = (struct.unpack("<f", mn)[0], struct.unpack("<f", mx)[0])
         elif ptype == <int>PT_DOUBLE:
-            bounds[i] = (struct.unpack("<d", mn)[0], struct.unpack("<d", mx)[0])
+            bounds[owners[i]] = (struct.unpack("<d", mn)[0], struct.unpack("<d", mx)[0])
         elif ptype == <int>PT_BOOLEAN:
-            bounds[i] = (mn[0] != 0, mx[0] != 0)
+            bounds[owners[i]] = (mn[0] != 0, mx[0] != 0)
         elif ptype == <int>PT_BYTE_ARRAY and is_utf8:
-            bounds[i] = (mn.decode("utf-8"), mx.decode("utf-8"))
+            bounds[owners[i]] = (mn.decode("utf-8"), mx.decode("utf-8"))
     return bounds
 
 
@@ -1523,6 +1596,10 @@ cdef class _StreamingParquetWriter:
     cdef bint _closed
     cdef bint _finished
     cdef dict _field_ids
+    # Each VARIANT column's shredding, in column order, learnt from the first row
+    # group and kept for every later one (the file has one schema).
+    cdef vector[ShredType] _shred
+    cdef bint _shred_known
 
     def __cinit__(self, object sink, str compression="zstd", object bloom_filters=True,
                   bint dictionary=True, Py_ssize_t max_page_bytes=0,
@@ -1561,6 +1638,7 @@ cdef class _StreamingParquetWriter:
         self._field_ids = field_ids
         self._closed = False
         self._finished = False
+        self._shred_known = False
         self._w = new StreamingParquetWriter(codec, profile_id, <size_t>max_page_bytes,
                                              page_index, <size_t>row_groups_per_block,
                                              statistics, <size_t>narrow_chunk_bytes,

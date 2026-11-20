@@ -1,11 +1,11 @@
 #
 # Replay the native parser corpus under ASan/UBSan.
 #
-# Runs on every push, not just on the nightly schedule, because it is a
+# Runs on every push, not just on the weekly schedule, because it is a
 # regression test rather than a search: it is deterministic, takes about a
 # minute, and re-checks every input that has ever crashed a parser. Leaving it
-# to the nightly job would mean a reintroduced parser bug sits in the branch for
-# up to a day.
+# to the weekly job would mean a reintroduced parser bug sits in the branch for
+# up to a week.
 #
 # The search for NEW inputs is the `native_fuzzing` job in fuzzer.yaml.
 #

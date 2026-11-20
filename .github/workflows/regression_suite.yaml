@@ -4,12 +4,22 @@ on:
   # Every commit that can reach main is covered: PR commits by `pull_request`,
   # main itself by `push`. `push` is scoped to main rather than "every branch but
   # main" so a same-repo PR does not run the whole suite twice for one commit.
+  # A commit touching only docs/ or top-level markdown runs nothing: no test
+  # reads them, so the ~55 job-minutes would re-prove the previous commit.
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  # Weekly: every commit already runs the suite above; this only catches drift
+  # from the deliberately unpinned requirements and the live services.
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * 0"
 
 jobs:
   # ── Build once, test in parallel. The tree is compiled a single time here and
@@ -53,6 +63,26 @@ jobs:
           sudo apt-get install -y --no-install-recommends libnghttp2-dev
           pkg-config --exists openssl libnghttp2
 
+      # Content-addressed C/C++ object cache: `compile tree` is ~32 of the run's
+      # ~55 job-minutes, and most commits change few native sources. Installed
+      # without `apt-get update` (see above). /usr/lib/ccache holds gcc/g++/cc/
+      # clang wrappers; putting it first on PATH routes the same compilers the
+      # build already picks through ccache, so no compiler choice changes. Safe
+      # to share across runners: build flags pin -march (no -march=native).
+      - name: Install ccache
+        run: |
+          sudo apt-get install -y --no-install-recommends ccache
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -74,7 +104,21 @@ jobs:
           python -m uv pip freeze
 
       - name: Compile
-        run: make compile
+        run: |
+          ccache --zero-stats
+          make compile
+
+      # A cache that is silently bypassed would look like a saving and be none:
+      # fail if no compilation went through ccache. Hit rate is in the log.
+      - name: Verify compiles went through ccache
+        run: |
+          ccache --show-stats
+          calls=$(ccache --print-stats | awk -F'\t' '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"||$1=="cache_miss"{s+=$2} END{print s+0}')
+          echo "ccache cacheable calls: ${calls}"
+          if [ "${calls}" -eq 0 ]; then
+            echo "ERROR: no compilation went through ccache (compiler not resolved via /usr/lib/ccache)" >&2
+            exit 1
+          fi
 
       # Assert OpenSSL is linked into the extension that actually CALLS it:
       # http_client statically links vendored libcurl, which needs -lssl
@@ -207,7 +251,7 @@ jobs:
       # so a commit's result depended on which seeds it drew: a push went red
       # because an oracle's precondition did not fire in 200 random cases, with no
       # engine change behind it, and a red regression matrix blocks the release.
-      # Fuzzing is a search, not a gate: it runs on a clock in fuzzer.yaml (daily,
+      # Fuzzing is a search, not a gate: it runs on a clock in fuzzer.yaml (weekly,
       # 100k cases) and a failure there is reproduced by pinning the printed seed
       # in tests/fuzzing/seeds/. The deterministic native-parser corpus replay
       # (fuzz_native_replay.yaml) stays on every push - it is a regression test.

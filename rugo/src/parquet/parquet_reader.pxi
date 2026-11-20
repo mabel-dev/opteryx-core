@@ -1997,6 +1997,49 @@ cdef class _ParallelRowGroups:
                 del r
 
 
+cdef list _projection_names(parquet_reader.FileStats& fs, object column_names, set variants):
+    """The names a stream reads: `column_names`, or every column of the file - row group
+    0's chunks, with a VARIANT's leaf chunks standing as the VARIANT itself, once."""
+    cdef list names = []
+    cdef str nm
+    if column_names is not None:
+        return [str(name) for name in column_names]
+    if fs.row_groups.size() == 0:
+        return names
+    for col in fs.row_groups[0].columns:
+        nm = col.name.decode("utf-8")
+        for v in variants:
+            if nm.startswith(v + "."):
+                nm = v
+                break
+        if nm not in variants or nm not in names:
+            names.append(nm)
+    return names
+
+
+cdef set _variant_fields(parquet_reader.FileStats& fs):
+    """The file's top-level VARIANT fields."""
+    cdef set out = set()
+    cdef size_t i
+    for i in range(fs.schema_columns.size()):
+        if fs.schema_columns[i].logical_type == b"variant":
+            out.add(fs.schema_columns[i].name.decode("utf-8"))
+    return out
+
+
+cdef object _variant_morsel(const uint8_t* data, size_t size, parquet_reader.FileStats& fs,
+                           vector[string]& names, vector[uint8_t]& is_variant, list col_names,
+                           int rg):
+    """Row group `rg` as a Morsel, each VARIANT folded to its JSON text (W3); None when it
+    decodes to no columns."""
+    cdef vector[parquet_reader.DecodedColumn] row_group_columns
+    with nogil:
+        row_group_columns = parquet_reader.DecodeRowGroupVariants(data, size, fs, names, is_variant, rg)
+    if row_group_columns.size() == 0:
+        return None
+    return _morsel_from_row_group(row_group_columns, col_names)
+
+
 def stream_parquet(data, column_names=None, row_group_mask=None, threads=1,
                    min_parallel_bytes=DEFAULT_PARALLEL_MIN_BYTES):
     """Read parquet data from memory, yielding ONE row group's Morsel at a time.
@@ -2017,6 +2060,8 @@ def stream_parquet(data, column_names=None, row_group_mask=None, threads=1,
     cdef list col_names
     cdef Py_ssize_t rg_idx
     cdef uint8_t _mbit
+    cdef set variants
+    cdef vector[uint8_t] is_variant
 
     if isinstance(data, (bytes, bytearray)):
         mem_view = memoryview(data).cast('B')
@@ -2027,20 +2072,30 @@ def stream_parquet(data, column_names=None, row_group_mask=None, threads=1,
 
     fs = parquet_reader.ReadParquetMetadataFromBuffer(&mem_view[0], <size_t>mem_view.shape[0])
 
-    if column_names is None:
-        col_names = []
-        if fs.row_groups.size() > 0:
-            for col in fs.row_groups[0].columns:
-                col_names.append(col.name.decode("utf-8"))
-    else:
-        col_names = [str(name) for name in column_names]
+    variants = _variant_fields(fs)
+    col_names = _projection_names(fs, column_names, variants)
     for name in col_names:
         cpp_column_names.push_back(name.encode("utf-8"))
+        _mbit = 1 if name in variants else 0   # a typed local: see cpp_mask below
+        is_variant.push_back(_mbit)
 
     if row_group_mask is not None:
         for m in row_group_mask:
             _mbit = 1 if m else 0
             cpp_mask.push_back(_mbit)
+
+    # shortcut: a projection holding a VARIANT decodes serially (the parallel reader
+    # materializes leaves on its workers, before they could be folded); fold on the
+    # workers when a standalone VARIANT read needs the speed.
+    if variants.intersection(col_names):
+        for rg_idx in range(<Py_ssize_t>fs.row_groups.size()):
+            if <size_t>rg_idx < cpp_mask.size() and cpp_mask[rg_idx] == 0:
+                continue
+            morsel = _variant_morsel(&mem_view[0], <size_t>mem_view.shape[0], fs,
+                                     cpp_column_names, is_variant, col_names, <int>rg_idx)
+            if morsel is not None:
+                yield morsel
+        return
 
     cdef int nthreads = min(<int>threads, parquet_reader.ParallelRowGroupReader.pool_size())
     cdef _ParallelRowGroups par
@@ -2095,6 +2150,8 @@ def stream_parquet_from_path(str path, column_names=None, row_group_mask=None, t
     cdef uint8_t _mbit
     cdef int nthreads
     cdef _ParallelRowGroups par
+    cdef set variants
+    cdef vector[uint8_t] is_variant
 
     with nogil:
         rc = read_all_mmap(c_path, &mapped_ptr, &mapped_len)
@@ -2104,20 +2161,28 @@ def stream_parquet_from_path(str path, column_names=None, row_group_mask=None, t
     try:
         fs = parquet_reader.ReadParquetMetadataFromBuffer(mapped_ptr, mapped_len)
 
-        if column_names is None:
-            col_names = []
-            if fs.row_groups.size() > 0:
-                for col in fs.row_groups[0].columns:
-                    col_names.append(col.name.decode("utf-8"))
-        else:
-            col_names = [str(name) for name in column_names]
+        variants = _variant_fields(fs)
+        col_names = _projection_names(fs, column_names, variants)
         for name in col_names:
             cpp_column_names.push_back(name.encode("utf-8"))
+            _mbit = 1 if name in variants else 0   # a typed local: see cpp_mask below
+            is_variant.push_back(_mbit)
 
         if row_group_mask is not None:
             for m in row_group_mask:
                 _mbit = 1 if m else 0
                 cpp_mask.push_back(_mbit)
+
+        # shortcut: serial for a projection holding a VARIANT - see stream_parquet.
+        if variants.intersection(col_names):
+            for rg_idx in range(<Py_ssize_t>fs.row_groups.size()):
+                if <size_t>rg_idx < cpp_mask.size() and cpp_mask[rg_idx] == 0:
+                    continue
+                morsel = _variant_morsel(mapped_ptr, mapped_len, fs, cpp_column_names,
+                                         is_variant, col_names, <int>rg_idx)
+                if morsel is not None:
+                    yield morsel
+            return
 
         nthreads = min(<int>threads, parquet_reader.ParallelRowGroupReader.pool_size())
         if _parallel_worthwhile(fs, cpp_column_names.size(), cpp_mask, nthreads,

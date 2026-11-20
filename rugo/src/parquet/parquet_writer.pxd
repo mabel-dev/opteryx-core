@@ -40,6 +40,11 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         const uint8_t* ptr
         uint32_t len
 
+    cdef cppclass SchemaGroup:
+        string name
+        int32_t field_id
+        bint top
+
     cdef cppclass ColumnInput:
         ColumnInput() except +
         string name
@@ -82,6 +87,8 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         bint sorted_hint
         bint sorted_descending
         bint sorted_nulls_first
+        vector[string] path
+        vector[SchemaGroup] groups
 
     cdef cppclass ColumnStats:
         bint has_minmax
@@ -119,6 +126,25 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         size_t peak_held_narrow_bytes()
         size_t narrow_demoted_columns()
         size_t narrow_budget_closes()
+
+
+cdef extern from "variant_encode.hpp" namespace "rugo::variant":
+
+    cdef cppclass ShredType:
+        ShredType()
+
+
+cdef extern from "variant_columns.hpp" namespace "rugo_pq_write":
+
+    # A VARIANT column's shredding, learnt from its first row group, and the column
+    # itself as the writer's leaf columns (docs/parquet_variant_design.md §5.4).
+    ShredType infer_variant(const StrSlice* docs, const uint8_t* validity,
+                            size_t rows) except + nogil
+
+    cdef cppclass VariantColumn:
+        VariantColumn(const string& name, ShredType type) except +
+        void append(const StrSlice* docs, const uint8_t* validity, size_t rows,
+                    bint dictionary, vector[ColumnInput]& out) except + nogil
 
 
 cdef extern from "_parquet_patch.hpp" namespace "rugo_pq_write":

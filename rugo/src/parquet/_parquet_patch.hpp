@@ -194,6 +194,9 @@ inline ColumnInput shape_from_schema_element(const SchemaElement &e) {
         "parquet patch: column '" + e.name +
         "' is a STRUCT; patching struct columns is not supported yet");
 
+  // A REQUIRED column's pages carry no definition levels: declaring it OPTIONAL over the
+  // copied pages would make a reader take its first value bytes for levels.
+  ci.leaf_required = e.repetition_type == REP_REQUIRED;
   ci.type = ptype_from_reader_name(e.physical_type);
 
   const std::string &lt = e.logical_type;
@@ -312,6 +315,7 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
         "parquet patch: donor column is a LIST; an ADDed column must be a primitive");
   cc.shape.bloom = false;
   cc.shape.dict_enabled = false;
+  cc.shape.leaf_required = false;   // its chunk is synthesised, with definition levels
 
   const ::ColumnStats &cs = fs.row_groups[0].columns[0];
   if (cs.null_count < 0)
@@ -918,7 +922,8 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
   if (source_is_rugo) {
     for (size_t j = 0; j < cols.size(); j++) {
       const int s = cols[j].src_index;
-      if (s < 0 || cols[j].reencode || cols[j].shape.is_array) continue;
+      if (s < 0 || cols[j].reencode || cols[j].shape.is_array || !cols[j].shape.path.empty())
+        continue;   // the keys name top-level fields: a group's leaves have none
       const std::string &src_name = fs.row_groups[0].columns[(size_t)s].name;
       auto mt = fs.key_value_metadata.find(
           std::string(rugo_parquet::kFileMcvKeyPrefix) + src_name);
@@ -942,6 +947,62 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
   write_parquet_footer(out, shapes, (size_t)fs.num_rows, rg_metas, all_rg_cols,
                        &file_ndv, 0, &file_mcv);
   return out;
+}
+
+// The number of leaf column chunks under schema element `e`.
+inline int schema_leaf_count(const SchemaElement &e) {
+  if (e.children.empty()) return 1;
+  int n = 0;
+  for (const SchemaElement &c : e.children) n += schema_leaf_count(c);
+  return n;
+}
+
+// A VARIANT's leaves as the columns that carry its chunks through a patch unchanged
+// (docs/parquet_variant_design.md §5.4, W4): each leaf's own shape, its path and the group
+// elements written before it - the layout the writer gives a VARIANT (ColumnInput::path).
+// `first_chunk` is the VARIANT's first leaf chunk in the source. Only plain groups can be
+// re-declared: a LIST under the VARIANT (a shredded array) carries levels this cannot
+// restate, so it is refused.
+inline void carry_variant_leaves(const SchemaElement &top, int first_chunk,
+                                 std::vector<PatchColumn> &cols) {
+  std::vector<SchemaGroup> pending;
+  std::vector<std::string> path;
+  int chunk = first_chunk;
+  auto walk = [&](auto &self, const SchemaElement &e, bool is_top) -> void {
+    if (e.repetition_type == REP_REPEATED ||
+        (!is_top && !e.children.empty() && !e.logical_type.empty() && e.logical_type != "struct"))
+      throw std::runtime_error("parquet patch: VARIANT column '" + top.name +
+                               "' shreds '" + e.name + "' as a " +
+                               (e.repetition_type == REP_REPEATED ? std::string("repeated field")
+                                                                  : e.logical_type) +
+                               ", which this patcher cannot re-declare");
+    path.push_back(e.name);
+    if (e.children.empty()) {
+      PatchColumn pc;
+      pc.shape = shape_from_schema_element(e);
+      pc.shape.field_id = -1;
+      pc.shape.path = path;
+      pc.shape.name.clear();
+      for (size_t k = 0; k < path.size(); ++k) pc.shape.name += (k ? "." : "") + path[k];
+      pc.shape.groups = std::move(pending);
+      pending.clear();
+      pc.shape.leaf_required = e.repetition_type == REP_REQUIRED;
+      pc.src_index = chunk++;
+      cols.push_back(std::move(pc));
+    } else {
+      SchemaGroup g;
+      g.name = e.name;
+      g.num_children = (int32_t)e.children.size();
+      g.top = is_top;
+      g.variant = is_top;
+      g.required = e.repetition_type == REP_REQUIRED;
+      g.field_id = e.field_id;
+      pending.push_back(std::move(g));
+      for (const SchemaElement &c : e.children) self(self, c, false);
+    }
+    path.pop_back();
+  };
+  walk(walk, top, true);
 }
 
 // Drop, rename, add and/or retype columns BY NAME.
@@ -981,8 +1042,25 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
   std::vector<bool> renamed_seen(rename.size(), false);
   std::vector<bool> retyped_seen(retype.size(), false);
 
+  int chunk = 0;   // the element's first leaf chunk in the source: a group holds several
   for (size_t i = 0; i < schema_fs.schema.size(); i++) {
     const SchemaElement &e = schema_fs.schema[i];
+    const int first_chunk = chunk;
+    chunk += schema_leaf_count(e);
+
+    if (e.logical_type == "variant") {
+      // Carried through byte for byte; patching the VARIANT itself is not supported (W4).
+      bool named = false;
+      for (const std::string &d : drop) named = named || d == e.name;
+      for (const auto &r : rename) named = named || r.first == e.name;
+      for (const auto &t : retype) named = named || t.first == e.name;
+      if (named)
+        throw std::runtime_error("parquet patch: column '" + e.name +
+                                 "' is a VARIANT; a patch carries it through unchanged and "
+                                 "cannot drop, rename or retype it");
+      carry_variant_leaves(e, first_chunk, cols);
+      continue;
+    }
 
     bool is_dropped = false;
     for (size_t d = 0; d < drop.size(); d++) {
@@ -993,7 +1071,7 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
 
     PatchColumn pc;
     pc.shape = shape_from_schema_element(e);
-    pc.src_index = (int)i;
+    pc.src_index = first_chunk;
 
     // A retype replaces the shape wholesale with the donor's - the target type
     // is exactly what the write path would have annotated this column as.
@@ -1005,11 +1083,14 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
       ConstantColumn target =
           parse_donor((const uint8_t *)retype[t].second.data(), retype[t].second.size());
       const PType was = pc.shape.type;
+      const bool was_required = pc.shape.leaf_required;
       pc.shape = target.shape;
       pc.shape.name = e.name;
       // Same physical type => the bytes already are what the new annotation
       // says they are, so this costs exactly what a rename costs.
       pc.reencode = (target.shape.type != was);
+      // Copied pages keep the source's repetition; re-encoded ones carry definition levels.
+      pc.shape.leaf_required = was_required && !pc.reencode;
     }
 
     for (size_t r = 0; r < rename.size(); r++) {
@@ -1048,9 +1129,12 @@ inline std::vector<uint8_t> PatchParquetColumnsByName(
   if (cols.empty())
     throw std::runtime_error("parquet patch: dropping every column would leave no relation");
   // A rename or add onto a name the result already holds.
+  std::vector<ColumnInput> result_shapes;
+  for (const PatchColumn &pc : cols) result_shapes.push_back(pc.shape);
+  const std::vector<std::string> top_names = top_level_names(result_shapes);
   rugo::require_unique_column_names(
-      "patch_columns: cannot write", cols.size(),
-      [&](size_t i) -> const std::string & { return cols[i].shape.name; });
+      "patch_columns: cannot write", top_names.size(),
+      [&](size_t i) -> const std::string & { return top_names[i]; });
 
   return PatchParquetColumns(src, src_len, cols, consts);
 }
@@ -1082,7 +1166,8 @@ inline bool same_column_shape(const ColumnInput &a, const ColumnInput &b) {
          a.is_array == b.is_array && a.array_depth == b.array_depth &&
          a.elem_type == b.elem_type && a.elem_is_utf8 == b.elem_is_utf8 &&
          a.draken_logical_kind == b.draken_logical_kind &&
-         a.field_id == b.field_id && a.element_ids == b.element_ids;
+         a.field_id == b.field_id && a.element_ids == b.element_ids &&
+         a.leaf_required == b.leaf_required;
 }
 
 // One source of an append: a complete parquet file and which of its row groups

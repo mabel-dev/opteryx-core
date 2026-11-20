@@ -174,6 +174,16 @@ struct StrSlice {
   uint32_t len;
 };
 
+// A group schema element written before a leaf (see ColumnInput::groups).
+struct SchemaGroup {
+  std::string name;
+  int32_t num_children = 0;
+  bool top = false;       // a top-level field
+  bool required = false;
+  bool variant = false;   // annotated VARIANT
+  int32_t field_id = -1;
+};
+
 // One column to write. Exactly one of the typed buffers is consulted, chosen
 // by `type`. `validity` is a 1-bit-per-row mask (1 = valid); NULL = all valid.
 // Buffers hold one entry PER ROW (including null rows — null entries are read
@@ -319,6 +329,19 @@ struct ColumnInput {
   const uint32_t *row_level_offsets = nullptr;
   const uint32_t *row_element_offsets = nullptr;
 
+  // ---- a leaf of a group column (a shredded VARIANT, variant_columns.hpp) ----
+  // `path` is the leaf's path_in_schema from the top-level field down; empty for
+  // every other column. `groups` are the group schema elements written just
+  // before this leaf (a group opens at its first leaf). `levels` holds ONE
+  // definition level per row, at most `max_def`; a row holds a value exactly
+  // when its level is max_def, which `validity` says too, so the value encoders
+  // and statistics need nothing new. `name` is the dotted path.
+  std::vector<std::string> path;
+  std::vector<SchemaGroup> groups;
+  bool leaf_required = false;
+  const uint8_t *levels = nullptr;
+  int max_def = 1;
+
   // ---- clustering / sort-order hint ----
   // Caller-supplied assertion that this column's values, within each row
   // group written from this ColumnInput, are already ordered. Written
@@ -438,6 +461,16 @@ inline std::vector<uint8_t> encode_def_levels(const uint8_t *validity,
     i += run;
   }
   return out;
+}
+
+// A data page's definition levels for rows [start, start + count) of a scalar
+// column: a group leaf's own levels, else the validity bit.
+inline std::vector<uint8_t> page_def_levels(const ColumnInput &col, size_t start,
+                                            size_t count) {
+  if (col.levels)
+    return encode_levels_rle(col.levels + start, count,
+                             level_bit_width((uint32_t)col.max_def));
+  return encode_def_levels(col.validity ? col.validity + (start >> 3) : nullptr, count);
 }
 
 // ---- PLAIN value encoders (non-null values only) ----
@@ -916,7 +949,7 @@ struct ColumnStats {
 // Does this column chunk get a `rugo.sum`? A scalar INT32/INT64 chunk with no
 // logical annotation beyond an integer width/sign one (chunk_sum.hpp).
 inline bool chunk_has_sum(const ColumnInput &col) {
-  return !col.is_array && col.logical == LK_NONE &&
+  return !col.is_array && col.path.empty() && col.logical == LK_NONE &&
          (col.type == PT_INT32 || col.type == PT_INT64);
 }
 
@@ -1468,6 +1501,7 @@ inline ColumnInput slice_rows(const ColumnInput &col, size_t start) {
     if (col.dec_raw) sub.dec_raw = col.dec_raw + start * (size_t)col.dec_width;
   }
   if (col.validity) sub.validity = col.validity + (start >> 3);
+  if (col.levels) sub.levels = col.levels + start;
   return sub;
 }
 
@@ -1489,7 +1523,7 @@ inline std::vector<uint8_t> concat_page(const std::vector<uint8_t> &header,
 inline PageBuild build_data_page(const ColumnInput &col, size_t num_rows,
                                  int codec, int zstd_level) {
   std::vector<uint8_t> body;
-  std::vector<uint8_t> def = encode_def_levels(col.validity, num_rows);
+  std::vector<uint8_t> def = page_def_levels(col, 0, num_rows);
   put_u32_le(body, (uint32_t)def.size());
   body.insert(body.end(), def.begin(), def.end());
   if (col.alp) encode_values_alp(col, num_rows, body);
@@ -2433,8 +2467,7 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
   // Build one data page covering rows [start, start+count) of the chunk.
   auto build_one = [&](size_t start, size_t count) {
     std::vector<uint8_t> data_body;
-    std::vector<uint8_t> def =
-        encode_def_levels(col.validity ? col.validity + (start >> 3) : nullptr, count);
+    std::vector<uint8_t> def = page_def_levels(col, start, count);
     put_u32_le(data_body, (uint32_t)def.size());
     data_body.insert(data_body.end(), def.begin(), def.end());
     data_body.push_back((uint8_t)bw);
@@ -2575,19 +2608,43 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
   // Flat pre-order list: root + each column's subtree. A primitive is 1 element;
   // a LIST nested `array_depth` deep is (2*array_depth + 1): each level adds a
   // LIST group + a repeated "list" group, plus the single leaf "element".
+  // A group leaf adds its `groups`; the root's children are the top-level fields.
   uint32_t n_elems = 1;
-  for (const auto &c : cols)
+  int32_t top_fields = 0;
+  for (const auto &c : cols) {
     n_elems += c.is_array ? (uint32_t)(2 * c.array_depth + 1) : 1;
+    n_elems += (uint32_t)c.groups.size();
+    if (c.path.empty()) top_fields++;
+    for (const SchemaGroup &g : c.groups) top_fields += g.top ? 1 : 0;
+  }
   w.writeFieldHeader(CT_LIST, 2); // FileMetaData.schema
   w.writeListHeader(CT_STRUCT, n_elems);
 
   // root
   w.structBegin();
   w.writeStringField(4, "schema");                 // name
-  w.writeI32Field(5, (int32_t)cols.size());        // num_children
+  w.writeI32Field(5, top_fields);                  // num_children
   w.structEnd();
 
   for (const auto &c : cols) {
+    for (const SchemaGroup &g : c.groups) {
+      w.structBegin();
+      w.writeI32Field(3, g.required ? REP_REQUIRED : REP_OPTIONAL);
+      w.writeStringField(4, g.name);
+      w.writeI32Field(5, g.num_children);
+      emit_field_id(w, g.field_id);
+      if (g.variant) {
+        w.writeFieldHeader(CT_STRUCT, 10);         // logicalType
+        w.structBegin();                           //   LogicalType union
+        w.writeFieldHeader(CT_STRUCT, 16);         //   VARIANT member
+        w.structBegin();                           //     VariantType
+        w.writeFieldHeader(CT_BYTE, 1);            //     specification_version (i8)
+        w.writeByte(1);
+        w.structEnd();
+        w.structEnd();
+      }
+      w.structEnd();
+    }
     if (c.is_array) {
       // `array_depth` nested LIST levels then the leaf. Each level is a LIST
       // group (OPTIONAL) followed by a repeated "list" group. The outermost
@@ -2637,8 +2694,8 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
     w.writeI32Field(1, (int32_t)c.type);           // type
     if (c.type == PT_FLBA)
       w.writeI32Field(2, c.dec_width);             // type_length
-    w.writeI32Field(3, REP_OPTIONAL);              // repetition_type
-    w.writeStringField(4, c.name);                 // name
+    w.writeI32Field(3, c.leaf_required ? REP_REQUIRED : REP_OPTIONAL); // repetition_type
+    w.writeStringField(4, c.path.empty() ? c.name : c.path.back());   // name
 
     if (c.logical == LK_DECIMAL) {
       w.writeI32Field(6, CONV_DECIMAL);
@@ -2744,7 +2801,8 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
 // Statistics) and FLBA (DECIMAL/INTERVAL), whose stats bytes are big-endian
 // two's complement and do not order byte-wise across zero.
 inline bool page_index_bound_kind(const ColumnInput &c, PageBoundKind &kind) {
-  if (c.is_array) return false;
+  // shortcut: no index for a group leaf (the reader prunes top-level columns only); add one when it prunes leaves.
+  if (c.is_array || !c.path.empty()) return false;
   switch (c.type) {
   case PT_INT32:   kind = PB_INT32;  return true;
   case PT_INT64:   kind = PB_INT64;  return true;
@@ -2870,6 +2928,9 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
         w.writeListString("list");
         w.writeListString("element");
       }
+    } else if (!c.path.empty()) {
+      w.writeListHeader(CT_BINARY, (uint32_t)c.path.size());
+      for (const std::string &step : c.path) w.writeListString(step);
     } else {
       w.writeListHeader(CT_BINARY, 1);
       w.writeListString(c.name);
@@ -3787,6 +3848,8 @@ inline std::vector<ColumnInput> slice_row_group_cols(const std::vector<ColumnInp
     }
     if (cols[i].validity)
       rg_cols[i].validity = cols[i].validity + (rg_start >> 3);
+    if (cols[i].levels)
+      rg_cols[i].levels = cols[i].levels + rg_start;
     if (cols[i].codes)
       rg_cols[i].codes = cols[i].codes + rg_start;
   }
@@ -3906,7 +3969,7 @@ inline void write_file_kv(TCompactWriter &fm,
     if (file_ndv->size() != schema_cols.size())
       throw std::logic_error("write_file_kv: file NDV values do not match the schema");
     for (size_t i = 0; i < schema_cols.size(); i++)
-      if (!(*file_ndv)[i].empty())
+      if (!(*file_ndv)[i].empty() && schema_cols[i].path.empty())   // keys name top-level fields
         kv.emplace_back(std::string(rugo_parquet::kFileNdvKeyPrefix) + schema_cols[i].name,
                         (*file_ndv)[i]);
   }
@@ -3914,7 +3977,7 @@ inline void write_file_kv(TCompactWriter &fm,
     if (file_mcv->size() != schema_cols.size())
       throw std::logic_error("write_file_kv: file MCV values do not match the schema");
     for (size_t i = 0; i < schema_cols.size(); i++)
-      if (!(*file_mcv)[i].empty())
+      if (!(*file_mcv)[i].empty() && schema_cols[i].path.empty())
         kv.emplace_back(std::string(rugo_parquet::kFileMcvKeyPrefix) + schema_cols[i].name,
                         (*file_mcv)[i]);
   }
@@ -4113,6 +4176,17 @@ inline void require_statistics_for_outputs(bool statistics, bool want_index,
 // compute_stats the chunks use, minus the sum) — so a bounds caller is not
 // limited to single-row-group files. A pass over every column, one pool task
 // per column: pass nullptr unless the result is read.
+// The file's top-level field names: a plain column's own, a group's once (at
+// the leaf that opens it). Names are unique over these, not over group leaves.
+inline std::vector<std::string> top_level_names(const std::vector<ColumnInput> &cols) {
+  std::vector<std::string> out;
+  for (const ColumnInput &c : cols) {
+    if (c.path.empty()) out.push_back(c.name);
+    else if (!c.groups.empty() && c.groups.front().top) out.push_back(c.groups.front().name);
+  }
+  return out;
+}
+
 inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t num_rows,
                                          int codec = CODEC_UNCOMPRESSED,
@@ -4129,9 +4203,10 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t narrow_held_budget = 0) {
   if (row_groups_per_block == 0)
     throw std::invalid_argument("WriteParquet: row_groups_per_block must be >= 1");
+  const std::vector<std::string> top_names = top_level_names(cols);
   rugo::require_unique_column_names(
-      "write_parquet: cannot write", cols.size(),
-      [&](size_t i) -> const std::string & { return cols[i].name; });
+      "write_parquet: cannot write", top_names.size(),
+      [&](size_t i) -> const std::string & { return top_names[i]; });
   NarrowColumnRuns runs;
   runs.chunk_bytes = narrow_chunk_bytes;
   runs.run_blocks = narrow_run_blocks;
@@ -4295,9 +4370,10 @@ class StreamingParquetWriter {
   // row group is fully encoded before it returns.
   void add_row_group(const std::vector<ColumnInput> &rg_cols, size_t rg_rows) {
     if (!have_schema_) {
+      const std::vector<std::string> top_names = top_level_names(rg_cols);
       rugo::require_unique_column_names(
-          "write_parquet: cannot write", rg_cols.size(),
-          [&](size_t i) -> const std::string & { return rg_cols[i].name; });
+          "write_parquet: cannot write", top_names.size(),
+          [&](size_t i) -> const std::string & { return top_names[i]; });
       schema_cols_ = strip_data(rg_cols);
       have_schema_ = true;
     } else {
@@ -4384,6 +4460,7 @@ class StreamingParquetWriter {
       c.codes = nullptr;
       c.rep_levels = nullptr; c.def_levels = nullptr;
       c.row_level_offsets = nullptr; c.row_element_offsets = nullptr;
+      c.levels = nullptr;
     }
     return out;
   }
@@ -4409,7 +4486,8 @@ class StreamingParquetWriter {
           a.ts_utc == b.ts_utc && a.draken_logical_kind == b.draken_logical_kind &&
           a.is_unsigned == b.is_unsigned && a.int_bit_width == b.int_bit_width &&
           a.is_array == b.is_array && a.array_depth == b.array_depth &&
-          a.elem_type == b.elem_type && a.elem_is_utf8 == b.elem_is_utf8;
+          a.elem_type == b.elem_type && a.elem_is_utf8 == b.elem_is_utf8 &&
+          a.path == b.path && a.max_def == b.max_def && a.leaf_required == b.leaf_required;
       if (!same_type)
         throw std::invalid_argument(at + ": column '" + b.name +
                                     "' has a different type from the first row group's");

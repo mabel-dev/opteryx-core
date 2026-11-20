@@ -255,6 +255,11 @@ cdef extern from "decode.hpp":
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names, const vector[uint8_t]& row_group_mask) nogil
     vector[DecodedColumn] DecodeRowGroupColumns(const uint8_t* data, size_t size, const vector[string]& column_names, const RowGroupStats& row_group, int row_group_index) except + nogil
 
+cdef extern from "variant_fold.hpp" namespace "rugo":
+    # DecodeRowGroupColumns with each name marked in `is_variant` folded from its leaves
+    # to its JSON text (docs/parquet_variant_design.md §5.4, W3).
+    vector[DecodedColumn] DecodeRowGroupVariants(const uint8_t* data, size_t size, const FileStats& fs, const vector[string]& names, const vector[uint8_t]& is_variant, int rg) except + nogil
+
 cdef extern from "parallel_read.hpp" namespace "rugo":
     cdef cppclass PreMaterialized:
         bint valid

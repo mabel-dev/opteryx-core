@@ -634,3 +634,85 @@ def test_an_unsupported_physical_change_is_refused(sample):
 
     with pytest.raises(RuntimeError, match="only a physical int32 to int64"):
         rp.patch_columns(src, retype={"i64": _donor("i64", None, "FLOAT64")})
+
+
+# ── REQUIRED columns ───────────────────────────────────────────────────────────────────────────
+# Another writer marks a NOT NULL column REQUIRED, and a REQUIRED column's pages carry no
+# definition levels. The patcher used to re-declare every column OPTIONAL, so a reader took the
+# first bytes of each copied page for levels: DuckDB refused the file ("Out of buffer"). A copied
+# column keeps the source's repetition; one the patcher writes itself carries levels, so is OPTIONAL.
+# (No byte-identity check here: DuckDB writes a page index between its chunks, which a patch drops.)
+
+
+def _duckdb_required(path, rows=3000):
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t (id INTEGER NOT NULL, s VARCHAR NOT NULL, n SMALLINT NOT NULL, maybe BIGINT)")
+    con.execute(
+        f"INSERT INTO t SELECT range, 'v' || (range % 13), (range % 600) - 300, "
+        f"CASE WHEN range % 5 = 0 THEN NULL ELSE range END FROM range({rows})"
+    )
+    con.execute(f"COPY t TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE 1000)")
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _duck(path, sql="SELECT * FROM '{p}' ORDER BY 1"):
+    import duckdb
+
+    return duckdb.sql(sql.format(p=path)).fetchall()
+
+
+def _repetition(path):
+    import duckdb
+
+    return dict(duckdb.sql(f"SELECT name, repetition_type FROM parquet_schema('{path}') WHERE type IS NOT NULL").fetchall())
+
+
+@pytest.fixture
+def required(tmp_path):
+    path = str(tmp_path / "required.parquet")
+    return path, _duckdb_required(path)
+
+
+def test_a_rename_keeps_required_columns_required(required, tmp_path):
+    path, src = required
+    out = rp.patch_columns(src, rename={"s": "label"})
+    patched = _write(tmp_path, "renamed.parquet", out)
+    assert _repetition(patched) == {"id": "REQUIRED", "label": "REQUIRED", "n": "REQUIRED", "maybe": "OPTIONAL"}
+    assert _duck(patched) == _duck(path)
+    assert [list(r.values()) for r in _rows(patched)] == [list(r.values()) for r in _rows(path)]
+
+
+def test_drop_and_add_beside_required_columns(required, tmp_path):
+    path, src = required
+    out = rp.patch_columns(src, drop=["n"], add=[_donor("extra", 7, "INT64")])
+    patched = _write(tmp_path, "dropped.parquet", out)
+    assert _repetition(patched) == {"id": "REQUIRED", "s": "REQUIRED", "maybe": "OPTIONAL", "extra": "OPTIONAL"}
+    assert _duck(patched) == [row[:2] + row[3:] + (7,) for row in _duck(path)]
+
+
+def test_retyping_a_required_column(required, tmp_path):
+    # An annotation-only retype copies the pages, so the column stays REQUIRED; a widening to
+    # INT64 re-encodes it, with definition levels, as OPTIONAL. The values are the same either way.
+    path, src = required
+    kept = _write(tmp_path, "to_int32.parquet", rp.patch_columns(src, retype={"n": _donor("n", None, "INT32")}))
+    assert _repetition(kept)["n"] == "REQUIRED"
+    widened = _write(tmp_path, "to_int64.parquet", rp.patch_columns(src, retype={"n": _donor("n", None, "INT64")}))
+    assert _repetition(widened)["n"] == "OPTIONAL"
+    for patched in (kept, widened):
+        assert _duck(patched, "SELECT n FROM '{p}' ORDER BY id") == _duck(path, "SELECT n FROM '{p}' ORDER BY id")
+
+
+def test_append_keeps_required_columns_and_refuses_a_repetition_change(required, tmp_path):
+    path, src = required
+    twice = _write(tmp_path, "twice.parquet", rp.append_row_groups(src, src))
+    assert _repetition(twice)["id"] == "REQUIRED"
+    assert _duck(twice) == sorted(_duck(path) * 2)
+    import duckdb
+
+    optional = str(tmp_path / "optional.parquet")
+    duckdb.sql(f"COPY (SELECT id, s, n, maybe FROM '{path}' UNION ALL SELECT NULL, 'x', 1, 1) TO '{optional}' (FORMAT PARQUET)")
+    with pytest.raises(RuntimeError, match="is not declared the way the first source declares it"):
+        rp.append_row_groups(src, open(optional, "rb").read())

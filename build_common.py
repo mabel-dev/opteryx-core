@@ -856,6 +856,9 @@ def draken_rugo_extensions(parquet_created_by):
                     # Self-contained in this TU (no malloc, no other miniz object needed).
                     "third_party/miniz/miniz_tinfl.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
+                    # Group leaves -> JSON text: read_parquet folds a VARIANT with it
+                    # (variant_fold.hpp). yyjson and mabel base64 resolve from draken_native.
+                    "rugo/src/parquet/nested_json.cpp",
                     # DecodedColumn -> owned Draken buffers (pure C++) and its
                     # Python edge (wrap_parquet_column); the edge is rugo_native only.
                     "rugo/src/parquet/column_materialize.cpp",

@@ -412,15 +412,17 @@ def test_a_file_holding_the_column_as_neither_is_refused(tmp_path):
 
 
 # ── A table's VARIANT column ─────────────────────────────────────────────────────────────────
-# The catalog declares the column VARIANT; today's writer holds it as JSON text, so this is
-# the text walk through a table scan: manifest pruning, merge-on-read deletes and all.
+# The catalog declares the column VARIANT. The engine's writer holds it as a shredded VARIANT;
+# files written before it hold JSON text and stay in the table, so a table scan reads both
+# forms: manifest pruning, merge-on-read deletes and all.
 
 TABLE = "varws.col.events"
 
 
 @pytest.fixture
 def table(tmp_path):
-    """A local-disk catalog table of two data files holding `_write`'s documents as JSON text."""
+    """A local-disk catalog table of `_write`'s documents twice over: ids below ROWS in the
+    file CTAS writes (a shredded VARIANT), ids from ROWS in a JSON-text file added after it."""
     if not _HAVE_CATALOG:
         pytest.skip(f"opteryx_catalog not importable (expected sibling repo at {_CATALOG_REPO})")
     from opteryx_catalog.catalog.manifest import clear_parsed_manifest_cache
@@ -434,10 +436,17 @@ def table(tmp_path):
     saved = (connectors._default_connector, dict(connectors._storage_prefixes), dict(connectors._connector_cache))
     connectors._connector_cache.clear()
     clear_parsed_manifest_cache()
-    opteryx.set_default_connector(OpteryxConnector, catalog=local_catalog_class(str(tmp_path / "catalog"), LocalDiskIO()))
+    catalog = local_catalog_class(str(tmp_path / "catalog"), LocalDiskIO())
+    opteryx.set_default_connector(OpteryxConnector, catalog=catalog)
     try:
         _run(f"CREATE TABLE {TABLE} AS SELECT id, data FROM READ_PARQUET('{source}')", pushed=False)
-        _run(f"INSERT INTO {TABLE} SELECT id + {ROWS}, data FROM READ_PARQUET('{source}')", pushed=False)
+        ds = catalog.store[TABLE]
+        text = os.path.join(ds.metadata.location, "data", "text.parquet")
+        con = duckdb.connect()
+        con.execute("CREATE TABLE src (id INTEGER, data VARCHAR)")
+        con.executemany("INSERT INTO src VALUES (?, ?)", [(ROWS + i, _json_text(i)) for i in range(ROWS)])
+        con.execute(f"COPY (SELECT * FROM src ORDER BY id) TO '{text}' (FORMAT PARQUET, ROW_GROUP_SIZE 1024)")
+        ds.add_files([text], author="tester", read_sources=[])
         clear_parsed_manifest_cache()
         yield TABLE
     finally:
@@ -491,12 +500,26 @@ def test_paths_over_a_table_with_deleted_rows(table):
     assert [row[0] for row in sorted(rows)] == [i for i in range(2 * ROWS) if i % 3]
 
 
-def test_every_path_over_a_column_shares_one_read_of_it(table):
-    # One chunk decoded and one parse per row, however many paths: five paths hold what one does.
-    one = _run(f"SELECT data ->> 'kind' FROM {table}", pushed=True)[2]
-    five = _run(
-        "SELECT data ->> 'kind', data -> 'kind', data ->> 'n', data -> 'commit', "
-        f"data -> 'commit' ->> 'rev' FROM {table}",
-        pushed=True,
-    )[2]
-    assert five.telemetry["io_held_peak_bytes"] == one.telemetry["io_held_peak_bytes"]
+def test_the_table_holds_both_forms(table, tmp_path):
+    # What the scans above read: the engine wrote a shredded VARIANT, the added file JSON text.
+    from rugo import parquet as rp
+
+    forms = {}
+    for root, _, files in os.walk(tmp_path / "catalog"):
+        for f in files:
+            if os.path.basename(root) == "data":
+                columns = rp.read_metadata(os.path.join(root, f)).schema_columns
+                forms[f == "text.parquet"] = {c.name: c.logical_type for c in columns}["data"]
+    assert forms == {False: "variant", True: "varchar"}
+
+
+def test_every_path_over_a_field_shares_one_read_of_it(table):
+    # However many paths read one field - one chunk of JSON text, or a VARIANT field's leaves -
+    # they hold what one path does.
+    def held(sql):
+        return _run(sql, pushed=True)[2].telemetry["io_held_peak_bytes"]
+
+    assert held(f"SELECT data ->> 'kind', data -> 'kind' FROM {table}") == held(f"SELECT data ->> 'kind' FROM {table}")
+    assert held(f"SELECT data -> 'commit', data -> 'commit' ->> 'rev' FROM {table}") == held(
+        f"SELECT data -> 'commit' FROM {table}"
+    )

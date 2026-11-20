@@ -1,5 +1,5 @@
 #
-# Fuzzing runs here, on a clock (currently 100k iterations, daily), and nowhere
+# Fuzzing runs here, on a clock (currently 100k iterations, weekly), and nowhere
 # else: the regression suite ignores tests/fuzzing, because a random-seeded search
 # must not decide whether a commit or a release is green.
 #
@@ -11,14 +11,17 @@
 # than be killed at the six-hour platform cap with no explanation.
 #
 # The SQL fuzzers seed themselves randomly and print the seed of every case, so
-# a nightly failure is reproduced from the job log by pinning that seed in
+# a failure is reproduced from the job log by pinning that seed in
 # tests/fuzzing/seeds/.
+#
+# Weekly, not daily: the SQL fuzz job runs ~3.5 hours and daily runs were the
+# largest single consumer of the repository's Actions minutes.
 #
 name: Fuzzing
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # 0300 each day
+    - cron: '0 3 * * 0'  # 0300 each Sunday
 
 jobs:
   fuzz_testing:

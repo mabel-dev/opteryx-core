@@ -215,17 +215,19 @@ def test_variant_type_identity_from_jsonl_parse_objects():
     assert col.to_pylist() == ['{"a": 1, "b": "x"}', None, '{"c": [1, 2]}']
 
 
-def test_variant_parquet_write_degrades_to_plain_string():
-    """Parquet has no variant/JSON logical type here -- VARIANT writes as a
-    plain UTF8 string, and the raw JSON text survives byte-for-byte."""
-    objects = [{"a": 1, "b": "x"}, None, {"c": [1, 2]}]
-    expected_text = [json.dumps(o) if o is not None else None for o in objects]
+def test_variant_parquet_write_is_a_parquet_variant():
+    """VARIANT writes as a (shredded) Parquet VARIANT, docs/parquet_variant_design.md
+    §5.4, and rugo reads it back as its JSON text: the same values, rendered compactly
+    with each object's members in name order."""
+    objects = [{"b": "x", "a": 1}, None, {"c": [1, 2]}]
     col = _variant_column(objects)
     m = _morsel("v", col)
     data = rp.write_parquet(m, compression="none", bloom_filters=False)
 
-    got = pq.read_table(io.BytesIO(data)).column("v").to_pylist()
-    assert got == expected_text
+    assert [c.logical_type for c in rp.read_metadata(data).schema_columns] == ["variant"]
+    with rp.read_parquet(data) as reader:
+        got = [t for morsel in reader for t in morsel.column("v").to_pylist()]
+    assert got == ['{"a":1,"b":"x"}', None, '{"c":[1,2]}']
 
 
 def test_variant_jsonl_write_reescapes_as_json_string_not_nested_object():

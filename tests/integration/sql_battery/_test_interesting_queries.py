@@ -40,7 +40,7 @@ def test_null_semantics(statement, expected_result):
     Test an battery of statements
     """
 
-    execute_and_fetch_all(statement)]
+    result = execute_and_fetch_all(statement)
     assert compare_sets(
         result, expected_result
     ), f"Query returned {result} but {expected_result} was expected.\n{statement}"
