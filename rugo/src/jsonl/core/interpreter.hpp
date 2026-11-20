@@ -71,6 +71,9 @@ struct MapProjection {
     // resolved, and only check the rest of its line's brackets and strings. Set when the
     // read has a projection; an unprojected read wants every key, so it has no tail to skip.
     bool                             early_exit;
+    // The capture slot that takes each accepted record's whole `{…}` span
+    // (ParseContext::whole_record), or -1.
+    int32_t                          whole_slot = -1;
 };
 
 // A copied column's bytes (ColumnMap::arena): a growable buffer whose resize() leaves new

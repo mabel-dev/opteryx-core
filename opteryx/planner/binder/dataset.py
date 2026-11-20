@@ -88,7 +88,7 @@ _GLOB_METACHARACTERS = frozenset("*?[")
 # parameters they translate to (rugo's `fail_on_error`, `has_header`, `delimiter`)
 # are deliberately not aliases, so writing one is an unrecognized option and the
 # "did you mean" hint below points at the SQL spelling.
-_READ_JSONL_OPTIONS = ("ignore_errors", "infer_schema", "infer_sample_size", "credentials")
+_READ_JSONL_OPTIONS = ("ignore_errors", "infer_schema", "infer_sample_size", "credentials", "as_variant")
 _READ_CSV_OPTIONS = (
     "ignore_errors",
     "separator",
@@ -800,6 +800,25 @@ def visit_function_dataset(
         else:
             infer_sample_size = 5
 
+        # `as_variant => 'data'`: one VARIANT column, `data`, holding each record's whole
+        # text — no key is split out (JSONBench's one-column load). Nothing is inferred,
+        # so the inference options mean nothing beside it and are refused.
+        whole_record = None
+        if "as_variant" in named_args:
+            arg = _literal_value("as_variant")
+            if arg.node_type != NodeType.LITERAL or type(arg.value) is not bytes or not arg.value:
+                raise InvalidFunctionParameterError(
+                    "READ_JSONL option 'as_variant' must be a non-empty string literal, the "
+                    "name of the column, e.g. READ_JSONL('file.jsonl', as_variant => 'data')."
+                )
+            whole_record = arg.text()
+            for inferring in ("infer_schema", "infer_sample_size"):
+                if inferring in named_args:
+                    raise InvalidFunctionParameterError(
+                        f"READ_JSONL option '{inferring}' cannot be used with 'as_variant': "
+                        "the record is read whole, so there is no schema to infer."
+                    )
+
         # Resolve the filesystem the same way Parquet scans do (protocol prefix
         # of the path -> opteryx.connectors.io_systems.create_filesystem). There
         # is no connector object yet for a bare file-path dataset function.
@@ -902,7 +921,8 @@ def visit_function_dataset(
         sample_morsel = None
         schema_source_path = jsonl_files[0]
 
-        for candidate_path in jsonl_files:
+        # A whole-record read has its schema already: nothing is sampled.
+        for candidate_path in jsonl_files if whole_record is None else ():
             file_obj = filesystem.open_input_file(candidate_path)
             try:
                 # rugo.jsonl.read_metadata()'s type inference is a no-op today (the
@@ -975,7 +995,9 @@ def visit_function_dataset(
         # what READ_CSV already binds for the same input (rugo.csv returns a
         # zero-column morsel rather than yielding nothing), so the two readers
         # agree on what an empty file means.
-        if sample_morsel is None:
+        if whole_record is not None:
+            physical_names = [whole_record]
+        elif sample_morsel is None:
             physical_names = []
         else:
             physical_names = [
@@ -1000,6 +1022,13 @@ def visit_function_dataset(
 
         schema_columns = []
         for physical_name, external_name in zip(physical_names, external_names):
+            if whole_record is not None:
+                schema_columns.append(
+                    context.plan_context.columns.relation_column(
+                        relation_name, external_name, column_type=_lt.VARIANT, origin=[relation_name]
+                    )
+                )
+                continue
             vector = sample_morsel.column(physical_name.encode("utf-8"))
             physical_type = vector.type
             if physical_type not in _JSONL_SUPPORTED_TYPES:
@@ -1047,6 +1076,7 @@ def visit_function_dataset(
         node.jsonl_fail_on_error = fail_on_error
         node.jsonl_infer_schema = infer_schema
         node.jsonl_infer_sample_size = infer_sample_size
+        node.jsonl_whole_record = whole_record
         # identity -> pre-alias physical (JSON key) name. Stable across projection
         # pushdown pruning `node.columns` (SchemaColumn objects/identities are
         # reused, never re-minted, by that pass) -- physical_planner uses this to

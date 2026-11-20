@@ -63,7 +63,15 @@ InterpreterResult interpret_range(
         wanted_cols.push_back(w);
         wanted_names.push_back(&name);
     };
-    for (size_t c = 0; c < columns.size(); ++c) add_col(columns[c], -1, static_cast<uint32_t>(c));
+    // The whole_record column matches no key: build_columns stages the record itself.
+    int32_t whole_slot = -1;
+    for (size_t c = 0; c < columns.size(); ++c) {
+        if (!context.whole_record.empty() && columns[c] == context.whole_record) {
+            whole_slot = static_cast<int32_t>(c);
+            continue;
+        }
+        add_col(columns[c], -1, static_cast<uint32_t>(c));
+    }
     // A predicate column joins the wanted set (reusing an output column of the same name)
     // and carries its predicate index for inline evaluation. Every predicate is judged
     // again on the record's captured values when it closes (bank_record), so a column
@@ -97,8 +105,10 @@ InterpreterResult interpret_range(
                 break;
             }
 
+    // No early exit for a whole record: its span is only known once the line is parsed.
     const MapProjection proj{&wanted_cols, &prepared_predicates, &pred_slot, columns.size(), &copy,
-                             /*early_exit=*/!context.projected_columns.empty()};
+                             /*early_exit=*/!context.projected_columns.empty() && whole_slot < 0,
+                             whole_slot};
     ColumnMap map = build_columns(buffer_data, buffer_length, proj, range_start, lines);
 
     // bytes_consumed = byte after the range's last newline (backward scan — newline near

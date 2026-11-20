@@ -6872,6 +6872,7 @@ class _Compiler:
             infer_schema=scan.jsonl_infer_schema,
             infer_sample_size=scan.jsonl_infer_sample_size,
             intern_nested_text=not config.features.disable_jsonl_nested_dict,
+            whole_record=scan.jsonl_whole_record,
         )
         plan = JsonlScanPlan(
             context,

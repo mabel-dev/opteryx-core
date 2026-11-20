@@ -265,6 +265,10 @@ class JsonlNestedExtractionStrategy(ScanExtractionStrategy):
         for nid, node in plan.nodes(True):
             if node.node_type != LogicalPlanStepType.FunctionDataset or node.function != "READ_JSONL":
                 continue
+            # shortcut: an `as_variant` column is the whole record, so `data->'k'` is the top-level
+            # key `k`, which rugo has no `->` spec for; read whole. Upgrade if JSONBench reads JSONL.
+            if node.jsonl_whole_record is not None:
+                continue
             physical = node.jsonl_physical_by_identity or {}
             for column in node.schema.columns:
                 column_type = column.column_type

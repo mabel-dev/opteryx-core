@@ -5473,6 +5473,7 @@ cdef class FunctionDatasetStep(PlanStep):
     cdef object _jsonl_infer_schema
     cdef dict _jsonl_physical_by_identity
     cdef tuple _jsonl_physical_columns
+    cdef str _jsonl_whole_record
     cdef object _manifest
     cdef dict _named_args
     cdef dict _parquet_physical_by_identity
@@ -5489,7 +5490,7 @@ cdef class FunctionDatasetStep(PlanStep):
         _row_str(self._relation, self._row.relation)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, orc_credentialed_filesystem=None, orc_files=None, orc_physical_by_identity=None, orc_physical_columns=None, orc_reader_columns=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, parquet_physical_by_identity=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, orc_credentialed_filesystem=None, orc_files=None, orc_physical_by_identity=None, orc_physical_columns=None, orc_reader_columns=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, jsonl_whole_record=None, manifest=None, named_args=None, parquet_physical_by_identity=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
         self.node_type = _step_types().FunctionDataset
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -5522,6 +5523,7 @@ cdef class FunctionDatasetStep(PlanStep):
         self.jsonl_infer_schema = jsonl_infer_schema
         self.jsonl_physical_by_identity = jsonl_physical_by_identity
         self.jsonl_physical_columns = jsonl_physical_columns
+        self.jsonl_whole_record = jsonl_whole_record
         self.manifest = manifest
         self.named_args = named_args
         self.parquet_physical_by_identity = parquet_physical_by_identity
@@ -5782,6 +5784,15 @@ cdef class FunctionDatasetStep(PlanStep):
         self._jsonl_infer_sample_size = value
 
     @property
+    def jsonl_whole_record(self):
+        return self._jsonl_whole_record
+
+    @jsonl_whole_record.setter
+    def jsonl_whole_record(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._jsonl_whole_record = value
+
+    @property
     def jsonl_infer_schema(self):
         return self._jsonl_infer_schema
 
@@ -5949,6 +5960,7 @@ cdef class FunctionDatasetStep(PlanStep):
         out["jsonl_infer_schema"] = self._jsonl_infer_schema
         out["jsonl_physical_by_identity"] = self._jsonl_physical_by_identity
         out["jsonl_physical_columns"] = self._jsonl_physical_columns
+        out["jsonl_whole_record"] = self._jsonl_whole_record
         out["manifest"] = self._manifest
         out["named_args"] = self._named_args
         out["parquet_physical_by_identity"] = self._parquet_physical_by_identity
@@ -6001,6 +6013,7 @@ cdef class FunctionDatasetStep(PlanStep):
         new._jsonl_infer_schema = _copy_field(self._jsonl_infer_schema, memo)
         new._jsonl_physical_by_identity = _copy_field(self._jsonl_physical_by_identity, memo)
         new._jsonl_physical_columns = _copy_field(self._jsonl_physical_columns, memo)
+        new._jsonl_whole_record = _copy_field(self._jsonl_whole_record, memo)
         new._manifest = _copy_field(self._manifest, memo)
         new._named_args = _copy_field(self._named_args, memo)
         new._parquet_physical_by_identity = _copy_field(self._parquet_physical_by_identity, memo)
@@ -6048,6 +6061,7 @@ cdef class FunctionDatasetStep(PlanStep):
         new._jsonl_infer_schema = self._jsonl_infer_schema
         new._jsonl_physical_by_identity = self._jsonl_physical_by_identity
         new._jsonl_physical_columns = self._jsonl_physical_columns
+        new._jsonl_whole_record = self._jsonl_whole_record
         new._manifest = self._manifest
         new._named_args = self._named_args
         new._parquet_physical_by_identity = self._parquet_physical_by_identity
@@ -11364,6 +11378,7 @@ cpdef frozenset steps_with(str field):
             "jsonl_infer_schema": frozenset({T.FunctionDataset}),
             "jsonl_physical_by_identity": frozenset({T.FunctionDataset}),
             "jsonl_physical_columns": frozenset({T.FunctionDataset}),
+            "jsonl_whole_record": frozenset({T.FunctionDataset}),
             "left_column": frozenset({T.Join}),
             "left_columns": frozenset({T.Join}),
             "left_readers": frozenset({T.Join}),

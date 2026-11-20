@@ -83,6 +83,7 @@ cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
         bint parse_objects
         bint fail_on_error
         bint intern_nested_text
+        string whole_record
 
 
 cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
@@ -222,6 +223,7 @@ cdef dict _fill_parse_context(
     parse_objects,
     fail_on_error,
     intern_nested_text,
+    whole_record,
 ):
     """Build `context` from read_jsonl's arguments, validating every one EAGERLY — before
     any bytes are read. The ONE place a JSONL ParseContext is built from Python values:
@@ -311,6 +313,31 @@ cdef dict _fill_parse_context(
     context.parse_objects = parse_objects
     context.fail_on_error = fail_on_error
     context.intern_nested_text = intern_nested_text
+
+    # whole_record (READ_JSONL's `as_variant`): one VARIANT column holding each record's
+    # whole text. It is the only column there is, so nothing else may be asked of it.
+    if whole_record is not None:
+        if type(whole_record) is not str or not whole_record:
+            raise ValueError("read_jsonl: whole_record must be a non-empty column name")
+        if parse_column_spec(whole_record.encode('utf-8')).nested:
+            raise ValueError(
+                f"read_jsonl: whole_record {whole_record!r} is a nested-column name; "
+                "it must be a plain name"
+            )
+        if columns and any(col != whole_record for col in columns):
+            raise ValueError(
+                f"read_jsonl: with whole_record {whole_record!r} that is the only column; "
+                f"asked for {list(columns)!r}"
+            )
+        if predicates:
+            raise ValueError("read_jsonl: whole_record takes no predicates")
+        if explicit_schema and dict(explicit_schema) != {whole_record: "VARIANT"}:
+            raise ValueError(
+                f"read_jsonl: with whole_record {whole_record!r} the only schema is "
+                f"{{{whole_record!r}: 'VARIANT'}}; got {dict(explicit_schema)!r}"
+            )
+        context.whole_record = whole_record.encode('utf-8')
+        context.explicit_schema[context.whole_record] = b"VARIANT"
     return declared_schema
 
 
@@ -330,6 +357,7 @@ def prepare_jsonl_context(
     parse_objects=True,
     fail_on_error=True,
     intern_nested_text=False,
+    whole_record=None,
 ):
     """Plan-time half of a native JSONL scan: validate read_jsonl's arguments and build
     the C++ ParseContext ONCE, through the same code read_jsonl uses, returned as a
@@ -339,7 +367,7 @@ def prepare_jsonl_context(
     try:
         _fill_parse_context(
             context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
-            parse_arrays, parse_objects, fail_on_error, intern_nested_text
+            parse_arrays, parse_objects, fail_on_error, intern_nested_text, whole_record
         )
     except BaseException:
         del context
@@ -429,7 +457,7 @@ def read_jsonl(
 
     declared_schema = _fill_parse_context(
         &context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
-        parse_arrays, parse_objects, fail_on_error, intern_nested_text
+        parse_arrays, parse_objects, fail_on_error, intern_nested_text, None
     )
 
     try:

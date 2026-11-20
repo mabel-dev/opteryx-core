@@ -64,6 +64,8 @@ cdef class JsonlReadNode(ReaderNode):
     cdef public bint jsonl_fail_on_error
     cdef public bint jsonl_infer_schema
     cdef public long long jsonl_infer_sample_size
+    # READ_JSONL(..., as_variant => name): the one column, holding each whole record.
+    cdef public str jsonl_whole_record
 
     def __init__(
         self,
@@ -84,6 +86,7 @@ cdef class JsonlReadNode(ReaderNode):
         self.jsonl_fail_on_error = True
         self.jsonl_infer_schema = True
         self.jsonl_infer_sample_size = 5
+        self.jsonl_whole_record = None
         if step.node_type in steps_with("jsonl_fail_on_error"):
             if step.jsonl_fail_on_error is not None:
                 self.jsonl_fail_on_error = step.jsonl_fail_on_error
@@ -91,6 +94,7 @@ cdef class JsonlReadNode(ReaderNode):
                 self.jsonl_infer_schema = step.jsonl_infer_schema
             if step.jsonl_infer_sample_size is not None:
                 self.jsonl_infer_sample_size = step.jsonl_infer_sample_size
+            self.jsonl_whole_record = step.jsonl_whole_record
 
     @property
     def name(self) -> str:  # pragma: no cover

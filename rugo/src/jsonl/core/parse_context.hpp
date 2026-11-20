@@ -76,6 +76,9 @@ struct ParseContext {
     // (identical raw-JSON-text storage either way — only the type tag differs).
     bool parse_objects = true;
     bool fail_on_error = true;  // Raise on malformed JSON or warn and continue
+    // whole_record: the output column that holds each record's whole `{…}` text, declared
+    // VARIANT (READ_JSONL's `as_variant`); no key is matched for it. Empty = none.
+    std::string whole_record;
     // intern_nested_text: a nested `->>` column is built Dict-shaped (unique values +
     // per-row codes) when the chunk's values repeat enough, dense otherwise. EXPERIMENT
     // (2026-10-02), A/B'd through FEATURE_DISABLE_JSONL_NESTED_DICT.

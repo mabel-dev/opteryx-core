@@ -4,11 +4,14 @@
 pushdown) BUILT 2026-11-19 for both forms — files that hold the column as a VARIANT and files
 that hold it as JSON text — on `READ_PARQUET` and on Parquet tables (§4.3). Pruning (2b),
 Step 3 (writer) BUILT 2026-11-20 as ruled (W1–W7 "as recommended", §5.4): every rugo write of a
-VARIANT column writes a shredded Parquet VARIANT. Step 4 not started.
+VARIANT column writes a shredded Parquet VARIANT. D5 BUILT 2026-11-20 (`READ_JSONL(path,
+as_variant => 'data')`). Step 4 at 10M BUILT 2026-11-20 (`tests/performance/jsonbench/variant/`): load 4.86GB JSONL →
+1.19GB in 20.8s; all 5 answers match DuckDB; hot total 362 ms vs DuckDB's 2,848 ms (Mac ARM,
+interleaved). 1B: not to be run (architect, 2026-11-20).
 **Rulings:** D1 yes (JSON text in memory) · D2 yes (automatic shredding, no setting) ·
 D3 as recommended (INT64 / own-scale DECIMAL; the rest stored as double, canonical
 rendering accepted) · D4 keep (string-form VARIANT files stay readable, no migration) ·
-D5 deferred — build first, then decide · D6 as recommended (shredded members in schema
+D5 a READ_JSONL option (2026-11-20; built as `as_variant`, below) · D6 as recommended (shredded members in schema
 order, then residual).
 **Builds on:** `docs/json_variant_type_plan.md` (VARIANT type, `->`/`->>` rulings — unchanged
 here), `rugo/src/parquet/nested_json.hpp` (Dremel assembly of nested groups → JSON text),
@@ -116,6 +119,17 @@ into columns — that *is* flattening, so loading through it is not compliant. T
 must be `data VARIANT` holding the whole line. Needs a way to read a JSONL line as one
 VARIANT value. *Options:* a READ_JSONL mode that yields the whole line as one VARIANT
 column, or a separate read function. *Architect's call — I haven't found an existing way.*
+*Ruled 2026-11-20: a READ_JSONL option.* Built as `READ_JSONL(path, as_variant => 'data')`: one
+VARIANT column, named by the option, holding each record's `{…}` text. In rugo it is
+`ParseContext::whole_record`. The map builder stages the record's span once its line has passed
+the usual line rules; no key is matched for it, so a top-level key that shares the column's
+name changes nothing. The column is declared VARIANT through `explicit_schema`, so its type
+never comes from a key. Blank lines are skipped and the whitespace around a record is trimmed.
+A line that isn't exactly one object is malformed, the same as today (`ignore_errors` drops it).
+Nothing is sampled at bind time, and `infer_schema` / `infer_sample_size` are refused beside
+it. Not built: rugo's standalone `read_jsonl` has no such option (only `prepare_jsonl_context`
+takes it); `data->'k'` over an `as_variant` scan is not pushed into the scan, which reads the
+whole record (shortcut comment in `jsonl_nested_extraction.py`).
 
 **D6 — Field order in a reassembled object** (whole-value read of a partially shredded
 object). *Recommend:* shredded members in schema order, then residual members in binary
@@ -464,7 +478,7 @@ shredded fields per file; typed DECIMAL leaves at the dominant scale, precision 
 2. Read: chained path pushdown + per-file resolution + string-leaf pruning; on/off equivalence.
 3. Write: encoder, inference, round-trip tests (JSONL → Parquet VARIANT → identical `->`/`->>`
    answers and whole-value text, modulo D3(a)).
-4. JSONBench: load to `data VARIANT` (needs D5), measure against DuckDB and the published
+4. JSONBench: load to `data VARIANT` (`READ_JSONL(..., as_variant => 'data')`), measure against DuckDB and the published
    ClickHouse numbers, 10M then 1B, on x86 to match their m6i.8xlarge.
 
 ## 7. Not doing

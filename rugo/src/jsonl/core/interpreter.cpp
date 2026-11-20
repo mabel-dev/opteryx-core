@@ -572,6 +572,16 @@ struct MapBuilder {
             rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
         }
     }
+    // The record [open, close] passed the line discipline: stage it whole as the
+    // whole_record column's value, before bank_record reads the slots.
+    inline void stage_whole(uint32_t open, uint32_t close) {
+        if constexpr (kColumns) {
+            if (proj->whole_slot < 0) return;
+            const uint32_t k = static_cast<uint32_t>(proj->whole_slot);
+            cur[k] = FieldSpan(0, 0, open, close - open + 1, ValueType::Object, 0, 0);
+            cur_gen[k] = rec_gen;
+        }
+    }
     // Drop the in-progress record (an inline predicate failed).
     inline void discard_record() {
         if constexpr (!kColumns) rs.spans.resize(rs.offsets.back());
@@ -926,7 +936,7 @@ void walk_window(MapBuilder<kColumns>& b, const StructuralWindow& w, uint32_t bu
             continue;
         }
         if (b.record_dead) { b.discard_record(); b.record_dead = false; }
-        else b.bank_record();
+        else { b.stage_whole(pos, w.ix[close]); b.bank_record(); }
         b.tail_start = w.ix[close] + 1;
         i = close;
     }
