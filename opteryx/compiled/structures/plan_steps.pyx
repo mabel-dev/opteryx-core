@@ -5477,6 +5477,7 @@ cdef class FunctionDatasetStep(PlanStep):
     cdef object _manifest
     cdef dict _named_args
     cdef dict _parquet_physical_by_identity
+    cdef dict _parquet_typed_paths
     cdef tuple _predicates
     cdef str _relation
     cdef str _relation_name
@@ -5490,7 +5491,7 @@ cdef class FunctionDatasetStep(PlanStep):
         _row_str(self._relation, self._row.relation)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, orc_credentialed_filesystem=None, orc_files=None, orc_physical_by_identity=None, orc_physical_columns=None, orc_reader_columns=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, jsonl_whole_record=None, manifest=None, named_args=None, parquet_physical_by_identity=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, avro_credentialed_filesystem=None, avro_files=None, avro_physical_by_identity=None, avro_physical_columns=None, avro_reader_schema=None, orc_credentialed_filesystem=None, orc_files=None, orc_physical_by_identity=None, orc_physical_columns=None, orc_reader_columns=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, jsonl_whole_record=None, manifest=None, named_args=None, parquet_physical_by_identity=None, parquet_typed_paths=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
         self.node_type = _step_types().FunctionDataset
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -5527,6 +5528,7 @@ cdef class FunctionDatasetStep(PlanStep):
         self.manifest = manifest
         self.named_args = named_args
         self.parquet_physical_by_identity = parquet_physical_by_identity
+        self.parquet_typed_paths = parquet_typed_paths
         self.predicates = predicates
         self.relation = relation
         self.relation_name = relation_name
@@ -5839,6 +5841,17 @@ cdef class FunctionDatasetStep(PlanStep):
         self._named_args = _require_expression_dict("FunctionDatasetStep.named_args", value)
 
     @property
+    def parquet_typed_paths(self):
+        # {text path identity: (CAST(<path> AS INT64) schema column, `::INT64` name)}: fusions the
+        # compiler takes where the footers prove them (docs/parquet_variant_path_read_design.md §5).
+        return self._parquet_typed_paths
+
+    @parquet_typed_paths.setter
+    def parquet_typed_paths(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._parquet_typed_paths = value
+
+    @property
     def parquet_physical_by_identity(self):
         return self._parquet_physical_by_identity
 
@@ -5964,6 +5977,7 @@ cdef class FunctionDatasetStep(PlanStep):
         out["manifest"] = self._manifest
         out["named_args"] = self._named_args
         out["parquet_physical_by_identity"] = self._parquet_physical_by_identity
+        out["parquet_typed_paths"] = self._parquet_typed_paths
         out["predicates"] = self._predicates
         out["relation"] = self._relation
         out["relation_name"] = self._relation_name
@@ -6017,6 +6031,7 @@ cdef class FunctionDatasetStep(PlanStep):
         new._manifest = _copy_field(self._manifest, memo)
         new._named_args = _copy_field(self._named_args, memo)
         new._parquet_physical_by_identity = _copy_field(self._parquet_physical_by_identity, memo)
+        new._parquet_typed_paths = _copy_field(self._parquet_typed_paths, memo)
         new._predicates = _copy_field(self._predicates, memo)
         new._relation = _copy_field(self._relation, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
@@ -6065,6 +6080,7 @@ cdef class FunctionDatasetStep(PlanStep):
         new._manifest = self._manifest
         new._named_args = self._named_args
         new._parquet_physical_by_identity = self._parquet_physical_by_identity
+        new._parquet_typed_paths = self._parquet_typed_paths
         new._predicates = self._predicates
         new._relation = self._relation
         new._relation_name = self._relation_name
@@ -8754,6 +8770,7 @@ cdef class ScanStep(PlanStep):
     cdef object _limit
     cdef object _manifest
     cdef dict _parquet_physical_by_identity
+    cdef dict _parquet_typed_paths
     cdef str _pending_cte_key
     cdef tuple _predicates
     cdef tuple _pushed_aggregates
@@ -8792,7 +8809,7 @@ cdef class ScanStep(PlanStep):
         self._row.pushed_distinct = self._pushed_distinct is True
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, parquet_physical_by_identity=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_files=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None, vector_search=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, parquet_physical_by_identity=None, parquet_typed_paths=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_files=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None, vector_search=None):
         self.node_type = _step_types().Scan
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -8811,6 +8828,7 @@ cdef class ScanStep(PlanStep):
         self.limit = limit
         self.manifest = manifest
         self.parquet_physical_by_identity = parquet_physical_by_identity
+        self.parquet_typed_paths = parquet_typed_paths
         self.pending_cte_key = pending_cte_key
         self.predicates = predicates
         self.pushed_aggregates = pushed_aggregates
@@ -8979,6 +8997,17 @@ cdef class ScanStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._manifest = value
         _row_manifest(self._row, self._manifest)
+
+    @property
+    def parquet_typed_paths(self):
+        # {text path identity: (CAST(<path> AS INT64) schema column, `::INT64` name)}: fusions the
+        # compiler takes where the footers prove them (docs/parquet_variant_path_read_design.md §5).
+        return self._parquet_typed_paths
+
+    @parquet_typed_paths.setter
+    def parquet_typed_paths(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._parquet_typed_paths = value
 
     @property
     def parquet_physical_by_identity(self):
@@ -9266,6 +9295,7 @@ cdef class ScanStep(PlanStep):
         out["limit"] = self._limit
         out["manifest"] = self._manifest
         out["parquet_physical_by_identity"] = self._parquet_physical_by_identity
+        out["parquet_typed_paths"] = self._parquet_typed_paths
         out["pending_cte_key"] = self._pending_cte_key
         out["predicates"] = self._predicates
         out["pushed_aggregates"] = self._pushed_aggregates
@@ -9318,6 +9348,7 @@ cdef class ScanStep(PlanStep):
         new._limit = _copy_field(self._limit, memo)
         new._manifest = _copy_field(self._manifest, memo)
         new._parquet_physical_by_identity = _copy_field(self._parquet_physical_by_identity, memo)
+        new._parquet_typed_paths = _copy_field(self._parquet_typed_paths, memo)
         new._pending_cte_key = _copy_field(self._pending_cte_key, memo)
         new._predicates = _copy_field(self._predicates, memo)
         new._pushed_aggregates = _copy_field(self._pushed_aggregates, memo)
@@ -9365,6 +9396,7 @@ cdef class ScanStep(PlanStep):
         new._limit = self._limit
         new._manifest = self._manifest
         new._parquet_physical_by_identity = self._parquet_physical_by_identity
+        new._parquet_typed_paths = self._parquet_typed_paths
         new._pending_cte_key = self._pending_cte_key
         new._predicates = self._predicates
         new._pushed_aggregates = self._pushed_aggregates
@@ -11409,6 +11441,7 @@ cpdef frozenset steps_with(str field):
             "outputs": frozenset({T.FramedWindow, T.Window}),
             "owner_is_current_user": frozenset({T.AlterMaterializedViewOwner, T.AlterTriggerOwner}),
             "parquet_physical_by_identity": frozenset({T.FunctionDataset, T.Scan}),
+            "parquet_typed_paths": frozenset({T.FunctionDataset, T.Scan}),
             "partition_by": frozenset({T.FramedWindow, T.Window}),
             "passthrough_columns": frozenset({T.Project}),
             "pattern": frozenset({T.GrantAccess, T.RevokeAccess, T.ShowEffectiveGrantsOn, T.ShowGrantsOn}),

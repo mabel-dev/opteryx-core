@@ -82,6 +82,7 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # string column. Set once at plan time; empty → no string hashing.
         void set_hash_key_columns(const vector[uint8_t]& v)
         void set_length_only_columns(const vector[uint8_t]& v)
+        void set_variant_leaf_passthrough(bint on)
         void set_chunk_cache_admit(bint v)
         void set_cache_versions(const unordered_map[string, string]& v)
         # Query-scoped HTTP tuning (host-connection cap / retries / bandwidth-

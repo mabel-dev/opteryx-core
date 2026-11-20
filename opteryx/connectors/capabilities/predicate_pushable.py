@@ -77,7 +77,10 @@ class PredicatePushable:
     # has nowhere to go.
     PUSHABLE_SCALAR_FUNCTIONS: bool = False
 
-    def can_push(self, operator: Expression, types: set = None) -> bool:
+    def can_push(self, operator: Expression, types: set = None, text_paths=frozenset()) -> bool:
+        """`text_paths`: identities of `->>` VARIANT paths the scan reads itself - text it
+        produces and compares as text, so judged as VARCHAR, not the NVARCHAR they bind as
+        (docs/parquet_variant_path_read_design.md §6). Empty for every other caller."""
         condition = operator.condition
         # Boolean-returning functions are their own predicate (LIKE lowers to
         # _STARTS_WITH / InStr / ... this way). They still have to satisfy the node
@@ -128,7 +131,9 @@ class PredicatePushable:
         # condition's left/right legs, which are None for a FUNCTION — so read the
         # categories off every referenced column rather than trusting that alone.
         column_types = {
-            n.schema_column.category
+            LogicalCategory.VARCHAR
+            if n.schema_column.identity in text_paths and n.schema_column.category == LogicalCategory.NVARCHAR
+            else n.schema_column.category
             for n in all_nodes
             if n.node_type == NodeType.IDENTIFIER and n.schema_column is not None
         }

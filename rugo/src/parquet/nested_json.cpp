@@ -82,6 +82,15 @@ struct Plan {
     bool path = false;
     bool text = false;
     std::vector<std::string> tail;
+    // A `->>` PATH plan ending at a shredded STRING leaf (docs/parquet_variant_path_read_design.md
+    // §3): that leaf's plan index and the def level at which it holds a value, and the
+    // destination field's `value` leaf (-1 = none) with its present level. -1 = not eligible.
+    int32_t pass_leaf = -1;
+    int32_t pass_def = 0;
+    int32_t pass_value_leaf = -1;
+    int32_t pass_value_def = 0;
+    // A `::INT64` path: emitted as the integer leaf (pass_*), never rendered (§5).
+    bool as_int64 = false;
     // A TEXT plan (see build_plan): root is the one string leaf, a JSON document per row, and
     // `keys` the whole path, walked through each row's parse (`blob` holds the keys' bytes).
     bool json_text = false;
@@ -561,6 +570,16 @@ std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& n
             plan->root = b.variant(*top, std::move(n), 0, &vp, &plan->tail);
             plan->path = true;
             plan->text = vp.text;
+            const Node& dest = plan->root.children[1];
+            plan->as_int64 = vp.as_int64;
+            const SK want = vp.as_int64 ? SK::Int : SK::String;
+            if (vp.text && plan->tail.empty() && dest.kind == NK::VValue && dest.children.size() == 1 &&
+                dest.children[0].kind == NK::Scalar && dest.children[0].sk == want) {
+                plan->pass_leaf = dest.children[0].first_leaf;
+                plan->pass_def = dest.children[0].def;
+                plan->pass_value_leaf = dest.value_leaf;
+                plan->pass_value_def = dest.value_def;
+            }
         } else {
             plan->root = b.body(*top, 0, 0, false, di);
         }
@@ -1198,11 +1217,153 @@ void assemble_one(const Plan& plan, const std::vector<const DecodedColumn*>& lea
     finish(out, a.o, offs, lens, valid, any_null, n_out);
 }
 
+// docs/parquet_variant_path_read_design.md §3. A `->>` path ending at a shredded STRING leaf,
+// in a row group where the destination field's `value` holds nothing: path_value then answers
+// every row with the leaf's string (def at pass_def) or NULL - a parent's null typed object is
+// "leads nowhere" there too. So the answer IS the leaf: emitted as it stands, its dictionary
+// kept, `metadata` never read. False = this row group takes the general path (assemble_one).
+bool pass_through(const Plan& plan, const std::vector<const DecodedColumn*>& leaves,
+                  const uint8_t* row_mask, DecodedColumn& out) {
+    const DecodedColumn& d = *leaves[static_cast<size_t>(plan.pass_leaf)];
+    if (!d.rep_levels.empty() || !d.rle_str_lens.empty()) return false;
+    if (plan.pass_value_leaf >= 0) {
+        const DecodedColumn& v = *leaves[static_cast<size_t>(plan.pass_value_leaf)];
+        if (v.def_levels.empty()) {
+            if (v.num_rows > 0) return false;   // every entry at its max level: all present
+        } else {
+            for (size_t i = 0; i < v.def_levels.size(); ++i)
+                if (v.def_levels[i] >= plan.pass_value_def) return false;
+        }
+    }
+    const size_t rows = !d.def_levels.empty() ? d.def_levels.size() : static_cast<size_t>(d.num_rows);
+    auto present = [&](size_t r) {
+        return (d.def_levels.empty() ? d.max_def_level : d.def_levels[r]) >= plan.pass_def;
+    };
+    size_t n_out = 0;
+    if (row_mask == nullptr) n_out = rows;
+    else for (size_t r = 0; r < rows; ++r) n_out += row_mask[r] != 0;
+
+    out.reset();
+    out.type = "byte_array";
+    out.logical_type = "varchar";
+    out.num_rows = static_cast<int32_t>(n_out);
+    out.success = true;
+    draken::AppendBuffer<uint8_t> valid;
+    valid.resize_fill((n_out + 7) / 8, 0);
+    bool any_null = false;
+
+    const bool coded = !d.dict_codes_array.empty();
+    const bool indexed = !coded && !d.dict_indices.empty() && !d.string_dict_arena.empty();
+    if (coded || indexed) {
+        // Dictionary: the entries as they are, a code per emitted row (0 under a NULL).
+        out.string_dict_arena.assign(d.string_dict_arena.data(), d.string_dict_arena.data() + d.string_dict_arena.size());
+        out.string_dict_offsets.assign(d.string_dict_offsets.data(), d.string_dict_offsets.data() + d.string_dict_offsets.size());
+        out.string_dict_lens.assign(d.string_dict_lens.data(), d.string_dict_lens.data() + d.string_dict_lens.size());
+        const size_t entries = d.string_dict_lens.size();
+        const uint8_t w = coded ? d.code_width : entries <= 256 ? 1 : entries <= 65536 ? 2 : 4;
+        out.code_width = w;
+        out.dict_codes_array.resize_fill(n_out * w, 0);
+        uint8_t* codes = out.dict_codes_array.data();
+        size_t vi = 0, k = 0;
+        for (size_t r = 0; r < rows; ++r) {
+            const bool here = present(r);
+            int32_t c = 0;
+            if (here) c = coded ? packed_code(d.dict_codes_array.data(), r, w) : d.dict_indices[vi++];
+            if (row_mask != nullptr && row_mask[r] == 0) continue;
+            if (here) {
+                const uint32_t u = static_cast<uint32_t>(c);
+                for (uint8_t b = 0; b < w; ++b) codes[k * w + b] = static_cast<uint8_t>(u >> (8 * b));
+                valid[k >> 3] |= static_cast<uint8_t>(1u << (k & 7));
+            } else {
+                any_null = true;
+            }
+            ++k;
+        }
+    } else {
+        // Plain values: the leaf's bytes as they are, an extent per emitted row.
+        out.string_arena.assign(d.string_arena.data(), d.string_arena.data() + d.string_arena.size());
+        out.string_offsets.resize_fill(n_out, 0);
+        out.string_lens.resize_fill(n_out, 0);
+        size_t vi = 0, k = 0;
+        for (size_t r = 0; r < rows; ++r) {
+            const bool here = present(r);
+            size_t at = 0;
+            if (here) {
+                at = !d.dict_indices.empty() ? static_cast<size_t>(d.dict_indices[vi]) : vi;
+                ++vi;
+                if (at >= d.string_lens.size()) fail(plan.name, "string value stream exhausted");
+            }
+            if (row_mask != nullptr && row_mask[r] == 0) continue;
+            if (here) {
+                out.string_offsets[k] = d.string_offsets[at];
+                out.string_lens[k] = d.string_lens[at];
+                valid[k >> 3] |= static_cast<uint8_t>(1u << (k & 7));
+            } else {
+                any_null = true;
+            }
+            ++k;
+        }
+    }
+    if (any_null) out.valid_bits = std::move(valid);
+    return true;
+}
+
+// docs/parquet_variant_path_read_design.md §5. A `::INT64` path: the integer leaf as INT64, NULL
+// where it holds nothing. Planned only where typed_path_proven held for this file's footer, so a
+// `value` holding data here is a contradiction, not a fallback.
+void typed_through(const Plan& plan, const std::vector<const DecodedColumn*>& leaves,
+                   const uint8_t* row_mask, DecodedColumn& out) {
+    if (plan.pass_leaf < 0) fail(plan.name, "the path does not end at a shredded integer leaf");
+    if (plan.pass_value_leaf >= 0) {
+        const DecodedColumn& v = *leaves[static_cast<size_t>(plan.pass_value_leaf)];
+        bool empty = v.def_levels.empty() ? v.num_rows == 0 : true;
+        for (size_t i = 0; empty && i < v.def_levels.size(); ++i) empty = v.def_levels[i] < plan.pass_value_def;
+        if (!empty)
+            fail(plan.name, "the field's `value` holds data in a row group its statistics said was empty");
+    }
+    Assembler a{plan, {}, {}};
+    a.L.resize(1);
+    Leaf& l = a.L[0];
+    l.d = leaves[static_cast<size_t>(plan.pass_leaf)];
+    const DecodedColumn& d = *l.d;
+    if (!d.rep_levels.empty()) fail(plan.name, "a typed path leaf cannot be repeated");
+    const size_t rows = !d.def_levels.empty() ? d.def_levels.size() : static_cast<size_t>(d.num_rows);
+    size_t n_out = 0;
+    if (row_mask == nullptr) n_out = rows;
+    else for (size_t r = 0; r < rows; ++r) n_out += row_mask[r] != 0;
+
+    out.reset();
+    out.type = "int64";
+    out.logical_type = "int64";
+    out.num_rows = static_cast<int32_t>(n_out);
+    out.success = true;
+    out.int64_values.resize_fill(n_out, 0);
+    draken::AppendBuffer<uint8_t> valid;
+    valid.resize_fill((n_out + 7) / 8, 0);
+    bool any_null = false;
+    size_t k = 0;
+    for (size_t r = 0; r < rows; ++r) {
+        l.pos = r;
+        const bool here = (d.def_levels.empty() ? d.max_def_level : d.def_levels[r]) >= plan.pass_def;
+        int64_t x = 0;
+        if (here) x = a.int_value(l);
+        if (row_mask != nullptr && row_mask[r] == 0) continue;
+        if (here) {
+            out.int64_values[k] = x;
+            valid[k >> 3] |= static_cast<uint8_t>(1u << (k & 7));
+        } else {
+            any_null = true;
+        }
+        ++k;
+    }
+    if (any_null) out.valid_bits = std::move(valid);
+}
+
 }  // namespace
 
 void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
               const std::vector<DecodedColumn>& leaves,
-              const uint8_t* row_mask, std::vector<DecodedColumn>& outs) {
+              const uint8_t* row_mask, std::vector<DecodedColumn>& outs, bool leaf_passthrough) {
     outs.clear();
     outs.resize(plans.size());
     if (plans[0]->json_text) {
@@ -1223,6 +1384,12 @@ void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
         for (int32_t file_leaf : plans[p]->used_index)
             mine.push_back(&leaves[static_cast<size_t>(
                 std::find(shared.begin(), shared.end(), file_leaf) - shared.begin())]);
+        if (plans[p]->as_int64) {
+            typed_through(*plans[p], mine, row_mask, outs[p]);
+            continue;
+        }
+        if (leaf_passthrough && plans[p]->pass_leaf >= 0 && pass_through(*plans[p], mine, row_mask, outs[p]))
+            continue;
         assemble_one(*plans[p], mine, row_mask, outs[p]);
     }
 }
@@ -1271,8 +1438,50 @@ bool parse_variant_path(const std::string& name, VariantPath& out) {
             key.push_back(name[i++]);
         }
         p.keys.push_back(std::move(key));
+        if (p.text && name.compare(i, std::string::npos, "::INT64") == 0) {
+            p.as_int64 = true;
+            i = name.size();
+        }
     }
     out = std::move(p);
+    return true;
+}
+
+bool path_dest_chunks(const FileStats& fs, const std::string& name, int64_t& leaf, int64_t& value) {
+    leaf = value = -1;
+    VariantPath vp;
+    if (!parse_variant_path(name, vp)) return false;
+    std::string err;
+    const std::shared_ptr<const nested::Plan> plan = nested::build_plan(fs, name, err);
+    if (!plan || plan->pass_leaf < 0) return false;
+    // The field's first chunk: every top-level field before it contributes its leaves.
+    size_t first = 0;
+    bool found = false;
+    for (const SchemaElement& e : fs.schema) {
+        if (e.name == vp.base) { found = true; break; }
+        first += static_cast<size_t>(nested::count_leaves(e));
+    }
+    if (!found) return false;
+    const std::vector<int32_t>& used = nested::used_leaf_index(*plan);
+    leaf = static_cast<int64_t>(first) + used[static_cast<size_t>(plan->pass_leaf)];
+    if (plan->pass_value_leaf >= 0)
+        value = static_cast<int64_t>(first) + used[static_cast<size_t>(plan->pass_value_leaf)];
+    return true;
+}
+
+bool chunk_holds_nothing(const ColumnStats& c) {
+    return c.null_count >= 0 && c.num_values >= 0 && c.null_count == c.num_values;
+}
+
+bool typed_path_proven(const FileStats& fs, const std::string& name) {
+    VariantPath vp;
+    int64_t leaf, value;
+    if (!parse_variant_path(name, vp) || !vp.as_int64 || !path_dest_chunks(fs, name, leaf, value)) return false;
+    for (const RowGroupStats& rg : fs.row_groups) {
+        if (value < 0) continue;
+        if (static_cast<size_t>(value) >= rg.columns.size() || !chunk_holds_nothing(rg.columns[value]))
+            return false;
+    }
     return true;
 }
 

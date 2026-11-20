@@ -47,6 +47,8 @@ only the rows the whole filter keeps.
 
 from draken.draken_native import DrakenType
 
+from opteryx import config
+from opteryx.compiled.structures.expressions import is_expression
 from opteryx.expression import NodeType
 from opteryx.models.dataset_format import PARQUET
 from opteryx.models.dataset_format import manifest_format
@@ -57,6 +59,10 @@ from opteryx.planner.logical_planner import PlanStep
 from .jsonl_nested_extraction import ScanExtractionStrategy
 from .jsonl_nested_extraction import _key_step
 from .jsonl_nested_extraction import _reads_source
+
+# Fields that only RECORD what other fields reference: an aggregate's `columns` lists every
+# identifier inside its aggregates (binder/aggregate.py), and a scan's lists what it emits.
+_BOOKKEEPING = {LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup}
 
 
 def _reads_parquet(node: PlanStep) -> bool:
@@ -111,6 +117,69 @@ class ParquetVariantExtractionStrategy(ScanExtractionStrategy):
         physical = dict(node.parquet_physical_by_identity or {})
         physical.update(specs)
         node.parquet_physical_by_identity = physical
+
+    def complete(self, plan: LogicalPlan, context) -> LogicalPlan:
+        plan = super().complete(plan, context)
+        if not config.features.disable_variant_typed_path:
+            self._record_typed_paths(plan)
+        return plan
+
+    def _record_typed_paths(self, plan: LogicalPlan) -> None:
+        """docs/parquet_variant_path_read_design.md §5: a pushed `->>` path read ONLY under
+        `CAST(<path> AS INT64)` becomes a candidate the compiler may read straight from the
+        shredded integer leaf, where the files' footers prove no row can need the cast. Recorded
+        on the scan step as {path identity: (the CAST's schema column, `<path>::INT64`)}; a path
+        read any other way, or under CASTs of more than one identity, is left alone."""
+        text_paths = {}
+        for nid, node in plan.nodes(True):
+            if _reads_parquet(node):
+                for identity, spec in (node.parquet_physical_by_identity or {}).items():
+                    if "->>" in spec:
+                        text_paths[identity] = (nid, spec)
+        if not text_paths:
+            return
+        casts = {}
+        bare = set()
+
+        def _walk(expression):
+            sc = expression.schema_column
+            operand = expression.left if expression.node_type == NodeType.CAST else None
+            if (
+                operand is not None
+                and expression.value in ("INT64", "INTEGER")
+                and expression.format is None
+                and sc is not None
+                and operand.node_type == NodeType.IDENTIFIER
+                and operand.schema_column is not None
+                and operand.schema_column.identity in text_paths
+            ):
+                casts.setdefault(operand.schema_column.identity, {})[sc.identity] = sc
+                return
+            if expression.node_type == NodeType.IDENTIFIER and sc is not None and sc.identity in text_paths:
+                bare.add(sc.identity)
+            for child in expression.children():
+                if is_expression(child):
+                    _walk(child)
+
+        for _, node in plan.nodes(True):
+            skip_columns = _reads_parquet(node) or node.node_type in _BOOKKEEPING
+            for key, value in node.field_values().items():
+                if key == "columns" and skip_columns:
+                    continue
+                for item in value if type(value) in (list, tuple) else (value,):
+                    if is_expression(item):
+                        _walk(item)
+
+        for identity, by_cast in casts.items():
+            if identity in bare or len(by_cast) != 1:
+                continue
+            cast_column = next(iter(by_cast.values()))
+            nid, spec = text_paths[identity]
+            node = plan[nid]
+            typed = dict(node.parquet_typed_paths or {})
+            typed[identity] = (cast_column, spec + "::INT64")
+            node.parquet_typed_paths = typed
+            plan[nid] = node
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         scans = (LogicalPlanStepType.FunctionDataset, LogicalPlanStepType.Scan)

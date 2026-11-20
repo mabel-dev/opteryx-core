@@ -47,10 +47,14 @@ namespace rugo {
 // notation the JSONL pushdown uses: <base>(->'<key>')*(->|->>)'<key>', where '' inside a key is
 // one quote. `->>` (only ever the last step) reads the value as TEXT - a string unquoted,
 // anything else its JSON - and `->` as JSON. docs/parquet_variant_design.md §4.3.
+// A `->>` path may end `::INT64`: the planner's fusion of `CAST(<path> AS INT64)`, read from a
+// shredded integer leaf only where typed_path_proven says no row can need the cast
+// (docs/parquet_variant_path_read_design.md §5).
 struct VariantPath {
     std::string base;
     std::vector<std::string> keys;
     bool text = false;
+    bool as_int64 = false;
 };
 // False when `name` is not in that notation.
 bool parse_variant_path(const std::string& name, VariantPath& out);
@@ -97,9 +101,13 @@ const std::vector<int32_t>& used_leaf_index(const Plan& plan);
 // paths) and `leaves` the leaves they read between them, in shared_leaf_index() order: the
 // field is decoded once, however many columns are read out of it. TEXT plans share more -
 // each emitted row is parsed ONCE to answer all of them.
+//
+// `leaf_passthrough`: a `->>` path ending at a shredded string leaf is emitted as that leaf
+// (dictionary kept) in a row group where its field's `value` holds nothing - the same answers
+// (docs/parquet_variant_path_read_design.md §3). False = always the general path (the kill switch).
 void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
               const std::vector<DecodedColumn>& leaves,
-              const uint8_t* row_mask, std::vector<DecodedColumn>& outs);
+              const uint8_t* row_mask, std::vector<DecodedColumn>& outs, bool leaf_passthrough);
 
 // The leaves `plans` read between them: each one's position among the file's leaves of the
 // field, in first-use order (plan by plan, each in its own plan order).
@@ -151,6 +159,21 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                         std::vector<std::vector<ColumnStats>>& stats,
                         std::shared_ptr<const NestedSpec>& nested, std::string& err,
                         const std::vector<std::vector<DeclaredNode>>* declared = nullptr);
+
+// For a `::INT64` path: true when, in every row group of `fs`, the path ends at a shredded
+// integer leaf and its field's `value` chunk holds nothing (statistics: null_count == num_values).
+// Then every row is that integer or NULL, exactly what CAST(<path> AS INT64) yields over the text.
+// False for any other name, or when a row group's statistics cannot prove it.
+bool typed_path_proven(const FileStats& fs, const std::string& name);
+
+// A `->>` path (or its `::INT64` form) ending at a shredded leaf of the kind its plan passes
+// through (docs/parquet_variant_path_read_design.md §3, §5): the file's chunk index of that leaf
+// and of its field's `value` chunk (-1 = the field has none). False (both -1) for any other name.
+// In a row group whose `value` chunk holds nothing (chunk_holds_nothing), the path's values are
+// exactly the leaf's, so the leaf's statistics speak for the path (§6b, row-group pruning).
+bool path_dest_chunks(const FileStats& fs, const std::string& name, int64_t& leaf, int64_t& value);
+// Statistics say the chunk holds no value at all (null_count == num_values, both recorded).
+bool chunk_holds_nothing(const ColumnStats& c);
 
 // Footer-gate probe: can every leaf of group `name` be rendered - and, with `declared`, matched to
 // the table's shape? (No decode.)

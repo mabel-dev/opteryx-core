@@ -108,6 +108,11 @@ cdef extern from "nested_json.hpp" namespace "rugo":
     # (a table's declared shape, or NULL), matched to it by field id? (footer only)
     bint group_renderable(const FileStats& fs, const string& name, string& err,
                           const vector[DeclaredNode]* declared) except +
+    # A `::INT64` path: proven, by this file's statistics, never to need a cast (see the header).
+    bint typed_path_proven(const FileStats& fs, const string& name) except +
+    # A path's destination leaf chunk and its field's `value` chunk (see the header).
+    bint path_dest_chunks(const FileStats& fs, const string& name, int64_t& leaf, int64_t& value) except +
+    bint chunk_holds_nothing(const ColumnStats& c)
 
     # A VARIANT path column's name (`data->'commit'->>'collection'`), split.
     cdef cppclass VariantPath:
@@ -1618,6 +1623,9 @@ cdef class _PrunePredicates:
     cdef vector[string] pcols
     cdef vector[int] pops
     cdef list pvals
+    # Per predicate: its column is a VARIANT path (`->` in the name), resolved per file to its
+    # destination leaf chunk by path_dest_chunks (docs/parquet_variant_path_read_design.md §6b).
+    cdef vector[bint] ppath
 
 
 cdef _PrunePredicates _prepare_prune_predicates(list predicates):
@@ -1629,6 +1637,7 @@ cdef _PrunePredicates _prepare_prune_predicates(list predicates):
         pp.pcols.push_back(col_name.encode('utf-8'))   # str names from the binder
         pp.pops.push_back(_pred_op_code(op))
         pp.pvals.append(value)
+        pp.ppath.push_back("->" in col_name)
     return pp
 
 
@@ -1662,13 +1671,28 @@ cdef list _prune_row_groups(const FileStats& fs, _PrunePredicates pp, str bloom_
     # checks the name per row group and raises if a file breaks that). -1 = the
     # file holds no such column, which tests nothing — as the name scan did.
     cdef vector[Py_ssize_t] pidx
+    cdef vector[Py_ssize_t] pguard
+    cdef vector[string] pchunk
     cdef vector[int] pkind
     cdef const RowGroupStats* rg0
+    cdef int64_t leaf_ci, value_ci
     if predicates and n_rg > 0:
         rg0 = &fs.row_groups[0]
         for pi in range(pp.pcols.size()):
             pidx.push_back(-1)
+            pguard.push_back(-1)
+            pchunk.push_back(pp.pcols[pi])
             pkind.push_back(_SK_DECODE_VALUE)
+            if pp.ppath[pi]:
+                # A path is tested on its destination leaf's statistics, and only in a row
+                # group where its field's `value` chunk holds nothing (pguard).
+                if (path_dest_chunks(fs, pp.pcols[pi], leaf_ci, value_ci)
+                        and <size_t>leaf_ci < rg0.columns.size()):
+                    pidx[pi] = <Py_ssize_t>leaf_ci
+                    pguard[pi] = <Py_ssize_t>value_ci
+                    pchunk[pi] = rg0.columns[<size_t>leaf_ci].name
+                    pkind[pi] = _stat_kind(rg0.columns[<size_t>leaf_ci])
+                continue
             for ci in range(rg0.columns.size()):
                 if rg0.columns[ci].name == pp.pcols[pi]:
                     pidx[pi] = <Py_ssize_t>ci
@@ -1680,7 +1704,7 @@ cdef list _prune_row_groups(const FileStats& fs, _PrunePredicates pp, str bloom_
         if not predicates:
             keep.append(rg_i)
             continue
-        if _rg_passes_predicates_native(fs.row_groups[rg_i], pp.pcols, pidx, pkind,
+        if _rg_passes_predicates_native(fs.row_groups[rg_i], pchunk, pidx, pguard, pkind,
                                         pp.pops, pp.pvals):
             keep.append(rg_i)
     if bloom_path is None or not keep or not predicates:
@@ -2045,7 +2069,8 @@ cdef int _pred_op_code(object op):
 
 
 cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, const vector[string]& pcols,
-                                       const vector[Py_ssize_t]& pidx, const vector[int]& pkind,
+                                       const vector[Py_ssize_t]& pidx, const vector[Py_ssize_t]& pguard,
+                                       const vector[int]& pkind,
                                        const vector[int]& pops, list pvals):
     """Evaluate AND-combined predicates against RowGroupStats min/max without
     materialising a Python dict. Bloom membership is NOT tested here — it needs
@@ -2070,6 +2095,10 @@ cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, const vector[str
 
     for pi in range(pcols.size()):
         if pidx[pi] < 0:
+            continue
+        # A path's leaf speaks for it only where its field's `value` chunk holds nothing.
+        if pguard[pi] >= 0 and (<size_t>pguard[pi] >= rg.columns.size()
+                                or not chunk_holds_nothing(rg.columns[<size_t>pguard[pi]])):
             continue
         i = <size_t>pidx[pi]
         if i >= rg.columns.size() or rg.columns[i].name != pcols[pi]:
@@ -3145,6 +3174,41 @@ cpdef list fetch_column_stats_many(
         ))
 
     return out
+
+
+cpdef set typed_paths_proven(
+    object filesystem,
+    list paths,
+    list names,
+    dict file_sizes = None,
+    ParquetFooterBytesCache footer_bytes_cache = None,
+):
+    """The `::INT64` path names (docs/parquet_variant_path_read_design.md §5) that every file
+    in `paths` proves, by its footer statistics, can be read straight from a shredded integer
+    leaf: in every row group the field's `value` chunk is empty. The compiler reads such a
+    path typed and keeps `CAST(<path> AS INT64)` over the text for every other name.
+
+    Footers come through the same signed, batched, cached acquisition as
+    fetch_column_stats_many, so the footer gate that follows reads them from the cache."""
+    cdef dict orig_to_cpp
+    cdef ParquetFooterMap footer_map
+    cdef ParquetFooterRef footer
+    cdef str path
+    cdef set proven = set(names)
+    if not paths or not proven:
+        return set()
+    orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    versions = _object_versions(filesystem, paths)
+    _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+                            &footer_map, None, _native_auth_header(filesystem), versions)
+    for path in paths:
+        if not proven:
+            break
+        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map,
+                                       _native_auth_header(filesystem), versions)
+        proven = {name for name in proven
+                  if typed_path_proven(deref(footer), (<str>name).encode('utf-8'))}
+    return proven
 
 
 cpdef list fetch_footer_key_values_many(
@@ -4399,6 +4463,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
     plan.pipeline_ptr.set_hash_key_columns(plan.hash_key_columns)
     plan.pipeline_ptr.set_length_only_columns(plan.length_only_columns)
+    plan.pipeline_ptr.set_variant_leaf_passthrough(not _config.features.disable_variant_leaf_passthrough)
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip, mirroring
     # `open_ipc_source`. Registration is what ARMS the mechanism: `dict_preds_` empty
     # leaves the guarded per-chunk dictionary probe in io_pipeline.hpp dead — so

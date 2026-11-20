@@ -4183,7 +4183,8 @@ class ParquetIOPipeline {
                     if (ng_leaf + 1 < ng->count) return true;
                     std::vector<DecodedColumn> folded;
                     try {
-                        rugo::nested::assemble(ng->plans, group_leaves[gi], col_mask, folded);
+                        rugo::nested::assemble(ng->plans, group_leaves[gi], col_mask, folded,
+                                               variant_leaf_passthrough_);
                     } catch (const std::exception& e) {
                         std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = e.what();
@@ -4194,8 +4195,10 @@ class ParquetIOPipeline {
                     for (size_t j = 0; j < folded.size(); ++j) {
                         ColumnStats synth;
                         synth.name = ng->names[j];
-                        synth.physical_type = "byte_array";
-                        synth.logical_type = "varchar";
+                        // A `::INT64` path folds to INT64 (nested_json §5); everything else is text.
+                        const bool is_int = folded[j].type == "int64";
+                        synth.physical_type = is_int ? "int64" : "byte_array";
+                        synth.logical_type = is_int ? "int64" : "varchar";
                         if (!emit_col(ng->slots[j], synth, folded[j])) return false;
                     }
                     return true;
@@ -4930,6 +4933,10 @@ class ParquetIOPipeline {
     // (the default) leaves decoding byte-for-byte unchanged.
     std::vector<uint8_t> length_only_columns_;
     void set_length_only_columns(const std::vector<uint8_t>& v) { length_only_columns_ = v; }
+    // nested::assemble's leaf_passthrough (docs/parquet_variant_path_read_design.md §3); the
+    // engine scan sets it from FEATURE_DISABLE_VARIANT_LEAF_PASSTHROUGH.
+    bool variant_leaf_passthrough_ = true;
+    void set_variant_leaf_passthrough(bool on) { variant_leaf_passthrough_ = on; }
     // C7: false = this scan may use chunk-cache hits but never fills the cache.
     void set_chunk_cache_admit(bool v) { chunk_cache_admit_ = v; }
     // Set once at plan time, before any submit: {fetch path: object version}.

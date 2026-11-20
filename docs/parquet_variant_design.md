@@ -7,7 +7,9 @@ Step 3 (writer) BUILT 2026-11-20 as ruled (W1–W7 "as recommended", §5.4): eve
 VARIANT column writes a shredded Parquet VARIANT. D5 BUILT 2026-11-20 (`READ_JSONL(path,
 as_variant => 'data')`). Step 4 at 10M BUILT 2026-11-20 (`tests/performance/jsonbench/variant/`): load 4.86GB JSONL →
 1.19GB in 20.8s; all 5 answers match DuckDB; hot total 362 ms vs DuckDB's 2,848 ms (Mac ARM,
-interleaved). 1B: not to be run (architect, 2026-11-20).
+interleaved). 1B: not to be run (architect, 2026-11-20). Closing the gap to ClickHouse:
+`docs/parquet_variant_path_read_design.md` (PROPOSED). x86 EC2 m6i.8xlarge (built from source at
+`390db5a`): load 57.7 s, all 5 answers match DuckDB, hot total 880 ms vs DuckDB's 5,568 ms.
 **Rulings:** D1 yes (JSON text in memory) · D2 yes (automatic shredding, no setting) ·
 D3 as recommended (INT64 / own-scale DECIMAL; the rest stored as double, canonical
 rendering accepted) · D4 keep (string-form VARIANT files stay readable, no migration) ·

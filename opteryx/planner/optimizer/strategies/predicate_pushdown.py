@@ -586,6 +586,16 @@ def _unwrap_nested(expression):
 
 
 # The expression types with both a `left` and a `right` operand.
+def _scan_category(schema_column, path_ids):
+    """The category the scan's pushdown gate judges a predicate column by. A `->>` VARIANT path
+    the scan itself reads is text the scan produces and compares as text
+    (docs/parquet_variant_path_read_design.md §6): VARCHAR, not the NVARCHAR it binds as, so it
+    is admitted where text is - and no plain NVARCHAR column's routing changes."""
+    if schema_column.identity in path_ids and schema_column.category == LogicalCategory.NVARCHAR:
+        return LogicalCategory.VARCHAR
+    return schema_column.category
+
+
 _LEFT_RIGHT_NODE_TYPES = frozenset(
     {
         NodeType.COMPARISON_OPERATOR,
@@ -1968,6 +1978,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         # "does this scan actually emit every column this predicate needs".
         _emit_memo = {}
         emitted_ids = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
+        # The `->>` VARIANT paths this scan itself reads (ParquetVariantExtractionStrategy).
+        path_ids = (
+            set(node.parquet_physical_by_identity or {})
+            if node.node_type in steps_with("parquet_physical_by_identity")
+            and not config.features.disable_variant_path_pushdown
+            else set()
+        )
 
         for predicate in context.collected_predicates:
             predicate_ids = _predicate_column_ids(predicate)
@@ -1996,10 +2013,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             types = set()
             if predicate.condition.node_type == NodeType.UNARY_OPERATOR:
                 if predicate.condition.centre and predicate.condition.centre.schema_column:
-                    types.add(predicate.condition.centre.schema_column.category)
+                    types.add(_scan_category(predicate.condition.centre.schema_column, path_ids))
             elif predicate.condition.node_type in _LEFT_RIGHT_NODE_TYPES:
                 if predicate.condition.left and predicate.condition.left.schema_column:
-                    types.add(predicate.condition.left.schema_column.category)
+                    types.add(_scan_category(predicate.condition.left.schema_column, path_ids))
                 # For InList/NotInList the right side is always an ARRAY literal; its type
                 # is an implementation detail of the IN operator, not a column type the
                 # connector needs to handle. Including it causes can_push to spuriously
@@ -2007,10 +2024,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # pass-1 and breaking two-pass late-materialization for downstream filters.
                 if predicate.condition.right and predicate.condition.right.schema_column:
                     if predicate.condition.value not in ("InList", "NotInList"):
-                        types.add(predicate.condition.right.schema_column.category)
-            if node.connector.supports_predicate_pushdown and node.connector.can_push(
-                predicate, types
-            ):
+                        types.add(_scan_category(predicate.condition.right.schema_column, path_ids))
+            # Only a scan reading `->>` paths passes text_paths; no other connector sees it.
+            pushable = node.connector.supports_predicate_pushdown and (
+                node.connector.can_push(predicate, types, text_paths=path_ids)
+                if path_ids
+                else node.connector.can_push(predicate, types)
+            )
+            if pushable:
                 if predicate.condition.node_type == NodeType.UNARY_OPERATOR:
                     metadata_to_push.append((predicate, predicate.condition))
                 else:

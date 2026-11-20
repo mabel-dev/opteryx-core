@@ -973,6 +973,13 @@ class Features:
     disable_parquet_variant_extraction = get_bool(
         "FEATURE_DISABLE_PARQUET_VARIANT_EXTRACTION", False
     )
+    # A `->>` path ending at a shredded string leaf is read as that leaf where its field's
+    # `value` holds nothing (docs/parquet_variant_path_read_design.md §3). Read by pool_reader.
+    disable_variant_leaf_passthrough = get_bool("FEATURE_DISABLE_VARIANT_LEAF_PASSTHROUGH", False)
+    # CAST(<path> ->> AS INT64) read from the shredded integer leaf where footers prove it (§5).
+    disable_variant_typed_path = get_bool("FEATURE_DISABLE_VARIANT_TYPED_PATH", False)
+    # Filters on a scan's own `->>` paths pushed into the Parquet scan (§6).
+    disable_variant_path_pushdown = get_bool("FEATURE_DISABLE_VARIANT_PATH_PUSHDOWN", False)
     disable_limit_elimination = get_bool("FEATURE_DISABLE_LIMIT_ELIMINATION", False)
     disable_group_limit_key_bound = get_bool("FEATURE_DISABLE_GROUP_LIMIT_KEY_BOUND", False)
     disable_limit_files_pruning = get_bool("FEATURE_DISABLE_LIMIT_FILES_PRUNING", False)

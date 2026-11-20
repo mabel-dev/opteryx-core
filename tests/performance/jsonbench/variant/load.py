@@ -9,6 +9,11 @@ writer, which writes a VARIANT column as a shredded Parquet VARIANT
 (docs/parquet_variant_design.md §5.4): the paths are typed columns inside the one
 column, as ClickHouse's `JSON` type stores them.
 
+Each shard is sorted by the five paths the queries read - kind, commit.operation,
+commit.collection, did, time_us - as ClickHouse's entry sorts its table (`ORDER BY` in its
+JSONBench ddl.sql), so each file's row groups carry tight statistics on those paths and a
+filter on them skips row groups (docs/parquet_variant_path_read_design.md §6b).
+
 One Parquet file per shard, under testdata/_downloads/jsonbench/variant/<n>shards/.
 `ignore_errors => true` drops the dump's few malformed lines, as DuckDB's baseline
 (`read_ndjson_objects(..., ignore_errors=true)`) does; the row count is printed.
@@ -64,7 +69,11 @@ def load(sources: list[str], out_dir: str) -> tuple[float, int, int]:
     started = time.monotonic()
     for source in sources:
         out_path = os.path.join(out_dir, os.path.basename(source).rsplit(".", 1)[0] + ".parquet")
-        sql = f"SELECT data FROM READ_JSONL('{source}', as_variant => 'data', ignore_errors => true)"
+        sql = (
+            f"SELECT data FROM READ_JSONL('{source}', as_variant => 'data', ignore_errors => true) "
+            "ORDER BY data->>'kind', data->'commit'->>'operation', data->'commit'->>'collection', "
+            "data->>'did', CAST(data->>'time_us' AS INT64)"
+        )
         rows = 0
 
         def counted(morsels):

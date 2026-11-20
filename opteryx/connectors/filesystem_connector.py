@@ -308,7 +308,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
     def can_push_topn(self, order_by) -> bool:
         return single_physical_column_topn(order_by)
 
-    def can_push(self, operator, types: set = None) -> bool:
+    def can_push(self, operator, types: set = None, text_paths=frozenset()) -> bool:
         """Format-aware predicate gate.
 
         Accepting here has teeth: the pushdown strategy CONSUMES the Filter node,
@@ -356,7 +356,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         without consuming.
         """
         if self.dataset_file_format in (PARQUET, SKENE):
-            return PredicatePushable.can_push(self, operator, types)
+            return PredicatePushable.can_push(self, operator, types, text_paths)
         if self.dataset_file_format == JSONL:
             from opteryx.connectors.jsonl_io import JsonlPredicatePushable
 

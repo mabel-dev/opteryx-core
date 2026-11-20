@@ -4271,6 +4271,52 @@ class _Compiler:
                         seen.add(sc.identity)
                         read_scs.append(sc)
 
+        paths = manifest.get_file_paths()
+        file_sizes = {}
+        files = getattr(manifest, "files", None)
+        if files:
+            for entry in files:
+                size = getattr(entry, "file_size_in_bytes", None)
+                if isinstance(size, int) and size > 0:
+                    file_sizes.setdefault(entry.file_path, size)
+        # Resolved once and shared by the gate and the plan below: the filesystem
+        # supplies the signed-URL rewrite that makes a remote (gs://) scan eligible,
+        # and the connector type picks the IO worker budget. Same helper the
+        # trampoline's `_ensure_scan_started` uses, so the two paths cannot disagree
+        # about which filesystem a scan has.
+        filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
+        # CAST(<path> AS INT64) read straight from the shredded integer leaf, where every
+        # file's footer proves no row can need the cast (docs/parquet_variant_path_read_design.md
+        # §5): the scan emits the CAST's own column in place of the text path, and the CAST
+        # above reads it (_bind_precomputed_subexpressions). Anywhere unproven, nothing changes.
+        typed_names = {}
+        typed = (scan.step.parquet_typed_paths
+                 if scan.step.node_type in (LogicalPlanStepType.FunctionDataset, LogicalPlanStepType.Scan)
+                 else None)
+        candidates = {sc.identity: typed[sc.identity] for sc in read_scs if typed and sc.identity in typed}
+        if candidates:
+            from opteryx.compiled.structures.expressions import LogicalColumn
+            from opteryx.connectors.parquet_io.pool_reader import typed_paths_proven
+
+            proven = typed_paths_proven(filesystem, paths, [name for _, name in candidates.values()],
+                                        file_sizes or None, scan_footer_bytes_cache())
+            swap = {pid: cast_sc for pid, (cast_sc, name) in candidates.items() if name in proven}
+            if swap:
+                # The scan's emitted columns are derived from scan.columns throughout, so the
+                # swap is made there too: every later derivation sees the CAST's column.
+                read_scs = [swap.get(sc.identity, sc) for sc in read_scs]
+                scan.columns = [
+                    LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=swap[col.schema_column.identity].name,
+                                  schema_column=swap[col.schema_column.identity],
+                                  arena=self.plan_context.expressions)
+                    if col.schema_column.identity in swap else col
+                    for col in scan.columns
+                ]
+        if typed:
+            # Swapped now or by an earlier plan of this scan: read by its `::INT64` name.
+            by_cast = {cast_sc.identity: name for cast_sc, name in typed.values()}
+            typed_names = {sc.identity: by_cast[sc.identity] for sc in read_scs if sc.identity in by_cast}
+
         # Row identity is not read from the file: the Source appends it after the read
         # set (set_native_scan_row_identity), so it leaves the columns rugo decodes.
         identity_scs = []
@@ -4316,26 +4362,12 @@ class _Compiler:
         # native boundary), mirroring hash_key_columns above.
         _length_only_ids = scan._length_only_columns or frozenset()
         length_only_columns = [1 if sc.identity in _length_only_ids else 0 for sc in read_scs]
-        paths = manifest.get_file_paths()
         # A pushed VARIANT path is read by its path name, and the footer gate decides it
         # per file from how that file holds the path's base column (kind "path").
-        path_names = _scan_path_names(scan)
+        path_names = {**_scan_path_names(scan), **typed_names}
         names = [path_names.get(sc.identity, sc.name) for sc in read_scs]
         gate_kinds = ["path" if sc.identity in path_names else kind
                       for sc, kind in zip(read_scs, kinds)]
-        file_sizes = {}
-        files = getattr(manifest, "files", None)
-        if files:
-            for entry in files:
-                size = getattr(entry, "file_size_in_bytes", None)
-                if isinstance(size, int) and size > 0:
-                    file_sizes.setdefault(entry.file_path, size)
-        # Resolved once and shared by the gate and the plan below: the filesystem
-        # supplies the signed-URL rewrite that makes a remote (gs://) scan eligible,
-        # and the connector type picks the IO worker budget. Same helper the
-        # trampoline's `_ensure_scan_started` uses, so the two paths cannot disagree
-        # about which filesystem a scan has.
-        filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
         absent = {}
         footers = ScanFooters()
         rejection = native_scan_rejection(paths, names, gate_kinds, file_sizes or None,
@@ -4368,14 +4400,32 @@ class _Compiler:
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
-        # A pushed path's values are no chunk's: no footer statistic speaks for them, so
-        # a predicate reading one prunes nothing (and ends range settlement and coverage).
+        # A pushed path's values are no chunk's own, so a predicate reading one ends range
+        # settlement and coverage. It still prunes: rugo tests it on the path's destination
+        # leaf in the row groups where the field's `value` holds nothing
+        # (docs/parquet_variant_path_read_design.md §6b), asked for by the path's name.
         stat_predicates = [
             node for node in predicates or []
             if not any(ident.schema_column is not None and ident.schema_column.identity in path_names
                        for ident in get_all_nodes_of_type(node, select_nodes=(NodeType.IDENTIFIER,)))
         ]
-        pruning = extract_predicate_stats(stat_predicates) if stat_predicates else None
+        pruning = extract_predicate_stats(list(predicates)) if predicates else None
+        if pruning:
+            by_name = {sc.name: path_names[sc.identity] for sc in read_scs if sc.identity in path_names}
+
+            def _as_text(value):
+                # A path's leaf statistics decode as str (a UTF-8 string leaf); its literal
+                # arrives as the NVARCHAR bytes, which would compare as unequal types.
+                if type(value) is bytes:
+                    return value.decode("utf-8")
+                if type(value) in (list, tuple):
+                    return type(value)(_as_text(v) for v in value)
+                return value
+
+            pruning = [
+                (by_name[column], op, _as_text(value)) if column in by_name else (column, op, value)
+                for column, op, value in pruning
+            ]
         if predicates and len(stat_predicates) == len(predicates):
             # Range settlement's plan-time proof, node by node: every pushed node
             # must extract to int range triples (a node extract_predicate_stats

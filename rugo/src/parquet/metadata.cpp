@@ -1044,9 +1044,6 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
     }
 
     map[canonical] = as;
-    if (elem.name != canonical) {
-      map[elem.name] = as;
-    }
 
     for (const auto &child : elem.children) {
       EmitSchemaEntry(child, nullable, false, columns, map);
@@ -1066,9 +1063,6 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
       columns.push_back(std::move(field));
     }
     map[canonical] = "json";
-    if (elem.name != canonical) {
-      map[elem.name] = "json";
-    }
     return;
   }
 
@@ -1085,9 +1079,6 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
     }
 
     map[canonical] = array_type;
-    if (elem.name != canonical) {
-      map[elem.name] = array_type;
-    }
     return;
   }
 
@@ -1123,9 +1114,6 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
     }
 
     map[canonical] = array_type;
-    if (elem.name != canonical) {
-      map[elem.name] = array_type;
-    }
     return;
   }
 
@@ -1143,9 +1131,6 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
   }
 
   map[canonical] = logical;
-  if (elem.name != canonical) {
-    map[elem.name] = logical;
-  }
 }
 
 static void
@@ -1340,6 +1325,8 @@ static void WalkLeaves(
                                     list_thresholds.begin(), list_thresholds.end());
     }
 
+    // Keyed by full name only: a bare-name alias let a nested field (a STRUCT member, a shredded
+    // VARIANT field) overwrite the entry of a top-level column of the same name.
     auto it = logical_type_map.find(canonical);
     if (it != logical_type_map.end()) {
       li.logical_type = it->second;
