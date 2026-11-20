@@ -7,7 +7,10 @@ Leave-one-out on the Mac 10M, SORTED load (2026-11-20; 5 rounds, arm order rotat
 identical answers in every arm), best ms Q1..Q5: all 7.6/40.7/26.1/18.4/20.7 = 113.6;
 -A 296.8 (2.61x), -C 148.1 (1.30x), -D 144.1 (1.27x; Q4/Q5 ~1.7x — -D also loses path
 row-group skipping, which needs the pushed filter). Sorted load: 24.4 s, 0.97 GB (unsorted 1.19).
-All five answers equal DuckDB's. Not yet run on x86. Measured as each part landed (Mac 10M, alternating,
+All five answers equal DuckDB's. x86 EC2 m6i.8xlarge (commit 38b87c9, 2026-11-20, hot = min of runs
+2-3): Q1 13 / Q2 60 / Q3 38 / Q4 28 / Q5 32 = 171 ms vs ClickHouse's CURRENT dashboard entry 139
+(5/52/26/27/29; the 229 in the repo's older result file is superseded) — 2nd of the dashboard's 10M entries;
+load 40.9 s, 0.97 GB; answers equal DuckDB's. Hot only - not JSONBench's official cold shape. Measured as each part landed (Mac 10M, alternating,
 identical answers): A 2.25x (517 → 230 ms), C 1.39x on top (239 → 172), D's admission 0.98x
 (noise). Found on the way: a top-level column sharing a name with a nested field was refused
 (rugo's logical-type map aliased bare names) — FIXED, `test_nested_name_collision.py`.

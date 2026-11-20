@@ -1282,9 +1282,12 @@ jsonbench-10-jsonl: ## Run JSONBench 10m vs DuckDB over the decompressed .jsonl 
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size 10 --format jsonl
 
-jsonbench-10-zstd: ## Run JSONBench 10m vs DuckDB over the zstd -1 .json.zst shards
+jsonbench-10-variant: ## Run JSONBench 10m over one shredded Parquet VARIANT column (the legal form), interleaved with DuckDB and answer-checked (loads testdata/_downloads/jsonbench/variant/10shards on first run)
+	@# Stamped, not `test -d`: load.py rebuilds the directory from scratch, so an
+	@# interrupted load leaves a partial one. Bump the stamp when load.py changes.
+	@test -f testdata/_downloads/jsonbench/variant/10shards.sorted-v1 || { $(PYTHON) tests/performance/jsonbench/variant/load.py --size 10 && touch testdata/_downloads/jsonbench/variant/10shards.sorted-v1; }
 	@clear || true
-	@$(PYTHON) tests/performance/jsonbench/runner.py --size 10 --format zstd
+	@$(PYTHON) tests/performance/jsonbench/variant/runner.py --size 10
 
 jsonbench-data: ## Fetch, decompress + zstd-recompress the JSONBench Bluesky dataset (JSONBENCH_SIZE=1|10|100, default 10)
 	@$(PYTHON) tests/performance/jsonbench/fetch_data.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
