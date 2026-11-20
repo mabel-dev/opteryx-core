@@ -109,6 +109,12 @@ cdef extern from "nested_json.hpp" namespace "rugo":
     bint group_renderable(const FileStats& fs, const string& name, string& err,
                           const vector[DeclaredNode]* declared) except +
 
+    # A VARIANT path column's name (`data->'commit'->>'collection'`), split.
+    cdef cppclass VariantPath:
+        string base
+
+    bint parse_variant_path(const string& name, VariantPath& out) except +
+
 
 cdef bint _has_group_chunks(const RowGroupStats* rg, const string& name):
     """True when the row group stores `name` as a nested group: chunks `<name>.<leaf>`."""
@@ -118,6 +124,24 @@ cdef bint _has_group_chunks(const RowGroupStats* rg, const string& name):
         if rg.columns[i].name.compare(0, prefix.size(), prefix) == 0:
             return True
     return False
+
+
+cdef bint _has_path_base_chunks(const RowGroupStats* rg, const string& name):
+    """True when `name` is a VARIANT path whose base column the row group stores as a group."""
+    cdef VariantPath variant_path
+    return parse_variant_path(name, variant_path) and _has_group_chunks(rg, variant_path.base)
+
+
+cdef string _path_text_chunk(const RowGroupStats* rg, const string& name):
+    """The chunk a VARIANT path is read from when the row group holds its base column as
+    one chunk of JSON text; empty when `name` is not such a path."""
+    cdef VariantPath variant_path
+    cdef size_t i
+    if parse_variant_path(name, variant_path):
+        for i in range(rg.columns.size()):
+            if rg.columns[i].name == variant_path.base:
+                return variant_path.base
+    return string()
 
 
 cdef _refuse_nested_group_column(const RowGroupStats* rg, const string& name, str path):
@@ -655,6 +679,7 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
     cdef const RowGroupStats* rg0
     cdef size_t ci, k
     cdef bint present
+    cdef string text_chunk
     for c in column_names:
         names.push_back(c.encode('utf-8'))
     for p, rg_idx in work_items:
@@ -670,7 +695,13 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
             held.clear()
             rg0 = &fsp.row_groups[0]
             for k in range(names.size()):
-                present = _has_group_chunks(rg0, names[k])
+                # A path read from JSON text reads its base column's chunk: that is the
+                # chunk whose adjacency says which row groups fetch together.
+                text_chunk = _path_text_chunk(rg0, names[k])
+                if text_chunk.size() != 0:
+                    held.push_back(text_chunk)
+                    continue
+                present = _has_group_chunks(rg0, names[k]) or _has_path_base_chunks(rg0, names[k])
                 for ci in range(rg0.columns.size()):
                     if rg0.columns[ci].name == names[k]:
                         present = True
@@ -4531,8 +4562,12 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     (every integer width and signedness, plus parquet TIME), "float32",
     "float64", "varchar", "bool", "date", "timestamp", "decimal64",
     "decimal128", "array" (R6 — a parquet LIST column, decoded natively from
-    its TAG_ARRAY pool blob), "uuid" (FIXED_LEN_BYTE_ARRAY(16) annotated UUID) or
-    "interval" (FIXED_LEN_BYTE_ARRAY(12) annotated INTERVAL).
+    its TAG_ARRAY pool blob), "uuid" (FIXED_LEN_BYTE_ARRAY(16) annotated UUID),
+    "interval" (FIXED_LEN_BYTE_ARRAY(12) annotated INTERVAL) or "path" (a pushed
+    VARIANT path, named `data->'commit'->>'collection'`: admitted when the file
+    holds its base column as a VARIANT rugo can read the path from or as a string
+    of JSON text, absent when the file has no such base column, refused when it
+    holds the base as anything else — docs/parquet_variant_design.md §4.3).
     Everything else — MAP, STRUCT/json, int96, other fixed_len_byte_array — has no
     `expected_kinds` spelling at all and so refuses
     at the first loop below; those scans stay on the trampoline Source.
@@ -4606,6 +4641,9 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     # max_repetition_level >= 1 is the structural proof it really is a list.
     cdef string s_array = b"array<"
     cdef vector[string] wanted
+    cdef vector[string] path_base      # per column: a "path" kind's base column, else empty
+    cdef VariantPath variant_path
+    cdef bint base_held
     cdef vector[DeclaredNode] declared_nodes
     cdef list kinds = []
     cdef list declared_types = []
@@ -4629,8 +4667,13 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
         kind, _, declared_type = expected_kinds[k].partition(":")
         if kind not in ("int", "float32", "float64", "varchar", "bool",
                         "decimal64", "decimal128", "date", "timestamp", "array", "uuid",
-                        "interval"):
+                        "interval", "path"):
             return f"column '{name}' has kind '{kind}', which the native scan has no decoder for"
+        path_base.push_back(string())
+        if kind == "path":
+            if not parse_variant_path(wanted[<size_t>k], variant_path):
+                return f"column '{name}' has kind 'path' but is not a VARIANT path"
+            path_base[<size_t>k] = variant_path.base
         if declared_type and kind not in ("int", "decimal64", "decimal128"):
             return f"column '{name}' has kind '{expected_kinds[k]}', which cannot carry a declared type"
         if not declared_type and (kind == "decimal64" or kind == "decimal128"):
@@ -4748,6 +4791,26 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             n_rg_cols = rgp.columns.size()
             rg_missing = []
             for k in range(ncols):
+                if kinds[k] == "path":
+                    # Decided by how the file holds the path's BASE column: a VARIANT group
+                    # (rugo reads the path out of its shredding), a string (JSON text, which
+                    # rugo parses), not at all (NULL, as any column a file lacks), or as
+                    # something a path cannot be read from. rugo's plan for it says which.
+                    base_held = _has_group_chunks(rgp, path_base[<size_t>k])
+                    for ci in range(n_rg_cols):
+                        if rgp.columns[ci].name == path_base[<size_t>k]:
+                            base_held = True
+                            break
+                    if base_held:
+                        if rg_i == 0 and not group_renderable(fsp[0], wanted[<size_t>k], group_err, NULL):
+                            return (f"the path '{wanted[<size_t>k].decode('utf-8', 'replace')}' cannot "
+                                    f"be read from {path}: {group_err.decode('utf-8', 'replace')}")
+                        continue
+                    if absent is None:
+                        return (f"column '{path_base[<size_t>k].decode('utf-8', 'replace')}' is not in "
+                                f"{path} (row group {rg_i})")
+                    rg_missing.append(k)
+                    continue
                 found = False
                 for ci in range(n_rg_cols):
                     csp = &rgp.columns[ci]

@@ -23,6 +23,7 @@ from .join_rewriter import JoinRewriteStrategy
 from .limit_elimination import LimitEliminationStrategy
 from .group_limit_key_bound import GroupLimitKeyBoundStrategy
 from .jsonl_nested_extraction import JsonlNestedExtractionStrategy
+from .parquet_variant_extraction import ParquetVariantExtractionStrategy
 from .limit_files_pruning import LimitFilesPruningStrategy
 from .limit_pushdown import LimitPushdownStrategy
 from .manifest_pruning import ManifestPruningStrategy
@@ -74,6 +75,7 @@ __all__ = [
     "LimitEliminationStrategy",
     "GroupLimitKeyBoundStrategy",
     "JsonlNestedExtractionStrategy",
+    "ParquetVariantExtractionStrategy",
     "LimitFilesPruningStrategy",
     "LimitPushdownStrategy",
     "ManifestPruningStrategy",

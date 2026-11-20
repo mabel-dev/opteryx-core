@@ -26,6 +26,12 @@ files over S3 itself. Opteryx's per-query times include its catalog lookup;
 these do not. Iceberg types the string columns BINARY, so they are decode()d to
 VARCHAR in the view, as the Avro path does.
 
+`--local-iceberg` reads the local `iceberg.clickbench.hits` table that
+`make clickbench-iceberg` builds (scratch/hits_iceberg: pyiceberg's SQL catalog
+on sqlite, file:// warehouse) and writes results.local.iceberg.json, the
+like-for-like engine comparison for the opteryx `--variant iceberg` run. As for
+AIStor, the catalog lookup goes through pyiceberg once, before any timing.
+
 The result file is written to the same directory as this script so that
 opteryx/runner.py can reference it as the local baseline.
 """
@@ -41,7 +47,9 @@ import time
 import duckdb
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "dev"))
-from secret_store import get_secret  # noqa: E402
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+import _common  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 43 ClickBench queries translated for DuckDB against the `hits` view.
@@ -196,6 +204,7 @@ def resolve_aistor_table(table_name: str) -> tuple[str, int]:
     key raises KeyError: no remote configured means no remote run. The keys
     come from Vaultwarden (dev/secret_store.py), the endpoint from .env."""
     from pyiceberg.catalog import load_catalog
+    from secret_store import get_secret
 
     endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
     # pyiceberg's SigV4 signer takes its credentials from the process environment.
@@ -222,20 +231,44 @@ def resolve_aistor_table(table_name: str) -> tuple[str, int]:
     return table.metadata_location, data_size
 
 
-def run_benchmark(queries: list, parquet_glob: str = None, avro_glob: str = None, iceberg_metadata: str = None) -> list:
+def resolve_local_iceberg_table() -> tuple[str, int]:
+    """(metadata path, data_size) of the local `clickbench.hits` that
+    `make clickbench-iceberg` builds - the same table the opteryx
+    `--variant iceberg` run reads. Not built raises FileNotFoundError."""
+    from pyiceberg.catalog import load_catalog
+
+    if not os.path.exists(os.path.join(_common.LOCAL_ICEBERG_DIR, "catalog.db")):
+        raise FileNotFoundError(f"{_common.LOCAL_ICEBERG_DIR} is not built - run make clickbench-iceberg first")
+    catalog = load_catalog(_common.LOCAL_ICEBERG_WORKSPACE, type="sql", **_common.local_iceberg_properties())
+    table = catalog.load_table(("clickbench", "hits"))
+    data_size = sum(task.file.file_size_in_bytes for task in table.scan().plan_files())
+    return table.metadata_location.removeprefix("file://"), data_size
+
+
+def run_benchmark(
+    queries: list,
+    parquet_glob: str = None,
+    avro_glob: str = None,
+    iceberg_metadata: str = None,
+    aistor: bool = False,
+) -> list:
     """
     Run all queries TRIES times each, over the parquet, the Avro files, OR the
-    AIStor Iceberg table whose metadata JSON is `iceberg_metadata`.
+    Iceberg table whose metadata JSON is `iceberg_metadata` (on AIStor when
+    `aistor`, else local files).
     Returns a list of [cold, warm1, warm2] timing tuples (seconds, 3 d.p.).
     """
     con = duckdb.connect()
     to_date_time = "epoch_ms(CAST(t AS BIGINT) * 1000)"
     if iceberg_metadata is not None:
-        endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
-        scheme, host = endpoint.split("://", 1)
-        for extension in ("httpfs", "iceberg"):
+        for extension in ("httpfs", "iceberg") if aistor else ("iceberg",):
             con.execute(f"INSTALL {extension}")
             con.execute(f"LOAD {extension}")
+    if iceberg_metadata is not None and aistor:
+        from secret_store import get_secret
+
+        endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
+        scheme, host = endpoint.split("://", 1)
         con.execute(f"""
             CREATE SECRET aistor (
                 TYPE s3,
@@ -247,6 +280,7 @@ def run_benchmark(queries: list, parquet_glob: str = None, avro_glob: str = None
                 USE_SSL {str(scheme == "https").lower()}
             )
         """)
+    if iceberg_metadata is not None:
         columns = con.execute(f"DESCRIBE SELECT * FROM iceberg_scan('{iceberg_metadata}')").fetchall()
         column_types = {name: column_type for name, column_type, *_ in columns}
         replace = [f"decode({name}) AS {name}" for name, column_type in column_types.items() if column_type == "BLOB"]
@@ -256,9 +290,9 @@ def run_benchmark(queries: list, parquet_glob: str = None, avro_glob: str = None
             replace.append("make_date(EventDate) AS EventDate")
         if column_types["EventTime"] == "TIMESTAMP":
             to_date_time = "t"
-        con.execute(
-            f"CREATE VIEW hits AS SELECT * REPLACE ({', '.join(replace)}) FROM iceberg_scan('{iceberg_metadata}')"
-        )
+        # A table Opteryx wrote is already VARCHAR/DATE: nothing to replace.
+        replace_clause = f" REPLACE ({', '.join(replace)})" if replace else ""
+        con.execute(f"CREATE VIEW hits AS SELECT *{replace_clause} FROM iceberg_scan('{iceberg_metadata}')")
     elif avro_glob is not None:
         # The shards keep the source's binary strings as Avro `bytes` (BLOB here);
         # decode() is read_parquet's binary_as_string=True, so the queries see
@@ -334,9 +368,18 @@ def main():
         help="Append the 15 queries proposed in ClickHouse/ClickBench#1489 (Q43-Q57); parquet only "
         "(default output: results.local.extended.json)",
     )
+    parser.add_argument(
+        "--local-iceberg",
+        action="store_true",
+        default=False,
+        help="Read the local Iceberg table make clickbench-iceberg builds (scratch/hits_iceberg) instead of parquet "
+        "(default output: results.local.iceberg.json)",
+    )
     args = parser.parse_args()
 
-    if args.extended and (args.aistor_table is not None or args.avro_dir is not None):
+    if args.local_iceberg and (args.aistor_table is not None or args.avro_dir is not None):
+        parser.error("--local-iceberg, --aistor-table and --avro-dir each pick the data; pass one")
+    if args.extended and (args.aistor_table is not None or args.avro_dir is not None or args.local_iceberg):
         parser.error("--extended is parquet only: it is the baseline for opteryx `--extended` on the local split")
     queries = QUERIES + EXTENDED_QUERIES if args.extended else QUERIES
 
@@ -358,7 +401,7 @@ def main():
         print(f"  Output         : {output_path}")
         print()
         start = time.monotonic()
-        results = run_benchmark(queries, iceberg_metadata=metadata_location)
+        results = run_benchmark(queries, iceberg_metadata=metadata_location, aistor=True)
         print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
         payload = {
             "system": "DuckDB (Iceberg on AIStor, iceberg_scan)",
@@ -372,6 +415,39 @@ def main():
             "load_time": 0,
             "data_size": data_size,
             "table": f"clickbench.{args.aistor_table}",
+            "result": results,
+        }
+        with open(output_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"Results written to {output_path}")
+        return
+
+    if args.local_iceberg:
+        metadata_location, data_size = resolve_local_iceberg_table()
+        output_path = args.output or os.path.join(os.path.dirname(__file__), "results.local.iceberg.json")
+        print("DuckDB ClickBench — local Iceberg benchmark")
+        print(f"  DuckDB version : {duckdb.__version__}")
+        print(f"  Machine        : {machine_description()}")
+        print(f"  Table          : iceberg.clickbench.hits  ({data_size / 1e9:.2f} GB)")
+        print(f"  Metadata       : {metadata_location}")
+        print(f"  Tries per query: {TRIES}")
+        print(f"  Output         : {output_path}")
+        print()
+        start = time.monotonic()
+        results = run_benchmark(queries, iceberg_metadata=metadata_location)
+        print(f"\nTotal benchmark time: {time.monotonic() - start:.1f}s")
+        payload = {
+            "system": "DuckDB (Iceberg, local, iceberg_scan)",
+            "date": __import__("datetime").date.today().isoformat(),
+            "machine": machine_description(),
+            "cluster_size": 1,
+            "proprietary": "no",
+            "hardware": "cpu",
+            "tuned": "no",
+            "tags": ["C++", "column-oriented", "embedded", "stateless"],
+            "load_time": 0,
+            "data_size": data_size,
+            "table": "iceberg.clickbench.hits",
             "result": results,
         }
         with open(output_path, "w") as f:

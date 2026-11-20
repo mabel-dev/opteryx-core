@@ -110,33 +110,61 @@ def _is_count_distinct_star(aggregate) -> bool:
     )
 
 
-def _spec(physical: str, operator: str, key: str) -> str:
-    """rugo's nested column name: `<physical>->>'<key>'` ('' escapes a quote)."""
-    return physical + operator + "'" + key.replace("'", "''") + "'"
+def _spec(physical: str, steps) -> str:
+    """rugo's nested column name: `<physical>->>'<key>'` ('' escapes a quote), one
+    `->'<key>'` per step of a chain."""
+    return physical + "".join(
+        operator + "'" + key.replace("'", "''") + "'" for operator, key in steps
+    )
 
 
-class JsonlNestedExtractionStrategy(OptimizationStrategy):
-    """Push one-level `->` / `->>` over READ_JSONL object columns into the scan."""
+def _key_step(expression):
+    """(`->` / `->>`, key) when `expression` extracts by ONE object key, else None."""
+    if expression.node_type != NodeType.EXTRACTION_OPERATOR or expression.value not in _OPERATORS:
+        return None
+    path = expression.right
+    if path is None or path.node_type != NodeType.LITERAL:
+        return None
+    key = _single_key(path.value)
+    return None if key is None else (_OPERATORS[expression.value], key)
+
+
+def _reads_source(operand, sources) -> bool:
+    return (
+        operand is not None
+        and operand.node_type == NodeType.IDENTIFIER
+        and operand.schema_column is not None
+        and operand.schema_column.identity in sources
+    )
+
+
+class ScanExtractionStrategy(OptimizationStrategy):
+    """The rewrite JsonlNestedExtractionStrategy and ParquetVariantExtractionStrategy
+    share: an eligible extraction becomes a column its scan emits. Each says which
+    columns can be read into (`_sources`), which extractions over them it takes
+    (`_steps`), and where the scan step keeps the name it asks rugo for (`_record`)."""
+
+    counter = ""
+
+    def _sources(self, plan: LogicalPlan) -> dict:
+        """{column identity: (step nid, physical name)}"""
+        raise NotImplementedError
+
+    def _steps(self, expression, sources):
+        """(the source IDENTIFIER, [(operator, key), ...]) when `expression` is an
+        extraction this strategy pushes, else None."""
+        raise NotImplementedError
+
+    def _record(self, node: PlanStep, specs: dict) -> None:
+        """Add {out identity: rugo name} to the scan step's physical-name map."""
+        raise NotImplementedError
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         """All rewriting happens here, once the tree is settled (never from `visit`)."""
-        # identity -> (step nid, physical name) for every READ_JSONL VARIANT column.
-        sources = {}
-        for nid, node in plan.nodes(True):
-            if node.node_type != LogicalPlanStepType.FunctionDataset or node.function != "READ_JSONL":
-                continue
-            physical = node.jsonl_physical_by_identity or {}
-            for column in node.schema.columns:
-                column_type = column.column_type
-                if (
-                    column_type is not None
-                    and column_type.physical == DrakenType.VARIANT
-                    and column.identity in physical
-                ):
-                    sources[column.identity] = (nid, physical[column.identity])
+        sources = self._sources(plan)
         if not sources:
             return plan
 
@@ -150,36 +178,21 @@ class JsonlNestedExtractionStrategy(OptimizationStrategy):
             if done is not None:
                 return done
             done = None
-            if expression.node_type == NodeType.EXTRACTION_OPERATOR and expression.value in _OPERATORS:
-                operand, path = expression.left, expression.right
-                out_column = expression.schema_column
-                if (
-                    operand is not None
-                    and operand.node_type == NodeType.IDENTIFIER
-                    and operand.schema_column is not None
-                    and operand.schema_column.identity in sources
-                    and path is not None
-                    and path.node_type == NodeType.LITERAL
-                    and out_column is not None
-                ):
-                    key = _single_key(path.value)
-                else:
-                    key = None
-                if key is not None:
-                    nid, physical = sources[operand.schema_column.identity]
-                    pushed.setdefault(
-                        out_column.identity,
-                        (nid, _spec(physical, _OPERATORS[expression.value], key), out_column),
-                    )
-                    done = LogicalColumn(
-                        node_type=NodeType.IDENTIFIER,
-                        source_column=out_column.name,
-                        source=operand.source,
-                        alias=expression.alias,
-                        schema_column=out_column,
-                        query_column=expression.query_column,
-                        arena=expression.arena,
-                    )
+            out_column = expression.schema_column
+            taken = None if out_column is None else self._steps(expression, sources)
+            if taken is not None:
+                operand, steps = taken
+                nid, physical = sources[operand.schema_column.identity]
+                pushed.setdefault(out_column.identity, (nid, _spec(physical, steps), out_column))
+                done = LogicalColumn(
+                    node_type=NodeType.IDENTIFIER,
+                    source_column=out_column.name,
+                    source=operand.source,
+                    alias=expression.alias,
+                    schema_column=out_column,
+                    query_column=expression.query_column,
+                    arena=expression.arena,
+                )
             if done is None:
                 done = rewrite_children(expression, _rewrite, share=True)
             rewritten[id(expression)] = done
@@ -215,17 +228,14 @@ class JsonlNestedExtractionStrategy(OptimizationStrategy):
                 continue
             node.columns = aggregates + referenced
 
-        # The READ_JSONL steps emit the pushed columns: schema (origin, for predicate
+        # The scan steps emit the pushed columns: schema (origin, for predicate
         # pushdown), columns, and the physical name rugo is asked for.
         by_step = {}
         for out_identity, (nid, spec, out_column) in pushed.items():
             by_step.setdefault(nid, []).append((out_identity, spec, out_column))
         for nid, additions in by_step.items():
             node = plan[nid]
-            physical = dict(node.jsonl_physical_by_identity or {})
-            for out_identity, spec, _ in additions:
-                physical[out_identity] = spec
-            node.jsonl_physical_by_identity = physical
+            self._record(node, {out_identity: spec for out_identity, spec, _ in additions})
             node.schema = node.schema.with_columns(
                 list(node.schema.columns) + [out_column for _, _, out_column in additions]
             )
@@ -239,9 +249,43 @@ class JsonlNestedExtractionStrategy(OptimizationStrategy):
                 for _, _, out_column in additions
             ]
             plan[nid] = node
-            self.telemetry.increase("optimization_jsonl_nested_extraction", len(additions))
+            self.telemetry.increase(self.counter, len(additions))
 
         return plan
+
+
+class JsonlNestedExtractionStrategy(ScanExtractionStrategy):
+    """Push one-level `->` / `->>` over READ_JSONL object columns into the scan."""
+
+    counter = "optimization_jsonl_nested_extraction"
+
+    def _sources(self, plan: LogicalPlan) -> dict:
+        # identity -> (step nid, physical name) for every READ_JSONL VARIANT column.
+        sources = {}
+        for nid, node in plan.nodes(True):
+            if node.node_type != LogicalPlanStepType.FunctionDataset or node.function != "READ_JSONL":
+                continue
+            physical = node.jsonl_physical_by_identity or {}
+            for column in node.schema.columns:
+                column_type = column.column_type
+                if (
+                    column_type is not None
+                    and column_type.physical == DrakenType.VARIANT
+                    and column.identity in physical
+                ):
+                    sources[column.identity] = (nid, physical[column.identity])
+        return sources
+
+    def _steps(self, expression, sources):
+        step = _key_step(expression)
+        if step is None or not _reads_source(expression.left, sources):
+            return None
+        return expression.left, [step]
+
+    def _record(self, node: PlanStep, specs: dict) -> None:
+        physical = dict(node.jsonl_physical_by_identity or {})
+        physical.update(specs)
+        node.jsonl_physical_by_identity = physical
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         for _, node in plan.steps_of((LogicalPlanStepType.FunctionDataset,)):

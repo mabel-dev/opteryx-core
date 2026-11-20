@@ -270,5 +270,39 @@ inline void object_members(std::string& o, const Metadata& md, const uint8_t* v,
     detail::members(o, md, detail::container(v, v + len, true), first, 0);
 }
 
+// The value of field `key` of the OBJECT at [v, end), or nullptr when the value is not an
+// object or has no such field. On a hit `end` becomes the bound of the field's value.
+inline const uint8_t* find_field(const Metadata& md, const uint8_t* v, const uint8_t*& end,
+                                 const char* key, size_t klen) {
+    if (v >= end) bad("empty value");
+    if ((v[0] & 3u) != 2) return nullptr;
+    const detail::Container c = detail::container(v, end, true);
+    // Linear: the spec lists field ids in name order, but DuckDB's objects are not, so a
+    // binary search over a file we did not write cannot be trusted.
+    for (uint32_t i = 0; i < c.n; ++i) {
+        const char* k; uint32_t n;
+        md.key(rd(c.ids + static_cast<size_t>(i) * c.id_w, c.id_w), k, n);
+        if (n == klen && std::memcmp(k, key, klen) == 0) {
+            end = c.vals_end;
+            return c.value(i);
+        }
+    }
+    return nullptr;
+}
+
+// The bytes of the STRING at [v, end) (short or long form); false when it is not a string.
+inline bool string_bytes(const uint8_t* v, const uint8_t* end, const uint8_t*& p, uint32_t& len) {
+    if (v >= end) bad("empty value");
+    if ((v[0] & 3u) == 1) {
+        len = v[0] >> 2;
+        if (static_cast<size_t>(end - v) - 1 < len) bad("a short string runs past its container");
+        p = v + 1;
+        return true;
+    }
+    if (v[0] != (16u << 2)) return false;
+    detail::sized(v, end, p, len, "string");
+    return true;
+}
+
 }  // namespace variant
 }  // namespace rugo

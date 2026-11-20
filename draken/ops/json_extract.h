@@ -186,6 +186,36 @@ static inline yyjson_val* nav_tokens(yyjson_val* root, const JsonNav& nav) noexc
 }
 
 // ---------------------------------------------------------------------------
+// value_text — the bytes `->` (text_mode false) / `->>` (true) yield for a value
+// that is present and not JSON null. The ONE statement of that rule: the row loop
+// below and the Parquet scan's read of a path out of a JSON-text column
+// (rugo/src/parquet/nested_json.cpp) both call it, so they cannot drift apart.
+//
+// `->>` on a JSON string yields the raw (unquoted, unescaped) UTF-8 content;
+// everything else — and all of `->` — is the value's JSON text. `owned` receives
+// a libc-malloc'd buffer the caller frees when that text had to be written.
+// False when the write failed.
+// ---------------------------------------------------------------------------
+static inline bool value_text(yyjson_val* val, bool text_mode, const char*& str,
+                              size_t& len, char*& owned) noexcept {
+    if (yyjson_is_raw(val)) {
+        // A number still in its source bytes (kJsonReadFlags). Those bytes are
+        // already the JSON text of the value, for `->` and `->>` alike — no write
+        // call, no allocation, no re-formatting.
+        str = yyjson_get_raw(val);
+        len = yyjson_get_len(val);
+    } else if (text_mode && yyjson_is_str(val)) {
+        str = yyjson_get_str(val);
+        len = yyjson_get_len(val);
+    } else {
+        owned = yyjson_val_write(val, 0u, &len);
+        if (!owned) return false;
+        str = owned;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // extract_rows_multi — the core loop, for N paths over ONE parse.
 //
 //   dv         — VARCHAR/NVARCHAR/VARBINARY/VARIANT vector; one JSON document per row.
@@ -279,10 +309,8 @@ static inline void extract_rows_multi(
                 continue;
             }
 
-            // `->>` on a JSON string yields the raw (unquoted, unescaped) UTF-8
-            // content; everything else — and all of `->` — is serialized as JSON
-            // text. yyjson_val_write allocates with libc malloc; the guard frees it
-            // even if the arena insert below throws.
+            // yyjson_val_write allocates with libc malloc; the guard frees it even if
+            // the arena insert below throws.
             struct MallocGuard {
                 char* p;
                 ~MallocGuard() { if (p) std::free(p); }
@@ -290,23 +318,10 @@ static inline void extract_rows_multi(
 
             const char* out_str = nullptr;
             size_t      out_len = 0u;
-            if (yyjson_is_raw(val)) {
-                // A number still in its source bytes (kJsonReadFlags). Those bytes
-                // are already the JSON text of the value, for `->` and `->>` alike
-                // — no write call, no allocation, no re-formatting.
-                out_str = yyjson_get_raw(val);
-                out_len = yyjson_get_len(val);
-            } else if (text_modes[k] && yyjson_is_str(val)) {
-                out_str = yyjson_get_str(val);
-                out_len = yyjson_get_len(val);
-            } else {
-                mg.p = yyjson_val_write(val, 0u, &out_len);
-                if (!mg.p)
-                    throw std::runtime_error(
-                        std::string(fn_name) + ": yyjson_val_write failed at row " +
-                        std::to_string(i));
-                out_str = mg.p;
-            }
+            if (!value_text(val, text_modes[k], out_str, out_len, mg.p))
+                throw std::runtime_error(
+                    std::string(fn_name) + ": yyjson_val_write failed at row " +
+                    std::to_string(i));
 
             if (out_len <= STR_INLINE_MAX) {
                 str_init_inline(&out[k].slots[i],

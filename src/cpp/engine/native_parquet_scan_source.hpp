@@ -1709,6 +1709,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             auto spec = std::make_shared<rugo::NestedSpec>();
             if (nested) {
                 spec->groups = nested->groups;
+                spec->slot = nested->slot;
                 for (uint32_t o : nested->orig) spec->orig.push_back(present_to_projected[o]);
             } else {
                 spec->orig = present_to_projected;   // names == present, one leaf each

@@ -50,6 +50,18 @@ await checkRows(blobSource(await openAsBlob(FILE)), "blob-slice");
   console.log("zstd/alp rows ok");
 }
 
+// GZIP pages (libdeflate). native: rugo.parquet.read_parquet(columns=[...]), row group 0
+{
+  const GZ = new URL("../../testdata/parquet_tests/byte_stream_split_extended.gzip.parquet", import.meta.url).pathname;
+  const f = await openParquet(blobSource(await openAsBlob(GZ)));
+  const { columns: c } = await f.readRowGroup(0, ["float_plain", "double_byte_stream_split"]);
+  f.close();
+  assert.equal(c.float_plain.length, 200);
+  assert.deepEqual([c.float_plain[0], c.float_plain[1], c.float_plain[199]], [10.33757495880127, 11.407482147216797, 9.295327186584473]);
+  assert.deepEqual([c.double_byte_stream_split[0], c.double_byte_stream_split[199]], [9.82038858616854, 8.225037940357872]);
+  console.log("gzip rows ok");
+}
+
 // LIST columns (dev/generate_wasm_list_fixture.py), row group 2. native: rugo.parquet.read_parquet
 {
   const LISTS = new URL("../../testdata/parquet_tests/wasm_lists.parquet", import.meta.url).pathname;

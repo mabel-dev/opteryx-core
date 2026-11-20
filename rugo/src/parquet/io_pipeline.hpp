@@ -3735,7 +3735,9 @@ class ParquetIOPipeline {
             // prefilter below makes predicate-columns-first), so a column's
             // position never depends on when it was decoded.
             const size_t ncols_total = item.column_stats.size();
-            result.columns.assign(ncols_total, ColumnOut{});
+            // One slot per expanded column, then the further columns of any group that yields
+            // several (NestedSpec::orig has one entry per slot).
+            result.columns.assign(item.nested ? item.nested->orig.size() : ncols_total, ColumnOut{});
             // Decoded leaves of each projected STRUCT/MAP, held until the group's last leaf.
             std::vector<std::vector<DecodedColumn>> group_leaves;
             if (item.nested) {
@@ -4174,13 +4176,14 @@ class ParquetIOPipeline {
 
                 if (ng != nullptr) {
                     // A leaf of a STRUCT/MAP: keep it (with its levels) until the group's last
-                    // leaf arrives, then fold them all into one JSON-text column.
+                    // leaf arrives, then fold them all into the JSON-text column - or columns,
+                    // for the paths read from one JSON-text column - the group yields.
                     const size_t gi = static_cast<size_t>(ng - item.nested->groups.data());
                     group_leaves[gi][ng_leaf] = std::move(decoded);
                     if (ng_leaf + 1 < ng->count) return true;
-                    DecodedColumn folded;
+                    std::vector<DecodedColumn> folded;
                     try {
-                        rugo::nested::assemble(*ng->plan, group_leaves[gi], col_mask, folded);
+                        rugo::nested::assemble(ng->plans, group_leaves[gi], col_mask, folded);
                     } catch (const std::exception& e) {
                         std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = e.what();
@@ -4188,11 +4191,14 @@ class ParquetIOPipeline {
                     }
                     group_leaves[gi].clear();
                     group_leaves[gi].shrink_to_fit();
-                    ColumnStats synth;
-                    synth.name = ng->name;
-                    synth.physical_type = "byte_array";
-                    synth.logical_type = "varchar";
-                    return emit_col(ng->first, synth, folded);
+                    for (size_t j = 0; j < folded.size(); ++j) {
+                        ColumnStats synth;
+                        synth.name = ng->names[j];
+                        synth.physical_type = "byte_array";
+                        synth.logical_type = "varchar";
+                        if (!emit_col(ng->slots[j], synth, folded[j])) return false;
+                    }
+                    return true;
                 }
                 return emit_col(i, col_stats, decoded);
             };
@@ -4640,27 +4646,22 @@ class ParquetIOPipeline {
             result.error = e.what();
         }
 
-        // Fold each STRUCT/MAP's leaf slots into the ONE column the consumer projected:
-        // the JSON-text ColumnOut was emitted at the group's first slot, the other leaf
-        // slots carry nothing. After this, names/columns are exactly the projection.
-        if (item.nested) {
+        // Fold each STRUCT/MAP's leaf slots into the column(s) the consumer projected: a
+        // group's JSON-text ColumnOuts were emitted at its `slots`, its other leaf slots
+        // carry nothing. After this, names/columns are exactly the projection.
+        if (item.nested && !item.nested->groups.empty() &&
+            result.columns.size() == item.nested->orig.size()) {   // sized before any decode; empty if that never ran
+            std::vector<std::string> slot_names(result.columns.size());
+            std::copy(result.column_names.begin(), result.column_names.end(), slot_names.begin());
+            for (const NestedGroup& g : item.nested->groups)
+                for (size_t j = 0; j < g.slots.size(); ++j) slot_names[g.slots[j]] = g.names[j];
             std::vector<std::string> folded_names;
             std::vector<ColumnOut> folded_cols;
-            folded_names.reserve(result.column_names.size());
-            folded_cols.reserve(result.columns.size());
-            for (size_t i = 0; i < result.columns.size();) {
-                const NestedGroup* grp = nullptr;
-                for (const NestedGroup& g : item.nested->groups)
-                    if (g.first == i) { grp = &g; break; }
-                if (grp != nullptr) {
-                    folded_names.push_back(grp->name);
-                    folded_cols.push_back(result.columns[i]);
-                    i += grp->count;
-                } else {
-                    folded_names.push_back(result.column_names[i]);
-                    folded_cols.push_back(result.columns[i]);
-                    ++i;
-                }
+            folded_names.reserve(item.nested->slot.size());
+            folded_cols.reserve(item.nested->slot.size());
+            for (uint32_t slot : item.nested->slot) {
+                folded_names.push_back(std::move(slot_names[slot]));
+                folded_cols.push_back(result.columns[slot]);
             }
             result.column_names = std::move(folded_names);
             result.columns = std::move(folded_cols);

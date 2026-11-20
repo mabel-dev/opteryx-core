@@ -57,6 +57,7 @@ from opteryx.planner.optimizer.strategies import (
     GroupJoinStrategy,
     GroupLimitKeyBoundStrategy,
     JsonlNestedExtractionStrategy,
+    ParquetVariantExtractionStrategy,
     JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
@@ -123,6 +124,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "GroupJoinStrategy": lambda: config.features.disable_groupjoin,
     "GroupLimitKeyBoundStrategy": lambda: config.features.disable_group_limit_key_bound,
     "JsonlNestedExtractionStrategy": lambda: config.features.disable_jsonl_nested_extraction,
+    "ParquetVariantExtractionStrategy": lambda: config.features.disable_parquet_variant_extraction,
     "JoinConditionHoistStrategy": lambda: config.features.disable_join_condition_hoist,
     "JoinEliminationStrategy": lambda: config.features.disable_join_elimination,
     "JoinKeyMaterializationStrategy": lambda: config.features.disable_join_key_materialization,
@@ -298,6 +300,9 @@ class OptimizerVisitor:
             # reads directly (rugo's nested walk). Before pushdown, so the comparisons
             # on it push into the reader and the object itself drops out of the read.
             JsonlNestedExtractionStrategy(telemetry),
+            # The same rewrite for a chain over a READ_PARQUET VARIANT column, which
+            # the scan reads from the columns the file shredded the value into.
+            ParquetVariantExtractionStrategy(telemetry),
             PredicatePushdownStrategy(telemetry),
             CrossJoinFilterPushdownStrategy(
                 telemetry

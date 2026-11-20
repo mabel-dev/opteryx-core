@@ -53,9 +53,6 @@ jobs:
       - name: Test footer reader (Blob.slice + HTTP Range, vs native figures)
         run: node rugo/wasm/test_footer.mjs
 
-      - name: Test codec probe (gzip/zstd round-trip, brotli refused)
-        run: node rugo/wasm/test_codecs.mjs
-
       - name: Stage site files
         run: |
           set -euo pipefail

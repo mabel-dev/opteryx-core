@@ -1,11 +1,13 @@
 // See nested_json.hpp for the contract and the rendering rulings.
 #include "nested_json.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
 #include "interop/value_format.hpp"   // fmt_*, json_string, LogicalDesc units
 #include "ops/float_ops.h"            // fp_canon: the same -0.0 / NaN canon as the scan
+#include "ops/json_extract.h"         // a path read out of JSON text: draken's own parse, walk and text rule
 #include "base64/_base64.h"           // mabel bintob64 / b64_encoded_size
 #include "variant_binary.hpp"         // VARIANT values held as Variant binary
 
@@ -74,6 +76,17 @@ struct Plan {
     int32_t n_leaves = 0;                 // leaves the plan reads (== file_leaves unless a declared shape drops some)
     int32_t file_leaves = 0;              // leaves the file's column has, in schema (DFS) order
     std::vector<int32_t> used_index;      // plan leaf k -> its position among the file's leaves
+    // A PATH plan (see build_plan): root is the VARIANT group, its children the metadata leaf and
+    // the pair the path leads to. `tail` holds the keys the file does not shred, looked up in
+    // that pair's `value`; `text` is `->>`.
+    bool path = false;
+    bool text = false;
+    std::vector<std::string> tail;
+    // A TEXT plan (see build_plan): root is the one string leaf, a JSON document per row, and
+    // `keys` the whole path, walked through each row's parse (`blob` holds the keys' bytes).
+    bool json_text = false;
+    std::vector<draken::ops::JsonPtrToken> keys;
+    std::string blob;
 };
 
 namespace {
@@ -184,35 +197,58 @@ struct Builder {
     // shredded array's element. `g` is the group holding the pair (present iff def >= gdef) and
     // `base` the file position of its first leaf. The spec reads these columns BY NAME, so the
     // plan takes `value` first and `typed_value` second whatever order the file holds them in.
+    // The `value` and `typed_value` members of pair group `g`, and the file position of each
+    // one's first leaf.
+    struct Pair {
+        const SchemaElement* value = nullptr;
+        const SchemaElement* typed = nullptr;
+        int32_t value_at = 0;
+        int32_t typed_at = 0;
+    };
+
+    Pair pair_of(const SchemaElement& g, int32_t base) {
+        Pair p;
+        int32_t at = base;
+        for (const SchemaElement& c : g.children) {
+            if (c.name == "value") { p.value = &c; p.value_at = at; }
+            else if (c.name == "typed_value") { p.typed = &c; p.typed_at = at; }
+            else if (!(c.name == "metadata" && g.logical_type == "variant"))
+                fail(column, "VARIANT group '" + g.full_name + "' has an unexpected field '" + c.name + "'");
+            at += count_leaves(c);
+        }
+        if (p.value == nullptr && p.typed == nullptr)
+            fail(column, "VARIANT group '" + g.full_name + "' has neither value nor typed_value");
+        if (p.value != nullptr && (!p.value->children.empty() || p.value->physical_type != "byte_array" ||
+                                   p.value->repetition_type == 2))
+            fail(column, "'" + p.value->full_name + "' is not the binary a VARIANT value is held in");
+        if (p.typed != nullptr && p.typed->repetition_type == 2)
+            fail(column, "'" + p.typed->full_name + "' is a repeated field, which a shredded VARIANT cannot hold");
+        return p;
+    }
+
+    // A field of a shredded object is itself a pair.
+    void check_field(const SchemaElement& f) {
+        if (f.children.empty() || f.repetition_type != 0 || f.logical_type != "struct")
+            fail(column, "shredded field '" + f.full_name + "' is not a required group of value / typed_value");
+    }
+
     Node vvalue(const SchemaElement& g, int32_t gdef, int32_t acc_rep, int32_t base) {
         Node v;
         v.kind = NK::VValue;
         v.key = member_key(g.name);
         v.def = gdef;
         v.first_leaf = leaf_ctr;
-        const SchemaElement* value = nullptr;
-        const SchemaElement* typed = nullptr;
-        int32_t value_at = 0, typed_at = 0, at = base;
-        for (const SchemaElement& c : g.children) {
-            if (c.name == "value") { value = &c; value_at = at; }
-            else if (c.name == "typed_value") { typed = &c; typed_at = at; }
-            else if (!(c.name == "metadata" && g.logical_type == "variant"))
-                fail(column, "VARIANT group '" + g.full_name + "' has an unexpected field '" + c.name + "'");
-            at += count_leaves(c);
-        }
-        if (value == nullptr && typed == nullptr)
-            fail(column, "VARIANT group '" + g.full_name + "' has neither value nor typed_value");
+        const Pair pair = pair_of(g, base);
+        const SchemaElement* value = pair.value;
+        const SchemaElement* typed = pair.typed;
+        const int32_t typed_at = pair.typed_at;
         if (value != nullptr) {
-            if (!value->children.empty() || value->physical_type != "byte_array" || value->repetition_type == 2)
-                fail(column, "'" + value->full_name + "' is not the binary a VARIANT value is held in");
             v.value_leaf = leaf_ctr;
             v.value_def = gdef + (value->repetition_type == 1 ? 1 : 0);
-            file_ctr = value_at;
+            file_ctr = pair.value_at;
             take_leaf();
         }
         if (typed != nullptr) {
-            if (typed->repetition_type == 2)
-                fail(column, "'" + typed->full_name + "' is a repeated field, which a shredded VARIANT cannot hold");
             Node t;
             t.def = gdef + (typed->repetition_type == 1 ? 1 : 0);
             t.first_leaf = leaf_ctr;
@@ -234,8 +270,7 @@ struct Builder {
                 t.kind = NK::VObject;
                 int32_t field_at = typed_at;
                 for (const SchemaElement& f : typed->children) {
-                    if (f.children.empty() || f.repetition_type != 0 || f.logical_type != "struct")
-                        fail(column, "shredded field '" + f.full_name + "' is not a required group of value / typed_value");
+                    check_field(f);
                     t.children.push_back(vvalue(f, t.def, acc_rep, field_at));
                     field_at += count_leaves(f);
                 }
@@ -250,9 +285,45 @@ struct Builder {
         return v;
     }
 
+    // The pair `keys[i..]` lead to from pair `g`, for a path read (docs/parquet_variant_design.md
+    // §4.3). While the level's typed_value is an object holding the next key, step into that
+    // field: its sibling `value` (the residual) is NOT read - the spec lets a reader assume a
+    // shredded field is never repeated there, and that a null typed_value is not an object. Keys
+    // the file does not shred (`tail`) are looked up in this level's `value` alone; with no key
+    // left the pair is read whole.
+    Node path(const SchemaElement& g, int32_t gdef, int32_t base, const std::vector<std::string>& keys,
+              size_t i, std::vector<std::string>& tail) {
+        if (i == keys.size()) return vvalue(g, gdef, 0, base);
+        const Pair pair = pair_of(g, base);
+        if (pair.typed != nullptr && !pair.typed->children.empty() && pair.typed->logical_type == "struct") {
+            int32_t field_at = pair.typed_at;
+            for (const SchemaElement& f : pair.typed->children) {
+                if (f.name == keys[i]) {
+                    check_field(f);
+                    return path(f, gdef + (pair.typed->repetition_type == 1 ? 1 : 0), field_at, keys, i + 1, tail);
+                }
+                field_at += count_leaves(f);
+            }
+        }
+        tail.assign(keys.begin() + static_cast<std::ptrdiff_t>(i), keys.end());
+        Node v;
+        v.kind = NK::Missing;      // no `value` at this level: nothing unshredded, so the path is never there
+        v.def = gdef;
+        v.first_leaf = leaf_ctr;
+        if (pair.value == nullptr) return v;
+        v.kind = NK::VValue;
+        v.value_leaf = leaf_ctr;
+        v.value_def = gdef + (pair.value->repetition_type == 1 ? 1 : 0);
+        file_ctr = pair.value_at;
+        take_leaf();
+        v.n_leaves = 1;
+        return v;
+    }
+
     // The VARIANT group `e`; `n` arrives with its key, def and first_leaf set. Its plan leaves are
-    // metadata, then the {value, typed_value} pair.
-    Node variant(const SchemaElement& e, Node n, int32_t acc_rep) {
+    // metadata, then the {value, typed_value} pair - or, with `vp`, the pair that path leads to.
+    Node variant(const SchemaElement& e, Node n, int32_t acc_rep, const VariantPath* vp = nullptr,
+                 std::vector<std::string>* tail = nullptr) {
         n.kind = NK::Variant;
         const int32_t base = file_ctr;
         const SchemaElement* md = nullptr;
@@ -271,7 +342,8 @@ struct Builder {
         file_ctr = md_at;
         take_leaf();
         n.children.push_back(std::move(m));
-        n.children.push_back(vvalue(e, n.def, acc_rep, base));
+        n.children.push_back(vp == nullptr ? vvalue(e, n.def, acc_rep, base)
+                                           : path(e, n.def, base, vp->keys, 0, *tail));
         file_ctr = at;
         n.n_leaves = leaf_ctr - n.first_leaf;
         return n;
@@ -426,6 +498,45 @@ std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& n
     const SchemaElement* top = nullptr;
     for (const SchemaElement& e : fs.schema)
         if (e.name == name) { top = &e; break; }
+    VariantPath vp;
+    const bool is_path = top == nullptr && parse_variant_path(name, vp);
+    if (is_path) {
+        for (const SchemaElement& e : fs.schema)
+            if (e.name == vp.base) { top = &e; break; }
+        if (declared != nullptr && !declared->empty()) {
+            err = "the path '" + name + "' cannot be read through a declared nested shape";
+            return nullptr;
+        }
+        // The file holds the base as a string: JSON text, the same chunks the scan admits for a
+        // whole VARIANT column read (pool_reader.pyx, kind "varchar").
+        const std::string* lt = top != nullptr ? &top->logical_type : nullptr;
+        if (top != nullptr && top->children.empty() && top->repetition_type != 2 &&
+            top->physical_type == "byte_array" &&
+            (lt->empty() || *lt == "varchar" || *lt == "binary" || *lt == "json")) {
+            auto plan = std::make_shared<Plan>();
+            plan->name = name;
+            plan->root.kind = NK::Scalar;
+            plan->root.sk = SK::String;
+            plan->root.def = top->repetition_type == 1 ? 1 : 0;
+            plan->root.n_leaves = 1;
+            plan->n_leaves = plan->file_leaves = 1;
+            plan->used_index = {0};
+            plan->json_text = true;
+            plan->text = vp.text;
+            for (const std::string& key : vp.keys) {
+                // One object key each, never an array index: what the path notation means.
+                plan->keys.push_back({static_cast<uint32_t>(plan->blob.size()),
+                                      static_cast<uint32_t>(key.size()), draken::ops::kJsonPtrNotIndex});
+                plan->blob += key;
+            }
+            return plan;
+        }
+        if (top != nullptr && top->logical_type != "variant") {
+            err = "'" + vp.base + "' is held as neither a VARIANT nor a string in this file, so the path '" +
+                  name + "' cannot be read from it";
+            return nullptr;
+        }
+    }
     if (top == nullptr) { err = "no top-level field named '" + name + "' in the footer schema"; return nullptr; }
     if (top->children.empty()) { err = "'" + name + "' is a plain column, not a STRUCT/MAP"; return nullptr; }
     if (top->repetition_type == 2) {
@@ -443,7 +554,16 @@ std::shared_ptr<const Plan> build_plan(const FileStats& fs, const std::string& n
         }
         auto plan = std::make_shared<Plan>();
         plan->name = name;
-        plan->root = b.body(*top, 0, 0, false, di);
+        if (is_path) {
+            Node n;
+            n.key = member_key(top->name);
+            n.def = top->repetition_type == 1 ? 1 : 0;
+            plan->root = b.variant(*top, std::move(n), 0, &vp, &plan->tail);
+            plan->path = true;
+            plan->text = vp.text;
+        } else {
+            plan->root = b.body(*top, 0, 0, false, di);
+        }
         plan->n_leaves = b.leaf_ctr;
         plan->file_leaves = count_leaves(*top);
         plan->used_index = std::move(b.used_index);
@@ -670,12 +790,25 @@ struct Assembler {
 
     // ── VARIANT ─────────────────────────────────────────────────────────────────
 
-    // What a {value, typed_value} pair held: nothing (both null), the Variant null, or a value.
-    enum class VR : uint8_t { Missing, Null, Value };
+    // What a {value, typed_value} pair held: nothing (both null), the Variant null, a value
+    // rendered as JSON, or - only when asked for `raw` - a string's own bytes, unquoted.
+    enum class VR : uint8_t { Missing, Null, Value, Raw };
+
+    // Render the Variant binary at [v, end).
+    VR binary(const variant::Metadata& md, const uint8_t* v, const uint8_t* end, bool raw) {
+        if (variant::is_null(v, static_cast<size_t>(end - v))) { o.append("null"); return VR::Null; }
+        const uint8_t* s; uint32_t slen;
+        if (raw && variant::string_bytes(v, end, s, slen)) {
+            o.append(reinterpret_cast<const char*>(s), slen);
+            return VR::Raw;
+        }
+        variant::render(o, md, v, end, 0);
+        return VR::Value;
+    }
 
     // Render one {value, typed_value} pair, consuming its entry from every leaf under it.
-    // Nothing is written when it is Missing.
-    VR vvalue(const Node& v, const variant::Metadata& md) {
+    // Nothing is written when it is Missing. `raw`: a string is written as its bytes.
+    VR vvalue(const Node& v, const variant::Metadata& md, bool raw = false) {
         const uint8_t* vp = nullptr;
         uint32_t vlen = 0;
         bool has_value = false;
@@ -719,6 +852,13 @@ struct Assembler {
                     o.push_back(']');
                     return VR::Value;
                 }
+                if (raw && t.sk == SK::String) {
+                    const uint8_t* p; uint32_t len;
+                    str_value(f, p, len);
+                    o.append(reinterpret_cast<const char*>(p), len);
+                    ++f.pos;
+                    return VR::Raw;
+                }
                 emit_scalar(t, f);
                 ++f.pos;
                 return VR::Value;
@@ -726,9 +866,53 @@ struct Assembler {
             skip1(t);
         }
         if (!has_value) return VR::Missing;
-        if (variant::is_null(vp, vlen)) { o.append("null"); return VR::Null; }
-        variant::render(o, md, vp, vlen);
-        return VR::Value;
+        return binary(md, vp, vp + vlen, raw);
+    }
+
+    // One row of a PATH plan over the VARIANT group `n` (known present): what `->` / `->>` would
+    // return for the path from the whole value. False = SQL NULL - the path leads nowhere, or to
+    // a JSON null - with nothing left in `o`.
+    bool path_value(const Node& n) {
+        Leaf& ml = L[n.children[0].first_leaf];
+        const uint8_t* p; uint32_t len;
+        str_value(ml, p, len);
+        ++ml.pos;
+        const Node& t = n.children[1];
+        if (t.kind == NK::Missing) return false;
+        const variant::Metadata md = variant::parse_metadata(p, len);
+        const size_t mark = o.size();
+        VR r;
+        if (plan.tail.empty()) {
+            r = vvalue(t, md, plan.text);
+        } else {
+            Leaf& l = L[t.value_leaf];
+            if (l.pos >= l.n) bad("levels exhausted before the row ended");
+            const bool present = def_at(l) >= t.value_def;
+            const uint8_t* v = nullptr;
+            uint32_t vlen = 0;
+            if (present) str_value(l, v, vlen);
+            ++l.pos;
+            if (!present) return false;
+            const uint8_t* end = v + vlen;
+            for (const std::string& key : plan.tail) {
+                v = variant::find_field(md, v, end, key.data(), key.size());
+                if (v == nullptr) return false;
+            }
+            r = binary(md, v, end, plan.text);
+        }
+        if (r == VR::Raw) return true;
+        // NaN and the infinities render as `null` as well, and `->` reads any JSON null as NULL.
+        if (r != VR::Value || (o.size() - mark == 4 && std::memcmp(o.data() + mark, "null", 4) == 0)) {
+            o.resize(mark);
+            return false;
+        }
+        // `->>` over a value JSON holds as a string that is not a Variant string (a date, a uuid,
+        // base64): its text is what is between the quotes, and none of those renderings escapes.
+        if (plan.text && o[mark] == '"') {
+            o.erase(mark, 1);
+            o.pop_back();
+        }
+        return true;
     }
 
     // The VARIANT group `n`, known present: read its metadata, render its value.
@@ -831,10 +1015,115 @@ struct Assembler {
     }
 };
 
-}  // namespace
+// The column assemble() returns: `n_out` rows, row i's bytes at text[offs[i] .. + lens[i]), the
+// NULL rows clear in `valid`.
+void finish(DecodedColumn& out, const std::string& text, draken::AppendBuffer<uint32_t>& offs,
+            draken::AppendBuffer<int32_t>& lens, draken::AppendBuffer<uint8_t>& valid,
+            bool any_null, size_t n_out) {
+    out.reset();
+    out.type = "byte_array";
+    out.logical_type = "varchar";
+    out.num_rows = static_cast<int32_t>(n_out);
+    out.success = true;
+    out.string_arena.assign(reinterpret_cast<const uint8_t*>(text.data()),
+                            reinterpret_cast<const uint8_t*>(text.data()) + text.size());
+    out.string_offsets = std::move(offs);
+    out.string_lens = std::move(lens);
+    if (any_null) {
+        valid.resize_uninit((n_out + 7) / 8);   // shrink only: n_out <= rows
+        out.valid_bits = std::move(valid);
+    }
+}
 
-void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
-              const uint8_t* row_mask, DecodedColumn& out) {
+// TEXT plans over one string leaf `d`: each emitted row is parsed ONCE and every plan's path is
+// walked through that parse. What a path yields is what `->` / `->>` yield for it over the same
+// text unpushed, because the parse flags, the walk and the text rule ARE draken's
+// (ops/json_extract.h). A row the mask drops is never parsed.
+// shortcut: a dictionary-encoded column is still parsed per row, cache per entry if a profile asks.
+void assemble_text(const std::vector<std::shared_ptr<const Plan>>& plans, const DecodedColumn& d,
+                   const uint8_t* row_mask, std::vector<DecodedColumn>& outs) {
+    const Plan& first = *plans[0];
+    if (!d.rep_levels.empty()) fail(first.name, "a column read as JSON text cannot be repeated");
+    Assembler a{first, {}, {}};
+    a.L.resize(1);
+    Leaf& l = a.L[0];
+    l.d = &d;
+    l.n = !d.def_levels.empty() ? d.def_levels.size() : static_cast<size_t>(d.num_rows);
+    const size_t rows = l.n;
+
+    // One parse arena for the row group, sized from its longest document (draken's ReadPool).
+    size_t longest = 0;
+    auto widen = [&](const auto& lens) {
+        for (size_t i = 0; i < lens.size(); ++i)
+            if (static_cast<size_t>(lens[i]) > longest) longest = static_cast<size_t>(lens[i]);
+    };
+    widen(d.string_lens);
+    widen(d.string_dict_lens);
+    widen(d.rle_str_lens);
+    draken::ops::ReadPool pool(longest);
+
+    struct Out {
+        std::string o;
+        draken::AppendBuffer<uint32_t> offs;
+        draken::AppendBuffer<int32_t> lens;
+        draken::AppendBuffer<uint8_t> valid;
+        bool any_null = false;
+    };
+    std::vector<Out> w(plans.size());
+    std::vector<draken::ops::JsonNav> navs;
+    for (size_t k = 0; k < plans.size(); ++k) {
+        w[k].valid.resize_fill((rows + 7) / 8, 0);
+        navs.push_back({plans[k]->keys.data(), static_cast<uint32_t>(plans[k]->keys.size()),
+                        plans[k]->blob.data(), 0});
+    }
+
+    size_t n_out = 0;
+    for (size_t r = 0; r < rows; ++r) {
+        const bool present = def_at(l) >= first.root.def;
+        const uint8_t* p = nullptr;
+        uint32_t len = 0;
+        if (present) a.str_value(l, p, len);   // consumed whether or not the row is emitted
+        ++l.pos;
+        if (row_mask != nullptr && row_mask[r] == 0) continue;
+        yyjson_val* root = nullptr;
+        draken::ops::JDocGuard doc(nullptr);
+        if (present) {
+            yyjson_read_err perr;
+            doc.doc = pool.read(reinterpret_cast<const char*>(p), len, &perr);
+            if (doc.doc == nullptr)
+                throw std::runtime_error("the path '" + first.name + "': invalid JSON at row " +
+                                         std::to_string(r) + " of the row group: " +
+                                         (perr.msg ? perr.msg : "unknown error"));
+            root = yyjson_doc_get_root(doc.doc);
+        }
+        for (size_t k = 0; k < plans.size(); ++k) {
+            Out& x = w[k];
+            yyjson_val* val = root != nullptr ? draken::ops::nav_tokens(root, navs[k]) : nullptr;
+            if (val == nullptr || yyjson_is_null(val)) {   // a missing key and a JSON null are SQL NULL
+                x.offs.push_back(0);
+                x.lens.push_back(0);
+                x.any_null = true;
+                continue;
+            }
+            struct Owned { char* p; ~Owned() { std::free(p); } } owned{nullptr};
+            const char* str = nullptr;
+            size_t n = 0;
+            if (!draken::ops::value_text(val, plans[k]->text, str, n, owned.p))
+                fail(plans[k]->name, "could not write the JSON text of row " + std::to_string(r));
+            if (x.o.size() + n > UINT32_MAX) fail(plans[k]->name, "its text exceeds 4 GiB for one row group");
+            x.offs.push_back(static_cast<uint32_t>(x.o.size()));
+            x.lens.push_back(static_cast<int32_t>(n));
+            x.o.append(str, n);
+            x.valid[n_out >> 3] |= static_cast<uint8_t>(1u << (n_out & 7));
+        }
+        ++n_out;
+    }
+    for (size_t k = 0; k < plans.size(); ++k)
+        finish(outs[k], w[k].o, w[k].offs, w[k].lens, w[k].valid, w[k].any_null, n_out);
+}
+
+void assemble_one(const Plan& plan, const std::vector<const DecodedColumn*>& leaves,
+                  const uint8_t* row_mask, DecodedColumn& out) {
     if (leaves.size() != static_cast<size_t>(plan.n_leaves))
         fail(plan.name, "expected " + std::to_string(plan.n_leaves) + " leaf chunks, got " +
                         std::to_string(leaves.size()));
@@ -843,7 +1132,7 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
     a.L.resize(leaves.size());
     size_t rows = 0;
     for (size_t k = 0; k < leaves.size(); ++k) {
-        const DecodedColumn& d = leaves[k];
+        const DecodedColumn& d = *leaves[k];
         Leaf& l = a.L[k];
         l.d = &d;
         l.n = !d.def_levels.empty() ? d.def_levels.size()
@@ -883,7 +1172,8 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
         // A top-level VARIANT that is the Variant null (or holds nothing) is SQL NULL, as a JSON
         // null read through `->` is; nested inside another value it stays `null`.
         bool is_null = false;
-        if (root.kind == NK::Variant) is_null = a.variant_value(root) != Assembler::VR::Value;
+        if (plan.path) is_null = !a.path_value(root);
+        else if (root.kind == NK::Variant) is_null = a.variant_value(root) != Assembler::VR::Value;
         else a.render(root);
         if (!selected) { a.o.resize(mark); continue; }
         if (is_null) {
@@ -905,19 +1195,44 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
             fail(plan.name, "leaf " + std::to_string(k) + " still has " +
                             std::to_string(a.L[k].n - a.L[k].pos) + " unread entries after the last row");
 
-    out.reset();
-    out.type = "byte_array";
-    out.logical_type = "varchar";
-    out.num_rows = static_cast<int32_t>(n_out);
-    out.success = true;
-    out.string_arena.assign(reinterpret_cast<const uint8_t*>(a.o.data()),
-                            reinterpret_cast<const uint8_t*>(a.o.data()) + a.o.size());
-    out.string_offsets = std::move(offs);
-    out.string_lens = std::move(lens);
-    if (any_null) {
-        valid.resize_uninit((n_out + 7) / 8);   // shrink only: n_out <= rows
-        out.valid_bits = std::move(valid);
+    finish(out, a.o, offs, lens, valid, any_null, n_out);
+}
+
+}  // namespace
+
+void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
+              const std::vector<DecodedColumn>& leaves,
+              const uint8_t* row_mask, std::vector<DecodedColumn>& outs) {
+    outs.clear();
+    outs.resize(plans.size());
+    if (plans[0]->json_text) {
+        if (leaves.size() != 1)
+            fail(plans[0]->name, "expected the one chunk of its JSON-text column, got " +
+                                 std::to_string(leaves.size()));
+        assemble_text(plans, leaves[0], row_mask, outs);
+        return;
     }
+    // Each plan reads its own leaves out of the ones the group decoded once between them.
+    const std::vector<int32_t> shared = shared_leaf_index(plans);
+    if (leaves.size() != shared.size())
+        fail(plans[0]->name, "expected " + std::to_string(shared.size()) + " leaf chunks, got " +
+                             std::to_string(leaves.size()));
+    std::vector<const DecodedColumn*> mine;
+    for (size_t p = 0; p < plans.size(); ++p) {
+        mine.clear();
+        for (int32_t file_leaf : plans[p]->used_index)
+            mine.push_back(&leaves[static_cast<size_t>(
+                std::find(shared.begin(), shared.end(), file_leaf) - shared.begin())]);
+        assemble_one(*plans[p], mine, row_mask, outs[p]);
+    }
+}
+
+std::vector<int32_t> shared_leaf_index(const std::vector<std::shared_ptr<const Plan>>& plans) {
+    std::vector<int32_t> shared;
+    for (const auto& plan : plans)
+        for (int32_t file_leaf : plan->used_index)
+            if (std::find(shared.begin(), shared.end(), file_leaf) == shared.end()) shared.push_back(file_leaf);
+    return shared;
 }
 
 }  // namespace nested
@@ -931,6 +1246,35 @@ bool has_prefix(const std::string& s, const std::string& name) {
 }
 
 }  // namespace
+
+bool parse_variant_path(const std::string& name, VariantPath& out) {
+    const size_t arrow = name.find("->");
+    if (arrow == std::string::npos || arrow == 0) return false;
+    VariantPath p;
+    p.base = name.substr(0, arrow);
+    size_t i = arrow;
+    while (i < name.size()) {
+        if (p.text) return false;                         // `->>` is only ever the last step
+        if (name.compare(i, 2, "->") != 0) return false;
+        i += 2;
+        if (i < name.size() && name[i] == '>') { p.text = true; ++i; }
+        if (i >= name.size() || name[i] != '\'') return false;
+        ++i;
+        std::string key;
+        for (;;) {
+            if (i >= name.size()) return false;           // the key's closing quote is missing
+            if (name[i] == '\'') {
+                if (i + 1 < name.size() && name[i + 1] == '\'') { key.push_back('\''); i += 2; continue; }
+                ++i;
+                break;
+            }
+            key.push_back(name[i++]);
+        }
+        p.keys.push_back(std::move(key));
+    }
+    out = std::move(p);
+    return true;
+}
 
 bool group_renderable(const FileStats& fs, const std::string& name, std::string& err,
                       const std::vector<DeclaredNode>* declared) {
@@ -952,6 +1296,13 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
     // every row group of the file agrees.
     const RowGroupStats& rg0 = fs.row_groups[static_cast<size_t>(rg_idxs[0])];
     std::vector<std::shared_ptr<const nested::Plan>> plans(projected.size());
+    // The top-level field a group column's chunks sit under: its own name, or a path's base.
+    std::vector<std::string> field(projected);
+    // Every plan over one top-level field folds from ONE read of that field's leaves - a VARIANT
+    // beside paths into it, several paths, the paths over a JSON-text column. `members[g]` are
+    // group g's projected indexes; groups are in the order of their first member.
+    std::vector<std::vector<size_t>> members;
+    std::vector<size_t> group_of(projected.size(), SIZE_MAX);
     bool any_group = false;
     for (size_t k = 0; k < projected.size(); ++k) {
         bool exact = false, prefixed = false;
@@ -959,11 +1310,25 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
             if (cs.name == projected[k]) { exact = true; break; }
             if (has_prefix(cs.name, projected[k])) prefixed = true;
         }
-        if (exact || !prefixed) continue;
+        if (exact) continue;
+        if (!prefixed) {
+            VariantPath vp;
+            if (!parse_variant_path(projected[k], vp)) continue;
+            bool held = false;
+            for (const ColumnStats& cs : rg0.columns)
+                if (cs.name == vp.base || has_prefix(cs.name, vp.base)) { held = true; break; }
+            if (!held) continue;
+            field[k] = vp.base;
+        }
         plans[k] = nested::build_plan(fs, projected[k], err,
                                       declared != nullptr && k < declared->size() ? &(*declared)[k] : nullptr);
         if (!plans[k]) return false;
         any_group = true;
+        size_t g = 0;
+        while (g < members.size() && field[members[g][0]] != field[k]) ++g;
+        if (g == members.size()) members.emplace_back();
+        members[g].push_back(k);
+        group_of[k] = g;
     }
 
     auto spec = std::make_shared<NestedSpec>();
@@ -973,11 +1338,16 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
         std::vector<std::string> row_names;
         std::vector<uint32_t> orig;
         std::vector<NestedGroup> groups;
+        std::vector<uint32_t> slot(projected.size(), 0);
+        // (group, projected index) of each further column of a group that yields several: their
+        // result slots follow the expanded list, so they are numbered once it is complete.
+        std::vector<std::pair<size_t, size_t>> further;
         for (size_t k = 0; k < projected.size(); ++k) {
             if (!plans[k]) {
                 bool found = false;
                 for (const ColumnStats& cs : rg.columns) {
                     if (cs.name == projected[k]) {
+                        slot[k] = static_cast<uint32_t>(row_names.size());
                         row_names.push_back(cs.name);
                         orig.push_back(static_cast<uint32_t>(k));
                         out.push_back(cs);
@@ -992,16 +1362,26 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                 }
                 continue;
             }
+            // A group is laid out where its first member is projected (so `groups` is in
+            // `members` order); its other members only take a result slot.
+            if (members[group_of[k]][0] != k) {
+                further.emplace_back(group_of[k], k);
+                continue;
+            }
             NestedGroup g;
-            g.name = projected[k];
+            for (size_t member : members[group_of[k]]) {
+                g.names.push_back(projected[member]);
+                g.plans.push_back(plans[member]);
+            }
             g.first = row_names.size();
-            g.plan = plans[k];
+            g.slots.push_back(static_cast<uint32_t>(g.first));
+            slot[k] = static_cast<uint32_t>(g.first);
             long prev = -1;
             size_t group_first_chunk = 0;
             size_t group_chunks = 0;
             for (size_t ci = 0; ci < rg.columns.size(); ++ci) {
                 const ColumnStats& cs = rg.columns[ci];
-                if (cs.name != projected[k] && !has_prefix(cs.name, projected[k])) continue;
+                if (cs.name != field[k] && !has_prefix(cs.name, field[k])) continue;
                 if (prev >= 0 && static_cast<long>(ci) != prev + 1) {
                     err = "column '" + projected[k] + "': its leaf chunks are not contiguous in the row group";
                     return false;
@@ -1016,9 +1396,10 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                       std::to_string(nested::file_leaf_count(*plans[k]));
                 return false;
             }
-            // The leaves the plan reads, in the PLAN's order (the order assemble() takes them in): all
-            // of the group's chunks, unless a declared shape leaves some of the file's fields out.
-            for (int32_t file_leaf : nested::used_leaf_index(*plans[k])) {
+            // The leaves the group's plans read between them, in the order assemble() takes them
+            // in: all of the field's chunks, or fewer - a path reads only what it needs, and a
+            // declared shape leaves out the file's fields the table no longer has.
+            for (int32_t file_leaf : nested::shared_leaf_index(g.plans)) {
                 row_names.push_back(rg.columns[group_first_chunk + static_cast<size_t>(file_leaf)].name);
                 orig.push_back(static_cast<uint32_t>(k));
                 out.push_back(rg.columns[group_first_chunk + static_cast<size_t>(file_leaf)]);
@@ -1026,9 +1407,15 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
             g.count = row_names.size() - g.first;
             groups.push_back(std::move(g));
         }
+        for (const auto& [gi, k] : further) {
+            slot[k] = static_cast<uint32_t>(orig.size());
+            groups[gi].slots.push_back(slot[k]);
+            orig.push_back(static_cast<uint32_t>(k));
+        }
         if (m == 0) {
             names = row_names;
             spec->orig = orig;
+            spec->slot = slot;
             spec->groups = groups;
         } else if (row_names != names) {
             err = "the row groups of one file disagree on the projected leaf chunks";

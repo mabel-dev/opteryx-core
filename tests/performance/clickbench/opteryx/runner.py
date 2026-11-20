@@ -147,7 +147,10 @@ OWN_BASELINES = {
 # The AIStor 10-file variants compare to DuckDB's iceberg_scan over the same
 # Iceberg table on AIStor (`make clickbench-duckdb-aistor-*-split-10`), not to
 # DuckDB on local parquet - that ratio measured the network, not the engine.
+# `iceberg` compares to DuckDB's iceberg_scan over the same local table
+# (`make clickbench-duckdb-iceberg`).
 SAME_FILES_BASELINES = {
+    "iceberg": ("DuckDB", "../duckdb/results.local.iceberg.json"),
     "avro": ("ClickHouse", "../clickhouse/results.local.avro.json"),
     "orc": ("ClickHouse", "../clickhouse/results.local.orc.json"),
     "aistor-canon-split-10": ("DuckDB", "../duckdb/results.aistor.hits_canon_split_10.json"),

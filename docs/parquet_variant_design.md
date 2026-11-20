@@ -1,6 +1,9 @@
 # Design: Parquet VARIANT (shredded) read + write
 
-**Status:** RULED 2026-11-19. §6 step 1 (whole-value read) BUILT 2026-11-19; steps 2-4 not started.
+**Status:** RULED 2026-11-19. §6 step 1 (whole-value read) BUILT 2026-11-19. Step 2 (path
+pushdown) BUILT 2026-11-19 for both forms — files that hold the column as a VARIANT and files
+that hold it as JSON text — on `READ_PARQUET` and on Parquet tables (§4.3). Pruning (2b),
+Step 3 (writer) STARTED 2026-11-20: build contract in §5.4. Step 4 not started.
 **Rulings:** D1 yes (JSON text in memory) · D2 yes (automatic shredding, no setting) ·
 D3 as recommended (INT64 / own-scale DECIMAL; the rest stored as double, canonical
 rendering accepted) · D4 keep (string-form VARIANT files stay readable, no migration) ·
@@ -172,7 +175,7 @@ cheapest".
    cover them. Non-string leaves don't prune in this work (text compares against int stats
    need a canonical-text proof — the "provably safe" rule).
 
-### 4.3 Step 2 build contract — PROPOSED 2026-11-19, awaiting ruling
+### 4.3 Step 2 build contract — BUILT 2026-11-19
 
 Found by reading the code the step has to fit into. **P#** are the architect's.
 
@@ -194,17 +197,18 @@ finds the VARIANT group `data`, and resolves the keys against THAT file's shredd
 Only `metadata` plus those leaves are decoded. Intermediate steps must be `->`; only the
 last may be `->>` (`(a->>'b')->>'c'` re-parses a string, a different operation).
 
-**P1 — Scope: `READ_PARQUET` only, for now.** The JSONL pushdown is `READ_JSONL`-only by the
-same precedent. A catalog table declared VARIANT can hold its files as plain JSON strings
-(today's writer; D4 keeps them readable), and rugo has no JSON parser to walk a path through
-text (yyjson is deliberately not linked). On `READ_PARQUET` the column is only bound VARIANT
-when the footer says so. A file in the same glob that holds the column as anything else is
-REFUSED by the footer gate, naming the file — never NULL-filled. Catalog tables need the
-mixed-form answer first (P5).
+**P1 — Scope.** First proposed as `READ_PARQUET` only, on the claim that rugo has no JSON
+parser and does not link yyjson. **Both were false** (corrected 2026-11-19): rugo's JSONL
+reader walks `col->>'k'` through text, and rugo's avro reader/writer call yyjson (symbols from
+draken_native). The scope limit fell with P5's ruling: the strategy takes any column bound
+VARIANT over Parquet — `READ_PARQUET`'s (the footer declares it) or a table's (the catalog
+declares it; `manifest_format` says the files are Parquet). Per file, the footer gate admits
+the path when the file holds the base column as a VARIANT or as a string, NULL-fills it when
+the file has no such column, and REFUSES — naming the file — when it holds it as anything else.
 
-**P2 — A new declared field on the FunctionDataset step:** `parquet_physical_by_identity`
-(identity → the name rugo is asked for), mirroring `jsonl_physical_by_identity`. The scan
-uses it where it now uses `sc.name`.
+**P2 — A new declared field on the FunctionDataset and Scan steps:**
+`parquet_physical_by_identity` (identity → the name rugo is asked for), mirroring
+`jsonl_physical_by_identity`. The scan uses it where it now uses `sc.name`.
 
 **P3 — Spec-violating files.** A file that repeats a shredded field's name inside the
 residual `value` is invalid by the spec. The whole-value read renders both; the path read
@@ -215,11 +219,90 @@ the common part, `JsonlNestedExtractionStrategy` keeps its name, flag and one-le
 a sibling `ParquetVariantExtractionStrategy` adds chains, with its own
 `FEATURE_DISABLE_PARQUET_VARIANT_EXTRACTION` so on/off equivalence is testable per format.
 
-**P5 — (later, not this step) path reads over string-form files in catalog tables.** Options:
-the native Source runs draken's extract kernel on the string column for those files
-(per-file, native, same answers by construction), or the compiler un-pushes the whole scan
-when any file is string-form. Needed before the writer (step 3) puts VARIANT-form files
-into tables that already hold string-form ones.
+**P5 — path reads over string-form files, and catalog tables. RULED 2026-11-19: build the
+text walk in the scan now** (option (b) below), with this cost on the table:
+
+- A pushed path is a column the scan emits, so it is produced for every row the scan emits —
+  BEFORE the scan's relocated filter. Unpushed, `->>` runs after the filter, on survivors.
+- On a VARIANT-form file that costs nothing: the path is a typed column read like any other.
+- On a string-form file there is nothing to read but the text, so the path is a JSON parse per
+  emitted row. `SELECT data->>'x' FROM t WHERE ts > …` (a filter the scan prefilter does not
+  take: timestamps, decimals, strings) parses every row of every unpruned row group instead of
+  the survivors. Every catalog VARIANT table today is string-form — the writer that makes
+  VARIANT-form files is step 3.
+
+The options were: **(a)** leave catalog tables unpushed until step 3; **(b)** build the
+per-file text walk in the scan (correct for any mix of files; carries the cost above on
+string-form files); **(c)** push only when every file of the scan is VARIANT-form, decided
+from footers at plan time. (b) was chosen. P1's `READ_PARQUET`-only scope is lifted with it:
+the strategy takes any column bound VARIANT over Parquet — `READ_PARQUET`'s, or a table's.
+
+**How the text walk is built.** A path over a file that holds its base column as a string
+(`byte_array`, annotated string / JSON or bare — what the scan admits for a whole VARIANT
+read) gets a TEXT plan. Every such path over one column shares ONE group in the scan's fold:
+the column's chunk is decoded once, each emitted row is parsed once, and each path is walked
+through that parse into its own output column (`NestedGroup::plans` / `slots` — a group now
+yields one column or several). The parse flags, the walk and the text rule are draken's own
+(`ops/json_extract.h`: `ReadPool`, `nav_tokens`, and `value_text`, factored out of
+`extract_rows_multi` so the two cannot drift), so the answer is what `->` / `->>` return
+unpushed, by construction. A row the scan's prefilter or a row admission drops is never parsed.
+
+**Built (step 2):**
+- `variant_binary.hpp`: `find_field` (linear key search) and `string_bytes`.
+- `nested_json.cpp`: `parse_variant_path`; PATH plans in `build_plan` (`Builder::path`) —
+  metadata plus only the leaves the path needs; `Assembler::path_value` returns what `->` /
+  `->>` would from the whole value. TEXT plans for a base held as a string; `assemble_text`
+  (one parse per emitted row, every path walked through it). `resolve_projection` takes a path
+  name as a group column, and puts every TEXT path over one column in one group.
+- `io_pipeline.hpp`: a group folds into one column or several (`NestedGroup::plans`/`slots`,
+  `NestedSpec::slot`); the further columns take result slots past the expanded column list.
+- **One read per field (ruled 2026-11-19, "share reads").** Every projected column read out of
+  one top-level field of a file is one group: several paths into a VARIANT, the VARIANT itself
+  beside them, the paths over a JSON-text column. The group's leaves are the ones its plans
+  need between them (`shared_leaf_index`), decoded once; each plan assembles from its own
+  subset. Before this each VARIANT-form path decoded its own copy of `metadata` (and of
+  `value`, when unshredded): on an unshredded 20,000-row file one path held 1,588,983 bytes
+  and three held 4,766,949.
+- `draken/ops/json_extract.h`: `value_text`, the `->` / `->>` text rule, factored out of
+  `extract_rows_multi` and shared with `assemble_text`. No behaviour change.
+- Footer gate (`pool_reader.pyx::native_scan_rejection`): kind `"path"` — admitted when rugo
+  can plan it for the file (base a VARIANT group or a string), absent (NULL-filled) when the
+  file lacks the base, refused otherwise. Fetch blocks for a TEXT path are inferred from its
+  base column's chunk, as for the unpushed read.
+- `compiler.py`: path names for the scan's reads (`_scan_path_names`, FunctionDataset and
+  Scan); a predicate on a path takes no part in statistics pruning, range settlement or
+  coverage; no two-pass (latmat) scan.
+- `plan_steps.pyx`: `parquet_physical_by_identity` on the FunctionDataset and Scan steps (P2).
+- `ParquetVariantExtractionStrategy` + `FEATURE_DISABLE_PARQUET_VARIANT_EXTRACTION`; the JSONL
+  strategy's rewrite is now the shared `ScanExtractionStrategy` (P4).
+- Tests: `tests/unit/optimizer/test_parquet_variant_extraction.py` — every query on and off,
+  over unshredded / auto-shredded / partially shredded files, over globs mixing a VARIANT-form
+  file with a JSON-text one (plain and dictionary pages), and over a local-catalog table (two
+  JSON-text files; manifest pruning, merge-on-read deletes, a self join). Measured there: a
+  path into a shredded field of the partial file holds 4,952 compressed bytes against 72,369
+  for the value; five paths over a JSON-text column hold exactly what one does, and so do
+  four paths (and the whole value beside two) over an unshredded VARIANT.
+
+**Known limits:**
+- *JSON-text files, filter not taken by the scan's prefilter* (a decimal compare, an
+  expression such as `id + 1 = 5`): every row the scan emits is parsed, where the unpushed
+  extraction parses the filter's survivors. That is P5's accepted cost. It is also visible as
+  behaviour when a row is not valid JSON: the pushed read fails on it, the unpushed read only
+  if the row survives the filter. Filters the prefilter takes (`id = 5`, `s = 'k'`, `LIKE`)
+  drop rows before the parse. Not measured at scale.
+- *The whole value read beside a path, on a JSON-text file* (`SELECT data, data->>'kind'`):
+  the column's chunk is decoded twice — once as the plain column, once for the paths' group.
+  Unpushed it is one decode. (On a VARIANT-form file the two share one read.)
+- *Two-pass (latmat) scan*: not used for a scan that carries a path — now including table
+  scans of the `WHERE … ORDER BY … LIMIT` shape that used it.
+- A string holding invalid UTF-8 is returned as its bytes by a path read over a VARIANT-form
+  file, where the unpushed read fails parsing the rendered text.
+- A column whose name contains `->` is not pushed.
+- The catalog (`opteryx-catalog`, `add_files`) refuses to register a VARIANT-form file ("row
+  group is missing column(s) ['data']"), so a TABLE mixing forms cannot exist until step 3
+  teaches it; the mixed case is tested through `READ_PARQUET` globs.
+- The standalone `rugo.parquet.read_parquet` does not take path names; asked for
+  `["id", "data"]` on a VARIANT file it returned `id` alone, with no error (not looked into).
 
 **Not in this step:** skipping `metadata` when a row group's residual chunks are all-null
 (a per-row-group read plan; decide from a profile in step 4), and pruning (step 2b, below).
@@ -245,6 +328,72 @@ page indexes.
 ### 5.3 What writes VARIANT
 Every rugo Parquet write of a DRAKEN_VARIANT column (CTAS, INSERT, dataset writes, OPTIMIZE
 rewrites) — one path, no option.
+
+### 5.4 Step 3 build contract — encoder/inference BUILDING; writer integration awaits W1–W6
+
+Found by reading the writer the step has to fit into. **W#** are the architect's.
+
+**What the writer is today.** `_parquet_writer.hpp` is one `ColumnInput` = one top-level field
+= one column chunk; every per-row-group vector (`RGMeta`, `EncodedRowGroup`, statistics,
+blooms, page index) is indexed by that one number. The only nesting it knows is LIST
+(`is_array`: rep/def levels over a flat element buffer). It cannot write a group with several
+leaves, and a scalar's definition level is its validity bit (max def 1). The Cython edge
+(`parquet_writer.pxi::_encode`) turns each morsel column into one `ColumnInput`; a VARIANT
+vector becomes a UTF8 string column. The streaming writer captures the file's schema from the
+first `write_row_group` — which is where "infer from the first row group" already fits.
+
+**W1 — How a VARIANT column enters the writer.** *Recommend:* the edge expands it into its
+LEAF columns — `data.metadata`, `data.value`, and a `value`/`typed_value` pair per shredded
+field — each an ordinary `ColumnInput` carrying three new things: its `path_in_schema`, its
+own definition levels with a `max_def` > 1 (the value encoders, dictionaries, statistics and
+page index run unchanged off "present = def == max_def"), and, on the first leaf, the group's
+schema subtree for `write_schema`. Chunk index stays equal to `cols` index everywhere, so the
+row-group, placement, footer and page-index code is untouched. *Alternative:* a separate
+group-column encoder beside the per-column one — a second code path through placement and
+footer, for no gain I can see.
+
+**W2 — Everything that writes a VARIANT column changes form at once** (§5.3, already ruled:
+one path, no option). Consequence to plan around: a file written by the new writer cannot be
+read by any engine released before step 1 — the read side has to be released and deployed
+(fleet, Cloud Run, odata) BEFORE this writer is. Nothing here gates it.
+
+**W3 — The standalone `rugo` wheel.** `rugo.parquet.write_parquet` would write VARIANT groups
+that `rugo.parquet.read_parquet` cannot read: it has no group handling at all and today drops
+a nested column from its result with no error. *Recommend:* compile `nested_json.cpp` into
+`rugo_native` and have `read_parquet` return a VARIANT group as its JSON text (a STRUCT/MAP
+would come with it, by the same code); at the least it must refuse a group loudly.
+
+**W4 — `patch_columns` and `append_row_groups`.** The column patcher rebuilds every column of
+a file from its schema tree and refuses a group ("patching struct columns is not supported
+yet") — so it will refuse any file holding a VARIANT, whichever column is patched. *Recommend:*
+teach it to carry a group's chunks through byte for byte (it already does that for chunks it
+does not touch); patching the VARIANT column itself stays refused. `append_row_groups` already
+requires identical schemas, which two files with different shreddings do not have: correct
+as it is (they are refused, and OPTIMIZE re-encodes).
+
+**W5 — The catalog (`../opteryx-catalog`).** `add_files` refuses a VARIANT-form file ("row
+group is missing column(s) ['data']"). Engine writes do not go through it (the engine
+describes its own files), so INSERT / CTAS / OPTIMIZE are not blocked; registering an
+externally written VARIANT file is. A change in another repository — not started, say if wanted.
+
+**W6 — Duplicate object keys.** JSON text may repeat a key; a Variant object may not. `->`
+returns the FIRST match today (yyjson), so the encoder keeps the first and drops the rest: path
+answers are unchanged, the whole-value text loses the repeats. *Alternative:* refuse the row.
+*Recommend keep-first* — same reasoning as D3(a).
+
+**Mine (defaults I will pick and measure, not rulings):** the inference constants — shred an
+object field when it is present in at least 1 row in 64 of the rows its parent object is, its
+dominant type covers at least half of its occurrences, to a depth of 8 and a cap of 128
+shredded fields per file; typed DECIMAL leaves at the dominant scale, precision 18 or 38.
+
+**Encoding rules (settled by D1–D6 and the spec):**
+- one parse per row (yyjson, raw numbers); objects' members sorted by name; per-row `metadata`
+  = the sorted, unique names used by that row's residual values (empty for a fully shredded row);
+- numbers per D3: an integer literal in int64 range → the narrowest int; any other literal of
+  ≤ 38 significant digits with no exponent, and not a negative zero → decimal4/8/16 at the
+  literal's own scale; the rest → double;
+- strings → short string (< 64 bytes) or string; `true`/`false`/`null` → their primitives;
+- a row whose text is SQL NULL is a null group; a JSON `null` is a Variant null in `value`.
 
 ## 6. Sequencing
 

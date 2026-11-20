@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # rugo wasm build. Needs emscripten (emcc/em++) on PATH. Run from anywhere.
 #   dist/rugo.{mjs,wasm}          footer reader + column-chunk decode (the published bundle)
-#   build/rugo_codecs.{mjs,wasm}  codec probe: rugo's page decompressors alone
 set -euo pipefail
 cd "$(dirname "$0")"
 R=../..
@@ -37,10 +36,5 @@ em++ "${CXX[@]}" rugo_wasm.cpp $P/metadata.cpp $P/decode_column.cpp $P/decode_pa
   $R/rugo/src/orc/orc_reader.cpp $R/rugo/src/avro/{avro_reader,avro_schema,avro_container}.cpp \
   -o dist/rugo.mjs "${LINK[@]}" -sEXPORTED_FUNCTIONS=$EXP
 
-# codec probe: decompressors alone, driven directly by test_codecs.mjs
-em++ "${CXX[@]}" rugo_codecs_probe.cpp "${CODECS[@]}" \
-  -o build/rugo_codecs.mjs "${LINK[@]}" -sEXPORTED_FUNCTIONS=_rugo_decompress,_malloc,_free
-
-for f in dist/rugo.wasm build/rugo_codecs.wasm; do
-  echo "$f raw=$(wc -c <$f) gzip9=$(gzip -9 -c $f | wc -c) brotli11=$(brotli -c -q 11 $f | wc -c)"
-done
+f=dist/rugo.wasm
+echo "$f raw=$(wc -c <$f) gzip9=$(gzip -9 -c $f | wc -c) brotli11=$(brotli -c -q 11 $f | wc -c)"

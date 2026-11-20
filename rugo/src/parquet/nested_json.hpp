@@ -42,12 +42,32 @@
 #include "metadata.hpp"
 
 namespace rugo {
+
+// A VARIANT path column. The scan is asked for `data->'commit'->>'collection'` by NAME, in the
+// notation the JSONL pushdown uses: <base>(->'<key>')*(->|->>)'<key>', where '' inside a key is
+// one quote. `->>` (only ever the last step) reads the value as TEXT - a string unquoted,
+// anything else its JSON - and `->` as JSON. docs/parquet_variant_design.md §4.3.
+struct VariantPath {
+    std::string base;
+    std::vector<std::string> keys;
+    bool text = false;
+};
+// False when `name` is not in that notation.
+bool parse_variant_path(const std::string& name, VariantPath& out);
+
 namespace nested {
 
 struct Plan;   // immutable render plan for one top-level STRUCT / MAP column
 
 // Build the plan for top-level field `name` of `fs`. nullptr + `err` when the
 // column is not a STRUCT/MAP this renderer supports (and why).
+//
+// A `name` no field has, that is a VariantPath over a VARIANT field, gets a PATH plan: it reads
+// only the leaves that path needs from THIS file's shredding and yields what `->` / `->>` would
+// return from the whole value (SQL NULL where the path leads nowhere or to a JSON null).
+// A VariantPath over a field the file holds as a STRING - one JSON document per row, how a
+// VARIANT was written before the Parquet VARIANT type - gets a TEXT plan: it reads that one
+// chunk, and assemble() parses each row to answer the path (docs/parquet_variant_design.md P5).
 //
 // `declared`, when given (a catalog table's declared shape for this column, pre-order), is what the
 // JSON is rendered AS: the table's member names in the table's order, each matched to the file's field
@@ -68,27 +88,45 @@ const std::vector<int32_t>& used_leaf_index(const Plan& plan);
 
 // Assemble one JSON document per row from the decoded leaves (in schema order,
 // each decoded UNMASKED with its rep/def levels). `row_mask`, when non-null, is one
-// byte per row-group row; only rows with a non-zero byte are emitted. `out` is
-// overwritten with a positional byte_array column (one entry per emitted row, NULL
-// rows carried in valid_bits). Throws std::runtime_error on any shape it cannot
-// render or any inconsistency between the levels and the schema.
-void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
-              const uint8_t* row_mask, DecodedColumn& out);
+// byte per row-group row; only rows with a non-zero byte are emitted. `outs` is
+// overwritten with one positional byte_array column per plan (one entry per emitted
+// row, NULL rows carried in valid_bits). Throws std::runtime_error on any shape it
+// cannot render or any inconsistency between the levels and the schema.
+//
+// `plans` are the plans over ONE top-level field (a VARIANT beside paths into it, several
+// paths) and `leaves` the leaves they read between them, in shared_leaf_index() order: the
+// field is decoded once, however many columns are read out of it. TEXT plans share more -
+// each emitted row is parsed ONCE to answer all of them.
+void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
+              const std::vector<DecodedColumn>& leaves,
+              const uint8_t* row_mask, std::vector<DecodedColumn>& outs);
+
+// The leaves `plans` read between them: each one's position among the file's leaves of the
+// field, in first-use order (plan by plan, each in its own plan order).
+std::vector<int32_t> shared_leaf_index(const std::vector<std::shared_ptr<const Plan>>& plans);
 
 }  // namespace nested
 
 // One projected STRUCT/MAP column expanded to its leaf chunks.
 struct NestedGroup {
-    std::string name;    // the projected column's name
     size_t first = 0;    // index of its first leaf in the expanded column list
     size_t count = 0;    // number of leaves
-    std::shared_ptr<const nested::Plan> plan;
+    // The columns the leaves fold into: each one's projected name, plan and result slot. Every
+    // projected column read out of one top-level field is here - a STRUCT/MAP/VARIANT itself,
+    // the paths into a VARIANT or a JSON-text column - so the field is read once. The first is
+    // at slot `first`; the further ones take slots past the expanded list.
+    std::vector<std::string> names;
+    std::vector<std::shared_ptr<const nested::Plan>> plans;
+    std::vector<uint32_t> slots;
 };
 
 // What the pipeline needs to fold leaves back into their group columns.
 struct NestedSpec {
     std::vector<NestedGroup> groups;
-    std::vector<uint32_t> orig;   // expanded index -> projected index
+    // result slot -> projected index. The first slots are the expanded column list's, one each;
+    // any after them are the further columns of the groups that yield several.
+    std::vector<uint32_t> orig;
+    std::vector<uint32_t> slot;   // projected index -> the result slot that holds the column
 };
 
 // Resolve a projection against the footer of one file for the given row groups.
@@ -96,8 +134,11 @@ struct NestedSpec {
 // For every projected column: a chunk of exactly that name is a plain column (the
 // stats are taken as they always were). Otherwise, if chunks named "<name>.*" exist
 // it is a STRUCT/MAP group: its leaves replace it in `names`/`stats` and `nested`
-// describes the fold. A column with neither is left out, so the caller's existing
-// "missing projected column" handling (schema evolution) still fires.
+// describes the fold. Otherwise, a VariantPath whose base the file holds is a group
+// too - the leaves its path plan reads, or, when the file holds the base as JSON text,
+// that one chunk. Every projected column over one top-level field shares ONE group, whose
+// leaves are read once. A column with none of these is left out, so
+// the caller's existing "missing projected column" handling (schema evolution) still fires.
 //
 // Returns false with `err` when a group cannot be rendered. When no projected
 // column is a group, `nested` is null and `names` == `projected`.

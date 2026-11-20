@@ -590,6 +590,16 @@ def _logical_tuple(ct):
             int(lg.precision), int(lg.scale), int(getattr(lg, "dimension", 0) or 0))
 
 
+def _scan_path_names(scan):
+    """{column identity: path name} for the VARIANT paths pushed into this scan
+    (ParquetVariantExtractionStrategy), {} when it has none. rugo is asked for such a
+    column by that name - `data->'commit'->>'collection'` - not by the column's own."""
+    step = scan.step
+    if step.node_type not in (LogicalPlanStepType.FunctionDataset, LogicalPlanStepType.Scan):
+        return {}
+    return step.parquet_physical_by_identity or {}
+
+
 def _null_fill_type(sc):
     """(DrakenType int, logical tuple or None) of the all-NULL column the native parquet
     Source emits for `sc` from a file that does not hold it — the type it emits for
@@ -4307,7 +4317,12 @@ class _Compiler:
         _length_only_ids = scan._length_only_columns or frozenset()
         length_only_columns = [1 if sc.identity in _length_only_ids else 0 for sc in read_scs]
         paths = manifest.get_file_paths()
-        names = [sc.name for sc in read_scs]
+        # A pushed VARIANT path is read by its path name, and the footer gate decides it
+        # per file from how that file holds the path's base column (kind "path").
+        path_names = _scan_path_names(scan)
+        names = [path_names.get(sc.identity, sc.name) for sc in read_scs]
+        gate_kinds = ["path" if sc.identity in path_names else kind
+                      for sc, kind in zip(read_scs, kinds)]
         file_sizes = {}
         files = getattr(manifest, "files", None)
         if files:
@@ -4323,7 +4338,7 @@ class _Compiler:
         filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
         absent = {}
         footers = ScanFooters()
-        rejection = native_scan_rejection(paths, names, kinds, file_sizes or None,
+        rejection = native_scan_rejection(paths, names, gate_kinds, file_sizes or None,
                                           filesystem=filesystem,
                                           footer_bytes_cache=scan_footer_bytes_cache(),
                                           absent=absent,
@@ -4353,8 +4368,15 @@ class _Compiler:
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
-        pruning = extract_predicate_stats(predicates) if predicates else None
-        if predicates:
+        # A pushed path's values are no chunk's: no footer statistic speaks for them, so
+        # a predicate reading one prunes nothing (and ends range settlement and coverage).
+        stat_predicates = [
+            node for node in predicates or []
+            if not any(ident.schema_column is not None and ident.schema_column.identity in path_names
+                       for ident in get_all_nodes_of_type(node, select_nodes=(NodeType.IDENTIFIER,)))
+        ]
+        pruning = extract_predicate_stats(stat_predicates) if stat_predicates else None
+        if predicates and len(stat_predicates) == len(predicates):
             # Range settlement's plan-time proof, node by node: every pushed node
             # must extract to int range triples (a node extract_predicate_stats
             # drops, or one that extracts to anything else, ends it).
@@ -4372,7 +4394,7 @@ class _Compiler:
         coverage, coverage_request = (None, None) if identity_scs else self._coverage_for_scan(
             scan, predicates,
             {sc.name for sc, retag in zip(read_scs, logical_coerce)
-             if retag and (retag & 0xF) != _LC_DATE})
+             if (retag and (retag & 0xF) != _LC_DATE) or sc.identity in path_names})
         # This relation's validated `WITH(name = value)` settings (None when it
         # carries none) and the session's variables — the two layers the IO
         # resolvers below merge, hint first.
@@ -5021,7 +5043,10 @@ class _Compiler:
         _row_identity = (
             scan.step.emit_row_identity if scan.step.node_type == LogicalPlanStepType.Scan else None
         )
-        lat = (None if (_scan_has_deletes or _vector_search or _row_identity)
+        # A pushed VARIANT path reads through the single-pass Source: the two-pass split
+        # is made by chunk name, and a path is not one.
+        lat = (None if (_scan_has_deletes or _vector_search or _row_identity
+                        or _scan_path_names(scan))
                else self._latmat_scan_plan(scan))
         if lat is not None:
             (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,

@@ -1125,7 +1125,11 @@ clickbench-duckdb-aistor-canon-split-10: ## DuckDB (iceberg_scan) over AIStor cl
 clickbench-duckdb-aistor-rugo-split-10: ## DuckDB (iceberg_scan) over AIStor clickbench.hits_rugo_typed_split_10 - the same table as clickbench-aistor-rugo-split-10 (regenerates duckdb/results.aistor.hits_rugo_typed_split_10.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --aistor-table hits_rugo_typed_split_10
 
-.PHONY: clickbench-duckdb-aistor-canon-split-10 clickbench-duckdb-aistor-rugo-split-10
+clickbench-duckdb-iceberg: ## DuckDB (iceberg_scan) over the local Iceberg table clickbench-iceberg builds - the same table (regenerates duckdb/results.local.iceberg.json; run `make clickbench-iceberg` first)
+	@test -f scratch/hits_iceberg.entry-v1 || { echo "scratch/hits_iceberg is not built - run make clickbench-iceberg first" >&2; exit 1; }
+	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py --local-iceberg
+
+.PHONY: clickbench-duckdb-aistor-canon-split-10 clickbench-duckdb-aistor-rugo-split-10 clickbench-duckdb-iceberg
 
 CLICKHOUSE ?= scratch/clickhouse/clickhouse
 clickbench-clickhouse-avro: ## ClickHouse local over the clickbench-avro shards, 1 try per query (writes clickhouse/results.local.avro.json; needs a clickhouse binary at CLICKHOUSE and scratch/hits_avro built by make clickbench-avro)

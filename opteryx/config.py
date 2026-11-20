@@ -970,6 +970,9 @@ class Features:
     # (ParseContext::intern_nested_text). Not an optimizer strategy — read by the compiler.
     disable_jsonl_nested_dict = get_bool("FEATURE_DISABLE_JSONL_NESTED_DICT", False)
     disable_length_only_column = get_bool("FEATURE_DISABLE_LENGTH_ONLY_COLUMN", False)
+    disable_parquet_variant_extraction = get_bool(
+        "FEATURE_DISABLE_PARQUET_VARIANT_EXTRACTION", False
+    )
     disable_limit_elimination = get_bool("FEATURE_DISABLE_LIMIT_ELIMINATION", False)
     disable_group_limit_key_bound = get_bool("FEATURE_DISABLE_GROUP_LIMIT_KEY_BOUND", False)
     disable_limit_files_pruning = get_bool("FEATURE_DISABLE_LIMIT_FILES_PRUNING", False)
