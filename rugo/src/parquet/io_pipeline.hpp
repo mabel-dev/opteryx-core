@@ -5113,6 +5113,10 @@ class ParquetIOPipeline {
 
     ~ParquetIOPipeline() {
         wait_shutdown();
+        // Workers are quiescent. Whatever is still on the ledgers belongs to results nobody
+        // popped (an abandoned scan) and dies with this pipeline: give it back to the process.
+        ledger_release(held_decoded_, held_decoded_.load(std::memory_order_relaxed));
+        ledger_release(held_prefetch_, held_prefetch_.load(std::memory_order_relaxed));
     }
 
     // Wire the destination MemoryPool. Must be called before any submit; the

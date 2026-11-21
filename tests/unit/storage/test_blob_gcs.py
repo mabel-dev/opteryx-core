@@ -46,29 +46,29 @@ from opteryx.connectors import GcpCloudStorageConnector
 from opteryx.utils.formatter import format_sql
 
 # Define the test case structure
-TestCase = namedtuple("TestCase", "query expected_rowcount expected_columncount stats")
+Case = namedtuple("Case", "query expected_rowcount expected_columncount stats")
 
 # Example parameterization data using named tuples for clarity
 test_cases = [
-    TestCase(
+    Case(
         query="SELECT * FROM opteryx.space_missions;",
         expected_rowcount=4630,
         expected_columncount=8,
         stats={},
     ),
-    TestCase(
+    Case(
         query="SELECT * FROM opteryx.space_missions LIMIT 10;",
         expected_rowcount=10,
         expected_columncount=8,
         stats={},
     ),
-    TestCase(
+    Case(
         query="SELECT COUNT(*) AS Missions, Company FROM opteryx.space_missions GROUP BY Company;",
         expected_rowcount=62,
         expected_columncount=2,
         stats={},
     ),
-    TestCase(
+    Case(
         query="SELECT Company FROM opteryx.space_missions WHERE Rocket_Status = 'Active';",
         expected_rowcount=1010,
         expected_columncount=1,

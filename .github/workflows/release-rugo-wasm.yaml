@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v5
 
       # Pinned to the toolchain the spike was measured on (emcc 6.0.12).
       - name: Set up Emscripten
@@ -39,7 +39,7 @@ jobs:
           version: 6.0.12
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "24"
 
@@ -79,13 +79,13 @@ jobs:
           (cd npm-pkg && npm pkg set version="$(cat ../site/VERSION)" && npm pack --dry-run)
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rugo-wasm
           path: site/
 
       - name: Upload npm package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rugo-wasm-npm
           path: npm-pkg/
@@ -99,13 +99,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4.1.7
+        uses: actions/download-artifact@v7
         with:
           name: rugo-wasm
           path: site
 
       - name: Check out mabel-dev/rugo.dev
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v5
         with:
           repository: mabel-dev/rugo.dev
           token: ${{ secrets.RUGO_DEV_RELEASE_TOKEN }}
@@ -149,13 +149,13 @@ jobs:
       id-token: write
     steps:
       - name: Download npm package
-        uses: actions/download-artifact@v4.1.7
+        uses: actions/download-artifact@v7
         with:
           name: rugo-wasm-npm
           path: npm-pkg
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "24"
 

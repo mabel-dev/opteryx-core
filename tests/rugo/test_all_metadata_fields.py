@@ -18,23 +18,44 @@ from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
 
 def _first_column_metadata(file_path):
     """Merge row-group stats + chunk info for the first row group's first
-    column: the current API splits what used to be one dict-shaped
+    single-leaf column: the current API splits what used to be one dict-shaped
     `read_metadata` result across `read_rowgroup_stats` (min/max/null_count/
     distinct_count/bloom) and `fetch_column_chunk_info` (offsets/encodings/
     codec/num_values). `path_in_schema` is folded into `name` (dotted path)
     in the current model, not a separate field. `index_page_offset` and
     `key_value_metadata` exist on the C++ ColumnStats struct but are not
     currently exposed to Python by either function.
+
+    None when every column has several leaves (a VARIANT-only file): chunk info
+    describes one column chunk, so fetch_column_chunk_info must refuse those.
     """
     with open(file_path, "rb") as f:
         data = f.read()
-    rg_stats = _native.read_rowgroup_stats(data)[0]["columns"][0]
-    # fetch_column_chunk_info matches by top-level (dot-truncated) name, which
-    # is exactly what read_rowgroup_stats already reports as "name" — pass it
-    # straight through rather than the fully dotted schema_columns name (that
-    # mismatches for nested/repeated schemas, e.g. binary.parquet's "foo").
-    chunk_info = fetch_column_chunk_info(file_path, 0, [rg_stats["name"]])[rg_stats["name"]]
+    # read_rowgroup_stats names each leaf by its dotted path; fetch_column_chunk_info
+    # keys a column by its top-level name.
+    leaves = {}
+    for column in _native.read_rowgroup_stats(data)[0]["columns"]:
+        leaves.setdefault(column["name"].split(".", 1)[0], []).append(column)
+    single = [(top, stats[0]) for top, stats in leaves.items() if len(stats) == 1]
+    if not single:
+        with pytest.raises(ValueError, match="more than one leaf"):
+            fetch_column_chunk_info(file_path, 0, [next(iter(leaves))])
+        return None
+    top, rg_stats = single[0]
+    chunk_info = fetch_column_chunk_info(file_path, 0, [top])[top]
+    assert rg_stats["physical_type"] == chunk_info["physical_type"], (file_path, top)
     return {**rg_stats, **chunk_info}
+
+
+def test_a_column_of_several_leaves_is_refused(tmp_path):
+    """A struct is several column chunks; its top-level name addresses none of them."""
+    import duckdb
+
+    path = str(tmp_path / "struct.parquet")
+    duckdb.sql(f"COPY (SELECT 1 AS id, {{'a': 1, 'b': 'x'}} AS s) TO '{path}' (FORMAT PARQUET)")
+    assert fetch_column_chunk_info(path, 0, ["id"])["id"]["physical_type"] == "int32"
+    with pytest.raises(ValueError, match="more than one leaf"):
+        fetch_column_chunk_info(path, 0, ["s"])
 
 
 def test_all_metadata_fields_exposed():
@@ -46,6 +67,8 @@ def test_all_metadata_fields_exposed():
         print(f"\nTesting file: {file_path}")
 
         col = _first_column_metadata(file_path)
+        if col is None:
+            continue
 
         # Fields currently exposed to Python across read_rowgroup_stats +
         # fetch_column_chunk_info. Not included (not exposed anywhere):
@@ -111,6 +134,8 @@ def test_metadata_field_types():
 
     for file_path in files_to_test:
         col = _first_column_metadata(file_path)
+        if col is None:
+            continue
 
         # Check types
         assert isinstance(col["name"], str)
@@ -155,6 +180,8 @@ def test_metadata_field_values():
 
     for file_path in files_to_test:
         col = _first_column_metadata(file_path)
+        if col is None:
+            continue
 
         # Basic fields should be present
         assert col.get("name") is not None

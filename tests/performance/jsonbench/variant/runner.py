@@ -30,8 +30,11 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
 sys.path.insert(0, _REPO_ROOT)
+sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 
-_spec = importlib.util.spec_from_file_location("variant_load", os.path.join(_HERE, "load.py"))
+from _common import print_banner, print_error_row, print_header, print_row, print_total_row  # noqa: E402
+
+_spec =importlib.util.spec_from_file_location("variant_load", os.path.join(_HERE, "load.py"))
 load = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(load)
 
@@ -122,14 +125,29 @@ def main() -> int:
     duck_load = time.monotonic() - started
     duck_rows = con.execute("SELECT count(*) FROM bluesky").fetchone()[0]
     our_rows = _opteryx(f"SELECT COUNT(*) FROM {table}")[0][0]
-    print(f"rows: Opteryx {our_rows:,}  DuckDB {duck_rows:,}  (DuckDB load {duck_load:.1f}s)")
     if our_rows != duck_rows:
-        print("\033[31mrow counts differ\033[0m")
+        print(f"\033[31mrow counts differ: Opteryx {our_rows:,}  DuckDB {duck_rows:,}\033[0m")
         return 1
+
+    import opteryx
+
+    data_size = sum(os.path.getsize(os.path.join(parquet_dir, f)) for f in os.listdir(parquet_dir))
+    print_banner(
+        title="JSONBENCH BENCHMARK",
+        opteryx_version=opteryx.__version__,
+        metadata=[
+            ("Dataset", f"Bluesky, {our_rows:,} rows ({data_size / 1e9:.2f}GB Parquet, one shredded VARIANT column)"),
+            ("Queries", str(len(OPTERYX))),
+            ("Iterations", f"{args.iterations} warm runs per query, interleaved with DuckDB"),
+        ],
+        duckdb_machine=f"{platform.node()}, same process, JSON column, loaded in {duck_load:.1f}s",
+    )
+    print_header("Query", args.iterations, has_baseline=True)
 
     results = []
     wrong = 0
-    print(f"{'query':<6}{'opteryx ms':>30}{'duckdb ms':>30}{'ratio':>8}")
+    opteryx_total = duckdb_total = 0.0
+    suite_start = time.monotonic()
     for q, (ours_sql, duck_sql) in enumerate(zip(OPTERYX, DUCKDB)):
         sql = ours_sql.format(t=table)
         o_ms, d_ms = [], []
@@ -140,23 +158,28 @@ def main() -> int:
             t0 = time.perf_counter()
             theirs = con.execute(duck_sql).fetchall()
             d_ms.append((time.perf_counter() - t0) * 1000)
-        ok = _same(q, ours, theirs)
-        wrong += not ok
         results.append([round(ms / 1000, 3) for ms in o_ms])
-        mark = "" if ok else "  \033[31mWRONG\033[0m"
-        print(
-            f"Q{q + 1:<5}{' '.join(f'{m:8.0f}' for m in o_ms):>30}{' '.join(f'{m:8.0f}' for m in d_ms):>30}"
-            f"{min(o_ms) / min(d_ms):8.2f}{mark}"
-        )
-        if not ok:
+        if not _same(q, ours, theirs):
+            wrong += 1
+            print_error_row(f"Q{q + 1}", "WRONG answer vs DuckDB")
             print(f"  ours:   {ours[:5]}\n  duckdb: {theirs[:5]}")
+            continue
+        print_row(f"Q{q + 1}", o_ms, args.iterations, min(d_ms))
+        opteryx_total += min(o_ms)
+        duckdb_total += min(d_ms)
+    print("─" * 100)
+    print_total_row(opteryx_total, duckdb_total, len(OPTERYX) - wrong, args.iterations)
+    print()
+    print(
+        f"\033[38;2;26;185;67m{len(OPTERYX) - wrong} passed\033[0m, "
+        f"\033[38;2;255;121;198m{wrong} failed\033[0m   ({time.monotonic() - suite_start:.1f}s)"
+    )
     if wrong:
         print(f"\033[31m{wrong} query(ies) differ from DuckDB — no result written\033[0m")
         return 1
 
     if not args.sources:
         out = os.path.join(_HERE, f"results.local.{args.size}m.json")
-        data_size = sum(os.path.getsize(os.path.join(parquet_dir, f)) for f in os.listdir(parquet_dir))
         with open(out, "w") as f:
             json.dump(
                 {
@@ -171,7 +194,7 @@ def main() -> int:
                 f,
                 indent=2,
             )
-        print(f"  {os.path.relpath(out, _REPO_ROOT)}")
+        print(f"  results: {os.path.relpath(out, _REPO_ROOT)}")
     return 0
 
 

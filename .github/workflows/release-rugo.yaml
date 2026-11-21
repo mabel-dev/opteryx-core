@@ -41,10 +41,10 @@ jobs:
         suite: [oracle, notebook, cli, avro]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           allow-prereleases: true
@@ -107,7 +107,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v5
 
       - name: Make build script executable
         run: chmod +x dev/build-rugo-wheels.sh
@@ -149,7 +149,7 @@ jobs:
           OPTERYX_ALLOW_KNOWN_GRPC_ABORT: "1"
 
       - name: Archive wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rugo-linux-${{ matrix.arch }}-${{ matrix.pybuild }}
           path: dist/*manylinux*.whl
@@ -167,10 +167,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.pybuild }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.pybuild }}
           allow-prereleases: true
@@ -185,7 +185,7 @@ jobs:
         run: ./dev/build-rugo-wheels-macos.sh
 
       - name: Archive wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rugo-macos-${{ matrix.os }}-${{ matrix.pybuild }}
           path: dist/delocated/*.whl
@@ -197,7 +197,7 @@ jobs:
       id-token: write
     steps:
       - name: Download all rugo wheels
-        uses: actions/download-artifact@v4.1.7
+        uses: actions/download-artifact@v7
         with:
           path: dist-staging
 
@@ -229,7 +229,7 @@ jobs:
     steps:
       # Needed only to read rugo/__version__.py below.
       - name: Check out repository
-        uses: actions/checkout@v4.1.7
+        uses: actions/checkout@v5
 
       - name: Create notes-only release on mabel-dev/rugo.dev
         env:

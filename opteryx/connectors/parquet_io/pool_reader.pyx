@@ -1496,6 +1496,11 @@ cpdef dict fetch_column_chunk_info(
         display = col_name[:dot] if dot >= 0 else col_name
         if display not in requested:
             continue
+        if display in result:
+            raise ValueError(
+                f"Column '{display}' has more than one leaf ('{col_name}' is another); chunk info "
+                f"describes one column chunk, so a struct or VARIANT column cannot be fetched by its top-level name"
+            )
         encodings_list = [
             EncodingToString(enc).decode("utf-8")
             for enc in col.encodings

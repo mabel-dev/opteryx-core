@@ -42,10 +42,10 @@ jobs:
     steps:
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.14 x64
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           allow-prereleases: true
@@ -77,7 +77,7 @@ jobs:
           echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
@@ -154,7 +154,7 @@ jobs:
       # build/ is excluded: build_ext --inplace copies every .so out of it, so
       # including it would double the artifact and restore a stale second copy.
       - name: Archive compiled tree
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: compiled-tree
           path: |
@@ -182,10 +182,10 @@ jobs:
     steps:
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }} x64
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
@@ -213,7 +213,7 @@ jobs:
       # Restores the .so files over the fresh checkout at their original paths.
       # Nothing in this job recompiles.
       - name: Restore compiled tree
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: compiled-tree
 
@@ -243,7 +243,7 @@ jobs:
         run: git clone --depth 1 https://github.com/mabel-dev/opteryx-catalog.git "$GITHUB_WORKSPACE/../opteryx-catalog"
 
       - name: "Authenticate to Google Cloud"
-        uses: google-github-actions/auth@v1
+        uses: google-github-actions/auth@v3
         with:
           credentials_json: '${{ secrets.GCP_KEY }}'
 
@@ -281,7 +281,7 @@ jobs:
       # Postgres + Silo S3); its environment is loaded per step, never into
       # GITHUB_ENV, so no AWS_* setting reaches the core tests above.
       - name: Checkout opteryx-iceberg
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: mabel-dev/opteryx-iceberg
           path: opteryx-iceberg
@@ -337,12 +337,12 @@ jobs:
     steps:
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # MUST match the interpreter `compile` used. The Makefile invokes
       # `python3.14` by name (Makefile PYTHON ?=).
       - name: Set up Python 3.14 x64
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           allow-prereleases: true
@@ -361,7 +361,7 @@ jobs:
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
 
       - name: Restore compiled tree
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: compiled-tree
 
@@ -384,10 +384,10 @@ jobs:
     steps:
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.14 x64
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           allow-prereleases: true
@@ -405,7 +405,7 @@ jobs:
       # makes the build below a no-op in both. Bump the version if the install
       # command below changes.
       - name: Cache cargo registry and sqllogictest build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -429,7 +429,7 @@ jobs:
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
 
       - name: Restore compiled tree
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: compiled-tree
 
@@ -471,7 +471,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: slt-coverage-html
           path: htmlcov/slt

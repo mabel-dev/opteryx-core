@@ -73,6 +73,25 @@ def test_early_abandonment_is_clean_and_correct():
             next(gen)
 
 
+def test_abandonment_gives_its_io_budget_back():
+    """Results decoded but never popped hold an IO budget charge; abandoning the scan must
+    return it to the process account, or every abandoned scan (a LIMIT) leaks budget."""
+    import gc
+
+    from opteryx.compiled.structures.memory_pool import io_budget_stats
+    from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_many_row_groups(tmp)
+        before = io_budget_stats()["held"]
+        gen = iter_row_groups_ipc(None, [path], ["x"])
+        next(gen)
+        gen.close()
+        del gen
+        gc.collect()
+        assert io_budget_stats()["held"] == before
+
+
 def test_cancel_skips_are_exposed_after_abandonment():
     """After abandoning a multi-row-group scan, draining the pipeline via the
     generator's finally exposes a non-negative `cancelled_skips` counter. We

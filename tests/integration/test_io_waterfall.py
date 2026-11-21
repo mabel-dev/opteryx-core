@@ -29,7 +29,6 @@ from opteryx.query_session import Session
 from opteryx.tracing import interpret_trace
 
 
-@pytest.mark.integration
 class TestIOWaterfallIntegration:
     """Integration tests for the execution-tracing waterfall."""
 

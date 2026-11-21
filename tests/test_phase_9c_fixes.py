@@ -31,7 +31,6 @@ def test_defect1_array_extraction_binds():
         # Consume the result to ensure no bind-time errors
         for morsel in result:
             pass
-        return True
     except AttributeError as e:
         if "ctx_ptr" in str(e):
             raise AssertionError(f"Defect 1 not fixed (array extraction): {e}")
@@ -52,7 +51,6 @@ def test_defect1_parameterized_cast_binds():
         # Consume the result to ensure no bind-time errors
         for morsel in result:
             pass
-        return True
     except AttributeError as e:
         if "ctx_ptr" in str(e):
             raise AssertionError(f"Defect 1 not fixed (param cast): {e}")
@@ -87,8 +85,6 @@ def test_defect2_null_arithmetic():
         if "Bus error" in str(e) or "SIGBUS" in str(e):
             raise AssertionError(f"Defect 2 not fixed (literal + NULL): {e}")
         raise
-
-    return True
 
 
 if __name__ == "__main__":

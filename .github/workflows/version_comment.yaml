@@ -9,7 +9,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Extract version
         id: get_version
@@ -19,7 +19,7 @@ jobs:
           echo "version=$vers" >> "$GITHUB_OUTPUT"
 
       - name: Comment on the PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const version = process.env.VERSION;
