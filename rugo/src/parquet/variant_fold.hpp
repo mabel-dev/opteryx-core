@@ -69,7 +69,8 @@ inline std::vector<DecodedColumn> DecodeRowGroupVariants(const uint8_t *data, si
     std::vector<DecodedColumn> group_leaves(std::make_move_iterator(decoded.begin() + g.first),
                                             std::make_move_iterator(decoded.begin() + g.first + g.count));
     std::vector<DecodedColumn> folded;
-    nested::assemble(g.plans, group_leaves, nullptr, folded, /*leaf_passthrough=*/true);
+    nested::assemble(g.plans, group_leaves, nullptr, folded, /*leaf_passthrough=*/true,
+                     /*leaf_empty=*/nullptr);
     for (size_t j = 0; j < folded.size(); ++j) {
       folded[j].logical_type = "varchar";   // JSON text
       keep_valid_entries(folded[j]);

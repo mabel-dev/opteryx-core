@@ -3803,6 +3803,18 @@ cdef class NativeScanPlan:
         return int(self.pipeline_ptr.rows_decoded())
 
     @property
+    def key_filter_rows(self):
+        """RUN-TIME: (rows in, rows out) of the runtime join KEY filters tested in
+        this scan's decode workers, or None when no row met one (none armed, or the
+        scan decoded nothing)."""
+        if self._closed or self.pipeline_ptr == NULL:
+            return None
+        cdef uint64_t rows_in = self.pipeline_ptr.key_filter_rows_in()
+        if rows_in == 0:
+            return None
+        return (int(rows_in), int(self.pipeline_ptr.key_filter_rows_out()))
+
+    @property
     def runtime_pruned_row_groups(self):
         """Row groups the RUNTIME min/max join bound excluded beyond what plan-time
         pruning had already dropped, or None when no bound was wired for this scan.

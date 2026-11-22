@@ -1222,11 +1222,12 @@ void assemble_one(const Plan& plan, const std::vector<const DecodedColumn*>& lea
 // every row with the leaf's string (def at pass_def) or NULL - a parent's null typed object is
 // "leads nowhere" there too. So the answer IS the leaf: emitted as it stands, its dictionary
 // kept, `metadata` never read. False = this row group takes the general path (assemble_one).
+// `value_empty`: the footer says the `value` chunk holds nothing, so its levels are not scanned.
 bool pass_through(const Plan& plan, const std::vector<const DecodedColumn*>& leaves,
-                  const uint8_t* row_mask, DecodedColumn& out) {
+                  const uint8_t* row_mask, DecodedColumn& out, bool value_empty) {
     const DecodedColumn& d = *leaves[static_cast<size_t>(plan.pass_leaf)];
     if (!d.rep_levels.empty() || !d.rle_str_lens.empty()) return false;
-    if (plan.pass_value_leaf >= 0) {
+    if (plan.pass_value_leaf >= 0 && !value_empty) {
         const DecodedColumn& v = *leaves[static_cast<size_t>(plan.pass_value_leaf)];
         if (v.def_levels.empty()) {
             if (v.num_rows > 0) return false;   // every entry at its max level: all present
@@ -1264,6 +1265,23 @@ bool pass_through(const Plan& plan, const std::vector<const DecodedColumn*>& lea
         out.code_width = w;
         out.dict_codes_array.resize_fill(n_out * w, 0);
         uint8_t* codes = out.dict_codes_array.data();
+        if (indexed && row_mask == nullptr && d.dict_indices.size() == rows &&
+            d.max_def_level >= plan.pass_def) {
+            // An index per row means every row is present, and no row is masked: the indices
+            // narrowed to the code width in one pass, no validity to build.
+            const int32_t* idx = d.dict_indices.data();
+            if (w == 1) {
+                for (size_t r = 0; r < rows; ++r) codes[r] = static_cast<uint8_t>(idx[r]);
+            } else if (w == 2) {
+                for (size_t r = 0; r < rows; ++r) {
+                    const uint16_t c = static_cast<uint16_t>(idx[r]);
+                    std::memcpy(codes + 2 * r, &c, 2);
+                }
+            } else {
+                std::memcpy(codes, idx, rows * 4);
+            }
+            return true;
+        }
         size_t vi = 0, k = 0;
         for (size_t r = 0; r < rows; ++r) {
             const bool here = present(r);
@@ -1363,7 +1381,8 @@ void typed_through(const Plan& plan, const std::vector<const DecodedColumn*>& le
 
 void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
               const std::vector<DecodedColumn>& leaves,
-              const uint8_t* row_mask, std::vector<DecodedColumn>& outs, bool leaf_passthrough) {
+              const uint8_t* row_mask, std::vector<DecodedColumn>& outs, bool leaf_passthrough,
+              const uint8_t* leaf_empty) {
     outs.clear();
     outs.resize(plans.size());
     if (plans[0]->json_text) {
@@ -1388,7 +1407,11 @@ void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
             typed_through(*plans[p], mine, row_mask, outs[p]);
             continue;
         }
-        if (leaf_passthrough && plans[p]->pass_leaf >= 0 && pass_through(*plans[p], mine, row_mask, outs[p]))
+        const int32_t vl = plans[p]->pass_value_leaf;
+        const bool value_empty = vl >= 0 && leaf_empty != nullptr &&
+                                 leaf_empty[mine[static_cast<size_t>(vl)] - leaves.data()] != 0;
+        if (leaf_passthrough && plans[p]->pass_leaf >= 0 &&
+            pass_through(*plans[p], mine, row_mask, outs[p], value_empty))
             continue;
         assemble_one(*plans[p], mine, row_mask, outs[p]);
     }

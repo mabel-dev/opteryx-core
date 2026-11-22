@@ -76,7 +76,18 @@ jobs:
           cp rugo/wasm/npm/package.json rugo/wasm/npm/README.md LICENSE npm-pkg/
           cp rugo/wasm/rugo_footer.mjs rugo/wasm/rugo_footer.d.ts npm-pkg/
           cp rugo/wasm/dist/rugo.mjs rugo/wasm/dist/rugo.wasm npm-pkg/dist/
-          (cd npm-pkg && npm pkg set version="$(cat ../site/VERSION)" && npm pack --dry-run)
+          (cd npm-pkg && npm pkg set version="$(cat ../site/VERSION)" && npm pack --pack-destination ..)
+
+      # npm release floor: install the packed tarball into a fresh project and import it by
+      # name, as a user would. publish-npm needs this job, so a broken package never publishes.
+      - name: npm floor — install and import the packed package
+        run: |
+          set -euo pipefail
+          mkdir consumer && cd consumer
+          npm init -y > /dev/null
+          npm install ../opteryx-rugo-*.tgz
+          cp ../rugo/wasm/npm/test_package.mjs .
+          node test_package.mjs "${GITHUB_WORKSPACE}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6

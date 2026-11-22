@@ -93,6 +93,24 @@ def test_a_nested_path(tmp_path):
     assert all(shapes[1::3]) and all(shapes[2::3])
 
 
+def test_a_leaf_present_in_every_row(tmp_path):
+    # No NULLs and no mask: the indices are narrowed in one pass. `kind` has a one-byte code,
+    # `tag` (300 entries) a two-byte one.
+    docs = [{"id": i, "kind": KINDS[i % 3], "tag": f"t{i % 300}"} for i in range(1200)]
+    path = _write(tmp_path, _jsonl(tmp_path, docs))
+    rows, shapes = _same(f"SELECT id, data->>'kind', data->>'tag' FROM READ_PARQUET('{path}')")
+    assert rows == sorted([(d["id"], d["kind"], d["tag"]) for d in docs], key=repr)
+    assert all(shapes[1::3]) and all(shapes[2::3])
+
+
+def test_a_file_without_statistics(tmp_path):
+    # No null count in the footer to trust: `value` is proven empty from its levels, as before.
+    path = _write(tmp_path, _jsonl(tmp_path, DOCS), statistics=False, page_index=False)
+    rows, shapes = _same(f"SELECT id, data->>'kind' FROM READ_PARQUET('{path}')")
+    assert rows == sorted([(d["id"], d.get("kind")) for d in DOCS], key=repr)
+    assert shapes[1::2] and all(shapes[1::2])
+
+
 def test_plain_pages(tmp_path):
     path = _write(tmp_path, _jsonl(tmp_path, DOCS), dictionary=False)
     rows, _ = _same(f"SELECT id, data->>'kind' FROM READ_PARQUET('{path}')")

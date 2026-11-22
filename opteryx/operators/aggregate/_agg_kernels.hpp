@@ -14,8 +14,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 
 #include "engine/agg_budgets.hpp"   // kMedianBytes — shared with variables.py's report
+#include <vector>
+
+#include "morsels/sort.hpp"         // sort_float_key / sort_team_run / sort_team_width — the radix select
 #include "ops/float_ops.h"          // draken::ops::fp_total_lt — THE ratified float order,
                                     // imported not re-derived (see finalize_quantile)
 
@@ -241,7 +245,9 @@ struct QuantileState {
     // morsel scheduling. That produced a silently wrong AND unstable MEDIAN.
     //
     // `p` is in [0, 1]; the sinks refuse anything else before a value is buffered.
-    inline double finalize_quantile(double p, bool descending) noexcept {
+    // `nthreads` is the width the caller may fan out to; a buffer too small for two
+    // team members (sort_team_width) selects with nth_element on the calling thread.
+    inline double finalize_quantile(double p, bool descending, unsigned nthreads) {
         if (size == 0) return 0.0;
         constexpr auto total_lt = [](double a, double b) noexcept {
             return draken::ops::fp_total_lt<double>(a, b);
@@ -251,6 +257,19 @@ struct QuantileState {
         const double crn = std::ceil(rn);
         const size_t lo_rank = static_cast<size_t>(frn);
         const size_t lo_idx = descending ? size - 1 - lo_rank : lo_rank;
+        const unsigned wt = sort_team_width(size, nthreads);
+        if (wt > 1) {
+            // hi is the next value in the requested order: ascending rank lo_idx+1, or
+            // lo_idx-1 descending. Both exist when crn > frn (lo_rank < n-1).
+            const bool need_hi = crn != frn;
+            uint64_t lo_key, hi_key = 0;
+            if (!radix_select_(lo_idx, need_hi ? (descending ? -1 : 1) : 0, wt, lo_key, hi_key))
+                throw std::logic_error("exact quantile: radix select lost its rank (rank >= rows)");
+            const double lo = radix_key_value_(lo_key);
+            if (!need_hi) return lo;
+            const double d = rn - frn;
+            return std::fma(lo, 1.0 - d, radix_key_value_(hi_key) * d);
+        }
         std::nth_element(buf, buf + lo_idx, buf + size, total_lt);
         const double lo = buf[lo_idx];
         if (crn == frn) return lo;
@@ -263,6 +282,105 @@ struct QuantileState {
             : *std::min_element(buf + lo_idx + 1, buf + size, total_lt);
         const double d = rn - frn;
         return std::fma(lo, 1.0 - d, hi * d);
+    }
+
+private:
+    // sort_float_key inverted: NaN (key UINT64_MAX) -> the canonical quiet NaN, every
+    // other key back to its value (-0.0 was already folded into +0.0, as fp_total_lt
+    // treats them equal).
+    static inline double radix_key_value_(uint64_t k) noexcept {
+        constexpr uint64_t SIGN = 0x8000000000000000ULL;
+        const uint64_t bits = (k == UINT64_MAX) ? 0x7FF8000000000000ULL
+                                                : ((k & SIGN) ? (k ^ SIGN) : ~k);
+        double v;
+        std::memcpy(&v, &bits, sizeof(v));
+        return v;
+    }
+
+    // Exact select of the key at ascending `rank` over the buffer, MSD radix on
+    // sort_float_key (the order fp_total_lt defines), `wt` threads per pass: each pass
+    // histograms the next 11 key bits of the rows still matching the chosen prefix,
+    // until at most kRadixFinish rows match, which are compacted and finished with
+    // nth_element. `hi_dir` (+1 / -1 / 0) also returns the key at rank+1 / rank-1,
+    // from the candidates when it is among them, else by a second select. The buffer is
+    // read, never reordered. Threads write pre-sized slices only (no allocation inside
+    // sort_team_run, which does not carry exceptions).
+    static constexpr size_t   kRadixFinish = size_t{1} << 17;
+    static constexpr int      kRadixBits   = 11;
+    static constexpr uint32_t kRadixBins   = 1u << kRadixBits;
+
+    bool radix_select_(size_t rank, int hi_dir, unsigned wt, uint64_t& key, uint64_t& hi_key) const {
+        const double* v = buf;
+        const size_t n = size;
+        uint64_t pmask = 0, pval = 0;
+        size_t r = rank, count = n;
+        int shift = 64;
+        std::vector<uint32_t> hist(static_cast<size_t>(wt) * kRadixBins);
+        std::vector<size_t> tcount(wt, 0);   // per member: rows matching the final prefix
+        while (true) {
+            const int width = shift < kRadixBits ? shift : kRadixBits;
+            shift -= width;
+            const uint32_t dmask = (1u << width) - 1u;
+            const int sh = shift;
+            sort_team_run(wt, [&, sh, dmask, pmask, pval](unsigned t) {
+                uint32_t* h = hist.data() + static_cast<size_t>(t) * kRadixBins;
+                std::memset(h, 0, kRadixBins * sizeof(uint32_t));
+                const size_t lo = n * t / wt, hi = n * (t + 1) / wt;
+                for (size_t i = lo; i < hi; ++i) {
+                    const uint64_t k = sort_float_key(v[i]);
+                    if ((k & pmask) == pval) ++h[(k >> sh) & dmask];
+                }
+            });
+            size_t cum = 0;
+            uint32_t b = 0;
+            for (; b <= dmask; ++b) {
+                size_t c = 0;
+                for (unsigned t = 0; t < wt; ++t) c += hist[static_cast<size_t>(t) * kRadixBins + b];
+                if (cum + c > r) { count = c; break; }
+                cum += c;
+            }
+            if (b > dmask) return false;   // rank >= rows: the caller's contract broken
+            for (unsigned t = 0; t < wt; ++t) tcount[t] = hist[static_cast<size_t>(t) * kRadixBins + b];
+            r -= cum;
+            pmask |= static_cast<uint64_t>(dmask) << shift;
+            pval |= static_cast<uint64_t>(b) << shift;
+            if (count <= kRadixFinish || shift == 0) break;
+        }
+        if (shift == 0) {
+            // Every candidate carries the same full key: rank r and its neighbours
+            // inside the candidates are that key.
+            key = pval;
+            const bool hi_inside = hi_dir > 0 ? r + 1 < count : (hi_dir < 0 ? r >= 1 : true);
+            if (hi_dir == 0) return true;
+            if (hi_inside) { hi_key = pval; return true; }
+            uint64_t unused;
+            return radix_select_(hi_dir > 0 ? rank + 1 : rank - 1, 0, wt, hi_key, unused);
+        }
+        std::vector<uint64_t> c(count);
+        std::vector<size_t> off(wt, 0);
+        for (unsigned t = 1; t < wt; ++t) off[t] = off[t - 1] + tcount[t - 1];
+        uint64_t* cd = c.data();
+        sort_team_run(wt, [&, pmask, pval](unsigned t) {
+            uint64_t* out = cd + off[t];
+            const size_t lo = n * t / wt, hi = n * (t + 1) / wt;
+            for (size_t i = lo; i < hi; ++i) {
+                const uint64_t k = sort_float_key(v[i]);
+                if ((k & pmask) == pval) *out++ = k;
+            }
+        });
+        std::nth_element(c.begin(), c.begin() + static_cast<std::ptrdiff_t>(r), c.end());
+        key = c[r];
+        if (hi_dir == 0) return true;
+        if (hi_dir > 0 && r + 1 < count) {
+            hi_key = *std::min_element(c.begin() + static_cast<std::ptrdiff_t>(r) + 1, c.end());
+            return true;
+        }
+        if (hi_dir < 0 && r >= 1) {
+            hi_key = *std::max_element(c.begin(), c.begin() + static_cast<std::ptrdiff_t>(r));
+            return true;
+        }
+        uint64_t unused;
+        return radix_select_(hi_dir > 0 ? rank + 1 : rank - 1, 0, wt, hi_key, unused);
     }
 };
 

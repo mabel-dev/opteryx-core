@@ -3740,10 +3740,15 @@ class ParquetIOPipeline {
             result.columns.assign(item.nested ? item.nested->orig.size() : ncols_total, ColumnOut{});
             // Decoded leaves of each projected STRUCT/MAP, held until the group's last leaf.
             std::vector<std::vector<DecodedColumn>> group_leaves;
+            // Beside each leaf: its chunk holds nothing by the footer (nested::assemble's leaf_empty).
+            std::vector<std::vector<uint8_t>> group_empty;
             if (item.nested) {
                 group_leaves.resize(item.nested->groups.size());
-                for (size_t g = 0; g < group_leaves.size(); ++g)
+                group_empty.resize(group_leaves.size());
+                for (size_t g = 0; g < group_leaves.size(); ++g) {
                     group_leaves[g].resize(item.nested->groups[g].count);
+                    group_empty[g].resize(item.nested->groups[g].count);
+                }
             }
             // Turn a decoded column into the ColumnOut at result.columns[slot]. `col_stats` is
             // the chunk's own stats, or — for a folded STRUCT/MAP — a synthetic descriptor of
@@ -4180,11 +4185,12 @@ class ParquetIOPipeline {
                     // for the paths read from one JSON-text column - the group yields.
                     const size_t gi = static_cast<size_t>(ng - item.nested->groups.data());
                     group_leaves[gi][ng_leaf] = std::move(decoded);
+                    group_empty[gi][ng_leaf] = rugo::chunk_holds_nothing(col_stats);
                     if (ng_leaf + 1 < ng->count) return true;
                     std::vector<DecodedColumn> folded;
                     try {
                         rugo::nested::assemble(ng->plans, group_leaves[gi], col_mask, folded,
-                                               variant_leaf_passthrough_);
+                                               variant_leaf_passthrough_, group_empty[gi].data());
                     } catch (const std::exception& e) {
                         std::lock_guard<std::mutex> _rl(res_mu); if (!result.success) return false; result.success = false;
                         result.error = e.what();

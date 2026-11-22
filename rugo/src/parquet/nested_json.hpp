@@ -105,9 +105,14 @@ const std::vector<int32_t>& used_leaf_index(const Plan& plan);
 // `leaf_passthrough`: a `->>` path ending at a shredded string leaf is emitted as that leaf
 // (dictionary kept) in a row group where its field's `value` holds nothing - the same answers
 // (docs/parquet_variant_path_read_design.md §3). False = always the general path (the kill switch).
+//
+// `leaf_empty`: one byte per leaf, 1 = the footer says its chunk holds nothing
+// (chunk_holds_nothing), which the pass-through then trusts instead of scanning `value`'s
+// levels (ruled 2026-11-22). nullptr = the footer is not to hand: the levels are scanned.
 void assemble(const std::vector<std::shared_ptr<const Plan>>& plans,
               const std::vector<DecodedColumn>& leaves,
-              const uint8_t* row_mask, std::vector<DecodedColumn>& outs, bool leaf_passthrough);
+              const uint8_t* row_mask, std::vector<DecodedColumn>& outs, bool leaf_passthrough,
+              const uint8_t* leaf_empty);
 
 // The leaves `plans` read between them: each one's position among the file's leaves of the
 // field, in first-use order (plan by plan, each in its own plan order).

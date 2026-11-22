@@ -2,7 +2,9 @@
 
 One native aggregate with MEDIAN (AggFn::Quantile in native_group_sinks.hpp;
 MEDIAN is p = 0.5): every non-NULL value is buffered as a double and the answer
-is selected with std::nth_element at finalize, interpolating linearly at rank
+is selected at finalize - std::nth_element, or a parallel MSD radix select on
+sort_float_key when the buffer is wide enough for two threads (ungrouped only;
+see test_radix_select_path_is_exact) - interpolating linearly at rank
 p * (n - 1) as fma(lo, 1 - d, hi * d), DuckDB's arithmetic
 (QuantileState::finalize_quantile). FLOAT64, numeric operands only. Quantiles
 over the same column in one aggregate share ONE buffer
@@ -329,6 +331,51 @@ def test_refused_shapes(sql):
 def test_non_numeric_operands_are_refused(operand):
     with pytest.raises(NotSupportedError):
         _rows(f"SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand}) FROM $planets")
+
+
+def _oracle_percentile(values, p, desc):
+    # The ratified order (NaN highest, -0.0 == +0.0) and finalize_quantile's arithmetic.
+    s = sorted(values, key=lambda v: (v != v, 0.0 if v != v else v), reverse=desc)
+    rn = p * (len(s) - 1)
+    lo_rank, frac = int(math.floor(rn)), rn - math.floor(rn)
+    if math.ceil(rn) == math.floor(rn):
+        return s[lo_rank]
+    return math.fma(s[lo_rank], 1.0 - frac, s[lo_rank + 1] * frac)
+
+
+_RADIX_N = 300_000   # > 2 x 65,536 rows: the ungrouped finalize takes the radix select
+_RADIX_CASES = {
+    # duplicates, NaN and -0.0
+    "nan_negzero": (
+        "CASE WHEN g % 1000 = 0 THEN CAST('nan' AS FLOAT64) WHEN g % 7 = 0 THEN CAST('-0.0' AS FLOAT64) "
+        "ELSE CAST(g % 97 AS FLOAT64) - 50.0 END",
+        lambda g: math.nan if g % 1000 == 0 else (-0.0 if g % 7 == 0 else float(g % 97) - 50.0),
+    ),
+    # hi in another radix bucket than lo, the candidates all one key
+    "two_clusters": (
+        "CASE WHEN g % 2 = 0 THEN CAST(1.0 AS FLOAT64) ELSE CAST(1e300 AS FLOAT64) END",
+        lambda g: 1.0 if g % 2 == 0 else 1e300,
+    ),
+    # hi in another radix bucket than lo, the candidates compacted
+    "edge_compact": (
+        "CASE WHEN g <= 100000 THEN CAST(g AS FLOAT64) ELSE CAST(1e300 AS FLOAT64) END",
+        lambda g: float(g) if g <= 100000 else 1e300,
+    ),
+}
+_RADIX_PS = [(0.0, False), (0.5, False), (0.99, False), (1.0, False), (0.3, True), (1.0, True),
+             (99999.5 / (_RADIX_N - 1), False), (1.0 - 99999.5 / (_RADIX_N - 1), True)]
+
+
+@pytest.mark.parametrize("case", sorted(_RADIX_CASES))
+def test_radix_select_path_is_exact(case):
+    expr, twin = _RADIX_CASES[case]
+    aggs = ", ".join(
+        f"PERCENTILE_CONT({p!r}) WITHIN GROUP (ORDER BY x{' DESC' if d else ''})" for p, d in _RADIX_PS
+    )
+    sql = f"SELECT {aggs}, MEDIAN(x) FROM (SELECT {expr} AS x FROM generate_series(1, {_RADIX_N}) AS g) AS t"
+    values = [twin(g) for g in range(1, _RADIX_N + 1)]
+    expected = tuple(_oracle_percentile(values, p, d) for p, d in _RADIX_PS) + (_oracle_percentile(values, 0.5, False),)
+    _assert_rows_equal(_rows(sql), [expected])
 
 
 if __name__ == "__main__":  # pragma: no cover

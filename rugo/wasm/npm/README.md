@@ -3,7 +3,8 @@
 > **Alpha.** Published under the `alpha` dist-tag. The API, the metadata shapes and the value mapping may change between releases.
 
 [Rugo](https://rugo.dev)'s Parquet, ORC and Avro readers, compiled to WebAssembly from the same C++ that ships in
-the `rugo` Python wheel. Works in the browser and in Node.
+the `rugo` Python wheel. Works in the browser and in Node. Rugo is the open-source data-file reader behind
+[Opteryx](https://opteryx.app).
 
 - Browser and Node (>= 24), ESM only, zero dependencies
 - ~358 KB gzipped wasm, single-threaded (no COOP/COEP headers needed)

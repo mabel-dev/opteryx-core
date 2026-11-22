@@ -514,6 +514,11 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                             node_stat["row_groups_pruned_bloom"] = facts[
                                 "row_groups_pruned_bloom"
                             ]
+                        # RUNTIME JOIN KEY FILTER: rows tested / admitted per row in
+                        # the decode workers. Present only when rows met one.
+                        for key in ("key_filter_rows_in", "key_filter_rows_out"):
+                            if key in facts:
+                                node_stat[key] = facts[key]
                         # Statistics coverage (P3): row groups answered from their
                         # footer statistics and never read, and row groups its exact
                         # terms proved empty - present only when coverage was asked
