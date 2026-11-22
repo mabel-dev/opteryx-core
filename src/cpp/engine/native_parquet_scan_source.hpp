@@ -1692,8 +1692,11 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             for (uint32_t pi : present_to_projected) present_declared.push_back((*declared_shapes)[pi]);
             read_declared = &present_declared;
         }
+        // A proven VARIANT path is read as its leaf (alias_leaves), under the same switch as the
+        // leaf pass-through it replaces (FEATURE_DISABLE_VARIANT_LEAF_PASSTHROUGH).
         if (!rugo::resolve_projection(*fit->second, rg_idxs, read_names, names, stats,
-                                      nested, rerr, read_declared)) {
+                                      nested, rerr, read_declared,
+                                      pipeline->variant_leaf_passthrough())) {
             // ErrCtx::msg is a bare const char*: stash the text in a thread_local that
             // outlives this call (see the decode-error path in get_morsel).
             static thread_local std::string resolve_err_buf;

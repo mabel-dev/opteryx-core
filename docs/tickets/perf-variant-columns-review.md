@@ -332,6 +332,70 @@ existing prefilter; it adds no two-pass of its own.
 Leave-one-out on the 10M runner per house rule; chunks decoded per query; prefilter rows
 in/out on Q4/Q5 (zero today for path predicates, by the reading above). Slower ⇒ deleted.
 
+### Built 2026-11-22 (rulings R-a, R-b) [measured]
+
+**Rugo.** `resolve_projection` takes `alias_leaves`. A path is read as its leaf's chunk when:
+- its plan passes through (`pass_leaf >= 0`);
+- the leaf is the path's own kind: BYTE_ARRAY for `->>`, INT64 for `::INT64` (a narrower
+  integer leaf keeps the fold);
+- the leaf has no repetition;
+- in every row group of the call, the destination field's `value` chunk holds nothing
+  (`chunk_holds_nothing`, or the field has no `value`).
+
+The leaf's `ColumnStats` is copied with `name` set to the path, and `logical_type` set as
+the fold emits it. With no group left, `nested` is null, as for an all-plain projection
+(which column fan-out's gate requires; whether fan-out then fires was not checked). The scan source passes the pipeline's `variant_leaf_passthrough()`, so
+`FEATURE_DISABLE_VARIANT_LEAF_PASSTHROUGH` turns aliasing off with the pass-through.
+
+**R-b.** `_native_scan_plan` keeps each scan's path read names
+(`_scan_path_read_names`), and `_arm_scan_prefilter` names predicate columns with them.
+`pass1_worker_predicate_admissible` takes `path_column_types` and admits NVARCHAR there
+only. In a file where a path is not aliased, the worker does not find the column,
+declines, and the consumer evaluates (`prefilter_prog_`).
+
+**Counters** (Q4, one run per build): bytes fetched 25.5 -> 19.1 MB and prefilter rows in
+0 -> 2,097,152, both now the plain-columns arm's. Q2: 54.7 -> 54.1 MB, 0 -> 9,830,400.
+
+**Leave-one-out** (Mac, 10M sorted, fresh process per cell, arm order rotated, 10 rounds,
+each cell best of 7, answers asserted equal across arms):
+
+| ms | Q1 | Q2 | Q3 | Q4 | Q5 | total |
+|---|---|---|---|---|---|---|
+| before R1 (main) | 3.22 | 19.99 | 11.19 | 9.40 | 11.09 | 54.90 |
+| aliasing only | 2.71 | 16.98 | 8.87 | 8.18 | 10.12 | 46.86 |
+| aliasing + path prefilter | 2.74 | 16.09 | 8.07 | 7.62 | 9.47 | 43.98 |
+
+Aliasing 0.854x; the prefilter adds 0.939x on top; together 0.801x.
+
+**Against plain columns** on the new build (Step 0 harness, best of 9 interleaved):
+
+| ms | Q1 | Q2 | Q3 | Q4 | Q5 | total |
+|---|---|---|---|---|---|---|
+| plain columns | 2.3 | 15.8 | 7.6 | 7.4 | 9.1 | 42.3 |
+| VARIANT paths | 2.8 | 16.1 | 8.1 | 7.9 | 9.5 | 44.4 |
+| | 1.21x | 1.02x | 1.07x | 1.06x | 1.04x | **1.05x** |
+
+The gap was 1.45x at Step 0 and 1.28x after R1a + R1b.
+
+**Tests** (`test_variant_leaf_passthrough.py`):
+- `test_a_deep_leaf_read_as_its_chunk`: a leaf 4 levels down, read unmasked, masked by
+  another path, and as the predicate (equality, IN, a literal no dictionary holds,
+  IS NULL).
+- `test_a_path_predicate_runs_on_the_decode_workers`.
+- `test_paths_read_as_leaves_beside_the_value_and_a_json_path`.
+
+Deliberate breaks: dropping the footer proof fails 5 tests; naming path columns by
+`sc.name` in the compiler fails the prefilter test.
+
+**Not done in R1:**
+- A typed-path predicate (`CAST(data->>'id' AS INT64) > 300`) is not pushed into the
+  scan at all; the optimizer declines it, before and after. R8.
+- The two-pass (latmat) scan stays off for any scan carrying a path, and range
+  settlement / coverage still end at a path predicate.
+- Fetch-block inference (`infer_fetch_blocks`) matches projected names against footer
+  chunk names, so an aliased path breaks adjacency there as before.
+- `pass_through` and `typed_through` remain, as the fallback for unproven row groups.
+
 ---
 
 ## R2 — writer: page index, bloom filters, NDV/MCV for shredded leaves

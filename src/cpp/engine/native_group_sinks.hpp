@@ -5628,11 +5628,21 @@ struct GroupBySink : Sink {
                 std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
                 if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
                     return false;
+                // A row repeating the previous valid row's (partition, group, value
+                // hash) is already in the set: skip its probe (clustered data repeats).
+                size_t prev_p = SIZE_MAX;
+                uint32_t prev_e = 0;
+                uint64_t prev_h = 0;
                 for (uint32_t i = 0; i < rows; ++i) {
                     if (!row_ok(i)) continue;
                     const size_t pi = gb_part(mkh[i]);
-                    uint32_t e = mke[i];
-                    if (l.parts[pi].cd[s].insert(e, l.cd_vhash[i]))
+                    const uint32_t e = mke[i];
+                    const uint64_t h = l.cd_vhash[i];
+                    if (pi == prev_p && e == prev_e && h == prev_h) continue;
+                    prev_p = pi;
+                    prev_e = e;
+                    prev_h = h;
+                    if (l.parts[pi].cd[s].insert(e, h))
                         lanes_of(pi).valid[e] += 1;
                 }
                 break;

@@ -4943,6 +4943,8 @@ class ParquetIOPipeline {
     // engine scan sets it from FEATURE_DISABLE_VARIANT_LEAF_PASSTHROUGH.
     bool variant_leaf_passthrough_ = true;
     void set_variant_leaf_passthrough(bool on) { variant_leaf_passthrough_ = on; }
+    // Also whether a proven path is read as its leaf's own chunk (resolve_projection's alias_leaves).
+    bool variant_leaf_passthrough() const { return variant_leaf_passthrough_; }
     // C7: false = this scan may use chunk-cache hits but never fills the cache.
     void set_chunk_cache_admit(bool v) { chunk_cache_admit_ = v; }
     // Set once at plan time, before any submit: {fetch path: object version}.

@@ -13,8 +13,14 @@
   way the OData service does (`session.execute_logical_plan`). The subsystem is
   GQL → `LogicalPlan`, and nothing more. Everything from relation resolution
   onwards is the existing engine.
+- **The parser is a separate library, `gqlparser`**, in its own repo
+  (`../gqlparser`) and published on PyPI, so that others can use the GQL →
+  syntax tree layer. Opteryx uses a vendored copy at
+  `opteryx/third_party/gqlparser`, the way it uses `query_builder` and
+  `sqloxide`, which keeps the engine's zero-install-dependency rule
+  (CLAUDE.md §4).
 
-Open decisions D1–D7 are listed under
+Open decisions D1–D8 are listed under
 [Open decisions](#open-decisions-for-the-architect). **D1 (what the lowering
 emits) shapes the whole subsystem.**
 
@@ -69,35 +75,79 @@ query as written. The lowering must reproduce it, not correct it.)
 
 ```
 GQL text
-  │  opteryx/planner/gql/lexer.py       tokens with source positions
-  ▼
-  │  opteryx/planner/gql/parser.py      recursive descent → GQL AST (dataclasses)
-  ▼
+  │  ┌─ gqlparser (library; vendored at opteryx/third_party/gqlparser) ─────────┐
+  │  │  lexer     tokens with source positions                                  │
+  ▼  │  parser    recursive descent → GQL syntax tree (dataclasses)             │
+     └──────────────────────────────────────────────────────────────────────────┘
   │  opteryx/planner/gql/graph.py       USE graph → PropertyGraphDefinition (catalog);
   │                                     labels, properties, variables checked
   ▼
-  │  opteryx/planner/gql/lowering.py    GQL AST → logical-planner input (see D1)
+  │  opteryx/planner/gql/lowering.py    syntax tree → logical-planner input (see D1);
+  │                                     refuses what Opteryx can't run yet
   ▼
 LogicalPlan ──► execute_logical_plan:  resolve → rewrite → bind → optimize → physical → execute
 ```
 
+**The split.** `gqlparser` knows GQL and nothing else: no catalog, no tables,
+no SQL, no Opteryx imports. `opteryx/planner/gql/` knows Opteryx: the graph
+definitions, the lowering, and every refusal of a construct that parses but
+that the engine can't run yet.
+
 - **Planning only, so Python.** This follows CLAUDE.md §1: Python decides the
   work and native code does it. Once the plan is handed over, the subsystem
   has no part in execution.
-- **Location: `opteryx/planner/gql/`.** The planner is Cython-compiled, so the
-  new modules follow whatever the rest of the planner does in `setup.py`. The
-  stale-build guard in `opteryx/planner/__init__.py` covers them automatically.
+- **Location of the Opteryx side: `opteryx/planner/gql/`.** The planner is
+  Cython-compiled, so the new modules follow whatever the rest of the planner
+  does in `setup.py`. The stale-build guard in `opteryx/planner/__init__.py`
+  covers them automatically.
 - **Entry point: a session method beside `execute_to_morsels`.** It parses,
   lowers, and calls `execute_logical_plan` with the session as `connection`, so
   that permissions, visibility filters and telemetry are the session's. Its
   exact surface is [D7](#d7-entry-point-surface).
 
-## 1. Lexer and parser
+## 1. gqlparser (the library)
 
-The parser is hand-written recursive descent with one token of lookahead. The
-grammar is small enough that a parser generator would cost more than it saves.
+**Contract:**
+- pure Python, no dependencies, and no Opteryx imports;
+- input: GQL text. Output: a syntax tree of frozen dataclasses, with a source
+  span on every node;
+- two error types, both carrying the line and column where the problem starts.
 
-**v1 grammar (informal):**
+**The two errors are siblings under `GqlError`, never parent and child**, so a
+caller tells them apart by type, not by message:
+- **`GqlSyntaxError`, invalid GQL:** the text breaks the ISO/IEC 39075 grammar;
+- **`GqlNotSupportedError`, not supported by this parser:** the text is valid
+  GQL, but outside the subset this release covers. The error names the
+  construct.
+
+The library declares the subset it covers in its README, and the subset grows
+release by release. The full 39075 grammar is very large, and a parser that
+claims all of it without testing all of it would be dishonest.
+
+**A wider grammar than Opteryx's v1.** Others will use the library, so it
+should parse what it declares even where Opteryx can't run it yet. Quantified
+paths, label expressions, path modes and `NEXT` all belong in the parser as
+soon as they are worth adding. Opteryx refuses them in its lowering
+([Refused in v1](#refused-in-v1)), not in the parser.
+
+**The syntax tree is public API.** Node names and fields are versioned under
+semver. Before 1.0 they may change, but each change is noted in the
+changelog. Opteryx pins the vendored copy to a release.
+
+**Testing.** I know of no official GQL conformance suite (the openCypher TCK
+covers Cypher), so the library's own tests are its correctness evidence:
+- every supported form;
+- every "not supported" construct, which must raise that error, never
+  "invalid GQL" and never a wrong tree;
+- error positions;
+- a round trip, if the library prints a tree back to GQL text (optional, not
+  required for Opteryx).
+
+**Implementation.** Hand-written recursive descent with one token of
+lookahead. A parser generator would bring a runtime dependency, which the
+library has to avoid.
+
+**Opteryx's v1 needs at least the following from the library (informal):**
 
 ```
 query        := [USE graph_name] match_stmt+ return_stmt
@@ -128,12 +178,16 @@ item         := expr [AS name]
 - keywords are case-insensitive;
 - string literals are single-quoted;
 - delimited identifiers follow 39075 (see [Spec checks](#spec-checks));
-- every token carries its line and column. Errors are positioned and use the
-  same message style as SQL errors: keywords in bold and a suggested fix.
+- every token carries its line and column.
 
-**Every unrecognised or out-of-scope construct is refused by name.** Nothing is
-skipped and nothing is approximated. The refusal list is
-[Refused in v1](#refused-in-v1).
+**Error presentation is Opteryx's.** The library's errors are plain text with
+a position. `opteryx/planner/gql/` turns them into Opteryx's message style
+(keywords in bold, a suggested fix) and its exception types. The library never
+takes on Opteryx's error conventions.
+
+**Nothing is skipped and nothing is approximated, on either side.** The
+library refuses what it doesn't parse, and Opteryx refuses what it doesn't
+run. Both refusals name the construct.
 
 ## 2. Graph resolution
 
@@ -243,7 +297,11 @@ with `get_property_graph` / `create_property_graph` / `drop_property_graph`.
 
 ## Refused in v1
 
-Each of these raises `UnsupportedSyntaxError` naming the construct:
+These are refusals by **Opteryx's lowering**, not by the parser. If the
+library parses the construct, the lowering raises `UnsupportedSyntaxError`
+naming it. If the library doesn't parse it yet, the library's "not supported
+by this parser" error is what surfaces, translated as in [§1](#1-gqlparser-the-library).
+Either way the user is told what isn't supported.
 
 - quantified paths (`{m,n}`, `*`, `+`, `?`), path modes (`WALK`/`TRAIL`/
   `ACYCLIC`/`SIMPLE`), and selectors (`ANY`, `ANY SHORTEST`, `ALL SHORTEST`,
@@ -277,7 +335,14 @@ be confirmed against the text before the relevant piece is built:
 4. the default output name of a `RETURN` item without `AS`;
 5. the delimited-identifier forms (double quotes, backticks, or both);
 6. `OFFSET` versus `SKIP`, and `LIMIT` placement relative to `ORDER BY`;
-7. the `DURATION` literal format, and date + duration arithmetic.
+7. the `DURATION` literal format, and date + duration arithmetic;
+8. lexical rules the gqlparser lexer currently refuses rather than guess
+   (backslash escapes and the `@` prefix, `--` comments, number suffixes,
+   digit separators and radixes, `$$` parameters). Each one also needs
+   confirming that GQL does define it, so the refusal is "not supported yet"
+   and not really "invalid GQL";
+9. that `<-` is a single token, so `a<-1` is `a`, `<-`, `1` and not
+   `a < -1`. The lexer does this and pins it with a test.
 
 ## Open decisions for the architect
 
@@ -372,10 +437,25 @@ result is literal.
 those surfaces then has to carry it. (a) is narrower and explicit. Whichever is
 chosen, the jobs API, IDE and DBAPI changes are follow-ups in their own repos.
 
+### D8: updating the vendored copy
+
+`opteryx/third_party/gqlparser` is a copy of a gqlparser release, so it needs a
+rule for how it moves:
+- **(a)** copy a tagged release in by hand, recording the version in the copy;
+- **(b)** a `dev/` script that copies a given tag and checks that it matches
+  the release.
+
+Either way the copy is never edited in place. A fix goes into gqlparser first,
+then a new release, then a re-copy. Otherwise the copy and the library drift.
+Recommendation: **(b)**, because a hand copy is how drift starts.
+
 ## Tests
 
-- **Parser:** every grammar form, every refusal, and error positions, as unit
-  tests on `opteryx/planner/gql`.
+- **Parser:** in the gqlparser repo, as described in [§1](#1-gqlparser-the-library).
+  Opteryx doesn't re-test the library. It tests its own translation of library
+  errors into Opteryx errors.
+- **Refusals:** one Opteryx test per item in [Refused in v1](#refused-in-v1).
+  Each asserts the error type and message, whether the construct parsed or not.
 - **Lowering equivalence:** each GQL query is paired with its hand-written SQL,
   and the two results must be identical. This is the correctness contract.
   There is no built-in graph (`$planets` has no foreign key), so the graphs

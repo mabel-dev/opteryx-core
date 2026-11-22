@@ -1150,6 +1150,10 @@ class _Compiler:
         # ranges ARE the whole pushed predicate (range_conjuncts_exact), else
         # absent. _native_scan_plan -> _arm_scan_prefilter.
         self._range_settle_cols: dict = {}
+        # Per native scan identity, {column identity: the name rugo reads it by} for the
+        # VARIANT paths pushed into it (`->>` and `::INT64`). _native_scan_plan ->
+        # _arm_scan_prefilter, whose predicate columns are named the same way.
+        self._scan_path_read_names: dict = {}
         # Row identity ($file / $ordinal, constants/row_identity.py) for a scan admitted
         # natively: its identity columns' (schema column, kind), appended by the Source
         # after the read set. _native_scan_plan -> _compile_scan, like the above.
@@ -4381,6 +4385,7 @@ class _Compiler:
         # A pushed VARIANT path is read by its path name, and the footer gate decides it
         # per file from how that file holds the path's base column (kind "path").
         path_names = {**_scan_path_names(scan), **typed_names}
+        self._scan_path_read_names[scan.identity] = path_names
         names = [path_names.get(sc.identity, sc.name) for sc in read_scs]
         gate_kinds = ["path" if sc.identity in path_names else kind
                       for sc, kind in zip(read_scs, kinds)]
@@ -4631,12 +4636,17 @@ class _Compiler:
         from opteryx.expression.evaluator.evaluation import Pass1PredResolver
         from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
 
-        identity_to_physical = {sc.identity: sc.name for sc in read_scs}
+        # A pushed VARIANT path is named as rugo reads it (`data->'commit'->>'collection'`), which
+        # is the name its column carries in the decoded row group.
+        path_names = self._scan_path_read_names.get(scan_identity, {})
+        identity_to_physical = {sc.identity: path_names.get(sc.identity, sc.name) for sc in read_scs}
         identity_to_type = {sc.identity: sc.column_type.physical.value for sc in read_scs}
         resolver = Pass1PredResolver(filter_bc, identity_to_physical, identity_to_type)
-        sc_by_name = {sc.name: sc for sc in read_scs}
+        sc_by_name = {identity_to_physical[sc.identity]: sc for sc in read_scs}
+        pred_scs = [sc_by_name[n] for n in resolver.col_names]
         if not pass1_worker_predicate_admissible(
-            sc_by_name[n].column_type for n in resolver.col_names
+            [sc.column_type for sc in pred_scs if sc.identity not in path_names],
+            [sc.column_type for sc in pred_scs if sc.identity in path_names],
         ):
             return False
         # The resolver owns the ctx the workers dereference; the NativePlan holds it.
@@ -4644,7 +4654,7 @@ class _Compiler:
         splan.set_scan_prefilter(get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
                                  resolver.col_names)
         pred_names = set(resolver.col_names)
-        is_pred = [sc.name in pred_names for sc in read_scs]
+        is_pred = [identity_to_physical[sc.identity] in pred_names for sc in read_scs]
         self.nplan.set_native_scan_prefilter(p, filter_bc, read_layout, is_pred)
         # Range settlement: the predicate IS the int ranges over exactly these
         # columns (_native_scan_plan), and none of them is emitted — so a row

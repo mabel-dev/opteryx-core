@@ -158,12 +158,20 @@ struct NestedSpec {
 //
 // `declared`, parallel to `projected` (or null), holds each column's declared shape; an empty entry is
 // "none declared". See build_plan.
+//
+// `alias_leaves` (docs/tickets/perf-variant-columns-review.md R1): a VARIANT path that ends at a
+// shredded leaf of its own kind - a `->>` path at a BYTE_ARRAY string leaf, a `::INT64` path at an
+// INT64 leaf - where, in every row group of `rg_idxs`, the destination field's `value` chunk holds
+// nothing by the footer (chunk_holds_nothing; ruling R-a) is read as that leaf's chunk, as a plain
+// column carrying the path's name: no group, no `metadata`, no `value`, no fold. Its answers are
+// pass_through's / typed_through's, which those row groups would have taken.
 bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                         const std::vector<std::string>& projected,
                         std::vector<std::string>& names,
                         std::vector<std::vector<ColumnStats>>& stats,
                         std::shared_ptr<const NestedSpec>& nested, std::string& err,
-                        const std::vector<std::vector<DeclaredNode>>* declared = nullptr);
+                        const std::vector<std::vector<DeclaredNode>>* declared = nullptr,
+                        bool alias_leaves = false);
 
 // For a `::INT64` path: true when, in every row group of `fs`, the path ends at a shredded
 // integer leaf and its field's `value` chunk holds nothing (statistics: null_count == num_values).

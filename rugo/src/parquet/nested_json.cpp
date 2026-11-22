@@ -1513,12 +1513,31 @@ bool group_renderable(const FileStats& fs, const std::string& name, std::string&
     return nested::build_plan(fs, name, err, declared) != nullptr;
 }
 
+// The file chunk a path is read as, under resolve_projection's alias_leaves; -1 = read as a group.
+static int64_t aliased_leaf(const FileStats& fs, const std::vector<int>& rg_idxs, const std::string& name,
+                            const nested::Plan& plan) {
+    if (plan.pass_leaf < 0) return -1;
+    int64_t leaf = -1, value = -1;
+    if (!path_dest_chunks(fs, name, leaf, value) || leaf < 0) return -1;
+    const char* want = plan.as_int64 ? "int64" : "byte_array";
+    for (int ri : rg_idxs) {
+        const RowGroupStats& rg = fs.row_groups[static_cast<size_t>(ri)];
+        if (static_cast<size_t>(leaf) >= rg.columns.size()) return -1;
+        const ColumnStats& l = rg.columns[static_cast<size_t>(leaf)];
+        if (l.physical_type != want || l.max_repetition_level != 0) return -1;
+        if (value >= 0 && (static_cast<size_t>(value) >= rg.columns.size() ||
+                           !chunk_holds_nothing(rg.columns[static_cast<size_t>(value)])))
+            return -1;
+    }
+    return leaf;
+}
+
 bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
                         const std::vector<std::string>& projected,
                         std::vector<std::string>& names,
                         std::vector<std::vector<ColumnStats>>& stats,
                         std::shared_ptr<const NestedSpec>& nested_out, std::string& err,
-                        const std::vector<std::vector<DeclaredNode>>* declared) {
+                        const std::vector<std::vector<DeclaredNode>>* declared, bool alias_leaves) {
     names.clear();
     stats.assign(rg_idxs.size(), {});
     nested_out.reset();
@@ -1535,6 +1554,8 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
     // group g's projected indexes; groups are in the order of their first member.
     std::vector<std::vector<size_t>> members;
     std::vector<size_t> group_of(projected.size(), SIZE_MAX);
+    // The file chunk each aliased path is read as (alias_leaves), else -1.
+    std::vector<int64_t> alias(projected.size(), -1);
     bool any_group = false;
     for (size_t k = 0; k < projected.size(); ++k) {
         bool exact = false, prefixed = false;
@@ -1555,6 +1576,10 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
         plans[k] = nested::build_plan(fs, projected[k], err,
                                       declared != nullptr && k < declared->size() ? &(*declared)[k] : nullptr);
         if (!plans[k]) return false;
+        if (alias_leaves && (alias[k] = aliased_leaf(fs, rg_idxs, projected[k], *plans[k])) >= 0) {
+            plans[k].reset();
+            continue;
+        }
         any_group = true;
         size_t g = 0;
         while (g < members.size() && field[members[g][0]] != field[k]) ++g;
@@ -1575,6 +1600,18 @@ bool resolve_projection(const FileStats& fs, const std::vector<int>& rg_idxs,
         // result slots follow the expanded list, so they are numbered once it is complete.
         std::vector<std::pair<size_t, size_t>> further;
         for (size_t k = 0; k < projected.size(); ++k) {
+            if (alias[k] >= 0) {
+                // The leaf's own chunk, named as the path: the scan matches predicates, the
+                // dictionary probe and the page search by this name.
+                ColumnStats cs = rg.columns[static_cast<size_t>(alias[k])];
+                cs.name = projected[k];
+                cs.logical_type = cs.physical_type == "int64" ? "int64" : "varchar";   // as the fold emits it
+                slot[k] = static_cast<uint32_t>(row_names.size());
+                row_names.push_back(cs.name);
+                orig.push_back(static_cast<uint32_t>(k));
+                out.push_back(std::move(cs));
+                continue;
+            }
             if (!plans[k]) {
                 bool found = false;
                 for (const ColumnStats& cs : rg.columns) {

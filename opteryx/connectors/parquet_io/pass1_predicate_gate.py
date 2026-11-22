@@ -61,7 +61,8 @@ from draken.draken_native import DrakenType
 # ClickBench files declare URL as parquet `binary` with no UTF8 annotation, so it
 # binds VARBINARY and Q24's whole predicate was running serially. NVARCHAR is
 # mechanically safe under the stamp too, and is deliberately NOT added here: it was
-# not part of that ruling.
+# not part of that ruling. It is admitted for a scan's own VARIANT path columns only
+# (ruling R-b, `path_column_types` below).
 _DESCRIPTOR_FREE_TYPES = frozenset(
     (
         DrakenType.INT8,
@@ -81,14 +82,24 @@ _DESCRIPTOR_FREE_TYPES = frozenset(
 )
 
 
-def pass1_worker_predicate_admissible(column_types) -> bool:
+def pass1_worker_predicate_admissible(column_types, path_column_types=()) -> bool:
     """True iff the pass-1 predicate may be pushed to rugo's decode workers.
 
     `column_types` are the `ColumnType`s of the predicate's columns (any iterable;
     a None entry — an untyped column — refuses). Fail-closed: an unknown or
     descriptor-carrying physical type means no push, and the consumer evaluates the
     predicate serially exactly as it does today for a shape rugo declines.
+
+    `path_column_types` are those of predicate columns that are VARIANT paths the scan
+    itself reads (ParquetVariantExtractionStrategy). A `->>` path binds NVARCHAR, which
+    is admitted for them only: architect ruling R-b, 2026-11-22
+    (docs/tickets/perf-variant-columns-review.md). In a file where a path is read as its
+    leaf the worker finds the column by name and evaluates; where it is not, the column
+    is not found, the worker declines, and the consumer evaluates.
     """
+    for ct in path_column_types:
+        if ct is None or (ct.physical not in _DESCRIPTOR_FREE_TYPES and ct.physical != DrakenType.NVARCHAR):
+            return False
     for ct in column_types:
         if ct is None or ct.physical not in _DESCRIPTOR_FREE_TYPES:
             return False

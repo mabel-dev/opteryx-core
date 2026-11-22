@@ -172,6 +172,103 @@ def test_the_json_form_is_not_passed_through(tmp_path):
     assert not any(shapes)
 
 
+# ── read as the leaf's own chunk (docs/tickets/perf-variant-columns-review.md R1) ──────────
+
+
+def _deep(i):
+    """Four levels down, each missing in some rows: the leaf's definition level is 2 to 6."""
+    d = {"id": i, "k": ["x", "y", "z"][i % 3]}
+    if i % 13 == 0:
+        return d                                   # no `a`
+    d["a"] = {"m": i} if i % 11 == 0 else {"b": {}}
+    if i % 11 == 0:
+        return d                                   # `a` without `b`
+    if i % 7 == 0:
+        return d                                   # `b` without `c`
+    d["a"]["b"]["c"] = {} if i % 5 == 0 else {"d": f"v{i % 40}"}
+    return d
+
+
+DEEP = [_deep(i) for i in range(3000)]
+DEEP_PATH = "data->'a'->'b'->'c'->>'d'"
+
+
+def _scan_counters(sql, passthrough):
+    config.features.disable_variant_leaf_passthrough = not passthrough
+    try:
+        session = opteryx.session()
+        rows = []
+        for morsel in session.execute_to_morsels(sql):
+            rows.extend(zip(*[morsel.column(n).to_pylist() for n in morsel.column_names]))
+        diag = session.telemetry["io_scan_diagnostics"][0]
+        return sorted(rows, key=repr), diag["prefilter_rows_in"], diag["bytes_fetched"]
+    finally:
+        config.features.disable_variant_leaf_passthrough = False
+
+
+def _want_deep(d):
+    return d.get("a", {}).get("b", {}).get("c", {}).get("d")
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "",                                        # unmasked
+        "WHERE data->>'k' = 'x'",                  # masked by another path: selective decode
+        f"WHERE {DEEP_PATH} = 'v3'",               # the deep leaf is the predicate
+        f"WHERE {DEEP_PATH} IN ('v1', 'v2') AND id % 2 = 0",
+        f"WHERE {DEEP_PATH} = 'absent'",           # no dictionary holds it
+        f"WHERE {DEEP_PATH} IS NULL",
+    ],
+)
+def test_a_deep_leaf_read_as_its_chunk(tmp_path, where):
+    path = _write(tmp_path, _jsonl(tmp_path, DEEP), max_rows_per_row_group=512)
+    sql = f"SELECT id, {DEEP_PATH}, data->>'k' FROM READ_PARQUET('{path}') {where}"
+    rows, shapes = _same(sql)
+    keep = {
+        "": lambda d: True,
+        "WHERE data->>'k' = 'x'": lambda d: d["k"] == "x",
+        f"WHERE {DEEP_PATH} = 'v3'": lambda d: _want_deep(d) == "v3",
+        f"WHERE {DEEP_PATH} IN ('v1', 'v2') AND id % 2 = 0": lambda d: _want_deep(d) in ("v1", "v2") and d["id"] % 2 == 0,
+        f"WHERE {DEEP_PATH} = 'absent'": lambda d: False,
+        f"WHERE {DEEP_PATH} IS NULL": lambda d: _want_deep(d) is None,
+    }[where]
+    assert rows == sorted([(d["id"], _want_deep(d), d["k"]) for d in DEEP if keep(d)], key=repr)
+
+
+def test_a_path_predicate_runs_on_the_decode_workers(tmp_path):
+    # Read as its leaf, the path is a column the worker prefilter finds by name (ruling R-b),
+    # and only the leaf's chunk is fetched. Under the switch the path is a group again: the
+    # worker cannot find it and declines, and the consumer filters - the same rows.
+    path = _write(tmp_path, _jsonl(tmp_path, DOCS), max_rows_per_row_group=64)
+    sql = (f"SELECT id, data->'commit'->>'collection' FROM READ_PARQUET('{path}') "
+           "WHERE data->'commit'->>'operation' = 'create'")
+    on, on_in, on_bytes = _scan_counters(sql, True)
+    off, off_in, off_bytes = _scan_counters(sql, False)
+    assert on == off
+    assert on == sorted([(d["id"], d["commit"]["collection"]) for d in DOCS
+                         if d.get("commit", {}).get("operation") == "create"], key=repr)
+    assert on_in == len(DOCS) and off_in == 0
+    assert on_bytes < off_bytes
+
+
+def test_paths_read_as_leaves_beside_the_value_and_a_json_path(tmp_path):
+    # One field read three ways in one scan: the whole value and a `->` path still fold from
+    # the group, the `->>` paths are their leaves.
+    path = _write(tmp_path, _jsonl(tmp_path, DOCS), max_rows_per_row_group=64)
+    rows, _ = _same(
+        f"SELECT id, data->'commit'->>'collection', data->'commit', data, data->'commit'->>'operation' "
+        f"FROM READ_PARQUET('{path}') WHERE id % 3 = 0"
+    )
+    assert sorted(r[0] for r in rows) == [d["id"] for d in DOCS if d["id"] % 3 == 0]
+    for i, collection, commit, data, operation in rows:
+        d = DOCS[i]
+        assert collection == d.get("commit", {}).get("collection")
+        assert operation == d.get("commit", {}).get("operation")
+        assert (None if commit is None else json.loads(commit)) == d.get("commit")
+        assert json.loads(data) == d
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
