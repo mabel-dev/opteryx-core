@@ -39,6 +39,10 @@ else
   # suite (x86, 2026-08-14); dev/ab_bench.py uses 1000 for the same reason.
   BENCH_PRELOAD = LD_PRELOAD=$(shell $(PYTHON) -c 'import draken; print(draken.preload_library_path() or "")' 2>/dev/null) MIMALLOC_PURGE_DELAY=1000
 endif
+# Benchmarks run with spill OFF, as the official ClickBench setup does: the repo .env
+# sets KVSTORE_LOCATION, which arms MorselBuffer spill at 512 MB (CB Q28 0.33 -> 1.6 s,
+# Q43 1.0 -> 2.4 s). The empty value wins because opteryx loads .env without override.
+BENCH_ENV = $(BENCH_PRELOAD) KVSTORE_LOCATION=
 MYPY := $(PYTHON) -m mypy
 
 # Parallel job count for compilation
@@ -887,7 +891,7 @@ define tpch_suite
 		exit 1; \
 	}
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale $(1) --variant $(2)
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/tpch/runner.py --scale $(1) --variant $(2)
 endef
 
 tpch-sf1: ## Run TPC-H SF1 vs DuckDB on the rugo-written parquet mirror (fast iteration; planning is ~19% of the work at this scale)
@@ -952,7 +956,7 @@ define ssb_suite
 		echo "         make ssb-sf$(1)-duckdb"; \
 		exit 1; \
 	}
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/ssb/runner.py --scale $(1) --variant $(2)
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/ssb/runner.py --scale $(1) --variant $(2)
 endef
 
 ssb-sf1: ## Run SSB SF1 vs DuckDB on the rugo-written parquet mirror
@@ -1010,17 +1014,17 @@ go:
 clickbench-rugo:
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
 clickbench-rugo-extended: ## Run ClickBench on the rugo 262k mirror with the 15 queries proposed in ClickHouse/ClickBench#1489 appended (Q43-Q57; Q54/Q55 need an exact percentile we do not have, and fail)
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (extended) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --extended
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --extended
 
 clickbench-canon: ## Run ClickBench on the upstream 100-file split (scratch/hits) instead of the rugo 262k mirror
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (canon) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon
 
 clickbench-canon-single: ## Run ClickBench on upstream's single hits.parquet (downloads 14 GiB to scratch/hits_single on first run)
 	@# Downloaded to a .partial name and renamed only on success, so an
@@ -1028,7 +1032,7 @@ clickbench-canon-single: ## Run ClickBench on upstream's single hits.parquet (do
 	@test -f scratch/hits_single/hits.parquet || { mkdir -p scratch/hits_single && curl -fL --retry 3 -o scratch/hits_single/hits.parquet.partial https://datasets.clickhouse.com/hits_compatible/hits.parquet && mv scratch/hits_single/hits.parquet.partial scratch/hits_single/hits.parquet; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (canon single) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon-single
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon-single
 
 clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, lz4 (performance posture), from scratch/hits_rugo_262k on first run)
 	$(call print_blue,"Running ClickBench benchmark on skene...")
@@ -1072,7 +1076,7 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@test -f scratch/hits_skene.skene-v3 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.skene-v3; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
 
 clickbench-json: ## Run ClickBench on upstream's hits.json.gz split into 100 x 1M-row zstd shards (downloads 22 GiB to scratch/hits.json.gz, splits to scratch/hits_json on first run)
 	@# Download to .partial and rename only on success, so an interrupted download
@@ -1083,7 +1087,7 @@ clickbench-json: ## Run ClickBench on upstream's hits.json.gz split into 100 x 1
 	@test -d scratch/hits_json || dev/clickbench/split_hits_json.sh scratch/hits.json.gz scratch/hits_json
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (json) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant json --iterations 3
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant json --iterations 3
 
 clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split converted to 1M-row deflate Avro shards by rugo's writer (converts scratch/hits_rugo_262k to scratch/hits_avro on first run)
 	@# Avro is reachable only through READ_AVRO, never as a stored dataset, so the
@@ -1105,7 +1109,7 @@ clickbench-avro: ## Run ClickBench through READ_AVRO over the rugo split convert
 	@test -f scratch/hits_avro.deflate-rugo-v1 || { rm -rf scratch/hits_avro scratch/hits_avro.partial && $(PYTHON) dev/clickbench/parquet_to_avro.py scratch/hits_rugo_262k scratch/hits_avro deflate rugo && touch scratch/hits_avro.deflate-rugo-v1; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (avro) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant avro
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant avro
 
 clickbench-orc: ## Run ClickBench through READ_ORC over the rugo split converted to 1M-row zstd ORC shards by pyarrow.orc (converts scratch/hits_rugo_262k to scratch/hits_orc on first run)
 	@# ORC is reachable here only through READ_ORC (it is not a stored-dataset format
@@ -1126,7 +1130,7 @@ clickbench-orc: ## Run ClickBench through READ_ORC over the rugo split converted
 	@test -f scratch/hits_orc.zstd-pyarrow-v1 || { rm -rf scratch/hits_orc scratch/hits_orc.partial && $(PYTHON) dev/clickbench/parquet_to_orc.py scratch/hits_rugo_262k scratch/hits_orc zstd && touch scratch/hits_orc.zstd-pyarrow-v1; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (orc) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant orc
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant orc
 
 clickbench-iceberg: ## Run ClickBench on a local Iceberg table written by Opteryx from the upstream split (builds scratch/hits_iceberg from scratch/hits on first run)
 	@# The ClickBench `opteryx-iceberg` entry's own create.sql + insert.sql
@@ -1137,7 +1141,7 @@ clickbench-iceberg: ## Run ClickBench on a local Iceberg table written by Optery
 	@test -f scratch/hits_iceberg.entry-v1 || { rm -rf scratch/hits_iceberg && $(PYTHON) dev/clickbench/build_iceberg_local.py && touch scratch/hits_iceberg.entry-v1; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (iceberg) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant iceberg
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant iceberg
 
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true
@@ -1154,7 +1158,7 @@ MAX_RATIO ?= 1.05
 QUERIES ?=
 DATA ?=
 clickbench-interleave: ## Interleaved Opteryx vs DuckDB ClickBench (O,D / D,O per query); fails if opteryx is slower than MAX_RATIO
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/interleave.py --loops $(LOOPS) --gap $(GAP) --max-ratio $(MAX_RATIO) $(if $(QUERIES),--queries $(QUERIES),) $(if $(DATA),--data $(DATA),)
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/interleave.py --loops $(LOOPS) --gap $(GAP) --max-ratio $(MAX_RATIO) $(if $(QUERIES),--queries $(QUERIES),) $(if $(DATA),--data $(DATA),)
 
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
@@ -1313,7 +1317,7 @@ jsonbench-duckdb: ## Re-run DuckDB JSONBench calibration (regenerates duckdb/res
 
 dash: ## Run odata_dashboard benchmark vs DuckDB (real-world OData query-log shapes)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/odata_dashboard/runner.py
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/odata_dashboard/runner.py
 
 dash-duckdb: ## Re-run DuckDB odata_dashboard calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/odata_dashboard/duckdb/runner.py
@@ -1336,7 +1340,7 @@ job: ## Run Join Order Benchmark (JOB) on the rugo-written parquet mirror (gener
 	@# number is comparable with a CI number only through `make job-skene`.
 	$(call mirror_rugo,testdata/job,testdata/job_rugo)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant rugo
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/job/runner.py --variant rugo
 
 job-skene: ## Run Join Order Benchmark (JOB) on the skene mirror (generates testdata/job_skene from testdata/job on first run)
 	$(call print_blue,"Running JOB on skene...")
@@ -1344,7 +1348,7 @@ job-skene: ## Run Join Order Benchmark (JOB) on the skene mirror (generates test
 	@# in mirror_skene is NOT optional — see gate 3 of the TPC-H comment.
 	$(call mirror_skene,testdata/job,testdata/job_skene)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant skene
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/job/runner.py --variant skene
 
 job-duckdb: ## Re-run DuckDB JOB calibration (regenerates duckdb/results.json)
 	@$(PYTHON) tests/performance/job/duckdb/runner.py
@@ -1366,14 +1370,14 @@ h2o: ## Run H2O db-benchmark on the rugo-written parquet mirror (groupby + join,
 	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
 	$(call mirror_rugo,testdata/h2o/medium,testdata/h2o_rugo)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant rugo --size medium --workload both
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/h2o/runner.py --variant rugo --size medium --workload both
 
 h2o-skene: ## Run H2O db-benchmark on the skene mirror (groupby + join, medium; generates testdata/h2o_skene on first run)
 	$(call print_blue,"Running H2O on skene...")
 	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
 	$(call mirror_skene,testdata/h2o/medium,testdata/h2o_skene)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant skene --size medium --workload both
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/h2o/runner.py --variant skene --size medium --workload both
 
 h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
 	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size medium --workload both
@@ -1400,7 +1404,7 @@ tpch-sf10-aistor: ## Run TPC-H SF10 vs DuckDB against the parquet source on AISt
 		exit 1; \
 	}
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 10 --variant aistor
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/tpch/runner.py --scale 10 --variant aistor
 
 tpcds-sf10-aistor: ## Run TPC-DS SF10 against the parquet source on AIStor (300s/query; compared to the DuckDB sf10 baseline when present)
 	$(call print_blue,Running TPC-DS SF10 benchmark (AIStor)...)
@@ -1413,27 +1417,27 @@ tpcds-sf10-aistor: ## Run TPC-DS SF10 against the parquet source on AIStor (300s
 clickbench-aistor-canon-split: ## Run ClickBench against upstream's 100-file split on AIStor (remote Iceberg)
 	$(call print_blue,Running ClickBench on AIStor (canon split)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split
 
 clickbench-aistor-canon-single: ## Run ClickBench against upstream's single hits.parquet on AIStor (remote Iceberg)
 	$(call print_blue,Running ClickBench on AIStor (canon single)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-single
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-single
 
 clickbench-aistor-rugo-split: ## Run ClickBench against the rugo 262k-row-group split on AIStor (remote Iceberg)
 	$(call print_blue,Running ClickBench on AIStor (rugo split)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split
 
 h2o-aistor: ## Run H2O db-benchmark (groupby + join, medium) against the parquet tree on AIStor (remote Iceberg)
 	$(call print_blue,"Running H2O on AIStor...")
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant aistor --size medium --workload both
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/h2o/runner.py --variant aistor --size medium --workload both
 
 job-aistor: ## Run Join Order Benchmark (JOB) against the parquet corpus on AIStor (remote Iceberg)
 	$(call print_blue,"Running JOB on AIStor...")
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant aistor
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/job/runner.py --variant aistor
 
 # ── Quick remote variants: SF0.1-sized, for iteration in minutes ─────────────
 #
@@ -1452,7 +1456,7 @@ tpch-sf01-aistor: ## Quick: TPC-H SF0.1 vs DuckDB on AIStor (remote Iceberg)
 		exit 1; \
 	}
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 01 --variant aistor
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/tpch/runner.py --scale 01 --variant aistor
 
 tpcds-sf01-aistor: ## Quick: TPC-DS SF0.1 on AIStor (compared to the DuckDB sf01 baseline when present)
 	$(call print_blue,Running TPC-DS SF0.1 benchmark (AIStor)...)
@@ -1462,24 +1466,24 @@ tpcds-sf01-aistor: ## Quick: TPC-DS SF0.1 on AIStor (compared to the DuckDB sf01
 clickbench-aistor-canon-split-10: ## Quick: ClickBench on upstream's files hits_0..9 (10M rows) on AIStor
 	$(call print_blue,Running ClickBench on AIStor (canon split, 10 files)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split-10
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split-10
 
 clickbench-aistor-rugo-split-10: ## Quick: ClickBench on the rugo split's files hits_0..9 (10M rows) on AIStor
 	$(call print_blue,Running ClickBench on AIStor (rugo split, 10 files)...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split-10
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split-10
 
 h2o-small-aistor: ## Quick: H2O db-benchmark (groupby + join, small = 1e7 rows) on AIStor
 	$(call print_blue,Running H2O small on AIStor...)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant aistor --size small --workload both
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/h2o/runner.py --variant aistor --size small --workload both
 
 .PHONY: tpch-sf10-aistor tpcds-sf10-aistor clickbench-aistor-canon-split clickbench-aistor-canon-single clickbench-aistor-rugo-split h2o-aistor job-aistor
 .PHONY: tpch-sf01-aistor tpcds-sf01-aistor clickbench-aistor-canon-split-10 clickbench-aistor-rugo-split-10 h2o-small-aistor
 
 signals: ## Run signals benchmark suite (synthetic security-findings dataset, no DuckDB baseline)
 	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/signals/runner.py
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/signals/runner.py
 
 medicare1-fetch: ## Download and convert Medicare1 benchmark data
 	@$(PYTHON) tests/performance/medicare1/fetch_data.py

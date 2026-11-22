@@ -404,7 +404,7 @@ class Shredder {
     template <typename Doc>
     static ShredType infer(const Doc* docs, const uint8_t* validity, size_t rows) {
         Seen root;
-        each_row(docs, validity, rows, [&](size_t, yyjson_val* v) { if (v != nullptr) root.observe(v, 0); });
+        each_row(docs, validity, 0, rows, [&](size_t, yyjson_val* v) { if (v != nullptr) root.observe(v, 0); });
         int budget = kShredFields;
         return root.decide(budget);
     }
@@ -422,14 +422,20 @@ class Shredder {
     // The leaves in schema order: metadata, then each pair's `value` followed by its typed_value.
     const std::vector<ShredLeaf>& leaves() const { return leaves_; }
 
-    // Fill the leaves with these rows (replacing what they held).
+    // Fill the leaves with rows [begin, end) of `docs` (replacing what they held). `validity`
+    // is the bitmap of all of `docs`, from row 0. Rows are encoded independently, so encoding
+    // a range gives exactly that range's entries of encoding them all, with `offset` relative
+    // to this Shredder's own `bytes` (docs/parquet_variant_parallel_encode_design.md §3).
     template <typename Doc>
-    void encode(const Doc* docs, const uint8_t* validity, size_t rows) {
+    void encode(const Doc* docs, const uint8_t* validity, size_t rows) { encode(docs, validity, 0, rows); }
+
+    template <typename Doc>
+    void encode(const Doc* docs, const uint8_t* validity, size_t begin, size_t end) {
         for (ShredLeaf& l : leaves_) {
             l.def.clear(); l.bytes.clear(); l.offset.clear(); l.i64.clear(); l.i128.clear(); l.boolean.clear();
-            l.def.reserve(rows);
+            l.def.reserve(end - begin);
         }
-        each_row(docs, validity, rows, [&](size_t, yyjson_val* v) {
+        each_row(docs, validity, begin, end, [&](size_t, yyjson_val* v) {
             if (v == nullptr) {                                   // SQL NULL: the group itself is null
                 for (size_t i = 0; i < leaves_.size(); ++i) null_at(static_cast<int>(i), 0);
                 return;
@@ -464,14 +470,14 @@ class Shredder {
         int first_leaf = 0, end_leaf = 0;           // every leaf under the pair
     };
 
-    // Parse each row as `->` does and hand its root (null for a SQL NULL row) to `fn`.
+    // Parse rows [begin, end) as `->` does and hand each root (null for a SQL NULL row) to `fn`.
     template <typename Doc, typename Fn>
-    static void each_row(const Doc* docs, const uint8_t* validity, size_t rows, Fn fn) {
+    static void each_row(const Doc* docs, const uint8_t* validity, size_t begin, size_t end, Fn fn) {
         size_t longest = 0;
-        for (size_t r = 0; r < rows; ++r)
+        for (size_t r = begin; r < end; ++r)
             if (validity == nullptr || ((validity[r >> 3] >> (r & 7)) & 1)) longest = std::max<size_t>(longest, docs[r].len);
         draken::ops::ReadPool pool(longest);
-        for (size_t r = 0; r < rows; ++r) {
+        for (size_t r = begin; r < end; ++r) {
             if (validity != nullptr && !((validity[r >> 3] >> (r & 7)) & 1)) { fn(r, nullptr); continue; }
             yyjson_read_err err;
             draken::ops::JDocGuard doc(pool.read(reinterpret_cast<const char*>(docs[r].ptr), docs[r].len, &err));

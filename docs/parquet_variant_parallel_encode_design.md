@@ -1,7 +1,7 @@
 # Design: encode a VARIANT row group in parallel
 
-> Status: design only, 2026-11-22. Nothing here is built. Decisions for the architect are
-> in §6. Background: `docs/tickets/perf-variant-columns-review.md` R4 and R5.
+> Status: BUILT 2026-11-22, uncommitted, with every §6 decision as recommended. Results
+> in §7. Background: `docs/tickets/perf-variant-columns-review.md` R4 and R5.
 
 ## 1. The problem
 
@@ -132,3 +132,28 @@ Sign-off: `make q`, `make slt`, `make rt`.
 - **Noted, not in scope:** after this change the next bound is expected to be zstd level 7
   under the `storage` profile (5.6 cpu-s in the same profile). That level is a policy
   choice, not part of this design.
+
+## 7. Results (2026-11-22) [measured]
+
+**Built as designed**, every §6 decision as recommended. Files: `variant_columns.hpp`
+(chunked encode on the writer pool, leaves joined), `variant_encode.hpp` (`encode` over a
+row range, `each_row` over a range so errors name the morsel row), `variant_encode_test.cpp`
+(`test_ranges`), `test_variant_write.py` (`test_a_row_group_encoded_in_several_parts`).
+
+**Same output.** Three JSONBench shards loaded by the old build and the new one: each pair
+of files differs by exactly one byte, the build number in the `created_by` footer string.
+
+**Tests.** The native encoder test (with `test_ranges`) and 161 VARIANT tests pass.
+Reversing the chunk order in the join fails `test_a_row_group_encoded_in_several_parts`
+and no other test.
+
+**Speed.** Old build (main) against new (private tree), a fresh process per cell, order
+alternated over 4 rounds, each cell gated on a quiet machine on AC power:
+
+| | old best | new best | ratio (best) | ratio (median) |
+|---|---|---|---|---|
+| OPTIMIZE, 3 files of 1M rows into 1 | 5.37 s | 2.78 s | 0.52x | 0.53x |
+| JSONBench load, 3 shards (3M rows) | 5.50 s | 2.50 s | 0.45x | 0.45x |
+
+The OPTIMIZE result matches the estimate in §5 (about 3 s).
+

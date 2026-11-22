@@ -184,6 +184,19 @@ def test_the_whole_value_is_the_json_written(written):
     assert [_value(rows[i]) for i in range(ROWS)] == WANT
 
 
+def test_a_row_group_encoded_in_several_parts(tmp_path):
+    # More rows than one encode task takes (4,096), split at rows that are not a multiple of 8,
+    # so the parts' leaves are joined back across the validity bitmap's bytes. A NULL, a type
+    # mismatch and a residual object fall on every part.
+    documents = [_document(i) for i in range(10_001)]
+    source, morsel = _source_morsel(tmp_path, documents)
+    ours = _write(tmp_path, morsel)
+    assert rp.read_metadata(ours).num_row_groups == 1
+    assert _duck_values(ours) == _duck_values(source)
+    rows = dict(_rows(f"SELECT id, data FROM READ_PARQUET('{ours}')", pushed=True))
+    assert [_value(rows[i]) for i in range(len(documents))] == [_value(_text(d)) for d in documents]
+
+
 def test_the_shredding_is_learnt_from_the_first_row_group(tmp_path):
     # `k` is a string through the first row group and an integer after it: it is shredded as
     # a string, and the integers are held in its residual `value`.

@@ -359,6 +359,60 @@ void test_inference_limits() {
     check(same_json(want, got), "the fields past the cap are in the residual");
 }
 
+// ── 4. row ranges ───────────────────────────────────────────────────────────
+
+// Encoding rows in ranges gives, range by range, exactly the entries of encoding them all: what
+// the writer's parallel encode joins back together (docs/parquet_variant_parallel_encode_design.md).
+void test_ranges() {
+    Rows rows;
+    for (int i = 0; i < 4001; ++i) rows.text.push_back(document(i));
+    rows.seal();
+    const ShredType learnt = Shredder::infer(rows.docs.data(), rows.validity.data(), rows.docs.size());
+    Shredder whole("data", learnt);
+    whole.encode(rows.docs.data(), rows.validity.data(), rows.docs.size());
+    // Bounds off a multiple of 8 (the validity bitmap's bytes) and a range of one row.
+    const std::vector<size_t> bounds = {0, 3, 1001, 1002, 2731, 4001};
+    std::vector<Shredder> parts;
+    for (size_t b = 0; b + 1 < bounds.size(); ++b) {
+        parts.emplace_back("data", learnt);
+        parts.back().encode(rows.docs.data(), rows.validity.data(), bounds[b], bounds[b + 1]);
+    }
+    const std::vector<ShredLeaf>& all = whole.leaves();
+    for (size_t k = 0; k < all.size(); ++k) {
+        const std::string name = "leaf " + std::to_string(k) + " (" + all[k].path.back() + ")";
+        std::vector<uint8_t> def, boolean;
+        std::vector<int64_t> i64;
+        std::vector<__int128> i128;
+        std::vector<std::string> payload;
+        for (const Shredder& p : parts) {
+            const ShredLeaf& l = p.leaves()[k];
+            def.insert(def.end(), l.def.begin(), l.def.end());
+            boolean.insert(boolean.end(), l.boolean.begin(), l.boolean.end());
+            i64.insert(i64.end(), l.i64.begin(), l.i64.end());
+            i128.insert(i128.end(), l.i128.begin(), l.i128.end());
+            if (!l.offset.empty())
+                for (size_t r = 0; r + 1 < l.offset.size(); ++r) payload.push_back(bytes_of(l, r));
+        }
+        check(def == all[k].def, name + ": definition levels differ");
+        check(boolean == all[k].boolean, name + ": booleans differ");
+        check(i64 == all[k].i64, name + ": int64s differ");
+        check(i128 == all[k].i128, name + ": int128s differ");
+        std::vector<std::string> want;
+        if (!all[k].offset.empty())
+            for (size_t r = 0; r + 1 < all[k].offset.size(); ++r) want.push_back(bytes_of(all[k], r));
+        check(payload == want, name + ": bytes differ");
+    }
+
+    // An invalid document is reported by its row among all the rows, not within its range.
+    Rows bad;
+    for (int i = 0; i < 20; ++i) bad.text.push_back(i == 13 ? "{not json" : "{\"a\":1}");
+    bad.seal();
+    Shredder tail("data", ShredType{});
+    std::string message;
+    try { tail.encode(bad.docs.data(), bad.validity.data(), 10, 20); } catch (const std::runtime_error& e) { message = e.what(); }
+    check(message.find("at row 13:") != std::string::npos, "invalid JSON reported as: " + message);
+}
+
 }  // namespace
 
 int main() {
@@ -366,6 +420,7 @@ int main() {
     test_refusals();
     test_shredding();
     test_inference_limits();
+    test_ranges();
     if (failures != 0) {
         std::fprintf(stderr, "variant encode: %d check(s) failed\n", failures);
         return 1;

@@ -1127,6 +1127,10 @@ class _Compiler:
         # identity per spec], [spec fn per spec], rows-preserving?). Read by the
         # HeapSort branch to arm the GROUP BY -> ORDER BY/LIMIT top-k fusion.
         self._groupby_sinks: dict = {}
+        # Pipelines pinned to dop 1 ONLY to keep a sorted breaker's emit order (Sort,
+        # HeapSort, Window, FramedWindow). A Sort/HeapSort consuming one lifts the pin
+        # (_lift_order_pin); a LIMIT on one makes the order load-bearing and removes it.
+        self._order_pins: set = set()
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
         # node identity: "NativeParquetScanSource" or "LatmatScanSource".
         self.scan_sources: dict = {}
@@ -2873,6 +2877,7 @@ class _Compiler:
 
         if kind == "SortNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
+            self._lift_order_pin(p)
             spec, sink_layout = self._sort_spec(p, node.step.order_by, layout)
             emit, layout = self._emit_subset(node, sink_layout)
             spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
@@ -2886,10 +2891,12 @@ class _Compiler:
             # Order-sensitive from here to the queue: one worker preserves the
             # sorted morsel order end to end.
             self.nplan.set_pipeline_dop(p2, 1)
+            self._order_pins.add(p2)
             return p2, layout
 
         if kind == "HeapSortNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
+            self._lift_order_pin(p)
             limit = node.step.limit
             if limit is None or int(limit) < 0:
                 _unsupported("a HeapSort without a positive LIMIT")
@@ -2907,6 +2914,7 @@ class _Compiler:
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)
+            self._order_pins.add(p2)
             return p2, layout
 
         if kind == "WindowNode":
@@ -3028,6 +3036,7 @@ class _Compiler:
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
+            self._order_pins.add(p2)
             return p2, list(layout) + list(fn_names)
 
         if kind == "FramedWindowNode":
@@ -3151,6 +3160,7 @@ class _Compiler:
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
+            self._order_pins.add(p2)
             return p2, list(layout) + [out_identity for _kc, out_identity, _a, _ot, _ol, _fr in py_funcs]
 
         if kind == "ScalarGuardNode":
@@ -3183,6 +3193,7 @@ class _Compiler:
             # morsels in stream order — LIMIT pins its pipeline to dop 1 (halt stops
             # the source early, so this is bounded work, not a full serial scan).
             self.nplan.set_pipeline_dop(p, 1)
+            self._order_pins.discard(p)   # the first N depend on the order — keep the pin
             # No limit (OFFSET-only) and no offset are both None.
             limit = node.step.limit
             offset = node.step.offset
@@ -7346,6 +7357,15 @@ class _Compiler:
             return (coerce & 0xF) == _LC_TIMEOFDAYSTAMP
         allowed_coerce = _LC_DATE if physical == DrakenType.DATE32 else 0
         return coerce in (0, allowed_coerce)
+
+    def _lift_order_pin(self, p):
+        """A Sort/HeapSort re-orders its whole input, so a dop-1 pin on ``p`` that only
+        kept an upstream breaker's sorted emit order buys nothing: run ``p`` at the
+        engine's dop (0 = no override). Ties may now arrive in a different order, which
+        SQL leaves unspecified."""
+        if p in self._order_pins:
+            self._order_pins.discard(p)
+            self.nplan.set_pipeline_dop(p, 0)
 
     def _arm_topn_boundary(self, p, child_nid, node, limit):
         """Arm the Top-N runtime boundary for the HeapSort `node` just compiled

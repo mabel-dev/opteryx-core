@@ -387,6 +387,9 @@ The inference constants (1 in 64, depth 8, 128 fields) are still unmeasured (des
 
 > 2026-11-22: the encode below runs serially on the calling thread (measured in R5).
 > Design for running it in parallel: `docs/parquet_variant_parallel_encode_design.md`.
+> BUILT the same day: OPTIMIZE 5.37 -> 2.78 s (0.52x), JSONBench load 0.45x, files
+> byte-identical apart from the build stamp. The per-row costs listed below remain; they
+> now run spread over the writer pool.
 
 **[read]**
 
