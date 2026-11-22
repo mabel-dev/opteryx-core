@@ -4544,6 +4544,7 @@ struct GroupByLocal : LocalSinkState {
     std::vector<uint32_t> dict_rep;   // per code: first row using it (representative)
     std::vector<uint8_t>  dict_part;  // per code: partition index
     std::vector<uint32_t> dict_gid;   // per code: group id within that partition
+    std::vector<uint32_t> dict_cnt;   // per code x4 lanes: rows using it (COUNT(*) histogram)
     std::vector<uint64_t> cd_vhash;   // per row: value hash for a CountDistinct spec
     // Every spec is COUNT(*) or a row-kind (gb_kind_row_resolvable) without a
     // DISTINCT operand: the shapes the dict code pass and the direct array cover.
@@ -5816,9 +5817,43 @@ struct GroupBySink : Sink {
             // VALUES a new group stores. Same representative the dense path would
             // have picked (the first row that created the group).
             l.dict_rep.assign(D, UINT32_MAX);
-            for (uint32_t i = 0; i < rows; ++i) {
-                const uint32_t c = skh.codes[i];
-                if (l.dict_rep[c] == UINT32_MAX) l.dict_rep[c] = i;
+            // COUNT(*) through the codes: count each code once per morsel, then add the
+            // count to its group once (pass C below) instead of one table add per row.
+            // Four interleaved lanes so a run of one code does not serialise on one counter.
+            const bool use_cnt = gb_rows_only || (l.has_rows && l.row_kinds_only && l.codepass_on);
+            if (use_cnt) {
+                l.dict_cnt.assign(static_cast<size_t>(D) * 4, 0);
+                uint32_t* h0 = l.dict_cnt.data();
+                uint32_t* h1 = h0 + D;
+                uint32_t* h2 = h1 + D;
+                uint32_t* h3 = h2 + D;
+                const uint32_t* codes = skh.codes;
+                uint32_t i = 0;
+                for (; i + 4 <= rows; i += 4) {
+                    ++h0[codes[i]];
+                    ++h1[codes[i + 1]];
+                    ++h2[codes[i + 2]];
+                    ++h3[codes[i + 3]];
+                }
+                for (; i < rows; ++i) ++h0[codes[i]];
+                uint32_t used = 0;
+                for (uint32_t d = 0; d < D; ++d) {
+                    h0[d] += h1[d] + h2[d] + h3[d];
+                    used += h0[d] != 0;
+                }
+                // First occurrence of each used code; stops once every used code has one.
+                for (uint32_t r = 0; used != 0; ++r) {
+                    const uint32_t c = codes[r];
+                    if (l.dict_rep[c] == UINT32_MAX) {
+                        l.dict_rep[c] = r;
+                        --used;
+                    }
+                }
+            } else {
+                for (uint32_t i = 0; i < rows; ++i) {
+                    const uint32_t c = skh.codes[i];
+                    if (l.dict_rep[c] == UINT32_MAX) l.dict_rep[c] = i;
+                }
             }
             // One probe per distinct value.
             l.dict_part.resize(D);
@@ -5858,13 +5893,12 @@ struct GroupBySink : Sink {
             GROUPBY_TEL_ACCUM(groupby_tel::probe_ns, _gbB_t0);
 
             if (gb_rows_only) {
-                // Pass C, dict form: per row, two small-array lookups by code. No
+                // Pass C, dict form: one add per used code from the histogram. No
                 // mk_hash gather and no mk_ent write anywhere in this path.
                 GROUPBY_TEL_START(_gbC_t0);
-                for (uint32_t i = 0; i < rows; ++i) {
-                    const uint32_t c = skh.codes[i];
-                    l.parts[l.dict_part[c]].grows[l.dict_gid[c]] += 1;
-                }
+                for (uint32_t d = 0; d < D; ++d)
+                    if (l.dict_cnt[d] != 0)
+                        l.parts[l.dict_part[d]].grows[l.dict_gid[d]] += l.dict_cnt[d];
                 GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
                 l.entries_total = 0;
                 for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
@@ -5880,10 +5914,8 @@ struct GroupBySink : Sink {
                 const uint8_t* dpart = l.dict_part.data();
                 const uint32_t* dgid = l.dict_gid.data();
                 if (l.has_rows) {
-                    for (uint32_t i = 0; i < rows; ++i) {
-                        const uint32_t c = codes[i];
-                        l.parts[dpart[c]].grows[dgid[c]] += 1;
-                    }
+                    for (uint32_t d = 0; d < D; ++d)
+                        if (l.dict_cnt[d] != 0) l.parts[dpart[d]].grows[dgid[d]] += l.dict_cnt[d];
                 }
                 for (size_t s = 0; s < nspecs; ++s) {
                     const GBKind kind = l.kinds[s];
