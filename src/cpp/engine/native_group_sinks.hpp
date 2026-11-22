@@ -6040,8 +6040,17 @@ struct GroupBySink : Sink {
                 l.mk_ent[i] = static_cast<uint32_t>(gid);
             }
         } else {
+        // A row whose hash equals the previous row's is that row's group (groups are
+        // identified by hash): reuse its id and skip the probe (clustered data repeats).
+        uint64_t prev_h = 0;
+        uint32_t prev_gid = 0;
+        bool have_prev = false;
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
+            if (have_prev && h == prev_h) {
+                l.mk_ent[i] = prev_gid;
+                continue;
+            }
             GBPartition& P = l.parts[gb_part(h)];
             int64_t gid;
             bool is_new = P.find_or_insert_group(
@@ -6056,6 +6065,9 @@ struct GroupBySink : Sink {
                 }
             }
             l.mk_ent[i] = static_cast<uint32_t>(gid);
+            prev_h = h;
+            prev_gid = static_cast<uint32_t>(gid);
+            have_prev = true;
         }
         }
 

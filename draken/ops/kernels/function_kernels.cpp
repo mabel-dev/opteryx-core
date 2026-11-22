@@ -794,6 +794,44 @@ inline int64_t fk_days_from_civil(int64_t y, unsigned m, unsigned d) {
     return era * 146097 + static_cast<int64_t>(doe) - 719468;
 }
 
+// One TIMESTAMP64 value's part, unit divisor and part fixed at compile time (the
+// divides become multiply-shifts and the part switch disappears).
+template <int64_t DIV, int PART>
+inline int64_t fk_ts_part(int64_t x) {
+    const int64_t secs = fk_floor_div(x, DIV);
+    const int64_t days = fk_floor_div(secs, 86400);
+    const int64_t sod = secs - days * 86400;   // seconds-of-day
+    if constexpr (PART == FK_PART_YEAR) return fk_civil_from_days(days).y;
+    else if constexpr (PART == FK_PART_MONTH) return fk_civil_from_days(days).m;
+    else if constexpr (PART == FK_PART_DAY) return fk_civil_from_days(days).d;
+    else if constexpr (PART == FK_PART_QUARTER) return (fk_civil_from_days(days).m - 1) / 3 + 1;
+    else if constexpr (PART == FK_PART_HOUR) return sod / 3600;
+    else if constexpr (PART == FK_PART_MINUTE) return (sod / 60) % 60;
+    else return sod % 60;   // FK_PART_SECOND
+}
+
+// Every row's part through the uniform data[selection[i]] access; NULL rows read
+// their slot like any other (the caller zeroes them).
+template <int64_t DIV, int PART>
+void fk_ts_part_rows(const DrakenVector* v, int64_t* out, uint32_t n) {
+    const int64_t* d = static_cast<const int64_t*>(v->data);
+    const uint32_t* sel = v->selection;
+    for (uint32_t i = 0; i < n; ++i) out[i] = fk_ts_part<DIV, PART>(d[sel[i]]);
+}
+
+template <int64_t DIV>
+void fk_ts_part_rows_unit(const DrakenVector* v, int part, int64_t* out, uint32_t n) {
+    switch (part) {
+        case FK_PART_YEAR:    fk_ts_part_rows<DIV, FK_PART_YEAR>(v, out, n); break;
+        case FK_PART_MONTH:   fk_ts_part_rows<DIV, FK_PART_MONTH>(v, out, n); break;
+        case FK_PART_DAY:     fk_ts_part_rows<DIV, FK_PART_DAY>(v, out, n); break;
+        case FK_PART_QUARTER: fk_ts_part_rows<DIV, FK_PART_QUARTER>(v, out, n); break;
+        case FK_PART_HOUR:    fk_ts_part_rows<DIV, FK_PART_HOUR>(v, out, n); break;
+        case FK_PART_MINUTE:  fk_ts_part_rows<DIV, FK_PART_MINUTE>(v, out, n); break;
+        default:              fk_ts_part_rows<DIV, FK_PART_SECOND>(v, out, n); break;
+    }
+}
+
 // TRUNC part ids (bind-time contract with compiled_expression.pyx _TRUNC_PARTS).
 enum {
     FK_TR_SECOND = 1, FK_TR_MINUTE = 2, FK_TR_HOUR = 3, FK_TR_DAY = 4,
@@ -848,8 +886,20 @@ VecResult draken_date_part(void* ctx, const DrakenVector* const* args, uint32_t 
     uint32_t n = v->length;
     auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
-    for (uint32_t i = 0; i < n; ++i)
-        out[i] = fk_row_valid(v, i) ? part_of(v->selection[i]) : 0;
+    if (v->type == DRAKEN_TIMESTAMP64) {
+        switch (c->left_unit & 3) {
+            case 0:  fk_ts_part_rows_unit<1>(v, part, out, n); break;
+            case 1:  fk_ts_part_rows_unit<1000>(v, part, out, n); break;
+            case 2:  fk_ts_part_rows_unit<1000000>(v, part, out, n); break;
+            default: fk_ts_part_rows_unit<1000000000>(v, part, out, n); break;
+        }
+        if (v->validity != nullptr)
+            for (uint32_t i = 0; i < n; ++i)
+                if (!fk_row_valid(v, i)) out[i] = 0;
+    } else {
+        for (uint32_t i = 0; i < n; ++i)
+            out[i] = fk_row_valid(v, i) ? part_of(v->selection[i]) : 0;
+    }
     return fk_numeric_result(v, out, n, DRAKEN_INT64);
 }
 

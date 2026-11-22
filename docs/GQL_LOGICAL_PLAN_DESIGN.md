@@ -115,10 +115,18 @@ that the engine can't run yet.
 
 **The two errors are siblings under `GqlError`, never parent and child**, so a
 caller tells them apart by type, not by message:
-- **`GqlSyntaxError`, invalid GQL:** the text breaks the ISO/IEC 39075 grammar;
-- **`GqlNotSupportedError`, not supported by this parser:** the text is valid
-  GQL, but outside the subset this release covers. The error names the
-  construct.
+- **`GqlNotSupportedError`, not supported by this parser:** a GQL construct
+  the parser recognises but doesn't support yet. The error names the
+  construct;
+- **`GqlSyntaxError`, could not be read:** usually the text is not GQL. But the
+  parser doesn't know all of GQL, so **valid GQL it doesn't recognise at all
+  also lands here**. Promising otherwise would need the full 39075 grammar.
+  The "not supported" list is the recognised part, and it grows. (Narrower
+  contract ruled by the architect, 2026-11-22.)
+
+The parser is also lenient in a few places that never change meaning: it
+enforces only part of GQL's reserved-word list, and it doesn't check function
+names. The gqlparser README lists these.
 
 The library declares the subset it covers in its README, and the subset grows
 release by release. The full 39075 grammar is very large, and a parser that
@@ -342,7 +350,16 @@ be confirmed against the text before the relevant piece is built:
    confirming that GQL does define it, so the refusal is "not supported yet"
    and not really "invalid GQL";
 9. that `<-` is a single token, so `a<-1` is `a`, `<-`, `1` and not
-   `a < -1`. The lexer does this and pins it with a test.
+   `a < -1`. The lexer does this and pins it with a test;
+10. the parser's choices on points I couldn't confirm (all pinned by tests):
+    - `-[`, `]->`, `<-[` and `]-` are written without spaces, and a space is a
+      syntax error;
+    - `||` binds looser than `+`/`-`, as in PostgreSQL, so `a || b + c` is
+      `a || (b + c)`;
+    - identifiers are case-sensitive and kept as written;
+    - `GROUP BY` names refer to `RETURN` aliases or variables;
+    - `OFFSET` / `SKIP` must come before `LIMIT`;
+    - `RETURN` items need `AS` to take an alias.
 
 ## Open decisions for the architect
 
