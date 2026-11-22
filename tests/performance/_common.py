@@ -405,7 +405,8 @@ def register_aistor_workspace() -> None:
     os.environ["AWS_SECRET_ACCESS_KEY"] = secret_key
 
     _add_iceberg_siblings()
-    from opteryx_iceberg import IcebergMetastore
+    # Operator-written config: IcebergMetastore refuses SigV4/s3.* properties (tenant REST only).
+    from opteryx_iceberg import UnrestrictedIcebergMetastore
 
     from opteryx.connectors import register_workspace
     from opteryx.connectors.opteryx_connector import OpteryxConnector
@@ -413,7 +414,7 @@ def register_aistor_workspace() -> None:
     register_workspace(
         AISTOR_WORKSPACE,
         OpteryxConnector,
-        catalog=IcebergMetastore,
+        catalog=UnrestrictedIcebergMetastore,
         catalog_type="rest",
         uri=f"{endpoint}/_iceberg",
         warehouse=AISTOR_WAREHOUSE,
@@ -421,6 +422,10 @@ def register_aistor_workspace() -> None:
             "rest.sigv4-enabled": "true",
             "rest.signing-name": "s3tables",
             "rest.signing-region": AISTOR_REGION,
+            # AIStor's /v1/config serves client.region="dummy" (pyiceberg used to let it win);
+            # the REST guard refuses a served transport key that differs from the configured
+            # one, so configure the same value. Region comes from s3.region / signing-region.
+            "client.region": "dummy",
             "s3.endpoint": endpoint,
             "s3.access-key-id": access_key,
             "s3.secret-access-key": secret_key,
@@ -461,7 +466,8 @@ def local_iceberg_properties() -> dict:
 def register_local_iceberg_workspace() -> None:
     """Bind workspace `iceberg` to the local SQL catalog under scratch/hits_iceberg."""
     _add_iceberg_siblings()
-    from opteryx_iceberg import IcebergMetastore
+    # Operator-written config: IcebergMetastore takes tenant REST bindings only.
+    from opteryx_iceberg import UnrestrictedIcebergMetastore
 
     from opteryx.connectors import register_workspace
     from opteryx.connectors.opteryx_connector import OpteryxConnector
@@ -469,7 +475,7 @@ def register_local_iceberg_workspace() -> None:
     register_workspace(
         LOCAL_ICEBERG_WORKSPACE,
         OpteryxConnector,
-        catalog=IcebergMetastore,
+        catalog=UnrestrictedIcebergMetastore,
         catalog_type="sql",
         **local_iceberg_properties(),
     )
