@@ -1,4 +1,5 @@
 #include "csv_column_builder.hpp"
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 #include "../../declared_parse.hpp"   // explicit_schema strict per-value parse (shared with JSONL)
 #include "../../predicate_literal.hpp" // predicate literal vs column type contract (shared with JSONL)
 #include "csv_scan.hpp"
@@ -1016,7 +1017,7 @@ StreamResult build_columns_streaming(
     // the next kMaxChunkBytes; its safe row-boundary splits (outside quoted fields) are
     // both the thread splits and, when the window is not the rest of the body, the cut:
     // the chunk ends one past the window's last split, and the next window starts there.
-    size_t hw = std::thread::hardware_concurrency();
+    size_t hw = draken_host_cpus();
     if (hw == 0) hw = 1;
     const size_t nt = max_threads ? std::min(max_threads, hw) : hw;
 

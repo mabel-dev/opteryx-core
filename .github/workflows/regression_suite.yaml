@@ -476,3 +476,76 @@ jobs:
           name: slt-coverage-html
           path: htmlcov/slt
           if-no-files-found: ignore
+
+  # The floor at a 190-vCPU host's widths (`make wide`, HOST_CPU_COUNT=190 -
+  # draken/core/host_cpus.h), the release.yaml `test-python` wide leg run on every
+  # commit. The ClickBench c6a.metal runs keep finding bugs that exist only at that
+  # width (66+ vCPU fetch-ahead refusal; slab frontier leak + exit deadlock); a
+  # 4-vCPU runner reaches them only through the override. It runs slt, so it takes
+  # the sqllogictest job's runner setup.
+  wide_floor:
+    needs: compile
+    name: make wide — floor at 190-vCPU widths (HOST_CPU_COUNT=190)
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.14 x64
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+          architecture: x64
+
+      - name: Verify system packages
+        run: |
+          dpkg -s libssl-dev pkg-config > /dev/null
+          pkg-config --exists openssl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same cache key as the sqllogictest job and release.yaml `test-python`.
+      - name: Cache cargo registry and sqllogictest build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/sqllogictest
+          key: sqllogictest-${{ runner.os }}-v1
+
+      - name: Build sqllogictest binary
+        run: |
+          if ! command -v sqllogictest &>/dev/null; then
+            cargo install sqllogictest-bin \
+              --git https://github.com/mabel-dev/sqllogictest \
+              --locked
+          fi
+
+      - name: Install Opteryx requirements
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --upgrade numpy
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+
+      - name: Restore compiled tree
+        uses: actions/download-artifact@v7
+        with:
+          name: compiled-tree
+
+      - name: Verify the compiled tree imports
+        run: python -c "import draken, rugo, skene, opteryx; print(opteryx.__version__)"
+
+      # slt's catalog-backed writes skip without opteryx_catalog; a skip is not a pass.
+      - name: Verify opteryx_catalog is installed
+        run: |
+          python -c "import opteryx_catalog, importlib.metadata as m; print('opteryx-catalog', m.version('opteryx-catalog'))"
+
+      - name: make wide — floor at 190-vCPU widths (HOST_CPU_COUNT=190)
+        run: make wide
+        env:
+          OPTERYX_HOME: ${{ github.workspace }}

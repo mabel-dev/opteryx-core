@@ -1,4 +1,5 @@
 #include "avro_reader.hpp"
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 
 #include <atomic>
 #include <exception>
@@ -2021,7 +2022,7 @@ void read_avro_buffer(const uint8_t* data, size_t size, const std::vector<std::s
     out.batches.clear();
     out.batches.resize(ranges.size());
 
-    const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+    const size_t hw = std::max<size_t>(1, draken_host_cpus());
     const size_t threads = std::min(max_threads ? max_threads : hw, ranges.size());
     if (threads <= 1) {
         AvroFile::Worker worker(file);

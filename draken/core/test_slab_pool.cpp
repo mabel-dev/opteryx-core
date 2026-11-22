@@ -53,6 +53,20 @@ static void test_tiers() {
     }
 }
 
+// The frontier grows kGrowSlots at a time; the slots past a request must stay free
+// for the next one, or every fresh run strands up to 15 slots of the reservation
+// (c6a.metal ClickBench load, 2026-11-22: 256 GiB mapped at 25 GB in use -> NULL).
+static void test_frontier_remainder_is_free() {
+    const int n = 256;
+    std::vector<void*> held;
+    const DrakenSlabStats before = draken_slab_stats();
+    for (int i = 0; i < n; ++i) held.push_back(draken_malloc(DRAKEN_SLAB_SLOT));
+    const DrakenSlabStats after = draken_slab_stats();
+    for (void* p : held) CHECK(p != nullptr);
+    CHECK(after.mapped_bytes - before.mapped_bytes <= int64_t(n + 16) * int64_t(DRAKEN_SLAB_SLOT));
+    for (void* p : held) draken_free(p);
+}
+
 // calloc zeroes a recycled block (it may hold the previous user's bytes).
 static void test_calloc_recycled_is_zero() {
     uint8_t* p = static_cast<uint8_t*>(draken_malloc(256 * K));
@@ -254,6 +268,7 @@ static void test_prefault() {
 
 int main() {
     test_tiers();
+    test_frontier_remainder_is_free();
     test_calloc_recycled_is_zero();
     test_realloc();
     test_recycle_and_budget();
