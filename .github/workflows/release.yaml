@@ -70,6 +70,7 @@ jobs:
   #   make st  — skene native C++ suite + Python binding/scan/dispatch tests
   #   make slt — sqllogictest suite, incl. MERGE/UPDATE/DELETE/OPTIMIZE on the
   #              catalog-backed `cat` workspace (tests/tools/local_catalog.py)
+  #   make wide — q's battery + slt at 190-vCPU widths (HOST_CPU_COUNT=190)
   #
   # None of them need cloud credentials, so these jobs need no secrets.
   #
@@ -209,6 +210,11 @@ jobs:
             name: make slt — sqllogictest suite (incl. catalog-backed writes)
           - target: ft
             name: make ft — fork statement execution (CLONE/RESYNC/DETACH)
+          # q's battery + slt at a 190-vCPU host's widths (HOST_CPU_COUNT,
+          # draken/core/host_cpus.h): the width-only bugs the ClickBench c6a.metal
+          # runs found. Runs slt, so it takes the sqllogictest runner steps below.
+          - target: wide
+            name: make wide — floor at 190-vCPU widths (HOST_CPU_COUNT=190)
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -236,12 +242,12 @@ jobs:
       # `make slt` drives the external sqllogictest-rs runner, a Rust binary - the one
       # thing a floor leg builds rather than restores. Same build and cache key as the
       # regression_suite.yaml `sqllogictest` job, so a warm cache makes this a no-op.
-      - name: Install Rust toolchain (slt only)
-        if: matrix.target == 'slt'
+      - name: Install Rust toolchain (slt + wide)
+        if: matrix.target == 'slt' || matrix.target == 'wide'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache sqllogictest build (slt only)
-        if: matrix.target == 'slt'
+      - name: Cache sqllogictest build (slt + wide)
+        if: matrix.target == 'slt' || matrix.target == 'wide'
         uses: actions/cache@v5
         with:
           path: |
@@ -250,8 +256,8 @@ jobs:
             ~/.cargo/bin/sqllogictest
           key: sqllogictest-${{ runner.os }}-v1
 
-      - name: Build sqllogictest binary (slt only)
-        if: matrix.target == 'slt'
+      - name: Build sqllogictest binary (slt + wide)
+        if: matrix.target == 'slt' || matrix.target == 'wide'
         run: |
           if ! command -v sqllogictest &>/dev/null; then
             cargo install sqllogictest-bin \

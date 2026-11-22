@@ -70,6 +70,7 @@ SKENE_INC  := -I$(ROOT)/skene/include -I$(ROOT)/skene/src -I$(ZSTD_DIR) \
 SKENE_SRCS := $(wildcard $(ROOT)/skene/src/*.cpp) \
               $(ROOT)/draken/core/vector_alloc.cpp \
               $(ROOT)/draken/core/mem_account.cpp \
+              $(ROOT)/draken/core/slab_pool.cpp \
               $(ROOT)/draken/simd/simd_hash.cpp \
               $(ROOT)/draken/simd/simd_env.cpp \
               $(ROOT)/draken/simd/cpu_features.cpp \
@@ -91,7 +92,8 @@ PARQUET_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/parquet $(DRAKEN_INC) \
                 -I$(ZSTD_DIR) -I$(ROOT)/third_party/bshoshany \
                 -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
                 -I$(ROOT)/third_party/miniz -I$(ROOT)/third_party/libdeflate \
-                -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/jkjeon/include
+                -I$(ROOT)/third_party/mabel -I$(ROOT)/third_party/jkjeon/include \
+                -I$(ROOT)/third_party/yyjson/src
 # %_test.cpp carries its own main() and would collide with replay_main.cpp's.
 # _parquet_column_wrap.cpp is the Python edge (Python.h), excluded like the
 # JSONL/CSV column builders below.
@@ -103,13 +105,15 @@ PARQUET_SRCS := $(filter-out %_test.cpp %/_parquet_column_wrap.cpp,$(wildcard $(
                 $(ROOT)/third_party/miniz/miniz_tinfl.cpp \
                 $(ROOT)/draken/core/vector_alloc.cpp \
                 $(ROOT)/draken/core/mem_account.cpp \
+                $(ROOT)/draken/core/slab_pool.cpp \
                 $(ROOT)/draken/core/chunk_cache.cpp \
                 $(ROOT)/draken/core/trace_bridge.cpp \
                 $(ZSTD_SRCS)
 # C sources: libdeflate for the GZIP codec (compression.cpp), mabel base64 for the
 # STRUCT/MAP JSON-text renderer (nested_json.cpp; its float text is header-only
-# dragonbox).
-PARQUET_CSRCS := $(ROOT)/third_party/libdeflate/lib/deflate_decompress.c \
+# dragonbox), yyjson for its JSON path reads (draken/ops/json_extract.h).
+PARQUET_CSRCS := $(ROOT)/third_party/yyjson/src/yyjson.c \
+                 $(ROOT)/third_party/libdeflate/lib/deflate_decompress.c \
                  $(ROOT)/third_party/libdeflate/lib/gzip_decompress.c \
                  $(ROOT)/third_party/libdeflate/lib/crc32.c \
                  $(ROOT)/third_party/libdeflate/lib/utils.c \
@@ -126,10 +130,12 @@ PARQUET_DEFS := -DRUGO_PARQUET_CREATED_BY='"opteryx-fuzz"' -DHAVE_ZSTD
 TEXT_INC   := -I$(ROOT)/rugo/src $(DRAKEN_INC) -I$(ROOT)/third_party/fastfloat \
               -I$(ROOT)/third_party/bshoshany -I$(ROOT)/src/cpp
 # declared_type.cpp: explicit_schema / predicate-literal type names (interpreter.cpp).
-# mem_account.cpp: ByteArena allocates through draken_malloc (core/alloc.h).
+# mem_account.cpp + slab_pool.cpp: ByteArena allocates through draken_malloc (core/alloc.h),
+# whose large tier is the slab pool.
 JSONL_SRCS := $(filter-out %/column_builder.cpp,$(wildcard $(ROOT)/rugo/src/jsonl/core/*.cpp)) \
               $(ROOT)/rugo/src/declared_type.cpp \
-              $(ROOT)/draken/core/mem_account.cpp
+              $(ROOT)/draken/core/mem_account.cpp \
+              $(ROOT)/draken/core/slab_pool.cpp
 CSV_SRCS   := $(filter-out %/csv_column_builder.cpp,$(wildcard $(ROOT)/rugo/src/csv/core/*.cpp))
 
 # --- rugo avro ----------------------------------------------------------------
@@ -146,6 +152,7 @@ AVRO_SRCS := $(ROOT)/rugo/src/avro/avro_schema.cpp \
              $(ROOT)/rugo/src/avro/avro_container.cpp \
              $(ROOT)/rugo/src/avro/avro_reader.cpp \
              $(ROOT)/draken/core/mem_account.cpp \
+             $(ROOT)/draken/core/slab_pool.cpp \
              $(ROOT)/third_party/snappy/snappy.cc \
              $(ROOT)/third_party/snappy/snappy-sinksource.cc \
              $(ROOT)/third_party/snappy/snappy-stubs-internal.cc \

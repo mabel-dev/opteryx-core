@@ -34,6 +34,8 @@ increment; an unsupported backend fails loudly rather than silently no-op'ing.
 from __future__ import annotations
 
 import os
+
+from opteryx.compiled.platform import cpu_count  # HOST_CPU_COUNT-aware (draken/core/host_cpus.h)
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 from typing import List
@@ -287,7 +289,7 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
 
 
 def _worker_count(n_files: int) -> int:
-    return max(1, min(n_files, (os.cpu_count() or 1)))
+    return max(1, min(n_files, (cpu_count() or 1)))
 
 
 def _write_manifest_atomic(manifest_path: str, manifest) -> None:

@@ -9,6 +9,7 @@
 // caller is never one of its own workers.
 
 #include "BS_thread_pool.hpp"   // vendored bshoshany pool (same as the readers)
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 
 #include <thread>
 
@@ -16,7 +17,7 @@ namespace rugo_writer {
 
 inline size_t pool_width() {
   static const size_t width = [] {
-    size_t hw = std::thread::hardware_concurrency();
+    size_t hw = draken_host_cpus();
     return hw == 0 ? (size_t)1 : hw;
   }();
   return width;

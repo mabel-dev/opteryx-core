@@ -4185,56 +4185,45 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
 cdef struct _EnginePlanArg:
     void* engine        # Engine* — borrowed; the NativePlan PyObject owns it
     int dop
-    PyObject* nplan     # borrowed NativePlan (keeps engine + scans alive via caller)
-    PyObject* out_q     # borrowed PyMorselQueue
-    PyObject* errslot   # borrowed NativeErrorSlot — the driver records the terminal
-                        # ErrCtx (code + msg copy) here; NO Python object is mutated.
-                        # The consumer reads it after the queue is finished.
     void* pool          # opaque BSThreadPoolBridge* — see executor.hpp for why void*
-
-
-cdef void _engine_plan_run(_EnginePlanArg* a) noexcept with gil:
-    """Driver-task body. The engine run itself happens DETACHED (``with nogil``):
-    this thread blocks indefinitely inside ``bs_pool_wait_native`` with no safe
-    point, and on free-threaded CPython a thread that stays ATTACHED while blocked
-    in native code stalls every stop-the-world (GC) — which then parks every scan
-    worker at its trampoline's attach, wedging the whole query. Proven live: the
-    lldb signature is ``_PyThreadState_Attach -> _PyParkingLot_Park`` under
-    ``submit_work_native`` on all workers while this thread sits in ``wait_native``.
-
-    Completion/error are coordinated back to the consumer with NATIVE machinery only:
-    the terminal ErrCtx is copied into the native ``errslot`` (a C int + a std::string,
-    no Python object), and the driver's LAST act is ``out_q.finish()`` — the queue's
-    own out-of-band finish signal. The consumer observing the queue finished is itself
-    proof this driver has returned from ``eng.run()`` (every worker joined) and stopped
-    touching the pool; it then builds the Python exception from ``errslot`` on its own
-    thread. No borrowed ``threading.Event`` and no borrowed ``list`` are touched here."""
-    cdef ErrCtx err
-    cdef object out_q = <object>a.out_q
-    cdef NativeErrorSlot errslot = <NativeErrorSlot>(<object>a.errslot)
-    cdef Engine* eng = <Engine*>a.engine
-    cdef int dop = a.dop
-    cdef void* pool = a.pool
-    err.code = 0
-    err.msg = NULL
-    try:
-        with nogil:
-            eng.run(dop, pool, err)
-        # Record the terminal ErrCtx natively (int + std::string copy — the msg
-        # pointer is "valid at raise time", i.e. now, so copy it before it can go
-        # stale). The consumer turns this into the Python exception after finish().
-        errslot.code = err.code
-        if err.code != 0 and err.msg != NULL:
-            errslot.msg = string(err.msg)
-    finally:
-        # LAST act: the sole, purely-native completion signal. Ordered AFTER the
-        # errslot write (which the consumer reads only once it observes finish, so
-        # the write is visible via the finish/get acquire-release handshake).
-        out_q.finish()
+    # The driver's OWN reference to the output queue (heap shared_ptr, released by the
+    # driver right after finish()): the consumer may drop its PyMorselQueue the moment
+    # it observes finish, while finish() is still returning on this thread.
+    shared_ptr[MorselQueue]* out_q
+    int* err_code       # &NativeErrorSlot.code - written BEFORE finish(); the consumer
+    string* err_msg     # &NativeErrorSlot.msg  - holds the slot until it sees finish
 
 
 cdef void _engine_plan_task(void* arg) noexcept nogil:
-    _engine_plan_run(<_EnginePlanArg*>arg)
+    """Driver-task body, GIL-FREE end to end: it never attaches to the interpreter.
+
+    Attaching at any point is a hang. On free-threaded CPython a thread ATTACHED while
+    blocked in ``eng.run``'s native wait stalls every stop-the-world GC, parking every
+    scan worker at its attach (lldb: ``_PyThreadState_Attach -> _PyParkingLot_Park``).
+    And a thread that attaches after interpreter finalization has begun is parked
+    forever (``PyThread_hang_thread``), so a consumer whose generator is only closed at
+    exit - an uncaught error with the generator held in a variable - would wait in
+    ``wait_finished`` for a ``finish()`` that never comes (ClickBench c6a.metal load,
+    2026-11-22: a 10 h timeout).
+
+    Completion and error reach the consumer natively: the terminal ErrCtx is copied
+    into the NativeErrorSlot's C fields, and the LAST act is ``finish()`` on the queue -
+    its own out-of-band signal, whose acquire-release handshake publishes the slot
+    write. Observing finish proves this driver has returned from ``eng.run()`` (every
+    worker joined) and stopped touching the pool and ``arg``; the consumer then builds
+    the Python exception from the slot on its own thread."""
+    cdef _EnginePlanArg* a = <_EnginePlanArg*>arg
+    cdef ErrCtx err
+    cdef shared_ptr[MorselQueue]* out_q = a.out_q
+    err.code = 0
+    err.msg = NULL
+    (<Engine*>a.engine).run(a.dop, a.pool, err)
+    # The msg pointer is "valid at raise time", i.e. now: copy it before it can go stale.
+    a.err_code[0] = err.code
+    if err.code != 0 and err.msg != NULL:
+        a.err_msg[0] = string(err.msg)
+    out_q[0].get().finish()   # `a` may be freed by the consumer from here on
+    del out_q
 
 
 def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
@@ -4243,7 +4232,7 @@ def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
     spawn_detached_native_task — a lone detached std::thread, NOT a task on ``pool``:
     the driver blocks in ``eng.run``'s native wait with no safe point, and on
     free-threaded CPython a thread that stays ATTACHED while blocked in native code
-    stalls every stop-the-world GC (see ``_engine_plan_run``'s docstring). It runs every
+    stalls every stop-the-world GC (see ``_engine_plan_task``'s docstring). It runs every
     pipeline in the graph at degree ``dop`` on ``pool`` and streams the terminal
     pipeline into
     ``out_q``. Completion is signalled purely natively via ``out_q.finish()`` (the
@@ -4259,10 +4248,10 @@ def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
     handle._args = <void*>a
     a.engine = <void*>nplan._e
     a.dop = dop
-    a.nplan = <PyObject*>nplan
-    a.out_q = <PyObject*>out_q
-    a.errslot = <PyObject*>errslot
     a.pool = <void*>pool._pool
+    a.err_code = &errslot.code
+    a.err_msg = &errslot.msg
+    a.out_q = new shared_ptr[MorselQueue](out_q._q)
     spawn_detached_native_task(_engine_plan_task, a)
     return handle
 

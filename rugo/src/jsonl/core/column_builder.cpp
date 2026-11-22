@@ -1,4 +1,5 @@
 #include "column_builder.hpp"
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 #include "fast_parsers.hpp"
 #include "nested_column.hpp"
 #include "json_canonical.hpp"
@@ -1489,7 +1490,7 @@ std::vector<ParsedColumn> parse_all_columns(
                                 " rows in one read; a column holds at most " +
                                 std::to_string(UINT32_MAX));
 
-    size_t hw = std::thread::hardware_concurrency();
+    size_t hw = draken_host_cpus();
     if (hw == 0) hw = 1;
     const size_t cap = std::min(hw, max_threads ? max_threads : hw);
     size_t nt = std::min(cap, ncols);

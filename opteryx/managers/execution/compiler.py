@@ -23,11 +23,11 @@ Special (non-relational) operations — EXPLAIN / SET / SHOW / INSERT / DDL — 
 reach this module; ``managers/execution/__init__.py`` routes them to serial_engine.
 """
 
-import os
 import threading
 
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
+from opteryx.compiled.platform import cpu_count  # HOST_CPU_COUNT-aware (draken/core/host_cpus.h)
 from opteryx.constants import ResultType
 from opteryx.exceptions import CidrAggTypeError
 from opteryx.exceptions import InvalidInternalStateError
@@ -115,7 +115,7 @@ def resolve_worker_count(requested) -> int:
     change to the config attribute moves the next session."""
     from opteryx import config
 
-    cpu = os.cpu_count() or 1
+    cpu = cpu_count() or 1
     if requested is None or requested <= 0:
         # Delegated, not repeated: `config.resolve_max_execution_workers` is the one
         # derivation of the auto branch, and the system-variable table applies the
@@ -306,6 +306,11 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
             continue
         entry["row_groups_read"] = plan.row_groups_decoded
         entry["parquet_rows_before_filter"] = plan.rows_decoded
+        # Runtime join KEY filter: rows tested / admitted in the decode workers.
+        # Absent when no row met a key filter, so "not armed" never reads as "0 kept".
+        key_filter_rows = plan.key_filter_rows
+        if key_filter_rows is not None:
+            entry["key_filter_rows_in"], entry["key_filter_rows_out"] = key_filter_rows
     for plan in parquet_plans or []:
         identity = getattr(plan, "scan_identity", None)
         if identity is None:
@@ -6938,7 +6943,7 @@ class _Compiler:
             # replacing the 2026-10-01 "every core but two") — decode is the scan's
             # critical path and the engine's workers sit idle waiting on it. Not the
             # parquet IO derivation's 80%-of-host branch.
-            max(1, os.cpu_count() or 1),
+            max(1, cpu_count() or 1),
         )
         plan.scan_identity = scan.identity
         self.scan_sources[scan.identity] = "NativeJsonlScanSource"
@@ -7126,7 +7131,7 @@ class _Compiler:
             zero_columns,
             # The Source's own decode pool, as the JSONL Source's: every core. The unit
             # of work is a batch of whole blocks, so even one file uses the whole pool.
-            max(1, os.cpu_count() or 1),
+            max(1, cpu_count() or 1),
             # A catalog table's files are matched to the table's columns by field id.
             scan.avro_require_field_ids,
             auth_header,
@@ -7176,7 +7181,7 @@ class _Compiler:
             [decode_index[name] for name in physical],
             zero_columns,
             scan.orc_match_by_id,
-            max(1, os.cpu_count() or 1),
+            max(1, cpu_count() or 1),
         )
         plan.scan_identity = scan.identity
         self.scan_sources[scan.identity] = "NativeOrcScanSource"

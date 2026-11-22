@@ -4,10 +4,11 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 import json
-import os as _os
 import typing
 from os import environ
 from typing import Optional
+
+from opteryx.compiled.platform import cpu_count as _host_cpu_count  # HOST_CPU_COUNT-aware (draken/core/host_cpus.h)
 
 
 def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
@@ -340,7 +341,7 @@ def resolve_parquet_local_io_workers(requested: Optional[int] = None) -> int:
         requested = PARQUET_LOCAL_IO_WORKERS
     requested = int(requested)
     if requested <= 0:
-        cpu = _os.cpu_count() or 1
+        cpu = _host_cpu_count() or 1
         return max(4, cpu - 2, (cpu * 4) // 5)
     return requested
 
@@ -777,7 +778,7 @@ def resolve_max_execution_workers(requested: Optional[int] = None) -> int:
         requested = MAX_EXECUTION_WORKERS
     requested = int(requested)
     if requested <= 0:
-        cpu = _os.cpu_count() or 1
+        cpu = _host_cpu_count() or 1
         return max(2, cpu - 2, (cpu * 4) // 5)
     return requested
 

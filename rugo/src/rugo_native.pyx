@@ -36,6 +36,16 @@ cdef inline object _rugo_steal(PyObject* raw):
     return obj
 
 
+cdef extern from "core/host_cpus.h" nogil:
+    unsigned draken_host_cpu_override()
+
+
+def host_cpu_override() -> int:
+    """HOST_CPU_COUNT, or 0 when unset - parsed once, natively (draken/core/host_cpus.h),
+    so the Python edge cannot disagree with rugo's native pools about the host width."""
+    return draken_host_cpu_override()
+
+
 include "_text_render.pxi"          # shared descriptor for the CSV / JSONL writers
 include "_predicate_literal.pxi"     # predicate literal kinds for the CSV / JSONL readers
 include "compression/_decompress.pxi"   # gzip/zstd/lz4 input for the JSONL / CSV readers

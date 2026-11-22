@@ -51,8 +51,8 @@ uint64_t get_page_size_bytes() noexcept;
 
 
 
-// Get CPU count (hardware threads)
-// On macOS/Linux: uses sysconf(_SC_NPROCESSORS_ONLN)
+// Get CPU count (hardware threads): HOST_CPU_COUNT when set (draken/core/host_cpus.h),
+// else sysconf(_SC_NPROCESSORS_ONLN) on macOS/Linux
 int get_cpu_count() noexcept;
 
 // Check if running on macOS

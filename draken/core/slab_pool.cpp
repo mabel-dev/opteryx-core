@@ -126,7 +126,12 @@ inline uint32_t class_full_mask(int c) {
     return n == 32 ? 0xFFFFFFFFu : ((1u << n) - 1u);
 }
 
-// Make slots [0, want) writable, growing the frontier in kGrowSlots steps. Under mtx.
+void free_runs_insert_locked(Pool& P, uint32_t s, uint32_t len);
+
+// Make slots [0, want) writable, growing the frontier in kGrowSlots steps. The
+// caller takes the slots up to `want`; the rounding remainder [want, frontier)
+// goes into the free runs - otherwise every frontier acquire strands up to
+// kGrowSlots - 1 slots of the reservation for good. Under mtx.
 bool grow_locked(Pool& P, uint32_t want) {
     if (want <= P.frontier) return true;
     if (want > kMaxSlots) return false;
@@ -142,6 +147,7 @@ bool grow_locked(Pool& P, uint32_t want) {
     else if (errno != EINVAL) die("MADV_HUGEPAGE on the slab frontier failed");
 #endif
     P.frontier = to;
+    if (to > want) free_runs_insert_locked(P, want, to - want);
     return true;
 }
 

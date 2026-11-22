@@ -44,6 +44,7 @@
 // fail loud, never a silent wrong answer.
 
 #include <algorithm>
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -1807,6 +1808,7 @@ struct GBLaneView {
     const HllppSketch* hll = nullptr;     // APPROX_COUNT_DISTINCT per-group sketches
     TDigestPtr* td = nullptr;             // APPROX_PERCENTILE per-group sketches
     const AggSpec2* pct_spec = nullptr;   // APPROX_PERCENTILE / Quantile p (+ direction)
+    unsigned quantile_width = 1;          // threads an exact-quantile select may use (ungrouped: query DOP)
 };
 
 // Steal a freshly-built column's owner into a unique_ptr for VectorOwner::child_owner.
@@ -2266,7 +2268,7 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             for (uint32_t i = 0; i < n; ++i) {
                 if (L.quantile[i].size == 0) continue;
                 okp[i] = 1;
-                double q = L.quantile[i].finalize_quantile(p, desc);
+                double q = L.quantile[i].finalize_quantile(p, desc, L.quantile_width);
                 std::memcpy(&raws[i], &q, sizeof(double));
             }
             return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
@@ -3439,6 +3441,7 @@ struct UngroupedAggSink : Sink {
             lv.hll = &g.hlls[s];
             lv.td = &g.tds[s];
             lv.pct_spec = &specs[s];
+            lv.quantile_width = static_cast<unsigned>(g.query_dop);
             m->columns.push_back(emit_lane_column(g.meta[s], kind, lv, 1, err));
             if (err.code != 0) return;
             m->names.push_back(specs[s].name);
@@ -7891,7 +7894,7 @@ struct GroupBySink : Sink {
         //
         // More threads than partitions is pure spawn cost (width 64 measured WORSE
         // than 16 on every query), so nonempty_parts remains the ceiling.
-        unsigned hw = std::thread::hardware_concurrency();
+        unsigned hw = draken_host_cpus();
         unsigned nt = hw > 2 ? hw - 2 : 1;
         if (nt > 16) nt = 16;
         // ...but never NARROWER than the width the pipeline itself ran at. The 16

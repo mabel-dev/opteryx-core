@@ -67,7 +67,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q ft rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test pipeline-latch-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q ft wide rugo-floor reference function-costs publish-reference page-index-test err-latch-test worker-exception-test pipeline-latch-test bench-is-null carchar-contest-check carchar-contest-build carchar-set-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -232,6 +232,22 @@ q:
 ft: ## Run the fork statement execution tests (CLONE/RESYNC/DETACH) — release floor, not make q
 	$(call print_blue,"Running fork statement execution tests...")
 	@$(PYTEST) tests/storage/test_clone_execution.py tests/storage/test_fork_maintenance_execution.py -q
+
+# The floor at a 190-vCPU host's widths (HOST_CPU_COUNT, draken/core/host_cpus.h): the
+# ClickBench c6a.metal shape, whose width-only bugs no 4-vCPU runner reaches by itself
+# (66+ vCPU fetch-ahead refusal 2026-10-04; slab frontier leak + exit deadlock 2026-11-22).
+# The override is PROVED first: a leg that silently ran at the runner's width would be green
+# and fake. shortcut: widths only, not cores - 190 threads share the runner's CPUs, so this
+# finds width bugs, never width performance, and data stays CI-sized; a volume x width bug
+# (the slab leak) needs its own unit test (slab-pool-test, in make q).
+wide: ## Release floor at 190-vCPU widths (HOST_CPU_COUNT=190): override proof, SQL shapes + results, exit-hang test, slt
+	$(call print_blue,"Running the floor at HOST_CPU_COUNT=190...")
+	@HOST_CPU_COUNT=190 $(PYTHON) -c "from opteryx.compiled.platform import cpu_count; n = cpu_count(); assert n == 190, f'HOST_CPU_COUNT override not in effect: cpu_count() = {n}'; print('cpu_count() =', n)"
+	@$(PYTEST) tests/unit/core/test_host_cpu_count_override.py -q
+	@HOST_CPU_COUNT=190 VALIDATE_OPTIMIZER_PLANS=1 $(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
+	@HOST_CPU_COUNT=190 $(PYTEST) tests/integration/sql_battery/test_results_battery.py tests/unit/execution/test_driver_exit_after_consumer_error.py -q
+	@HOST_CPU_COUNT=190 $(MAKE) --no-print-directory slt
+	$(call print_green,"✓ floor passed at HOST_CPU_COUNT=190")
 
 bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
 	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)

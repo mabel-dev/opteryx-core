@@ -1,4 +1,5 @@
 #include "field_span.hpp"
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 #include "interpreter.hpp"
 #include "jsonl_reader.hpp"   // choose_prefilter_plan, prefilter_plan_segments
 #include "nested_column.hpp"
@@ -164,7 +165,7 @@ InterpreterResult interpret_jsonl_threaded(
     const bool prefilter =
         use_prefilter && choose_prefilter_plan(buffer_data, buffer_length, context, plan);
 
-    size_t hw = std::thread::hardware_concurrency();
+    size_t hw = draken_host_cpus();
     if (hw == 0) hw = 1;
     size_t nt = std::min(hw, max_threads ? max_threads : hw);
 

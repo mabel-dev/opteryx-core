@@ -10,6 +10,7 @@
 // - Linux x86_64
 
 #include "platform.h"
+#include "core/host_cpus.h"  // HOST_CPU_COUNT override
 
 #if defined(__APPLE__)
 #include <sys/param.h>
@@ -185,6 +186,7 @@ uint64_t get_cgroup_memory_limit_bytes() noexcept {
 }
 
 int get_cpu_count() noexcept {
+    if (const unsigned o = draken_host_cpu_override()) return static_cast<int>(o);
 #if defined(__APPLE__) || defined(__linux__)
     const long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? static_cast<int>(n) : 0;

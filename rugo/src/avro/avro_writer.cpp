@@ -1,4 +1,5 @@
 #include "avro_writer.hpp"
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 
 #include <algorithm>
 #include <atomic>
@@ -1306,7 +1307,7 @@ bool build_enum(const DrakenVector* v, size_t max_symbols, size_t max_threads, s
         if (!name_ok(text_of(sel[i]))) return false;
         ++seen;
     }
-    const size_t threads = max_threads ? max_threads : std::max<size_t>(1, std::thread::hardware_concurrency());
+    const size_t threads = max_threads ? max_threads : std::max<size_t>(1, draken_host_cpus());
 
     // 1. Rows, by range: which physical values a non-null row uses (several rows may
     //    share one — a relaxed store of the same byte), and the column's size as strings.
@@ -1597,7 +1598,7 @@ AvroWriter::AvroWriter(std::vector<FieldSpec> fields, const WriteOptions& opts)
         schema_json_ = opts_.schema;
     }
     threads_ = opts_.max_threads ? opts_.max_threads
-                                 : std::max<size_t>(1, std::thread::hardware_concurrency());
+                                 : std::max<size_t>(1, draken_host_cpus());
     if (!opts_.have_sync) {
         std::random_device rd;
         for (int i = 0; i < 16; i += 4) {

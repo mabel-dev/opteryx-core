@@ -76,8 +76,8 @@ cdef extern from "morsels/sort.hpp" nogil:
 # Standalone callers have no query DOP: this module sorts at the host's full width,
 # the same as rugo's other native pools. The engine never comes through here — its
 # sinks pass the query's authorised width to the C++ core directly.
-cdef extern from "<thread>" namespace "std::thread" nogil:
-    unsigned hardware_concurrency()
+cdef extern from "core/host_cpus.h" nogil:
+    unsigned draken_host_cpus()
 
 
 cdef size_t SIZE_MAX_C = <size_t>-1
@@ -153,7 +153,7 @@ def sort_morsels(list morsels, list column_names, list ascending, limit=None,
     cdef bint ok
 
     with nogil:
-        ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, hardware_concurrency(), cxx_out, err)
+        ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, draken_host_cpus(), cxx_out, err)
 
     if not ok:
         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
@@ -199,7 +199,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
         if ok:
             for i in range(n):
                 perm[i] = <uint32_t>i
-            sort_perm(keys, perm, SIZE_MAX_C, hardware_concurrency())
+            sort_perm(keys, perm, SIZE_MAX_C, draken_host_cpus())
 
     if not ok:
         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")

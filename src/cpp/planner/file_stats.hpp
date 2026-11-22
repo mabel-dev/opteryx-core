@@ -31,6 +31,7 @@
 #pragma once
 
 #include <algorithm>
+#include "core/host_cpus.h"  // draken_host_cpus: the one host CPU count
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -225,7 +226,7 @@ public:
                 }
             }
         };
-        const size_t threads = std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), order.size());
+        const size_t threads = std::min<size_t>(std::max(1u, draken_host_cpus()), order.size());
         std::vector<std::thread> helpers;
         for (size_t t = 1; t < threads; ++t) helpers.emplace_back(work);
         work();

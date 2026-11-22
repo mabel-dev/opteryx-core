@@ -153,7 +153,12 @@ def _available_cpus() -> int:
     """CPUs this process may actually use: the affinity mask, then a container CPU
     quota (cgroup v2 `cpu.max`, v1 `cfs_quota_us`), then Lambda's memory-to-vCPU
     ratio. `os.cpu_count()` alone reports the host's cores, which on a one-vCPU
-    Lambda or a CPU-limited container would oversubscribe the decode threads."""
+    Lambda or a CPU-limited container would oversubscribe the decode threads.
+    HOST_CPU_COUNT (draken/core/host_cpus.h) replaces all of it: it is the width the
+    caller asked to be run at, not a measurement to clamp."""
+    override = _native.host_cpu_override()
+    if override:
+        return override
     try:
         n = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
