@@ -29,6 +29,40 @@ from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_
 from draken.core.buffers cimport draken_vector_nbytes
 from draken.core.buffers cimport draken_vector_projected_arena_bytes
 
+
+def _interval_iso8601(months, microseconds):
+    """An INTERVAL's (months, us) as the ISO-8601 duration CAST AS VARCHAR gives.
+
+    Display only (Morsel.__str__). Mirrors iso8601_duration_emit in
+    ops/sql_temporal_format.h; opteryx's expression/formatter.pyx and
+    utils/display.py carry the same mirror.
+    """
+    negative = months < 0 or microseconds < 0
+    years, months_rem = divmod(abs(months), 12)
+    days, rem = divmod(abs(microseconds), 86400000000)
+    hours, rem = divmod(rem, 3600000000)
+    minutes, rem = divmod(rem, 60000000)
+    seconds, frac = divmod(rem, 1000000)
+
+    parts = ["-P" if negative else "P"]
+    if years:
+        parts.append(f"{years}Y")
+    if months_rem:
+        parts.append(f"{months_rem}M")
+    if days:
+        parts.append(f"{days}D")
+    if hours or minutes or seconds or frac:
+        parts.append("T")
+        if hours:
+            parts.append(f"{hours}H")
+        if minutes:
+            parts.append(f"{minutes}M")
+        if seconds or frac:
+            parts.append(f"{seconds}.{frac:06d}S" if frac else f"{seconds}S")
+    if len(parts) == 1:
+        parts.append("T0S")
+    return "".join(parts)
+
 # C-level Py_DECREF: Cython 3 made cpython.ref.Py_DECREF take `object`, which
 # would re-INCREF; we need the raw PyObject* form for the C++ column store.
 cdef extern from *:
@@ -644,6 +678,8 @@ cdef class Morsel:
                     s = val.decode("utf-8")
                 except UnicodeDecodeError:
                     s = val.hex()
+            elif col_type == "INTERVAL" and isinstance(val, tuple):
+                s = _interval_iso8601(val[0], val[1])
             else:
                 s = str(val)
             if len(s) > width:

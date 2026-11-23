@@ -26,6 +26,7 @@ if True:
     import opteryx
     from opteryx.constants import ResultType
     from opteryx.exceptions import MissingSqlStatement
+    from opteryx.utils.display import format_interval
     from opteryx.utils.display import format_jsonl
     from opteryx.utils.display import format_markdown
     from opteryx.utils.display import format_table
@@ -97,7 +98,15 @@ def execute(statement: str) -> QueryResult:
         for morsel in session.execute_to_morsels(statement):
             if morsel.num_rows == 0:
                 continue
-            columns = [morsel.column(name).to_pylist() for name in morsel.column_names]
+            columns = []
+            for name in morsel.column_names:
+                vector = morsel.column(name)
+                values = vector.to_pylist()
+                # An INTERVAL comes out as a bare (months, microseconds) tuple,
+                # which every output format would otherwise show as-is.
+                if vector.type_name == "INTERVAL":
+                    values = [None if v is None else format_interval(v) for v in values]
+                columns.append(values)
             rows.extend(zip(*columns))
 
         if session.result_type == ResultType.NON_TABULAR:

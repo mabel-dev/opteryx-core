@@ -244,6 +244,26 @@ def test_jsonl_encodes_the_types_json_has_no_representation_for():
     assert encoded == {"d": 3.14, "when": "2025-01-31", "blob": "//4=", "nothing": None}
 
 
+def test_an_interval_formats_as_an_iso_8601_duration():
+    from opteryx.utils.display import format_interval
+
+    day_us = 86_400_000_000
+    assert format_interval((0, day_us)) == "P1D"
+    assert format_interval((2, 3 * 3_600_000_000)) == "P2MT3H"
+    assert format_interval((14, 0)) == "P1Y2M"
+    assert format_interval((0, 90_000_000)) == "PT1M30S"
+    assert format_interval((0, 1_500_000)) == "PT1.500000S"
+    assert format_interval((-1, -day_us)) == "-P1M1D"
+    assert format_interval((0, 0)) == "PT0S"
+
+
+def test_an_interval_column_renders_as_a_duration_not_a_tuple():
+    code, out, err = _cli("--no-color", "SELECT INTERVAL '1' DAY AS i")
+    assert code == 0, err
+    rows = [_cells(line) for line in out.splitlines() if line.startswith("│")]
+    assert ["1", "P1D"] in rows, out
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

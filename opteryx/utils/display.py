@@ -49,6 +49,43 @@ _ELLIPSIS = "\u2026"
 _MINIMUM_COLUMN_WIDTH = 6
 
 
+def format_interval(value: Tuple[int, int]) -> str:
+    """
+    Render an INTERVAL's (months, microseconds) pair as an ISO-8601 duration.
+
+    The same text `CAST(<interval> AS VARCHAR)` produces (draken's
+    iso8601_duration_emit, mirrored in expression/formatter.pyx), so a value
+    reads the same on the console as it does cast in a query. Pure Python so
+    the CLI's display does not depend on a compiled module.
+    """
+    months, microseconds = value
+    negative = months < 0 or microseconds < 0
+    years, months_rem = divmod(abs(months), 12)
+    days, rem = divmod(abs(microseconds), 86_400_000_000)
+    hours, rem = divmod(rem, 3_600_000_000)
+    minutes, rem = divmod(rem, 60_000_000)
+    seconds, frac = divmod(rem, 1_000_000)
+
+    parts = ["-P" if negative else "P"]
+    if years:
+        parts.append(f"{years}Y")
+    if months_rem:
+        parts.append(f"{months_rem}M")
+    if days:
+        parts.append(f"{days}D")
+    if hours or minutes or seconds or frac:
+        parts.append("T")
+        if hours:
+            parts.append(f"{hours}H")
+        if minutes:
+            parts.append(f"{minutes}M")
+        if seconds or frac:
+            parts.append(f"{seconds}.{frac:06d}S" if frac else f"{seconds}S")
+    if len(parts) == 1:
+        parts.append("T0S")
+    return "".join(parts)
+
+
 def _cell(value: Any) -> Tuple[str, str, bool]:
     """
     Convert a single value to its display form.
