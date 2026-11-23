@@ -398,6 +398,8 @@ enum class AggFn : uint8_t {
 constexpr int kAggNoOperand = -1;   // CountStar: no operand column
 constexpr int kAggWholeRow  = -2;   // CountDistinct: dedup over EVERY column in
                                      // the stream (COUNT(DISTINCT *))
+constexpr int kMinMaxUnpaired  = -1;   // AggSpec2::minmax_partner: an ordinary MIN/MAX
+constexpr int kMinMaxPairOwner = -2;   // AggSpec2::minmax_partner: owns the pair's record
 constexpr int kQuantileOwnsBuffer = -1;   // AggSpec2::quantile_owner: buffers its own
 
 struct AggSpec2 {
@@ -431,6 +433,12 @@ struct AggSpec2 {
     // finalize and which it never appends to. The compiler assigns it; the sinks
     // check it (quantile_spec_check) — a mis-assigned owner fails, never answers.
     int     quantile_owner = -1;
+    // GROUP BY MIN + MAX over one column as one record (docs/GROUPBY_MINMAX_PAIR_DESIGN.md).
+    // kMinMaxUnpaired: an ordinary spec. kMinMaxPairOwner: this spec owns the pair's
+    // record. Otherwise the index of the EARLIER owner, of the opposite direction over
+    // the same column, whose record this spec reads. The compiler assigns it; the sink
+    // checks it (minmax_pair_check) — a mis-assigned pair fails, never answers.
+    int     minmax_partner = kMinMaxUnpaired;
     // SUM/AVG/STDDEV family/MEDIAN(DISTINCT col) — see agg_fn_takes_distinct_operand.
     // The operand is deduped exactly as COUNT(DISTINCT col) dedups it (draken value
     // hash, 64-bit hash identity, NULLs excluded) and each distinct VALUE is carried
@@ -571,6 +579,76 @@ inline bool quantile_spec_check(const std::vector<AggSpec2>& specs, size_t s, Er
                   "silent wrong answer";
         return false;
     }
+    return true;
+}
+
+// The types a MIN/MAX pair holds: exactly sort_num_key's integer-domain cases, whose
+// order key inverts to the raw container (gb_mm_raw). Floats are not among them: the
+// key canonicalises -0.0 and maps every NaN to one value.
+inline bool minmax_pair_type_ok(DrakenType t) {
+    switch (t) {
+        case DRAKEN_INT8: case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+        case DRAKEN_DATE32: case DRAKEN_TIMESTAMP64: case DRAKEN_TIME32: case DRAKEN_TIME64:
+        case DRAKEN_DECIMAL: case DRAKEN_BOOL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// sort_num_key's encoding of a raw container, and its inverse — the pair stores keys only.
+inline uint64_t gb_mm_key(DrakenType t, int64_t raw) noexcept {
+    switch (t) {
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+            return static_cast<uint64_t>(raw);
+        default:
+            return static_cast<uint64_t>(raw) ^ 0x8000000000000000ULL;
+    }
+}
+inline int64_t gb_mm_raw(DrakenType t, uint64_t key) noexcept {
+    switch (t) {
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
+            return static_cast<int64_t>(key);
+        default:
+            return static_cast<int64_t>(key ^ 0x8000000000000000ULL);
+    }
+}
+
+// MIN/MAX pair spec s (AggSpec2::minmax_partner), checked at capture once its operand
+// type is known: a non-DISTINCT MIN or MAX over a pairable type, and EITHER an owner
+// named by exactly one later spec, OR a spec naming an earlier owner of the opposite
+// direction over the same column. Anything else reading a record would be a
+// confident answer about the wrong extreme.
+inline bool minmax_pair_check(const std::vector<AggSpec2>& specs, size_t s,
+                              const AggColMeta& m, ErrCtx& err) {
+    const AggSpec2& sp = specs[s];
+    if (sp.minmax_partner == kMinMaxUnpaired) return true;
+    auto bad = [&err]() {
+        err.code = 1;
+        err.msg = "GROUP BY MIN/MAX pair spec is not a non-DISTINCT MIN and MAX over the "
+                  "same non-float fixed-width column — compiler invariant violated, fail "
+                  "loud, never the wrong extreme";
+        return false;
+    };
+    const bool is_minmax = sp.fn == AggFn::Min || sp.fn == AggFn::Max;
+    if (!is_minmax || sp.distinct_operand || m.is_string || m.is_float
+            || !minmax_pair_type_ok(m.type))
+        return bad();
+    if (sp.minmax_partner == kMinMaxPairOwner) {
+        size_t partners = 0;
+        for (size_t t = s + 1; t < specs.size(); ++t)
+            if (specs[t].minmax_partner == static_cast<int>(s)) ++partners;
+        return partners == 1 ? true : bad();
+    }
+    const int o = sp.minmax_partner;
+    if (o < 0 || static_cast<size_t>(o) >= s) return bad();
+    const AggSpec2& os = specs[static_cast<size_t>(o)];
+    const bool opposite = (os.fn == AggFn::Min && sp.fn == AggFn::Max)
+                          || (os.fn == AggFn::Max && sp.fn == AggFn::Min);
+    if (os.minmax_partner != kMinMaxPairOwner || os.col_idx != sp.col_idx || !opposite
+            || os.distinct_operand)
+        return bad();
     return true;
 }
 
@@ -1458,6 +1536,11 @@ enum class GBKind : uint8_t {
                  // with no non-NULL addresses emits an EMPTY array, matching
                  // "the set of addresses seen", which is a real and empty answer
                  // rather than an unknown one.
+    MinMaxPair,     // MIN + MAX over one non-float fixed-width column (AggSpec2::
+                    // minmax_partner owner): one GBMinMaxRec per group holds both
+                    // order keys and the count; the raw values are the keys inverted
+    MinMaxPartner,  // the pair's other spec: NO lanes of its own — emit reads the
+                    // owner's record in this spec's direction
 };
 
 // Which GBArrayAggState lane an ARRAY_AGG operand's values live in. One store per
@@ -1724,6 +1807,9 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
         case AggFn::Min:
         case AggFn::Max:
         case AggFn::AnyValue:   // always the min-direction lane — see AggFn::AnyValue
+            // A pair's eligibility (fn, type, partner) is minmax_pair_check's, at capture.
+            if (sp.minmax_partner == kMinMaxPairOwner) return GBKind::MinMaxPair;
+            if (sp.minmax_partner != kMinMaxUnpaired) return GBKind::MinMaxPartner;
             if (m.is_string) return GBKind::MinMaxStr;
             if (m.type == DRAKEN_DECIMAL128 || m.type == DRAKEN_UUID) return GBKind::MinMaxD128;
             return GBKind::MinMaxNum;
@@ -1790,7 +1876,19 @@ inline CxxColumn emit_i128_lane_column(const __int128* vals, const int64_t* vali
 
 // Per-spec lane slices for one emit chunk of `n` groups. Only the pointers the
 // spec's kind reads are set.
+// A MIN/MAX pair's per-group state (GBKind::MinMaxPair): both order keys and the
+// non-NULL count side by side, so one row touches one cache line, not one per lane.
+struct GBMinMaxRec {
+    uint64_t min_key;
+    uint64_t max_key;
+    int64_t  valid;
+};
+static_assert(sizeof(GBMinMaxRec) == 24 && std::is_trivially_copyable_v<GBMinMaxRec>,
+              "GBMinMaxRec is a 24-byte trivially copyable lane record");
+
 struct GBLaneView {
+    const GBMinMaxRec* mm    = nullptr;   // MIN/MAX pair records (owner's, for a partner)
+    bool               mm_max = false;    // which extreme of `mm` this spec emits
     const int64_t*     rows  = nullptr;
     const int64_t*     valid = nullptr;
     const int64_t*     i64   = nullptr;   // int sums / MIN-MAX raw containers
@@ -2175,6 +2273,19 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
         }
         case GBKind::MinMaxNum:
             return emit_fixed_column(L.i64, valid_ok(), n, meta.type, meta.logical, err);
+        case GBKind::MinMaxPair:
+        case GBKind::MinMaxPartner: {
+            // The pair's record (lane_view: this spec's own, or its owner's) read in
+            // THIS spec's direction; the raw container is the order key inverted.
+            std::vector<int64_t> raws(n, 0);
+            ok.resize(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                const GBMinMaxRec& r = L.mm[i];
+                ok[i] = r.valid > 0 ? 1 : 0;
+                if (ok[i]) raws[i] = gb_mm_raw(meta.type, L.mm_max ? r.max_key : r.min_key);
+            }
+            return emit_fixed_column(raws.data(), ok.data(), n, meta.type, meta.logical, err);
+        }
         case GBKind::MinMaxStr:
             return emit_string_lane_column(meta, L.sext, L.valid, n);
         case GBKind::ArrayAgg:
@@ -2927,6 +3038,13 @@ struct UngroupedAggSink : Sink {
             }
             if (specs[s].fn == AggFn::Quantile && !quantile_spec_check(specs, s, err))
                 return false;
+            // The ungrouped cell already holds both extremes; a pair is GROUP BY only.
+            if (specs[s].minmax_partner != kMinMaxUnpaired) {
+                err.code = 1;
+                err.msg = "MIN/MAX pair spec reached the ungrouped aggregate — compiler "
+                          "invariant violated, fail loud";
+                return false;
+            }
             // CORR: both operands numeric — captures the second operand's
             // type/floatness into meta[s] (type2/is_float2).
             if (specs[s].fn == AggFn::Corr
@@ -3494,6 +3612,7 @@ struct GBLanes {
     GBSegVec<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
     GBSegVec<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     GBSegVec<GBStrExt> sext;    // MinMaxStr extremes (records)
+    GBSegVec<GBMinMaxRec> mm;   // MinMaxPair records (keys + count)
     // MinMaxStr long-extreme bytes. Shared so the (adopting) merge can keep a source's
     // bytes alive (skeep) after the source table is released.
     std::shared_ptr<GBArena> sbytes;
@@ -3509,7 +3628,7 @@ struct GBLanes {
         valid.hint(rows); i64.hint(rows); f64.hint(rows); f64sq.hint(rows);
         f64y.hint(rows); f64yy.hint(rows); f64xy.hint(rows); mkey.hint(rows);
         f64k.hint(rows); f64ky.hint(rows);
-        i128.hint(rows); sext.hint(rows);
+        i128.hint(rows); sext.hint(rows); mm.hint(rows);
     }
 };
 
@@ -3521,7 +3640,7 @@ struct GBLanes {
 inline void gb_lanes_swap(GBLanes& L, size_t a, size_t b) {
     auto sw = [a, b](auto& lane) { if (!lane.empty()) std::swap(lane[a], lane[b]); };
     sw(L.valid); sw(L.i64); sw(L.f64); sw(L.f64sq); sw(L.f64y); sw(L.f64yy);
-    sw(L.f64xy); sw(L.f64k); sw(L.f64ky); sw(L.mkey); sw(L.i128); sw(L.sext); sw(L.aa); sw(L.cidr);
+    sw(L.f64xy); sw(L.f64k); sw(L.f64ky); sw(L.mkey); sw(L.i128); sw(L.sext); sw(L.mm); sw(L.aa); sw(L.cidr);
     sw(L.quantile); sw(L.hll); sw(L.td);
 }
 
@@ -3559,6 +3678,11 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
         case GBKind::MinMaxNum:
             L.valid.resize(n); L.i64.resize(n); L.mkey.resize(n);
             return;
+        case GBKind::MinMaxPair:
+            L.mm.resize(n);   // value-initialised: valid 0 = no value yet
+            return;
+        case GBKind::MinMaxPartner:
+            return;   // no lanes: emit reads the owner spec's record (see lane_view)
         case GBKind::MinMaxStr:
             L.valid.resize(n); L.sext.resize(n);
             if (!L.sbytes) L.sbytes = std::make_shared<GBArena>();
@@ -3608,6 +3732,7 @@ inline bool gb_kind_row_resolvable(GBKind k) {
     switch (k) {
         case GBKind::Valid: case GBKind::SumI: case GBKind::AvgI:
         case GBKind::SumF: case GBKind::AvgF: case GBKind::MinMaxNum:
+        case GBKind::MinMaxPair: case GBKind::MinMaxPartner:
             return true;
         default:
             return false;
@@ -3643,6 +3768,7 @@ struct GBFlatLanes {
     uint64_t* mkey  = nullptr;
     __int128* i128  = nullptr;
     GBStrExt* sext  = nullptr;
+    GBMinMaxRec* mm = nullptr;
     GBArena*  sbytes = nullptr;
     GBArrayAggState* aa = nullptr;
     opteryx::roaring32::Roaring32* cidr = nullptr;
@@ -3663,7 +3789,7 @@ inline bool gb_flat_lanes(GBLanes& L, size_t n, GBFlatLanes& f) {
     take(L.valid, f.valid); take(L.i64, f.i64); take(L.f64, f.f64); take(L.f64sq, f.f64sq);
     take(L.f64y, f.f64y); take(L.f64yy, f.f64yy); take(L.f64xy, f.f64xy);
     take(L.f64k, f.f64k); take(L.f64ky, f.f64ky);
-    take(L.mkey, f.mkey); take(L.i128, f.i128); take(L.sext, f.sext);
+    take(L.mkey, f.mkey); take(L.i128, f.i128); take(L.sext, f.sext); take(L.mm, f.mm);
     f.sbytes = L.sbytes.get(); f.aa = L.aa.data(); f.cidr = L.cidr.data();
     f.quantile = L.quantile.data(); f.hll = L.hll.data(); f.td = L.td.data();
     return ok;
@@ -3740,6 +3866,21 @@ inline bool gb_apply_row_kind_rd(GBKind kind, bool want_max, bool is_f, const Dr
                 L.valid[e] += 1;
             }
             return true;
+        case GBKind::MinMaxPair:
+            // One key, one record: both extremes and the count in one cache line.
+            for (uint32_t i = 0; i < rows; ++i) {
+                if (!row_ok(i)) continue;
+                const auto r = at(i);
+                GBMinMaxRec& m = r.L->mm[r.e];
+                const uint64_t kk = sort_num_key(v, i);
+                const bool first = m.valid == 0;
+                m.min_key = (first || kk < m.min_key) ? kk : m.min_key;
+                m.max_key = (first || kk > m.max_key) ? kk : m.max_key;
+                m.valid += 1;
+            }
+            return true;
+        case GBKind::MinMaxPartner:
+            return true;   // the owner's record carries both extremes
         default:
             err.code = 1;
             err.msg = "gb_apply_row_kind: aggregate kind has no row-kind update — "
@@ -3754,7 +3895,7 @@ inline bool gb_apply_row_kind_rd(GBKind kind, bool want_max, bool is_f, const Dr
 template <class Resolve>
 inline bool gb_apply_row_kind(GBKind kind, bool want_max, bool is_f, const DrakenVector& v,
                               uint32_t rows, Resolve&& at, ErrCtx& err) {
-    if (kind == GBKind::MinMaxNum)
+    if (kind == GBKind::MinMaxNum || kind == GBKind::MinMaxPair || kind == GBKind::MinMaxPartner)
         return gb_apply_row_kind_rd<GBRawInt<int64_t>>(kind, want_max, is_f, v, rows, at, err);
     return gb_with_raw_reader(v.type, is_f, [&](auto rd) {
         return gb_apply_row_kind_rd<decltype(rd)>(kind, want_max, is_f, v, rows, at, err);
@@ -4240,6 +4381,13 @@ struct GBPartition : GBPartData {
 constexpr size_t kGBSpillUnitMinBytes = size_t(1) << 20;
 constexpr size_t kGBSpillUnitMaxBytes = size_t(128) << 20;
 constexpr int kGBSpillI128Bit = 15;
+// Bits [0, kGBSpillI64Lanes) are gb_each_i64_lane's positions. A MinMaxPair record
+// spills as three INT64 columns, one bit each: min key, max key, count.
+constexpr int kGBSpillI64Lanes = 10;
+constexpr int kGBSpillMMMinBit = 10, kGBSpillMMMaxBit = 11, kGBSpillMMValidBit = 12;
+constexpr uint16_t kGBSpillMMBits = (1u << kGBSpillMMMinBit) | (1u << kGBSpillMMMaxBit)
+                                    | (1u << kGBSpillMMValidBit);
+static_assert(kGBSpillMMValidBit < kGBSpillI128Bit, "pair spill bits overlap the int128 bit");
 
 // Kinds whose whole state is fixed-width lanes. The per-group OBJECT kinds (string
 // extremes, lists, sketches, distinct pairs) have no serialiser and never spill.
@@ -4249,6 +4397,7 @@ inline bool gb_kind_spillable(GBKind k) {
         case GBKind::SumI: case GBKind::SumF: case GBKind::SumD128:
         case GBKind::AvgI: case GBKind::AvgF: case GBKind::AvgD128:
         case GBKind::MinMaxNum: case GBKind::MinMaxD128:
+        case GBKind::MinMaxPair: case GBKind::MinMaxPartner:
         case GBKind::Stddev: case GBKind::StddevSamp:
         case GBKind::VarPop: case GBKind::VarSamp:
         case GBKind::Corr:
@@ -4269,8 +4418,9 @@ inline void gb_each_i64_lane(LT& L, F&& f) {
     f(L.f64k); f(L.f64ky); f(L.mkey);
 }
 
-// The lanes a kind allocates: one bit per gb_each_i64_lane position, plus
-// kGBSpillI128Bit for the int128 lane. Asked of gb_lanes_resize, the one authority.
+// The lanes a kind allocates: one bit per gb_each_i64_lane position, kGBSpillMMBits
+// for the pair record, and kGBSpillI128Bit for the int128 lane. Asked of
+// gb_lanes_resize, the one authority.
 inline uint16_t gb_spill_lane_mask(GBKind k) {
     GBLanes T;
     gb_lanes_resize(T, k, 1);
@@ -4280,6 +4430,7 @@ inline uint16_t gb_spill_lane_mask(GBKind k) {
         if (!lane.empty()) m |= static_cast<uint16_t>(1u << i);
         ++i;
     });
+    if (!T.mm.empty()) m |= kGBSpillMMBits;
     if (!T.i128.empty()) m |= static_cast<uint16_t>(1u << kGBSpillI128Bit);
     return m;
 }
@@ -4364,7 +4515,7 @@ inline MorselPtr gb_spill_encode(const std::vector<GBPartData>& wins,
             !add_lane([](const GBPartData& w) -> const GBSegVec<int64_t>& { return w.grows; }))
         return fail(unsized);
     for (size_t s = 0; s < masks.size(); ++s) {
-        for (int bit = 0; bit < kGBSpillI128Bit; ++bit) {
+        for (int bit = 0; bit < kGBSpillI64Lanes; ++bit) {
             if (!((masks[s] >> bit) & 1u)) continue;
             int64_t* d;
             CxxColumn c = gb_spill_i64_column(n, d);
@@ -4382,6 +4533,28 @@ inline MorselPtr gb_spill_encode(const std::vector<GBPartData>& wins,
                 if (!sized) return fail(unsized);
             }
             add(std::move(c));
+        }
+        if ((masks[s] & kGBSpillMMBits) != 0) {
+            if ((masks[s] & kGBSpillMMBits) != kGBSpillMMBits)
+                return fail("GROUP BY spill: a MIN/MAX pair mask without all three record columns");
+            int64_t *mn, *mx, *vd;
+            CxxColumn cmn = gb_spill_i64_column(n, mn);
+            CxxColumn cmx = gb_spill_i64_column(n, mx);
+            CxxColumn cvd = gb_spill_i64_column(n, vd);
+            for (const GBPartData& w : wins) {
+                const GBSegVec<GBMinMaxRec>& lane = w.lanes[s].mm;
+                if (lane.size() != w.size()) return fail(unsized);
+                lane.for_each_run(0, w.size(), [&mn, &mx, &vd](const GBMinMaxRec* p, size_t rows) {
+                    for (size_t r = 0; r < rows; ++r) {
+                        *mn++ = static_cast<int64_t>(p[r].min_key);
+                        *mx++ = static_cast<int64_t>(p[r].max_key);
+                        *vd++ = p[r].valid;
+                    }
+                });
+            }
+            add(std::move(cmn));
+            add(std::move(cmx));
+            add(std::move(cvd));
         }
         if ((masks[s] >> kGBSpillI128Bit) & 1u) {
             int64_t *lo, *hi;
@@ -4467,6 +4640,25 @@ inline bool gb_spill_decode(const CxxMorsel& m, GBPartData& P,
             fill(lane, d);
         });
         if (!ok) return fail(shape);
+        if ((masks[s] & kGBSpillMMBits) != 0) {
+            const DrakenVector *vmn = nullptr, *vmx = nullptr, *vvd = nullptr;
+            if ((masks[s] & kGBSpillMMBits) != kGBSpillMMBits || L.mm.size() != n
+                    || !lane_data(vmn) || !lane_data(vmx) || !lane_data(vvd))
+                return fail(shape);
+            const int64_t* mn = static_cast<const int64_t*>(vmn->data);
+            const int64_t* mx = static_cast<const int64_t*>(vmx->data);
+            const int64_t* vd = static_cast<const int64_t*>(vvd->data);
+            const uint32_t* smn = vmn->selection;
+            const uint32_t* smx = vmx->selection;
+            const uint32_t* svd = vvd->selection;
+            L.mm.for_each_run(0, n, [=, &smn, &smx, &svd](GBMinMaxRec* p, size_t rows) {
+                for (size_t r = 0; r < rows; ++r) {
+                    p[r].min_key = static_cast<uint64_t>(mn[*smn++]);
+                    p[r].max_key = static_cast<uint64_t>(mx[*smx++]);
+                    p[r].valid = vd[*svd++];
+                }
+            });
+        }
         if ((masks[s] >> kGBSpillI128Bit) & 1u) {
             const DrakenVector *vlo = nullptr, *vhi = nullptr;
             if (!lane_data(vlo) || !lane_data(vhi)) return fail(shape);
@@ -4924,6 +5116,7 @@ struct GroupBySink : Sink {
             l.meta[s].is_string = str_minmax;
             l.meta[s].captured = true;
             l.kinds[s] = gb_kind_of(specs[s], l.meta[s]);
+            if (!minmax_pair_check(specs, s, l.meta[s], err)) return false;
         }
         l.row_kinds_only = true;
         for (size_t s = 0; s < specs.size() && l.row_kinds_only; ++s) {
@@ -5579,7 +5772,10 @@ struct GroupBySink : Sink {
                     L.valid[e] += 1;
                 }
                 break;
-            case GBKind::MinMaxNum: {
+            case GBKind::MinMaxPartner:
+                break;   // the owner spec's record carries both extremes
+            case GBKind::MinMaxNum:
+            case GBKind::MinMaxPair: {
                 if (!gb_apply_row_kind_rd<RD>(kind, want_max, is_f, v, rows,
                                        [lanes_of, mkh, mke](uint32_t i) {
                                            return GBRowRef<LT>{&lanes_of(gb_part(mkh[i])), mke[i]};
@@ -6606,6 +6802,19 @@ struct GroupBySink : Sink {
                 }
                 case GBKind::QuantileShared:
                     break;   // no lanes — the owner spec's merge carries the values
+                case GBKind::MinMaxPartner:
+                    break;   // no lanes — the owner spec's record carries both extremes
+                case GBKind::MinMaxPair:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        const GBMinMaxRec& sr = S.mm[e];
+                        if (sr.valid == 0) continue;
+                        GBMinMaxRec& dr = D.mm[ge[e]];
+                        const bool first = dr.valid == 0;
+                        dr.min_key = (first || sr.min_key < dr.min_key) ? sr.min_key : dr.min_key;
+                        dr.max_key = (first || sr.max_key > dr.max_key) ? sr.max_key : dr.max_key;
+                        dr.valid += sr.valid;
+                    }
+                    break;
                 case GBKind::SumD128:
                 case GBKind::AvgD128:
                     for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
@@ -6980,6 +7189,7 @@ struct GroupBySink : Sink {
         std::vector<double> f64, f64sq, f64y, f64yy, f64xy;
         std::vector<__int128> i128;
         std::vector<GBStrExt> sext;
+        std::vector<GBMinMaxRec> mm;
     };
 
     // Read-only view of spec `s`'s lanes in `P` over groups [start, start+n) — what
@@ -7013,6 +7223,13 @@ struct GroupBySink : Sink {
             lv.quantile = const_cast<opteryx::ungrouped::QuantileState*>(
                 O.quantile.data()) + start;
             lv.pct_spec = &specs[s];
+        } else if (kind == GBKind::MinMaxPair || kind == GBKind::MinMaxPartner) {
+            // The pair's record — a partner's is its owner's in this same partition
+            // (minmax_partner, checked at capture) — read in THIS spec's direction.
+            const GBLanes& O = kind == GBKind::MinMaxPair
+                ? L : P.lanes[static_cast<size_t>(specs[s].minmax_partner)];
+            lv.mm = O.mm.span(start, n, sc.mm);
+            lv.mm_max = specs[s].fn == AggFn::Max;
         } else if (kind == GBKind::ApproxCountDistinct) {
             // No `valid` lane either — never NULL (see emit_lane_column).
             lv.hll = L.hll.data() + start;
@@ -7250,9 +7467,11 @@ struct GroupBySink : Sink {
             meta[s].captured = true;
             kinds[s] = gb_kind_of(specs[s], meta[s]);
             if (kinds[s] != GBKind::Valid && kinds[s] != GBKind::SumI
-                    && kinds[s] != GBKind::AvgI && kinds[s] != GBKind::MinMaxNum)
+                    && kinds[s] != GBKind::AvgI && kinds[s] != GBKind::MinMaxNum
+                    && kinds[s] != GBKind::MinMaxPair && kinds[s] != GBKind::MinMaxPartner)
                 return fail("GROUP BY statistics seed over an aggregate kind statistics "
                             "cannot answer — fail loud");
+            if (!minmax_pair_check(specs, s, meta[s], err)) return false;
         }
         if (!g.init) {
             g.key_meta.assign(K, KeyColMeta{});
@@ -7362,6 +7581,21 @@ struct GroupBySink : Sink {
                         L.valid[gid] += a.valid;
                         break;
                     }
+                    case GBKind::MinMaxPair: {
+                        if (!a.any_extreme) break;   // no non-null value: nothing to offer
+                        // gb_mm_key, not agg2_seed_order_key: the record's raw values
+                        // are recovered by gb_mm_raw, its exact inverse.
+                        const uint64_t kmin = gb_mm_key(meta[s].type, a.min);
+                        const uint64_t kmax = gb_mm_key(meta[s].type, a.max);
+                        GBMinMaxRec& m = L.mm[gid];
+                        const bool first = m.valid == 0;
+                        m.min_key = (first || kmin < m.min_key) ? kmin : m.min_key;
+                        m.max_key = (first || kmax > m.max_key) ? kmax : m.max_key;
+                        m.valid += a.valid;
+                        break;
+                    }
+                    case GBKind::MinMaxPartner:
+                        break;   // the owner spec's record took both extremes
                     default:
                         return fail("GROUP BY statistics seed over an aggregate kind "
                                     "statistics cannot answer — fail loud");
@@ -7540,7 +7774,8 @@ struct GroupBySink : Sink {
             if (kind == GBKind::Rows) continue;
             const GBLanes& S = W.lanes[s2];
             GBLanes& D = dst.lanes[s2];
-            if (S.valid.empty()) continue;
+            // No state: a partner (its owner's record is folded) or no row reached it.
+            if (S.valid.empty() && S.mm.empty()) continue;
             const bool want_max = specs[s2].fn == AggFn::Max;
             for (uint32_t ii = 0; ii < n; ++ii) {
                 const uint32_t t = sel[ii];
@@ -7570,6 +7805,16 @@ struct GroupBySink : Sink {
                         }
                         D.valid[m] += S.valid[t];
                         break;
+                    case GBKind::MinMaxPair: {
+                        const GBMinMaxRec& sr = S.mm[t];
+                        if (sr.valid == 0) break;
+                        GBMinMaxRec& dr = D.mm[m];
+                        const bool first = dr.valid == 0;
+                        dr.min_key = (first || sr.min_key < dr.min_key) ? sr.min_key : dr.min_key;
+                        dr.max_key = (first || sr.max_key > dr.max_key) ? sr.max_key : dr.max_key;
+                        dr.valid += sr.valid;
+                        break;
+                    }
                     default:
                         break;   // unreachable: ticket_eligible admits the row kinds only
                 }

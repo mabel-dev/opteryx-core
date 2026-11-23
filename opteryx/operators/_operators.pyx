@@ -188,6 +188,7 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         double percentile
         bint quantile_descending
         int quantile_owner
+        int minmax_partner
         bint distinct_operand
 
 cdef extern from "core/alloc.h" nogil:
@@ -4099,6 +4100,9 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
         else:
             s.quantile_descending = False
             s.quantile_owner = -1
+        # GROUP BY MIN/MAX pair (compiler._pair_minmax): -1 unpaired, -2 owner, else
+        # the owner's spec index. The sink checks it (minmax_pair_check).
+        s.minmax_partner = -1 if opts is None else <int>opts.get("minmax_partner", -1)
         out.push_back(s)
     return out
 

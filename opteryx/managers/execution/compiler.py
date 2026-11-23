@@ -2054,6 +2054,13 @@ class _Compiler:
     # narrower than _AGG_OPERAND_TYPES (which also allows DECIMAL/BOOL/temporal for
     # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median collectors exactly.
     _MEDIAN_OPERAND_TYPES = _NUMERIC_TYPES
+    # GROUP BY MIN + MAX over one column share one record (docs/GROUPBY_MINMAX_PAIR_DESIGN.md)
+    # for these types only — mirrors native_group_sinks.hpp minmax_pair_type_ok (the
+    # order key inverts to the value). Floats stay two specs.
+    _MINMAX_PAIR_TYPES = frozenset(_INT_TYPES + (
+        DrakenType.DATE32, DrakenType.TIMESTAMP64, DrakenType.TIME32, DrakenType.TIME64,
+        DrakenType.DECIMAL, DrakenType.BOOL,
+    ))
     _AGG_OPERAND_TYPES = _NUMERIC_TYPES + (
         DrakenType.DECIMAL, DrakenType.DECIMAL128, DrakenType.DATE32,
         DrakenType.TIMESTAMP64, DrakenType.TIME32, DrakenType.TIME64,
@@ -2168,14 +2175,31 @@ class _Compiler:
             layout = self._add_computed(p, computed, layout)
         return layout
 
-    def _parse_aggregates(self, aggs, layout, grouped=True):
+    def _pair_minmax(self, specs, minmax_specs):
+        """Pair the first plain MIN with the first plain MAX over each pairable column:
+        the earlier spec owns the record (minmax_partner -2), the later names it."""
+        by_col = {}
+        for pos, fn, idx, pt in minmax_specs:
+            if pt in self._MINMAX_PAIR_TYPES:
+                by_col.setdefault(idx, {}).setdefault(fn, pos)
+        for both in by_col.values():
+            if len(both) != 2:
+                continue
+            owner, partner = sorted(both.values())
+            specs[owner] = (*specs[owner], {"minmax_partner": -2})
+            specs[partner] = (*specs[partner], {"minmax_partner": owner})
+
+    def _parse_aggregates(self, aggs, layout, grouped=True, pair_minmax=False):
         """Any mix of COUNT(*) / COUNT(col) / SUM / AVG / MIN / MAX / ARRAY_AGG over
         plain columns. Returns [(identity, fn, operand_idx | -1[, options]), ...] in
         output order. ``grouped`` is False for the ungrouped sink, which ARRAY_AGG
-        cannot use."""
+        cannot use. ``pair_minmax`` is True for the GROUP BY sink only (never the
+        ungrouped sink or a groupjoin): MIN and MAX over one column share a record."""
         if not aggs:
             _unsupported("an aggregate node with no aggregates")
         specs = []
+        # Plain (non-DISTINCT) MIN/MAX specs: (position, fn, operand idx, physical type).
+        minmax_specs = []
         # Exact-quantile buffers: operand column index -> position of the spec that
         # owns that column's buffer. Every later non-DISTINCT MEDIAN/PERCENTILE_CONT
         # over the same column reads it instead of buffering the column again
@@ -2418,7 +2442,11 @@ class _Compiler:
                 # value hash, NULLs excluded) — see AggSpec2::distinct_operand.
                 specs.append((sc.identity, fn, idx, {"distinct_operand": True}))
                 continue
+            if fn in ("Min", "Max"):
+                minmax_specs.append((len(specs), fn, idx, pt))
             specs.append((sc.identity, fn, idx))
+        if pair_minmax:
+            self._pair_minmax(specs, minmax_specs)
         # Each aggregate's OUTPUT identity and its bind-time result type, folded
         # into the same identity -> (physical type, ColumnType) tracking every
         # other branch uses - the window branch and GROUPING() already do this.
@@ -2736,7 +2764,7 @@ class _Compiler:
                     p, [], [], True, frozenset(layout))
                 return p2, list(layout)
             layout = self._project_agg_operands(p, raw_aggs, layout)
-            specs = self._parse_aggregates(aggs, layout)
+            specs = self._parse_aggregates(aggs, layout, pair_minmax=True)
             key_emit = self._group_key_emit(node, group_cols, having)
             # Planner NDV estimate for the grouped keys (physical planner, execution_estimates.py);
             # -1 = unknown. Gates the sink's per-partition parvi front maps.
