@@ -8182,6 +8182,16 @@ def execute_native(plan, telemetry=None, trace_sink=None, admit_to_chunk_cache=T
                         "trace truncated: a worker exceeded its span arena "
                         "capacity (OPTERYX_TRACE_ARENA_SPANS) — timeline is incomplete"
                     )
+            if telemetry is not None:
+                # READ_JSONL(..., as_variant, ignore_errors): records nested deeper than a
+                # VARIANT holds were skipped. Each scan's count is final once run() returns
+                # (its Source state is torn down at the end of its pipeline).
+                for _jp in nplan.jsonl_scan_plans:
+                    if _jp.records_too_deep > 0:
+                        telemetry.add_message(
+                            f"READ_JSONL skipped {_jp.records_too_deep} record(s) nested deeper "
+                            "than 1024 levels, the most a VARIANT can hold"
+                        )
             _ts0 = _t.perf_counter_ns()
             # Return the thread-local engine pool to idle for the NEXT query on
             # this thread — do NOT shut it down (which would join its `dop` worker

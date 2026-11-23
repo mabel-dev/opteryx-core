@@ -767,7 +767,7 @@ def _create_set_node(logical_node, query_properties, registry):
 def _create_show_node(logical_node, query_properties, registry):
     object_type = logical_node.object_type
 
-    if object_type in ("TABLE", "VIEW", "MATERIALIZED VIEW", "TASK", "TRIGGER"):
+    if object_type in ("TABLE", "VIEW", "MATERIALIZED VIEW", "TASK", "TRIGGER", "PROPERTY GRAPH"):
         return registry.create("Show Create", query_properties, logical_node)
     elif object_type == "INDEXES":
         return registry.create("Show Indexes", query_properties, logical_node)
@@ -785,6 +785,14 @@ def _create_alter_view_node(logical_node, query_properties, registry):
 
 def _create_drop_view_node(logical_node, query_properties, registry):
     return registry.create("View Management", query_properties, logical_node, action="drop_view")
+
+
+def _create_create_property_graph_node(logical_node, query_properties, registry):
+    return registry.create("Property Graph Management", query_properties, logical_node, action="create")
+
+
+def _create_drop_property_graph_node(logical_node, query_properties, registry):
+    return registry.create("Property Graph Management", query_properties, logical_node, action="drop")
 
 
 def _create_show_columns_node(logical_node, query_properties, registry):
@@ -1040,6 +1048,8 @@ _DISPATCH = {
     LogicalPlanStepType.CreateView:       _create_create_view_node,
     LogicalPlanStepType.AlterView:        _create_alter_view_node,
     LogicalPlanStepType.DropView:         _create_drop_view_node,
+    LogicalPlanStepType.CreatePropertyGraph: _create_create_property_graph_node,
+    LogicalPlanStepType.DropPropertyGraph:   _create_drop_property_graph_node,
     LogicalPlanStepType.ShowColumns:      _create_show_columns_node,
     LogicalPlanStepType.ShowManifest:     _create_show_manifest_node,
     LogicalPlanStepType.ShowSnapshots:    _create_show_snapshots_node,

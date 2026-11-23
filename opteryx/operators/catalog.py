@@ -184,6 +184,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.show_indexes import ShowIndexesNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
+    from opteryx.operators.graph_management import PropertyGraphManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
     from opteryx.operators.merge import MergeNode
@@ -468,6 +469,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         ViewManagementNode,
         name="View Management",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        PropertyGraphManagementNode,
+        name="Property Graph Management",
         category=OperatorCategory.DDL,
         is_not_explained=True,
     )

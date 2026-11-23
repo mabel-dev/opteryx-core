@@ -10,7 +10,7 @@
 //! DROP STATISTICS ON <table> [FOR COLUMNS <c1>, <c2>, ...]
 //! ALTER WORKSPACE <source> SET SECURE <object> TO <workspace>[, <workspace>...]
 //! ALTER WORKSPACE <source> DROP SECURE <object>
-//! SHOW CREATE MATERIALIZED VIEW | TASK <name>
+//! SHOW CREATE MATERIALIZED VIEW | TASK | PROPERTY GRAPH <name>
 //! SHOW CREATE TRIGGER <name> ON <table>
 //! ALTER TABLE <fork> RESYNC [FORCE] | DETACH
 //! ```
@@ -55,8 +55,8 @@ materialized view doing the copying; the destinations are workspace names, not \
 relations.";
 
 const SHOW_CREATE_GRAMMAR: &str = "Expected: **SHOW CREATE MATERIALIZED VIEW** \
-<name> or **SHOW CREATE TASK** <name>. The statement takes one object name and \
-nothing else.";
+<name>, **SHOW CREATE TASK** <name> or **SHOW CREATE PROPERTY GRAPH** <name>. The \
+statement takes one object name and nothing else.";
 
 const SHOW_CREATE_TRIGGER_GRAMMAR: &str = "Expected: **SHOW CREATE TRIGGER** \
 <name> **ON** <table>. A trigger name is only unique per table, so the table \
@@ -248,6 +248,16 @@ fn show_create(cursor: &mut Cursor) -> Result<Option<OpteryxOnly>, ParserError> 
         end_of_statement(cursor, SHOW_CREATE_GRAMMAR)?;
         return Ok(Some(OpteryxOnly::ShowCreate(ShowCreate {
             obj_type: "Task",
+            obj_name,
+            trigger_name: None,
+        })));
+    }
+
+    if cursor.take_words(&["PROPERTY", "GRAPH"]) {
+        let obj_name = cursor.object_name(SHOW_CREATE_GRAMMAR)?;
+        end_of_statement(cursor, SHOW_CREATE_GRAMMAR)?;
+        return Ok(Some(OpteryxOnly::ShowCreate(ShowCreate {
+            obj_type: "PropertyGraph",
             obj_name,
             trigger_name: None,
         })));

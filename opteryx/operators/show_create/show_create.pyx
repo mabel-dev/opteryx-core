@@ -59,6 +59,15 @@ class ShowCreateNode(BasePlanNode):
         view_definition = self.connector.get_view(self.object_name)
         return render_create_view(self.object_name, view_definition.statement)
 
+    def _property_graph_statement(self):
+        """The stored text IS the statement: canonical CREATE PROPERTY GRAPH, rendered
+        when it was created (binder/property_graph.py)."""
+        from opteryx.connectors import TableType
+
+        if self.connector.locate_object(self.object_name)[0] != TableType.PropertyGraph:
+            raise DatasetNotFoundError(dataset=self.object_name, connector="PROPERTY GRAPH")
+        return self.connector.get_property_graph(self.object_name).statement
+
     def _table_statement(self):
         """Reconstruct a table's DDL - see opteryx.models.create_statement.
 
@@ -144,6 +153,7 @@ class ShowCreateNode(BasePlanNode):
             "MATERIALIZED VIEW": self._materialized_view_statement,
             "TASK": self._task_statement,
             "TRIGGER": self._trigger_statement,
+            "PROPERTY GRAPH": self._property_graph_statement,
         }
         create_statement = _STATEMENT_BUILDERS[self.object_type]()
 

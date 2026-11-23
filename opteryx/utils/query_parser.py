@@ -75,6 +75,9 @@ _SYNTHESIZED_TARGETS = {
     # Vector index statements act on the relation the index belongs to.
     "AlterIndexBuild": "relation",
     "RefreshIndex": "relation",
+    # The graph itself: it is a name in the relation namespace, as a view is.
+    "CreatePropertyGraph": "name",
+    "DropPropertyGraph": "name",
 }
 
 # What each synthesized statement is, and the role it needs. Kept beside the
@@ -107,6 +110,10 @@ _SYNTHESIZED_STATEMENTS = {
     "DetachRelation": (False, True, "owner"),
     # WRITE on the table the trigger hangs off, symmetric with creating one.
     "DropTrigger": (False, True, "writer"),
+    # Classed exactly as CREATE VIEW is (DDL, owner at pre-flight; the binder
+    # gates it at WRITE): a property graph is catalog text in the same namespace.
+    "CreatePropertyGraph": (False, True, "owner"),
+    "DropPropertyGraph": (False, True, "owner"),
     # Customer secrets (jobs.opteryx docs/design/secrets.md). Workspace-level
     # owner-tier for all three - the binder (DROP), the information_schema
     # table (SHOW) and jobs.opteryx at submission (CREATE) each hold the gate as

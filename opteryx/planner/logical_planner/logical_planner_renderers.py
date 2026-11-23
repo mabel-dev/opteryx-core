@@ -387,6 +387,19 @@ def render_drop_view(node: PlanStep) -> str:
     return f"DROP VIEW {if_exists}({view_list})"
 
 
+@register_render(LogicalPlanStepType.CreatePropertyGraph)
+def render_create_property_graph(node: PlanStep) -> str:
+    or_replace = "OR REPLACE " if node.or_replace else ""
+    if_not_exists = "IF NOT EXISTS " if node.if_not_exists else ""
+    return f"CREATE {or_replace}PROPERTY GRAPH {if_not_exists}({node.graph_name})"
+
+
+@register_render(LogicalPlanStepType.DropPropertyGraph)
+def render_drop_property_graph(node: PlanStep) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    return f"DROP PROPERTY GRAPH {if_exists}({node.graph_name})"
+
+
 @register_render(LogicalPlanStepType.RenameRelation)
 def render_rename_relation(node: PlanStep) -> str:
     if_exists = "IF EXISTS " if node.if_exists else ""

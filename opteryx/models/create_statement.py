@@ -230,3 +230,50 @@ def render_create_trigger(
         )
 
     return ";\n\n".join(statements) + ";"
+
+
+def render_create_property_graph(graph_name: str, vertex_tables: List[Dict], edge_tables: List[Dict]) -> str:
+    """The canonical CREATE PROPERTY GRAPH: what is stored, and what SHOW CREATE returns.
+
+    Everything is written out - element names, keys, both endpoints of every edge,
+    each label and every property - so a reader of this text (gqlparser's
+    `parse_property_graph`, which lowers GQL against it) never needs a schema.
+
+    Each element is a dict: `relation` (name parts), `name`, `key` (columns),
+    `label`, `properties` ((column, property) pairs), and for an edge `source` and
+    `destination`, each (key columns, vertex element name, referenced columns).
+    """
+
+    def columns(names) -> str:
+        return "(" + ", ".join(quote_identifier(name) for name in names) + ")"
+
+    def element(table: Dict, edge: bool) -> str:
+        relation = ".".join(quote_identifier(part) for part in table["relation"])
+        lines = [f"{relation} AS {quote_identifier(table['name'])} KEY {columns(table['key'])}"]
+        if edge:
+            for end in ("source", "destination"):
+                key, vertex, references = table[end]
+                lines.append(
+                    f"{end.upper()} KEY {columns(key)} REFERENCES {quote_identifier(vertex)} {columns(references)}"
+                )
+        if table["properties"]:
+            listed = ", ".join(
+                quote_identifier(column)
+                if column == name
+                else f"{quote_identifier(column)} AS {quote_identifier(name)}"
+                for column, name in table["properties"]
+            )
+            properties = f"PROPERTIES ({listed})"
+        else:
+            properties = "NO PROPERTIES"
+        lines.append(f"LABEL {quote_identifier(table['label'])} {properties}")
+        return "\n      ".join(lines)
+
+    def section(title: str, tables: List[Dict], edge: bool) -> str:
+        body = ",\n    ".join(element(table, edge) for table in tables)
+        return f"  {title} (\n    {body}\n  )"
+
+    sections = [section("VERTEX TABLES", vertex_tables, False)]
+    if edge_tables:
+        sections.append(section("EDGE TABLES", edge_tables, True))
+    return f"CREATE PROPERTY GRAPH {quote_qualified_name(graph_name)}\n" + "\n".join(sections) + ";"

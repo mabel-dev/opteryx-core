@@ -36,6 +36,7 @@
 
 #include "fast_float/fast_float.h"
 #include "ops/json_extract.h"   // kJsonReadFlags, ReadPool, JDocGuard: draken's parse of a row
+#include "../variant_limit.hpp"  // kVariantMaxDepth
 
 namespace rugo {
 namespace variant {
@@ -130,7 +131,7 @@ inline void string(std::string& o, const char* s, size_t len) {
 
 }  // namespace enc
 
-constexpr int kMaxEncodeDepth = 1024;   // variant_binary.hpp refuses to render deeper
+constexpr int kMaxEncodeDepth = kVariantMaxDepth;   // the JSONL reader and variant_binary.hpp hold the same limit
 
 // One row's values in Variant binary: its dictionary of field names, and the values that use it.
 struct RowEncoder {

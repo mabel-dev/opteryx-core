@@ -128,7 +128,16 @@ the usual line rules; no key is matched for it, so a top-level key that shares t
 name changes nothing. The column is declared VARIANT through `explicit_schema`, so its type
 never comes from a key. Blank lines are skipped and the whitespace around a record is trimmed.
 A line that isn't exactly one object is malformed, the same as today (`ignore_errors` drops it).
-Nothing is sampled at bind time, and `infer_schema` / `infer_sample_size` are refused beside
+**Limitation (ruled 2026-11-23): a VARIANT holds values nested at most 1024 levels deep.**
+Depth counts containers: the record's object is depth 0, and a value inside more than 1024
+objects or arrays is refused. The limit is `kVariantMaxDepth` in `rugo/src/variant_limit.hpp`,
+shared by this reader, the Variant encoder and the Variant renderer. The reader refuses a
+deeper record when it reads it, so a load never gets as far as the writer: without
+`ignore_errors` the query fails, naming the record's line; with `ignore_errors` the record
+is skipped and the query reports how many were skipped (`session.messages`). Found by the
+JSONBench 1B load: one document in files 101–1000 is nested deeper than 1024 levels.
+Records of 2048 bytes or fewer are never scanned for depth, since a record that deep needs
+more bytes than that. Nothing is sampled at bind time, and `infer_schema` / `infer_sample_size` are refused beside
 it. Not built: rugo's standalone `read_jsonl` has no such option (only `prepare_jsonl_context`
 takes it); `data->'k'` over an `as_variant` scan is not pushed into the scan, which reads the
 whole record (shortcut comment in `jsonl_nested_extraction.py`).

@@ -23,6 +23,7 @@ from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Writable
+from opteryx.connectors.capabilities.eidetic import PropertyGraphDefinition
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import ColumnNotFoundError, ConcurrentModificationError, DatasetNotFoundError
 from opteryx.exceptions import ExecutionError, InvalidInternalStateError
@@ -497,6 +498,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             return (TableType.Table, None)
         if self.view_exists(name):
             return (TableType.View, None)
+        if os.path.isfile(self._property_graph_path(name)):
+            return (TableType.PropertyGraph, None)
         return (None, None)
 
     # Materialized view operations. The registration record (defining SQL,
@@ -512,9 +515,14 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         return os.path.isfile(self._mv_path(relation_name))
 
     # `workspace.collection.<object>` is ONE namespace: a name identifies a
-    # table, a view or a task, never two of them. All three sentinels sit in the
-    # same directory, so this is the list every creator checks.
-    _NAME_SENTINELS = (("dataset.json", "table"), ("view.json", "view"), ("task.json", "task"))
+    # table, a view, a task or a property graph, never two of them. All the
+    # sentinels sit in the same directory, so this is the list every creator checks.
+    _NAME_SENTINELS = (
+        ("dataset.json", "table"),
+        ("view.json", "view"),
+        ("task.json", "task"),
+        ("property_graph.json", "property graph"),
+    )
 
     def name_holder(self, relation_name: str) -> Optional[str]:
         """Which kind of object holds this name, or None if it is free."""
@@ -533,8 +541,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         holder = self.name_holder(relation_name)
         if holder is not None and holder != kind:
             raise ValueError(
-                f"{relation_name} already exists as a {holder}. A table, a view and a "
-                "task share one namespace, so a name identifies exactly one of them."
+                f"{relation_name} already exists as a {holder}. Tables, views, tasks and "
+                "property graphs share one namespace, so a name identifies exactly one of them."
             )
 
     def _task_path(self, relation_name: str) -> str:
@@ -2146,6 +2154,74 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if not os.listdir(relation_dir):
             os.rmdir(relation_dir)
 
+    # Property graph operations (Eidetic capability). A graph is its canonical
+    # CREATE PROPERTY GRAPH text, kept beside the other name sentinels.
+
+    def _property_graph_path(self, graph_name: str) -> str:
+        return os.path.join(self._relation_dir(graph_name), "property_graph.json")
+
+    def get_property_graph(self, graph_name: str) -> PropertyGraphDefinition:
+        path = self._property_graph_path(graph_name)
+        if not os.path.isfile(path):
+            raise DatasetNotFoundError(dataset=graph_name, connector=self.__class__.__name__)
+        with open(path, "r") as f:
+            data = json.load(f)
+        return PropertyGraphDefinition(
+            name=data["name"],
+            statement=data["statement"],
+            owner=data.get("owner"),
+            description=data.get("description"),
+        )
+
+    def create_property_graph(
+        self,
+        graph_name: str,
+        statement: str,
+        update_if_exists: bool = False,
+        owner: Optional[str] = None,
+    ) -> None:
+        """Create (or replace) a property graph's definition.
+
+        Raises:
+            ValueError: If another kind of object holds the name, or the graph
+                already exists and update_if_exists is False
+        """
+        self._validate_relation_name(graph_name)
+        relation_dir = self._relation_dir(graph_name)
+        path = os.path.join(relation_dir, "property_graph.json")
+
+        self.assert_name_free(graph_name, "property graph")
+        if os.path.isfile(path) and not update_if_exists:
+            raise ValueError(f"property graph already exists: {graph_name}")
+
+        os.makedirs(relation_dir, exist_ok=True)
+        definition = {
+            "format_version": 1,
+            "name": graph_name,
+            "statement": statement,
+            "owner": owner,
+            "description": None,
+            "created_at": _now_utc_iso(),
+        }
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(definition, f)
+        os.replace(tmp_path, path)
+
+    def drop_property_graph(self, graph_name: str, author: Optional[str] = None) -> None:
+        """Drop a property graph's definition; `author` is unused by this store.
+
+        Raises:
+            ValueError: If the property graph doesn't exist
+        """
+        path = self._property_graph_path(graph_name)
+        if not os.path.isfile(path):
+            raise ValueError(f"property graph does not exist: {graph_name}")
+        os.remove(path)
+        relation_dir = self._relation_dir(graph_name)
+        if not os.listdir(relation_dir):
+            os.rmdir(relation_dir)
+
 
 class LocalStoreTable(BaseTable):
     """Transient reader for a LocalStoreConnector-managed relation."""
@@ -2186,6 +2262,16 @@ class LocalStoreTable(BaseTable):
         relation_dir = self._relation_dir()
         dataset_path = os.path.join(relation_dir, "dataset.json")
         if not os.path.isfile(dataset_path):
+            # Only on the failure path, so a real read pays nothing: a graph shares
+            # the namespace, and "not found" would send the reader looking for a typo.
+            if os.path.isfile(os.path.join(relation_dir, "property_graph.json")):
+                from opteryx.exceptions import UnsupportedSyntaxError
+
+                raise UnsupportedSyntaxError(
+                    f"'{self.dataset}' is a property graph, not a table. Query it with GQL "
+                    "(the gqlparser package lowers GQL to SQL over the graph's tables), or "
+                    "read its tables directly."
+                )
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
 
         with open(dataset_path, "r") as f:

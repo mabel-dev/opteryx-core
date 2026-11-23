@@ -1,6 +1,60 @@
 # Property Graphs (SQL/PGQ DDL) and GQL over Opteryx
 
-**Status:** PROPOSAL, 2026-11-23. Nothing built in opteryx-core.
+**Status:** BUILT, 2026-11-23, uncommitted, in opteryx-core and in
+`opteryx-catalog`.
+- **Both stores supported:** the local store (`LocalStoreConnector`) and the
+  catalog (`OpteryxConnector` over `OpteryxCatalog`, Firestore
+  `<workspace>/<collection>/property_graphs/<name>`, audited as
+  `create_property_graph` / `update_property_graph` / `drop_property_graph`).
+- **Any other `Eidetic` store** refuses graph DDL with "the catalog behind this
+  workspace cannot store property graphs yet".
+- **Release order: catalog before core.** Core's `OpteryxConnector` calls the
+  catalog's `property_graph_exists` from `locate_object`, and from a dataset
+  read's not-found path. Against an older catalog, both raise `AttributeError`.
+- **The catalog does not read graphs in `get_relation`**, contrary to "a third
+  kind in `get_relation`" below. That call runs for every relation a query
+  plans, and a third document would be a billed read on all of them, just to
+  word the rare `SELECT FROM <graph>` refusal. The check runs only on the
+  not-found path instead, which is free when a read succeeds.
+- **No webhooks are sent for graphs.** Views send them; nobody subscribes to
+  graph events yet, and that can be added when someone does.
+
+**Where the build differs from the proposal below:**
+1. **`KEY` is mandatory on edge tables too**, not only on vertex tables. SQL/PGQ
+   defaults both to the primary key, and Opteryx has none.
+2. **Relations are stored as written, not qualified.** Each is validated to
+   resolve (and to be readable by the creator) at CREATE time.
+3. **Column names are stored as the schema spells them.** `KEY (ID)` over a
+   column `id` is stored as `KEY (id)`. Element names are always written out
+   with `AS`.
+4. **Validation binds `SELECT * FROM <relation>` schema-only, as the creator**
+   (the helper `bind_schema_only` in `binder/view.py`, now shared with CREATE
+   VIEW's recorded schema). So creating a graph needs READ on every element
+   table, as CREATE VIEW does on its sources.
+5. **A foreign-key default needs exactly one foreign key.** `SOURCE <vertex>`
+   (with no `KEY ... REFERENCES`) takes the edge table's single informational
+   `FOREIGN KEY` to that vertex table. Zero or several are refused by name.
+   Foreign keys are single-column, so a defaulted endpoint is too.
+6. **Permission tiers mirror views exactly.** `analyze_query` classes the DDL
+   as owner-tier at pre-flight, as it does `CREATE VIEW`, and the binder gates
+   create, drop and `SHOW CREATE` at WRITE.
+7. **The `SELECT * FROM <graph>` refusal** ("is a property graph, not a
+   table") is in both stores' dataset read, on its failure path only (see the
+   `get_relation` note above).
+8. **Execution goes through the serial engine's DDL dispatch**, beside View
+   Management (`serial_engine.py`). This is the existing DDL path, not a data
+   pipeline, but it is Python on the execution side and so part of the
+   interim debt CLAUDE.md §2 describes.
+
+**Verified:**
+- 46 new tests (`tests/unit/planner/test_property_graph_parse.py`,
+  `tests/storage/test_property_graph_ddl.py`);
+- the existing view, `SHOW CREATE`, permissions, `check()` parity and
+  aside-parser suites (454 tests);
+- end to end: `CREATE PROPERTY GRAPH`, then `SHOW CREATE`, then gqlparser's
+  `parse_property_graph` and `lower`, then Opteryx returns the same rows as
+  hand-written SQL;
+- `make q` and `make slt`: see the session report.
 
 ## The split
 

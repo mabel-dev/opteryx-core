@@ -24,6 +24,7 @@
 #include "base64/_base64.h"           // mabel bintob64 / b64_encoded_size
 #include "interop/value_format.hpp"   // fmt_*, json_string
 #include "ops/float_ops.h"            // fp_canon: the same -0.0 / NaN canon as the scan
+#include "../variant_limit.hpp"       // kVariantMaxDepth
 
 namespace rugo {
 namespace variant {
@@ -76,7 +77,7 @@ inline Metadata parse_metadata(const uint8_t* p, size_t len) {
 // A value that is the Variant null (basic type 0, primitive type 0).
 inline bool is_null(const uint8_t* v, size_t len) { return len >= 1 && v[0] == 0; }
 
-constexpr int kMaxDepth = 1024;
+constexpr int kMaxDepth = kVariantMaxDepth;
 
 inline void render(std::string& o, const Metadata& md, const uint8_t* v, const uint8_t* end, int depth);
 

@@ -1,6 +1,7 @@
 #include "jsonl_reader.hpp"
 #include "volnitsky.h"     // simd_contains_cs (confirm step)
 #include "interpreter.hpp"  // require_chunk_length
+#include "../../variant_limit.hpp"  // kVariantMaxDepth (too_deep_error_message)
 #include <cstring>
 #include <algorithm>
 #include <memory>
@@ -477,6 +478,16 @@ std::string malformed_error_message(const uint8_t* buffer, size_t length, size_t
     if (snippet_len > 200) snippet_len = 200;
     return "Malformed JSONL at line " + std::to_string(line) + " (byte offset " +
            std::to_string(offset) + "): " + py_str_repr(buffer + start, snippet_len);
+}
+
+std::string too_deep_error_message(const uint8_t* buffer, size_t length, size_t offset) {
+    const size_t limit = offset < length ? offset : length;
+    size_t line = 1;
+    for (size_t i = 0; i < limit; ++i)
+        if (buffer[i] == '\n') ++line;
+    return "The JSONL record at line " + std::to_string(line) + " (byte offset " +
+           std::to_string(offset) + ") is nested deeper than " + std::to_string(rugo::kVariantMaxDepth) +
+           " levels, the most a VARIANT can hold; pass ignore_errors => true to skip such records";
 }
 
 // The needle for string literal `v` on column `pred_column`, or false when it is not a

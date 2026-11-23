@@ -65,3 +65,47 @@ class Eidetic:
         # Placeholder implementation; actual implementation would remove
         # the view from the connector's metadata.
         raise NotImplementedError("drop_view method must be implemented by subclasses.")
+
+    # Property graphs (SQL/PGQ) are catalog text in the same namespace as views:
+    # a graph is a canonical CREATE PROPERTY GRAPH statement and nothing else
+    # (docs/PROPERTY_GRAPH_DESIGN.md). Unlike the view methods these refuse in
+    # the base rather than raise NotImplementedError: a catalog that has not
+    # added graphs yet is a real, reachable state, and the reader should be told
+    # so rather than shown an internal error.
+
+    def get_property_graph(self, graph_name: str) -> "PropertyGraphDefinition":
+        """Retrieve the definition of the specified property graph."""
+        raise _no_property_graphs(self)
+
+    def create_property_graph(
+        self,
+        graph_name: str,
+        statement: str,
+        update_if_exists: bool = False,
+        owner: Optional[str] = None,
+    ):
+        """Create (or, with `update_if_exists`, replace) a property graph."""
+        raise _no_property_graphs(self)
+
+    def drop_property_graph(self, graph_name: str, author: Optional[str] = None):
+        """Drop the specified property graph."""
+        raise _no_property_graphs(self)
+
+
+@dataclasses.dataclass
+class PropertyGraphDefinition:
+    name: str
+    # The canonical CREATE PROPERTY GRAPH text: every element, key, label and
+    # property written out, so a reader of it never needs a schema.
+    statement: str
+    owner: Optional[str] = None
+    description: Optional[str] = None
+
+
+def _no_property_graphs(store) -> Exception:
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    return UnsupportedSyntaxError(
+        f"The catalog behind this workspace ({type(store).__name__}) cannot store "
+        "property graphs yet."
+    )

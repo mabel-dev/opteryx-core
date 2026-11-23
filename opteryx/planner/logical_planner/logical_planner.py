@@ -82,6 +82,7 @@ from opteryx.compiled.structures.plan_steps import CreateTagStep
 from opteryx.compiled.structures.plan_steps import VectorIndexDdlStep
 from opteryx.compiled.structures.plan_steps import CreateTaskStep
 from opteryx.compiled.structures.plan_steps import CreateTriggerStep
+from opteryx.compiled.structures.plan_steps import CreatePropertyGraphStep
 from opteryx.compiled.structures.plan_steps import CreateViewStep
 from opteryx.compiled.structures.plan_steps import DetachRelationStep
 from opteryx.compiled.structures.plan_steps import DistinctStep
@@ -93,6 +94,7 @@ from opteryx.compiled.structures.plan_steps import DropSecretStep
 from opteryx.compiled.structures.plan_steps import DropTagStep
 from opteryx.compiled.structures.plan_steps import DropTaskStep
 from opteryx.compiled.structures.plan_steps import DropTriggerStep
+from opteryx.compiled.structures.plan_steps import DropPropertyGraphStep
 from opteryx.compiled.structures.plan_steps import DropViewStep
 from opteryx.compiled.structures.plan_steps import DropWorkspaceStep
 from opteryx.compiled.structures.plan_steps import ExceptStep
@@ -173,6 +175,8 @@ class LogicalPlanStepType(int, Enum):
     CreateView = auto()
     AlterView = auto()
     DropView = auto()
+    CreatePropertyGraph = auto()  # SQL/PGQ; catalog text like a view
+    DropPropertyGraph = auto()
     Analyze = auto()
     Comment = auto()  # COMMENT ON VIEW/TABLE
 
@@ -4552,6 +4556,7 @@ def plan_show_create_query(statement, *, plan_context, **kwargs):
         "MATERIALIZEDVIEW": "MATERIALIZED VIEW",
         "TASK": "TASK",
         "TRIGGER": "TRIGGER",
+        "PROPERTYGRAPH": "PROPERTY GRAPH",
     }
     obj_type = statement[root_node]["obj_type"].upper()
     if obj_type not in _OBJECT_TYPES:
@@ -4561,7 +4566,7 @@ def plan_show_create_query(statement, *, plan_context, **kwargs):
         raise UnsupportedSyntaxError(
             f"Opteryx does not support '**SHOW CREATE** {obj_type}'; the object types "
             "with a definition to show are **TABLE**, **VIEW**, **MATERIALIZED VIEW**, "
-            "**TASK** and **TRIGGER**."
+            "**TASK**, **TRIGGER** and **PROPERTY GRAPH**."
         )
     show_step.object_type = _OBJECT_TYPES[obj_type]
     show_step.object_name = extract_variable(statement[root_node]["obj_name"])
@@ -6964,6 +6969,38 @@ def _reject_pronouns_in_task_body(task_sql: str, what: str) -> None:
         )
 
 
+def plan_create_property_graph(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """CREATE [OR REPLACE] PROPERTY GRAPH [IF NOT EXISTS] <name> ... - from the aside parser.
+
+    The parsed definition is carried as-is; the binder validates it against the
+    element tables and renders the canonical text that is stored
+    (docs/PROPERTY_GRAPH_DESIGN.md §2). Nothing about it is planned: a graph is
+    catalog text, as a view is.
+    """
+    root = "CreatePropertyGraph"
+    body = statement[root]
+    plan = LogicalPlan(plan_context)
+    plan.add_node(
+        CreatePropertyGraphStep(
+            graph_name=_aside_object_name(body["name"]),
+            or_replace=body["or_replace"],
+            if_not_exists=body["if_not_exists"],
+            definition=body,
+        )
+    )
+    return plan
+
+
+def plan_drop_property_graph(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """DROP PROPERTY GRAPH [IF EXISTS] <name> - from the aside parser."""
+    body = statement["DropPropertyGraph"]
+    plan = LogicalPlan(plan_context)
+    plan.add_node(
+        DropPropertyGraphStep(graph_name=_aside_object_name(body["name"]), if_exists=body["if_exists"])
+    )
+    return plan
+
+
 def plan_create_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """CREATE [OR REPLACE] TASK <name> AS <statement> — synthesized by pre-parse.
 
@@ -7940,6 +7977,8 @@ QUERY_BUILDERS = {
     "CreateSchema": plan_create_collection,  # CREATE COLLECTION, rewritten by the SQL rewriter
     "CreateView": plan_create_view,
     "AlterView": plan_alter_view,
+    "CreatePropertyGraph": plan_create_property_graph,  # aside parser
+    "DropPropertyGraph": plan_drop_property_graph,  # aside parser
     "AlterTable": plan_alter_table,
     "AlterFunction": plan_alter_workspace,  # ALTER WORKSPACE, rewritten by the SQL rewriter
     # ALTER WORKSPACE ... SET|DROP SECURE - synthesized pre-parse; the rewriter

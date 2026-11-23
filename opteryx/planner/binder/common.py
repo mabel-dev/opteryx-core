@@ -22,6 +22,7 @@ from opteryx.planner.binder.window import visit_window
 from opteryx.planner.binder.framed_window import visit_framed_window as _visit_framed_window
 from opteryx.planner.binder.subquery import visit_comment, visit_materialized_cte_ref, visit_subquery
 from opteryx.compiled.planner.binder_core import traverse
+from opteryx.planner.binder.property_graph import visit_create_property_graph, visit_drop_property_graph
 from opteryx.planner.binder.view import (
     visit_alter_view,
     visit_create_view,
@@ -269,6 +270,16 @@ class BinderVisitor:
         self, node: PlanStep, context: BindingContext
     ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_view(self, node, context)
+
+    def visit_create_property_graph(
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
+        return visit_create_property_graph(self, node, context)
+
+    def visit_drop_property_graph(
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
+        return visit_drop_property_graph(self, node, context)
 
     def visit_create_relation(
         self, node: PlanStep, context: BindingContext

@@ -37,6 +37,7 @@ def _special_op_types():
     from opteryx.operators.show_indexes import ShowIndexesNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
+    from opteryx.operators.graph_management import PropertyGraphManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
     from opteryx.operators.merge import MergeNode
@@ -55,6 +56,7 @@ def _special_op_types():
         ShowIndexesNode,
         TableManagementNode,
         ViewManagementNode,
+        PropertyGraphManagementNode,
         RelationManagementNode,
         InsertNode,
         MergeNode,
@@ -85,6 +87,7 @@ def execute(
     from opteryx.operators.show_indexes import ShowIndexesNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
+    from opteryx.operators.graph_management import PropertyGraphManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
     from opteryx.operators.merge import MergeNode
@@ -103,7 +106,10 @@ def execute(
         )
     if isinstance(head_node, SetVariableNode):
         return head_node(None), ResultType.NON_TABULAR
-    if isinstance(head_node, (ViewManagementNode, TableManagementNode, RelationManagementNode)):
+    if isinstance(
+        head_node,
+        (ViewManagementNode, PropertyGraphManagementNode, TableManagementNode, RelationManagementNode),
+    ):
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, (MergeNode, CompactionCommitNode)):
         # MERGE's whole body — the join, the action chain and the blended

@@ -82,6 +82,58 @@ def test_a_line_that_is_not_one_object_fails(tmp_path, caplog, bad):
     ) == [(LINES[0],), (LINES[2],)]
 
 
+def _nested(arrays, inner=""):
+    # The record's object is depth 0; its member `a` opens `arrays` arrays, the k-th at depth
+    # k, around `inner` (a scalar there sits at depth arrays + 1). A string full of brackets,
+    # opening with an escaped quote, sits beside it: brackets inside strings nest nothing.
+    return '{"s":"\\"' + "[{" * 1500 + '","a":' + "[" * arrays + inner + "]" * arrays + "}"
+
+
+# A VARIANT holds values to depth 1024 (rugo/src/variant_limit.hpp).
+FITS = [_nested(1024), _nested(1023, "0")]
+TOO_DEEP = [_nested(1025), _nested(1024, "0")]
+
+
+@pytest.mark.parametrize("record", FITS)
+def test_a_record_at_the_depth_limit_is_read_and_written(tmp_path, record):
+    path = tmp_path / "deep.jsonl"
+    path.write_text(LINES[0] + "\n" + record + "\n")
+    morsels = list(opteryx.session().execute_to_morsels(
+        f"SELECT data FROM READ_JSONL('{path}', as_variant => 'data')"
+    ))
+    assert [v for m in morsels for v in m.column("data").to_pylist()] == [LINES[0], record]
+    # The writer holds the same limit: what the reader accepts, it writes.
+    for m in morsels:
+        rp.write_parquet(m)
+
+
+@pytest.mark.parametrize("record", TOO_DEEP)
+def test_a_record_deeper_than_a_variant_holds(tmp_path, caplog, record):
+    path = tmp_path / "deep.jsonl"
+    path.write_text(LINES[0] + "\n" + record + "\n" + LINES[2] + "\n")
+    with pytest.raises(DatasetReadError):
+        _rows(f"SELECT data FROM READ_JSONL('{path}', as_variant => 'data')")
+    assert "line 2" in caplog.text and "nested deeper than 1024 levels" in caplog.text
+    # With ignore_errors it is skipped, and the query says so.
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        f"SELECT data FROM READ_JSONL('{path}', as_variant => 'data', ignore_errors => true)"
+    ):
+        rows.extend(morsel.column("data").to_pylist())
+    assert rows == [LINES[0], LINES[2]]
+    assert any("skipped 1 record(s) nested deeper than 1024" in m for m in session.messages)
+
+
+def test_no_warning_when_nothing_is_skipped(jsonl):
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(
+        f"SELECT data FROM READ_JSONL('{jsonl}', as_variant => 'data', ignore_errors => true)"
+    ):
+        pass
+    assert not any("nested deeper" in m for m in session.messages)
+
+
 def test_a_buffer_read_in_many_windows(tmp_path):
     # The map builder indexes 256 KB windows: every record keeps its own span across them.
     path = tmp_path / "big.jsonl"

@@ -6,6 +6,7 @@
 #include "predicate_literal.hpp" // check_predicate_literals: literal vs column type contract
 #include "declared_type.hpp"     // check_predicate_literals: declared column types
 #include "structural_scan.hpp" // scan_structural_index (build_map's windows)
+#include "../../variant_limit.hpp" // variant_too_deep: a whole record read as a VARIANT
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -347,6 +348,22 @@ struct MapBuilder {
     inline void flag_malformed(uint32_t pos) {
         if (!malformed_found) { malformed_found = true; malformed_at = pos; }
         ++malformed_count;
+    }
+    bool too_deep_found = false;
+    uint32_t too_deep_at = 0;
+    uint32_t too_deep_count = 0;
+
+    // The record [open, close] is the whole_record column's value and nests deeper than a
+    // VARIANT holds: count it and do not bank it (ColumnMap::too_deep*).
+    inline bool refuse_too_deep(uint32_t open, uint32_t close) {
+        if constexpr (kColumns) {
+            if (proj->whole_slot < 0 || !rugo::variant_too_deep(buffer + open, close - open + 1)) return false;
+            if (!too_deep_found) { too_deep_found = true; too_deep_at = open; }
+            ++too_deep_count;
+            return true;
+        } else {
+            return false;
+        }
     }
 
     inline size_t rows_banked() const {
@@ -936,7 +953,7 @@ void walk_window(MapBuilder<kColumns>& b, const StructuralWindow& w, uint32_t bu
             continue;
         }
         if (b.record_dead) { b.discard_record(); b.record_dead = false; }
-        else { b.stage_whole(pos, w.ix[close]); b.bank_record(); }
+        else if (!b.refuse_too_deep(pos, w.ix[close])) { b.stage_whole(pos, w.ix[close]); b.bank_record(); }
         b.tail_start = w.ix[close] + 1;
         i = close;
     }
@@ -1132,6 +1149,9 @@ ColumnMap build_columns(
     b.cm.malformed = b.malformed_found;
     b.cm.malformed_pos = b.malformed_found ? b.malformed_at : 0;
     b.cm.malformed_count = b.malformed_count;
+    b.cm.too_deep = b.too_deep_found;
+    b.cm.too_deep_pos = b.too_deep_found ? b.too_deep_at : 0;
+    b.cm.too_deep_count = b.too_deep_count;
     return std::move(b.cm);
 }
 

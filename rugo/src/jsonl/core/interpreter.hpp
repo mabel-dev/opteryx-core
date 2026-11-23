@@ -199,6 +199,13 @@ struct ColumnMap {
     size_t   malformed_pos = 0;
     uint32_t malformed_count = 0;
 
+    // Records read as a VARIANT (the whole_record column) that nest deeper than a VARIANT
+    // holds (rugo/src/variant_limit.hpp): not banked. The first one's position and how many,
+    // like malformed*: an error with fail_on_error, a warning without.
+    bool     too_deep = false;
+    size_t   too_deep_pos = 0;
+    uint32_t too_deep_count = 0;
+
     size_t num_records() const { return rows; }
 
     // The bytes column `c`'s spans index, per chunk: its arena when copied, else `source`.

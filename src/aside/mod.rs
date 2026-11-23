@@ -36,6 +36,7 @@
 mod admin;
 mod cursor;
 mod grant;
+mod graph;
 mod index;
 mod listen;
 mod secret;
@@ -105,6 +106,8 @@ pub enum OpteryxOnly {
     CreateSecret(secret::CreateSecret),
     DropSecret(secret::DropSecret),
     ShowSecrets(secret::ShowSecrets),
+    CreatePropertyGraph(graph::CreatePropertyGraph),
+    DropPropertyGraph(graph::DropPropertyGraph),
 }
 
 /// Tokenize `sql`, then run each statement through the aside productions before
@@ -163,6 +166,9 @@ pub fn parse_statements(
         }
         if recognised.is_none() {
             recognised = secret::parse(&mut cursor)?;
+        }
+        if recognised.is_none() {
+            recognised = graph::parse(&mut cursor)?;
         }
         match recognised {
             Some(statement) => out.push(OpteryxStatement::Opteryx(statement)),

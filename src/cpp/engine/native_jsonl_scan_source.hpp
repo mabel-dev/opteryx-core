@@ -136,6 +136,9 @@ struct JsonlScanSpec {
     mutable int64_t rows_read   = -1;   // rows emitted
     mutable int64_t bytes_read  = -1;   // chunk bytes decoded
     mutable int64_t chunks_read = -1;   // chunks decoded
+    // Records read as a VARIANT that nest deeper than a VARIANT holds, skipped under
+    // ignore_errors (rugo/src/variant_limit.hpp).
+    mutable int64_t records_too_deep = -1;
 };
 
 // Copy the ParseContext prepare_jsonl_context built (owned by a PyCapsule the
@@ -315,6 +318,7 @@ struct NativeJsonlScanGlobal : GlobalSourceState {
     std::atomic<int64_t> rows{0};
     std::atomic<int64_t> bytes{0};
     std::atomic<int64_t> chunks{0};
+    std::atomic<int64_t> too_deep{0};
 
     std::vector<std::thread> workers;
 
@@ -333,6 +337,7 @@ struct NativeJsonlScanGlobal : GlobalSourceState {
         spec->rows_read = rows.load();
         spec->bytes_read = bytes.load();
         spec->chunks_read = chunks.load();
+        spec->records_too_deep = too_deep.load();
     }
 };
 
@@ -690,6 +695,16 @@ private:
         if (ctx.fail_on_error && ir.all_records.malformed) {
             error = decode_error(rj::malformed_error_message(buf, len, ir.all_records.malformed_pos));
             return;
+        }
+        // A record read as a VARIANT that nests deeper than a VARIANT holds was not banked:
+        // an error, or with ignore_errors a count the query reports as a warning.
+        if (ir.all_records.too_deep) {
+            if (ctx.fail_on_error) {
+                error = "READ_JSONL('" + path + "'): " +
+                        rj::too_deep_error_message(buf, len, ir.all_records.too_deep_pos);
+                return;
+            }
+            g.too_deep.fetch_add(ir.all_records.too_deep_count, std::memory_order_relaxed);
         }
         if (ir.all_records.num_records() == 0 || ir.num_records_passed == 0) return;
         const uint32_t rows = static_cast<uint32_t>(ir.num_records_passed);

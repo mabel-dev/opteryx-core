@@ -24,6 +24,13 @@ shared by every reference:
   filtering by P, so when all readers filter by P the move is an identity — the
   per-reference copies are removed.
 
+- DISJUNCTIONS: when the references filter DIFFERENTLY (TPC-DS Q39: `d_moy = 1`
+  on one, `d_moy = 2` on the other), the body is filtered by the OR, over the
+  references, of each one's remaining body-column filters (ANDed). Every row any
+  reference keeps satisfies that OR, so the body loses only rows no reader wants;
+  each reference keeps its own filters, which still select its rows. Skipped when
+  any reference has no such filter — that reference reads every row.
+
 Order matters: the MAIN plan (and any dependent shared body) is optimized first,
 so filters and projections have already settled against the reference leaves;
 then this coordination runs per body, dependents before dependencies; then each
@@ -42,6 +49,8 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.relation_resolver import iter_plan_forest
 from opteryx.compiled.structures.expressions import rewrite_children
 from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.planner.optimizer.strategies.disjunction_simplification import _build_and
+from opteryx.planner.optimizer.strategies.disjunction_simplification import _build_or
 
 __all__ = ["coordinate_shared_cte", "strip_body_boundary"]
 
@@ -272,20 +281,12 @@ def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> 
     common = set(per_ref[0])
     for candidates in per_ref[1:]:
         common &= set(candidates)
-    if not common:
-        return
 
     body_columns_by_identity = {c.identity: c for c in (body_schema.columns if body_schema else [])}
     head_nid = body.exit_point()
 
-    for key in common:
-        _donor_plan, _donor_nid, donor, donor_mapping = per_ref[0][key]
-        # a KeyError here would mean a mapping onto a column the boundary schema
-        # does not carry — impossible by construction (the mapping was minted
-        # FROM that schema), so it fails loud rather than being smoothed over
-        translated = _translate_condition(
-            donor.condition, donor_mapping, body_columns_by_identity
-        )
+    def _add_body_filter(translated):
+        nonlocal head_nid
         body_filter = FilterStep()
         body_filter.condition = translated
         body_filter.columns = get_all_nodes_of_type(
@@ -297,11 +298,44 @@ def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> 
         body.add_edge(head_nid, filter_nid)
         head_nid = filter_nid
 
+    # Disjunction over what is NOT common, built before the common filters are
+    # removed from the references (removal does not touch the residual nodes).
+    branches = {}
+    for candidates in per_ref:
+        residual = sorted((k for k in candidates if k not in common), key=repr)
+        if not residual:
+            branches = None  # this reference reads every row the common filters keep
+            break
+        branches.setdefault(tuple(residual), candidates)
+    disjunction = None
+    if branches is not None and len(branches) > 1:
+        disjunction = _build_or([
+            _build_and([
+                _translate_condition(candidates[k][2].condition, candidates[k][3],
+                                     body_columns_by_identity)
+                for k in residual
+            ])
+            for residual, candidates in branches.items()
+        ])
+
+    for key in common:
+        _donor_plan, _donor_nid, donor, donor_mapping = per_ref[0][key]
+        # a KeyError here would mean a mapping onto a column the boundary schema
+        # does not carry — impossible by construction (the mapping was minted
+        # FROM that schema), so it fails loud rather than being smoothed over
+        _add_body_filter(
+            _translate_condition(donor.condition, donor_mapping, body_columns_by_identity)
+        )
+
         # every reference carried an equivalent copy — remove each one
         for candidates in per_ref:
             ref_plan, ref_filter_nid, _node, _mapping = candidates[key]
             _remove_hoisted_filter(ref_plan, ref_filter_nid)
         telemetry.optimization_shared_cte_predicate_pushed += 1
+
+    if disjunction is not None:
+        _add_body_filter(disjunction)
+        telemetry.optimization_shared_cte_disjunction_pushed += 1
 
 
 def coordinate_shared_cte(

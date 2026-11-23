@@ -362,6 +362,12 @@ InterpreterResult interpret_jsonl_threaded(
             out.malformed = true;
             out.malformed_pos = pos;
         }
+        out.too_deep_count += m.too_deep_count;
+        const size_t deep_pos = chunk_starts[partial_chunk[k]] + m.too_deep_pos;
+        if (m.too_deep && (!out.too_deep || deep_pos < out.too_deep_pos)) {
+            out.too_deep = true;
+            out.too_deep_pos = deep_pos;
+        }
         result.num_records_passed += partial[k].num_records_passed;
     }
     result.bytes_consumed = buffer_length;

@@ -121,6 +121,10 @@ class _MemoryDoc:
         self._data = dict(data)
         self.exists = True
 
+    def delete(self):
+        self._data = None
+        self.exists = False
+
     def collection(self, name):
         return self._children.setdefault(name, _MemoryCollection())
 
@@ -144,6 +148,8 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
     from opteryx_catalog.exceptions import DatasetAlreadyExists
     from opteryx_catalog.exceptions import DatasetNotFound
     from opteryx_catalog.exceptions import ForkError
+    from opteryx_catalog.exceptions import NameInUse
+    from opteryx_catalog.exceptions import ViewNotFound
     from opteryx_catalog.opteryx_catalog import OpteryxCatalog
 
     io = disk_io if disk_io is not None else LocalDiskIO()
@@ -154,6 +160,8 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
     forks: dict = {}
     # Per-dataset metastore documents beyond existence (the orphan quarantine record).
     documents: dict = {}
+    # Property graph documents, by "workspace.collection.graph".
+    graphs: dict = {}
 
     class LocalCatalog:
         # Shared state, visible to every instance the connector creates.
@@ -275,6 +283,29 @@ def local_catalog_class(root: str, disk_io: LocalDiskIO | None = None):
             if key not in datasets:
                 raise DatasetNotFound(identifier)
             return datasets[key]
+
+        # This store holds no views: the honest answer to "is this a view" is no.
+        def load_view(self, identifier):
+            raise ViewNotFound(identifier)
+
+        # ---- property graphs: the real catalog's methods over memory documents --
+        create_property_graph = OpteryxCatalog.create_property_graph
+        load_property_graph = OpteryxCatalog.load_property_graph
+        property_graph_exists = OpteryxCatalog.property_graph_exists
+        drop_property_graph = OpteryxCatalog.drop_property_graph
+        _property_graph_parts = staticmethod(OpteryxCatalog._property_graph_parts)
+
+        def _property_graph_doc_ref(self, collection, graph_name):
+            return graphs.setdefault(f"{self.workspace}.{collection}.{graph_name}", _MemoryDoc())
+
+        def assert_name_free(self, collection, name, kind):
+            """The real guard reads dataset, view and task documents this store does not
+            have; datasets and graphs are the two kinds it holds."""
+            key = f"{self.workspace}.{collection}.{name}"
+            if kind != "dataset" and key in datasets:
+                raise NameInUse(f"{collection}.{name} already exists as a dataset.")
+            if kind != "property graph" and key in graphs and graphs[key].exists:
+                raise NameInUse(f"{collection}.{name} already exists as a property graph.")
 
         def get_relation(self, identifier):
             key = self._key(identifier)

@@ -92,6 +92,11 @@ std::string py_str_repr(const uint8_t* bytes, size_t length);
 // it counts newlines over every byte before `offset`.
 std::string malformed_error_message(const uint8_t* buffer, size_t length, size_t offset);
 
+// The fail_on_error message for the first record read as a VARIANT that nests deeper than
+// a VARIANT holds (ColumnMap::too_deep), at `offset` in `buffer`: its 1-based line number.
+// Error path only, like malformed_error_message.
+std::string too_deep_error_message(const uint8_t* buffer, size_t length, size_t offset);
+
 }  // namespace rugo::_jsonl
 
 #endif  // _JSONL_READER_HPP_

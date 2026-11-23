@@ -224,7 +224,14 @@ _SHOW_CREATE_ACTIONS = {
     # unattended runs carry, which is exactly what makes a task's definition
     # AUTOMATE-gated.
     "TRIGGER": "AUTOMATE",
+    # Same tier as VIEW: the definition names the tables it maps, which the
+    # caller may hold no grant on.
+    "PROPERTY GRAPH": "WRITE",
 }
+
+
+# Catalog TEXT, held in the view store rather than the data binding.
+_VIEW_STORE_OBJECTS = frozenset({"VIEW", "PROPERTY GRAPH"})
 
 
 def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
@@ -264,18 +271,18 @@ def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             f"{node.object_type.lower()} {node.object_name} ({action.lower()} required)"
         )
 
-    if node.object_type == "VIEW":
-        # Read back from where CREATE VIEW wrote it - the view store, not the
-        # workspace's data binding. A MATERIALIZED VIEW is storage and stays on
-        # the data binding with the rest of the object types.
+    if node.object_type in _VIEW_STORE_OBJECTS:
+        # Read back from where CREATE VIEW (or PROPERTY GRAPH) wrote it - the view
+        # store, not the workspace's data binding. A MATERIALIZED VIEW is storage
+        # and stays on the data binding with the rest of the object types.
         node.connector = _view_store(node.object_name, context)
     else:
         node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
 
-    # Every object type but VIEW is read back through the Writable capability -
+    # Every other object type is read back through the Writable capability -
     # the definition stores hang off it - so a connector without it cannot
     # answer, and must say so rather than fail later with a missing attribute.
-    if node.object_type != "VIEW":
+    if node.object_type not in _VIEW_STORE_OBJECTS:
         from opteryx.connectors.capabilities import Writable
         from opteryx.exceptions import UnsupportedSyntaxError
 
@@ -292,6 +299,58 @@ def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
 
     node.columns = []
     return node, context
+
+
+def bind_schema_only(sql: str, context: BindingContext):
+    """Bind `sql` inside this statement's planning, schema-only, and return the
+    head (exit) step - for DDL that must know what a statement or a relation
+    produces (CREATE VIEW's recorded schema, CREATE PROPERTY GRAPH's columns).
+
+    Bound AS the creator (`context.execution_context`), so the sources must
+    resolve and the creator must be able to read them; a failure propagates.
+    """
+    from opteryx.planner import bind_statement
+
+    # The body's shared CTEs (a CTE it references twice, `WITH a AS (...), b AS (...
+    # FROM a) SELECT ... FROM a, b`) are the BODY's, bound schema-only with no
+    # Manifest. Left in this statement's registries, the CREATE's own physical planner
+    # compiled them as its own and refused their manifest-less scans - so the body
+    # binds against empty registries and the statement's are put back after.
+    plan_context = context.plan_context
+    statement_ctes = (
+        plan_context.shared_ctes,
+        plan_context.physical_shared_ctes,
+        plan_context.recursive_ctes,
+        plan_context.pending_shared_ctes,
+    )
+    plan_context.shared_ctes = {}
+    plan_context.physical_shared_ctes = {}
+    plan_context.recursive_ctes = {}
+    plan_context.pending_shared_ctes = []
+    try:
+        bound_plan, _clean_sql, _ast = bind_statement(
+            operation=sql,
+            parameters=None,
+            # Row visibility filters restrict which ROWS a reader sees; they cannot
+            # add, remove or retype a column, so they have no bearing on a shape.
+            visibility_filters=None,
+            execution_context=context.execution_context,
+            query_id=context.query_id,
+            telemetry=context.telemetry,
+            schema_only=True,
+            # bound inside the DDL's own planning, so its columns are minted in
+            # this statement's table
+            plan_context=plan_context,
+        )
+    finally:
+        (
+            plan_context.shared_ctes,
+            plan_context.physical_shared_ctes,
+            plan_context.recursive_ctes,
+            plan_context.pending_shared_ctes,
+        ) = statement_ctes
+
+    return bound_plan[bound_plan.exit_point()]
 
 
 def _view_output_schema(node, context: BindingContext):
@@ -322,51 +381,10 @@ def _view_output_schema(node, context: BindingContext):
     stale - the view itself still expands the wildcard at read time, so this can
     misdescribe the view but can never change what it returns.
     """
-    from opteryx.planner import bind_statement
     from opteryx.types.schema import ColumnDescriptor
     from opteryx.types.schema import RelationDescriptor
 
-    # The body's shared CTEs (a CTE it references twice, `WITH a AS (...), b AS (...
-    # FROM a) SELECT ... FROM a, b`) are the BODY's, bound schema-only with no
-    # Manifest. Left in this statement's registries, the CREATE's own physical planner
-    # compiled them as its own and refused their manifest-less scans - so the body
-    # binds against empty registries and the statement's are put back after.
-    plan_context = context.plan_context
-    statement_ctes = (
-        plan_context.shared_ctes,
-        plan_context.physical_shared_ctes,
-        plan_context.recursive_ctes,
-        plan_context.pending_shared_ctes,
-    )
-    plan_context.shared_ctes = {}
-    plan_context.physical_shared_ctes = {}
-    plan_context.recursive_ctes = {}
-    plan_context.pending_shared_ctes = []
-    try:
-        bound_plan, _clean_sql, _ast = bind_statement(
-            operation=node.view_sql,
-            parameters=None,
-            # Row visibility filters restrict which ROWS a reader sees; they cannot
-            # add, remove or retype a column, so they have no bearing on the shape
-            # being recorded here.
-            visibility_filters=None,
-            execution_context=context.execution_context,
-            query_id=context.query_id,
-            telemetry=context.telemetry,
-            schema_only=True,
-            # the view body is bound inside the CREATE VIEW's own planning, so its
-            # columns are minted in this statement's table
-            plan_context=plan_context,
-        )
-    finally:
-        (
-            plan_context.shared_ctes,
-            plan_context.physical_shared_ctes,
-            plan_context.recursive_ctes,
-            plan_context.pending_shared_ctes,
-        ) = statement_ctes
-
-    head = bound_plan[bound_plan.exit_point()]
+    head = bind_schema_only(node.view_sql, context)
 
     from opteryx.planner.binder.project import refuse_collision_qualified_names
 

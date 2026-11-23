@@ -145,6 +145,7 @@ class TableType(str, Enum):
     """Enum representing the type of object in a data catalog"""
     Table = "Table"
     View = "View"
+    PropertyGraph = "PropertyGraph"
 
 
 

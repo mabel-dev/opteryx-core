@@ -234,6 +234,43 @@ void test_refusals() {
     }
 }
 
+// The JSONL reader refuses a record read as a VARIANT exactly when the encoder would:
+// rugo::variant_too_deep (variant_limit.hpp) against encode(), around kVariantMaxDepth,
+// nesting arrays and objects around an empty container, a scalar and an object. A string of
+// brackets with an escaped quote sits in every record: brackets in strings nest nothing.
+void test_depth_limit() {
+    const std::string pad = "{\"s\":\"\\\"" + [] { std::string p; for (int i = 0; i < 1500; ++i) p += "[{"; return p; }() + "\",\"a\":";
+    int refused = 0, held = 0;
+    for (int n = rugo::kVariantMaxDepth - 2; n <= rugo::kVariantMaxDepth + 1; ++n) {
+        for (const char* inner : {"", "0", "{}", "{\"k\":[1]}"}) {
+            for (bool objects : {false, true}) {
+                std::string doc = pad;
+                for (int i = 0; i < n; ++i) doc += objects ? "{\"o\":" : "[";
+                doc += objects && inner[0] == '\0' ? "null" : inner;
+                for (int i = 0; i < n; ++i) doc += objects ? "}" : "]";
+                doc += "}";
+                Rows rows;
+                rows.text = {doc};
+                rows.seal();
+                Shredder s("data", ShredType{});
+                bool threw = false;
+                try { s.encode(rows.docs.data(), nullptr, 1); } catch (const std::runtime_error&) { threw = true; }
+                const bool deep = rugo::variant_too_deep(reinterpret_cast<const uint8_t*>(doc.data()), doc.size());
+                check(deep == threw, std::string(objects ? "objects" : "arrays") + " x" + std::to_string(n) +
+                                         " around '" + inner + "': the reader says " + (deep ? "too deep" : "fits") +
+                                         ", the encoder " + (threw ? "refused it" : "wrote it"));
+                if (threw) ++refused;
+                else {
+                    ++held;
+                    std::string got;
+                    unshredded(s, 0, got);   // the renderer holds the same limit
+                }
+            }
+        }
+    }
+    check(refused > 0 && held > 0, "the cases straddle the limit");
+}
+
 // ── 2 + 3. shredding ────────────────────────────────────────────────────────
 
 std::string document(int i) {
@@ -418,6 +455,7 @@ void test_ranges() {
 int main() {
     test_rendering();
     test_refusals();
+    test_depth_limit();
     test_shredding();
     test_inference_limits();
     test_ranges();

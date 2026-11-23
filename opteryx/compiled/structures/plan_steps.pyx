@@ -4827,6 +4827,217 @@ cdef class DropViewStep(PlanStep):
         return new
 
 
+cdef class CreatePropertyGraphStep(PlanStep):
+    """The CreatePropertyGraph logical plan step."""
+
+    cdef object _connector
+    cdef dict _definition
+    cdef object _graph_name
+    cdef object _if_not_exists
+    cdef object _or_replace
+    cdef object _statement
+
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, definition=None, graph_name=None, if_not_exists=None, or_replace=None, statement=None):
+        self.node_type = _step_types().CreatePropertyGraph
+        self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
+        self.definition = definition
+        self.graph_name = graph_name
+        self.if_not_exists = if_not_exists
+        self.or_replace = or_replace
+        self.statement = statement
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._connector = value
+
+    @property
+    def definition(self):
+        return self._definition
+
+    @definition.setter
+    def definition(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._definition = value
+
+    @property
+    def graph_name(self):
+        return self._graph_name
+
+    @graph_name.setter
+    def graph_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._graph_name = value
+
+    @property
+    def if_not_exists(self):
+        return self._if_not_exists
+
+    @if_not_exists.setter
+    def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("CreatePropertyGraphStep.if_not_exists", value)
+        self._if_not_exists = value
+
+    @property
+    def or_replace(self):
+        return self._or_replace
+
+    @or_replace.setter
+    def or_replace(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("CreatePropertyGraphStep.or_replace", value)
+        self._or_replace = value
+
+    @property
+    def statement(self):
+        return self._statement
+
+    @statement.setter
+    def statement(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._statement = value
+
+    cpdef tuple expressions(self, bint include_columns=True):
+        cdef list out = []
+        if include_columns:
+            _extend_expressions(out, self._columns)
+        return tuple(out)
+
+    cpdef map_expressions(self, object fn):
+        self.columns = _map_expressions(fn, self._columns)
+
+    cpdef dict field_values(self):
+        cdef dict out = self._common_values()
+        out["connector"] = self._connector
+        out["definition"] = self._definition
+        out["graph_name"] = self._graph_name
+        out["if_not_exists"] = self._if_not_exists
+        out["or_replace"] = self._or_replace
+        out["statement"] = self._statement
+        return out
+
+    cpdef PlanStep copy(self, dict memo=None):
+        if memo is None:
+            memo = {}
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        cdef CreatePropertyGraphStep new = CreatePropertyGraphStep.__new__(CreatePropertyGraphStep)
+        new.node_type = self.node_type
+        memo[id(self)] = new
+        self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
+        new._definition = _copy_field(self._definition, memo)
+        new._graph_name = _copy_field(self._graph_name, memo)
+        new._if_not_exists = _copy_field(self._if_not_exists, memo)
+        new._or_replace = _copy_field(self._or_replace, memo)
+        new._statement = _copy_field(self._statement, memo)
+        new._sync_row()
+        return new
+
+    cdef PlanStep _shallow_copy(self):
+        cdef CreatePropertyGraphStep new = CreatePropertyGraphStep.__new__(CreatePropertyGraphStep)
+        new.node_type = self.node_type
+        self._share_common_into(new)
+        new._connector = self._connector
+        new._definition = self._definition
+        new._graph_name = self._graph_name
+        new._if_not_exists = self._if_not_exists
+        new._or_replace = self._or_replace
+        new._statement = self._statement
+        new._row[0] = self._row[0]
+        return new
+
+cdef class DropPropertyGraphStep(PlanStep):
+    """The DropPropertyGraph logical plan step."""
+
+    cdef object _connector
+    cdef object _graph_name
+    cdef object _if_exists
+
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, graph_name=None, if_exists=None):
+        self.node_type = _step_types().DropPropertyGraph
+        self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
+        self.graph_name = graph_name
+        self.if_exists = if_exists
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._connector = value
+
+    @property
+    def graph_name(self):
+        return self._graph_name
+
+    @graph_name.setter
+    def graph_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._graph_name = value
+
+    @property
+    def if_exists(self):
+        return self._if_exists
+
+    @if_exists.setter
+    def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("DropPropertyGraphStep.if_exists", value)
+        self._if_exists = value
+
+    cpdef tuple expressions(self, bint include_columns=True):
+        cdef list out = []
+        if include_columns:
+            _extend_expressions(out, self._columns)
+        return tuple(out)
+
+    cpdef map_expressions(self, object fn):
+        self.columns = _map_expressions(fn, self._columns)
+
+    cpdef dict field_values(self):
+        cdef dict out = self._common_values()
+        out["connector"] = self._connector
+        out["graph_name"] = self._graph_name
+        out["if_exists"] = self._if_exists
+        return out
+
+    cpdef PlanStep copy(self, dict memo=None):
+        if memo is None:
+            memo = {}
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        cdef DropPropertyGraphStep new = DropPropertyGraphStep.__new__(DropPropertyGraphStep)
+        new.node_type = self.node_type
+        memo[id(self)] = new
+        self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
+        new._graph_name = _copy_field(self._graph_name, memo)
+        new._if_exists = _copy_field(self._if_exists, memo)
+        new._sync_row()
+        return new
+
+    cdef PlanStep _shallow_copy(self):
+        cdef DropPropertyGraphStep new = DropPropertyGraphStep.__new__(DropPropertyGraphStep)
+        new.node_type = self.node_type
+        self._share_common_into(new)
+        new._connector = self._connector
+        new._graph_name = self._graph_name
+        new._if_exists = self._if_exists
+        new._row[0] = self._row[0]
+        return new
+
 cdef class DropWorkspaceStep(PlanStep):
     """The DropWorkspace logical plan step."""
 
@@ -11274,7 +11485,7 @@ cdef class VectorIndexDdlStep(PlanStep):
         return new
 
 
-PLAN_STEP_TYPES = frozenset({VectorIndexDdlStep, AddColumnStep, AddRelationshipStep, AggregateStep, AggregateAndGroupStep, AlterColumnTypeStep, AlterMaterializedViewOwnerStep, AlterMaterializedViewSuspendedStep, AlterRelationStep, AlterTaskStep, AlterTriggerMinimumIntervalStep, AlterTriggerOwnerStep, AlterTriggerSuspendedStep, AlterViewStep, AlterWorkspaceStep, AlterWorkspaceSecureStep, AnalyzeStep, CallProcedureStep, CloneCollectionStep, CloneRelationStep, CommentStep, CompactionCommitStep, CreateCollectionStep, CreateRelationStep, CreateTagStep, CreateTaskStep, CreateTriggerStep, CreateViewStep, DetachRelationStep, DistinctStep, DropCollectionStep, DropColumnStep, DropRelationStep, DropRelationshipStep, DropTagStep, DropTaskStep, DropTriggerStep, DropViewStep, DropSecretStep, DropWorkspaceStep, ExceptStep, ExitStep, ExplainStep, FilterStep, FramedWindowStep, FunctionDatasetStep, GrantAccessStep, HeapSortStep, InsertStep, IntersectStep, JoinStep, LimitStep, ListenStep, MaterializedCteRefStep, MergeStep, OrderStep, ProjectStep, RenameColumnStep, RenameRelationStep, ResyncRelationStep, RevokeAccessStep, RollbackRelationStep, ScalarSubqueryGuardStep, ScanStep, SetStep, ShowStep, ShowColumnsStep, ShowEffectiveGrantsOnStep, ShowGrantsOnStep, ShowLineageStep, ShowManifestStep, ShowSnapshotsStep, ShowSourcesStep, SubqueryStep, TruncateRelationStep, UnionStep, UnlistenStep, UnnestStep, WindowStep})
+PLAN_STEP_TYPES = frozenset({VectorIndexDdlStep, AddColumnStep, AddRelationshipStep, AggregateStep, AggregateAndGroupStep, AlterColumnTypeStep, AlterMaterializedViewOwnerStep, AlterMaterializedViewSuspendedStep, AlterRelationStep, AlterTaskStep, AlterTriggerMinimumIntervalStep, AlterTriggerOwnerStep, AlterTriggerSuspendedStep, AlterViewStep, AlterWorkspaceStep, AlterWorkspaceSecureStep, AnalyzeStep, CallProcedureStep, CloneCollectionStep, CloneRelationStep, CommentStep, CompactionCommitStep, CreateCollectionStep, CreateRelationStep, CreateTagStep, CreateTaskStep, CreateTriggerStep, CreateViewStep, CreatePropertyGraphStep, DropPropertyGraphStep, DetachRelationStep, DistinctStep, DropCollectionStep, DropColumnStep, DropRelationStep, DropRelationshipStep, DropTagStep, DropTaskStep, DropTriggerStep, DropViewStep, DropSecretStep, DropWorkspaceStep, ExceptStep, ExitStep, ExplainStep, FilterStep, FramedWindowStep, FunctionDatasetStep, GrantAccessStep, HeapSortStep, InsertStep, IntersectStep, JoinStep, LimitStep, ListenStep, MaterializedCteRefStep, MergeStep, OrderStep, ProjectStep, RenameColumnStep, RenameRelationStep, ResyncRelationStep, RevokeAccessStep, RollbackRelationStep, ScalarSubqueryGuardStep, ScanStep, SetStep, ShowStep, ShowColumnsStep, ShowEffectiveGrantsOnStep, ShowGrantsOnStep, ShowLineageStep, ShowManifestStep, ShowSnapshotsStep, ShowSourcesStep, SubqueryStep, TruncateRelationStep, UnionStep, UnlistenStep, UnnestStep, WindowStep})
 
 # The class for each LogicalPlanStepType, for the few sites that build a step
 # whose type is only known at run time.
@@ -11285,7 +11496,7 @@ cpdef dict step_classes():
     global _STEP_CLASSES
     if _STEP_CLASSES is None:
         T = _step_types()
-        _STEP_CLASSES = {T.VectorIndexDdl: VectorIndexDdlStep, T.AddColumn: AddColumnStep, T.AddRelationship: AddRelationshipStep, T.Aggregate: AggregateStep, T.AggregateAndGroup: AggregateAndGroupStep, T.AlterColumnType: AlterColumnTypeStep, T.AlterMaterializedViewOwner: AlterMaterializedViewOwnerStep, T.AlterMaterializedViewSuspended: AlterMaterializedViewSuspendedStep, T.AlterRelation: AlterRelationStep, T.AlterTask: AlterTaskStep, T.AlterTriggerMinimumInterval: AlterTriggerMinimumIntervalStep, T.AlterTriggerOwner: AlterTriggerOwnerStep, T.AlterTriggerSuspended: AlterTriggerSuspendedStep, T.AlterView: AlterViewStep, T.AlterWorkspace: AlterWorkspaceStep, T.AlterWorkspaceSecure: AlterWorkspaceSecureStep, T.Analyze: AnalyzeStep, T.CallProcedure: CallProcedureStep, T.CloneCollection: CloneCollectionStep, T.CloneRelation: CloneRelationStep, T.Comment: CommentStep, T.CompactionCommit: CompactionCommitStep, T.CreateCollection: CreateCollectionStep, T.CreateRelation: CreateRelationStep, T.CreateTag: CreateTagStep, T.CreateTask: CreateTaskStep, T.CreateTrigger: CreateTriggerStep, T.CreateView: CreateViewStep, T.DetachRelation: DetachRelationStep, T.Distinct: DistinctStep, T.DropCollection: DropCollectionStep, T.DropColumn: DropColumnStep, T.DropRelation: DropRelationStep, T.DropRelationship: DropRelationshipStep, T.DropTag: DropTagStep, T.DropTask: DropTaskStep, T.DropTrigger: DropTriggerStep, T.DropView: DropViewStep, T.DropSecret: DropSecretStep, T.DropWorkspace: DropWorkspaceStep, T.Except: ExceptStep, T.Exit: ExitStep, T.Explain: ExplainStep, T.Filter: FilterStep, T.FramedWindow: FramedWindowStep, T.FunctionDataset: FunctionDatasetStep, T.GrantAccess: GrantAccessStep, T.HeapSort: HeapSortStep, T.Insert: InsertStep, T.Intersect: IntersectStep, T.Join: JoinStep, T.Limit: LimitStep, T.Listen: ListenStep, T.MaterializedCteRef: MaterializedCteRefStep, T.Merge: MergeStep, T.Order: OrderStep, T.Project: ProjectStep, T.RenameColumn: RenameColumnStep, T.RenameRelation: RenameRelationStep, T.ResyncRelation: ResyncRelationStep, T.RevokeAccess: RevokeAccessStep, T.RollbackRelation: RollbackRelationStep, T.ScalarSubqueryGuard: ScalarSubqueryGuardStep, T.Scan: ScanStep, T.Set: SetStep, T.Show: ShowStep, T.ShowColumns: ShowColumnsStep, T.ShowEffectiveGrantsOn: ShowEffectiveGrantsOnStep, T.ShowGrantsOn: ShowGrantsOnStep, T.ShowLineage: ShowLineageStep, T.ShowManifest: ShowManifestStep, T.ShowSnapshots: ShowSnapshotsStep, T.ShowSources: ShowSourcesStep, T.Subquery: SubqueryStep, T.TruncateRelation: TruncateRelationStep, T.Union: UnionStep, T.Unlisten: UnlistenStep, T.Unnest: UnnestStep, T.Window: WindowStep}
+        _STEP_CLASSES = {T.VectorIndexDdl: VectorIndexDdlStep, T.AddColumn: AddColumnStep, T.AddRelationship: AddRelationshipStep, T.Aggregate: AggregateStep, T.AggregateAndGroup: AggregateAndGroupStep, T.AlterColumnType: AlterColumnTypeStep, T.AlterMaterializedViewOwner: AlterMaterializedViewOwnerStep, T.AlterMaterializedViewSuspended: AlterMaterializedViewSuspendedStep, T.AlterRelation: AlterRelationStep, T.AlterTask: AlterTaskStep, T.AlterTriggerMinimumInterval: AlterTriggerMinimumIntervalStep, T.AlterTriggerOwner: AlterTriggerOwnerStep, T.AlterTriggerSuspended: AlterTriggerSuspendedStep, T.AlterView: AlterViewStep, T.AlterWorkspace: AlterWorkspaceStep, T.AlterWorkspaceSecure: AlterWorkspaceSecureStep, T.Analyze: AnalyzeStep, T.CallProcedure: CallProcedureStep, T.CloneCollection: CloneCollectionStep, T.CloneRelation: CloneRelationStep, T.Comment: CommentStep, T.CompactionCommit: CompactionCommitStep, T.CreateCollection: CreateCollectionStep, T.CreateRelation: CreateRelationStep, T.CreateTag: CreateTagStep, T.CreateTask: CreateTaskStep, T.CreateTrigger: CreateTriggerStep, T.CreateView: CreateViewStep, T.CreatePropertyGraph: CreatePropertyGraphStep, T.DropPropertyGraph: DropPropertyGraphStep, T.DetachRelation: DetachRelationStep, T.Distinct: DistinctStep, T.DropCollection: DropCollectionStep, T.DropColumn: DropColumnStep, T.DropRelation: DropRelationStep, T.DropRelationship: DropRelationshipStep, T.DropTag: DropTagStep, T.DropTask: DropTaskStep, T.DropTrigger: DropTriggerStep, T.DropView: DropViewStep, T.DropSecret: DropSecretStep, T.DropWorkspace: DropWorkspaceStep, T.Except: ExceptStep, T.Exit: ExitStep, T.Explain: ExplainStep, T.Filter: FilterStep, T.FramedWindow: FramedWindowStep, T.FunctionDataset: FunctionDatasetStep, T.GrantAccess: GrantAccessStep, T.HeapSort: HeapSortStep, T.Insert: InsertStep, T.Intersect: IntersectStep, T.Join: JoinStep, T.Limit: LimitStep, T.Listen: ListenStep, T.MaterializedCteRef: MaterializedCteRefStep, T.Merge: MergeStep, T.Order: OrderStep, T.Project: ProjectStep, T.RenameColumn: RenameColumnStep, T.RenameRelation: RenameRelationStep, T.ResyncRelation: ResyncRelationStep, T.RevokeAccess: RevokeAccessStep, T.RollbackRelation: RollbackRelationStep, T.ScalarSubqueryGuard: ScalarSubqueryGuardStep, T.Scan: ScanStep, T.Set: SetStep, T.Show: ShowStep, T.ShowColumns: ShowColumnsStep, T.ShowEffectiveGrantsOn: ShowEffectiveGrantsOnStep, T.ShowGrantsOn: ShowGrantsOnStep, T.ShowLineage: ShowLineageStep, T.ShowManifest: ShowManifestStep, T.ShowSnapshots: ShowSnapshotsStep, T.ShowSources: ShowSourcesStep, T.Subquery: SubqueryStep, T.TruncateRelation: TruncateRelationStep, T.Union: UnionStep, T.Unlisten: UnlistenStep, T.Unnest: UnnestStep, T.Window: WindowStep}
     return _STEP_CLASSES
 
 
@@ -11302,7 +11513,7 @@ cpdef frozenset steps_with(str field):
             "action": frozenset({T.Analyze}),
             "aggregates": frozenset({T.Aggregate, T.AggregateAndGroup, T.Window}),
             "alias": frozenset({T.Distinct, T.Filter, T.FunctionDataset, T.Join, T.Limit, T.MaterializedCteRef, T.Order, T.Project, T.Scan, T.Subquery, T.Union, T.Unnest}),
-            "all_relations": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
+            "all_relations": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window, T.CreatePropertyGraph, T.DropPropertyGraph}),
             "analyze": frozenset({T.Explain}),
             "analyze_columns": frozenset({T.Analyze}),
             "args": frozenset({T.FunctionDataset}),
@@ -11338,10 +11549,10 @@ cpdef frozenset steps_with(str field):
             "column_mapping": frozenset({T.Insert}),
             "column_name": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.DropColumn, T.RenameColumn}),
             "column_type": frozenset({T.AddColumn}),
-            "columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
+            "columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window, T.CreatePropertyGraph, T.DropPropertyGraph}),
             "comment": frozenset({T.Comment}),
             "condition": frozenset({T.Filter}),
-            "connector": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropSecret, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
+            "connector": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropSecret, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten, T.CreatePropertyGraph, T.DropPropertyGraph}),
             "connectors": frozenset({T.DropCollection, T.DropRelation, T.DropView}),
             "constraint_if_exists": frozenset({T.DropRelationship}),
             "constraint_name": frozenset({T.AddRelationship, T.DropRelationship}),
@@ -11395,8 +11606,8 @@ cpdef frozenset steps_with(str field):
             "hints": frozenset({T.FunctionDataset, T.MaterializedCteRef, T.Scan, T.Subquery}),
             "history_view": frozenset({T.Scan, T.ShowLineage, T.ShowSnapshots, T.ShowSources}),
             "hoisted_columns": frozenset({T.Project}),
-            "if_exists": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterRelation, T.Comment, T.CreateTag, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.RenameColumn, T.RenameRelation, T.RollbackRelation, T.TruncateRelation}),
-            "if_not_exists": frozenset({T.AddColumn, T.CloneRelation, T.CreateCollection, T.CreateRelation, T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert}),
+            "if_exists": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterRelation, T.Comment, T.CreateTag, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.RenameColumn, T.RenameRelation, T.RollbackRelation, T.TruncateRelation, T.DropPropertyGraph}),
+            "if_not_exists": frozenset({T.AddColumn, T.CloneRelation, T.CreateCollection, T.CreateRelation, T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert, T.CreatePropertyGraph}),
             "implied_join": frozenset({T.Join}),
             "internal_relation": frozenset({T.Scan}),
             "is_materialized_view": frozenset({T.DropRelation, T.Insert}),
@@ -11434,7 +11645,7 @@ cpdef frozenset steps_with(str field):
             "on": frozenset({T.Distinct, T.Join}),
             "on_table": frozenset({T.CreateTask}),
             "operation": frozenset({T.VectorIndexDdl, T.Merge}),
-            "or_replace": frozenset({T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert}),
+            "or_replace": frozenset({T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert, T.CreatePropertyGraph}),
             "order_by": frozenset({T.FramedWindow, T.HeapSort, T.Order, T.Window}),
             "outcome": frozenset({T.Listen}),
             "output_relation": frozenset({T.FramedWindow, T.Window}),
@@ -11449,7 +11660,7 @@ cpdef frozenset steps_with(str field):
             "pre_inline_columns": frozenset({T.Filter}),
             "pre_inline_condition": frozenset({T.Filter}),
             "pre_inline_relations": frozenset({T.Filter}),
-            "pre_update_columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
+            "pre_update_columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window, T.CreatePropertyGraph, T.DropPropertyGraph}),
             "predicates": frozenset({T.FunctionDataset, T.Scan}),
             "principal": frozenset({T.GrantAccess, T.RevokeAccess}),
             "procedure_name": frozenset({T.CallProcedure}),
@@ -11502,7 +11713,9 @@ cpdef frozenset steps_with(str field):
             "source_tail_id": frozenset({T.CompactionCommit, T.Insert, T.Merge}),
             "sources": frozenset({T.Filter, T.Project, T.ShowSources, T.Union}),
             "start_date": frozenset({T.Scan}),
-            "statement": frozenset({T.AlterTask, T.CreateTask}),
+            "definition": frozenset({T.CreatePropertyGraph}),
+            "graph_name": frozenset({T.CreatePropertyGraph, T.DropPropertyGraph}),
+            "statement": frozenset({T.AlterTask, T.CreateTask, T.CreatePropertyGraph}),
             "statement_name": frozenset({T.Merge}),
             "suspended": frozenset({T.AlterMaterializedViewSuspended, T.AlterTriggerSuspended}),
             "swap_build_side": frozenset({T.Join}),

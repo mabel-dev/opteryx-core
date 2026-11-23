@@ -347,6 +347,7 @@ cdef extern from "engine/native_jsonl_scan_source.hpp" namespace "opteryx::engin
         int64_t rows_read
         int64_t bytes_read
         int64_t chunks_read
+        int64_t records_too_deep
     void jsonl_scan_spec_set_context(JsonlScanSpec* spec, const void* context)
 
 cdef extern from "engine/native_avro_scan_source.hpp" namespace "opteryx::engine" nogil:
@@ -2095,6 +2096,7 @@ cdef class JsonlScanPlan:
         self.spec.rows_read = -1
         self.spec.bytes_read = -1
         self.spec.chunks_read = -1
+        self.spec.records_too_deep = -1
         self.scan_identity = None
 
     @property
@@ -2111,6 +2113,12 @@ cdef class JsonlScanPlan:
     def chunks_read(self):
         """Chunks decoded; -1 until the scan has run."""
         return self.spec.chunks_read
+
+    @property
+    def records_too_deep(self):
+        """Records read as a VARIANT skipped (ignore_errors) for nesting deeper than a
+        VARIANT holds; -1 until the scan has run."""
+        return self.spec.records_too_deep
 
 
 cdef class OrcScanPlan:
@@ -4372,6 +4380,7 @@ include "relation_management/relation_management.pyx"
 include "insert/insert.pyx"
 include "merge/merge.pyx"
 include "view_management/view_management.pyx"
+include "graph_management/graph_management.pyx"
 
 # The generic plan operator for every kind without a class of its own.
 include "physical_step/physical_step.pyx"

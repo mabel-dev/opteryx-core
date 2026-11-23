@@ -198,6 +198,16 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
             self.snapshot = self.table.snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
         except DatasetNotFound as exc:
+            # Only on the failure path, so a real read pays nothing: a property graph
+            # shares the namespace, and "not found" would send the reader hunting a typo.
+            if self.catalog.property_graph_exists(_collection_and_name(self.dataset)):
+                from opteryx.exceptions import UnsupportedSyntaxError
+
+                raise UnsupportedSyntaxError(
+                    f"'{self.dataset}' is a property graph, not a table. Query it with GQL "
+                    "(the gqlparser package lowers GQL to SQL over the graph's tables), or "
+                    "read its tables directly."
+                ) from exc
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from exc
 
     def can_push_topn(self, order_by) -> bool:
@@ -1353,6 +1363,13 @@ def _empty_manifest(schema, bounds_are_ordinal: bool):
     ).build({})
 
 
+def _collection_and_name(relative_id: str) -> Tuple[str, str]:
+    """`collection.name` -> (collection, name), name-last, as the catalog addresses
+    views and property graphs (a collection may itself be dotted)."""
+    collection, _, name = relative_id.rpartition(".")
+    return collection, name
+
+
 def _normalized_view_schema(stored, view_name: str) -> Optional[RelationDescriptor]:
     """A view's stored schema as an engine RelationDescriptor, or None.
 
@@ -1643,7 +1660,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         if found:
             return TableType.View, result
 
-        # Not found as either type
+        # Last, a property graph: the third kind of object sharing the namespace.
+        if catalog.property_graph_exists(_collection_and_name(relative_id)):
+            return TableType.PropertyGraph, None
+
+        # Not found as any type
         return None, None
 
     def table_engine(self, name: str, **kwargs):
@@ -4112,6 +4133,39 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         identifier = (collection, name)
         catalog.drop_view(identifier, author=author)
+
+    # Property graph operations (Eidetic capability): canonical CREATE PROPERTY GRAPH
+    # text, held by the catalog beside its views.
+    def get_property_graph(self, graph_name: str):
+        from opteryx.connectors.capabilities.eidetic import PropertyGraphDefinition
+
+        workspace, relative_id = self._parse_identifier(graph_name)
+        record = self._get_catalog(workspace).load_property_graph(_collection_and_name(relative_id))
+        return PropertyGraphDefinition(
+            name=graph_name,
+            statement=record["statement"],
+            owner=record.get("author"),
+            description=record.get("description"),
+        )
+
+    def create_property_graph(
+        self,
+        graph_name: str,
+        statement: str,
+        update_if_exists: bool = False,
+        owner: Optional[str] = None,
+    ):
+        workspace, relative_id = self._parse_identifier(graph_name)
+        self._get_catalog(workspace).create_property_graph(
+            _collection_and_name(relative_id),
+            statement,
+            author=owner,
+            update_if_exists=update_if_exists,
+        )
+
+    def drop_property_graph(self, graph_name: str, author: Optional[str] = None):
+        workspace, relative_id = self._parse_identifier(graph_name)
+        self._get_catalog(workspace).drop_property_graph(_collection_and_name(relative_id), author=author)
 
     def view_exists(self, view_name: str) -> bool:
         """Check if the specified view exists."""
