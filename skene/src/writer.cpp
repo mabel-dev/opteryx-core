@@ -588,12 +588,32 @@ Status write_string_column(WriteContext& ctx, const DrakenVector& v,
     return Status::ok();
 }
 
+// The vector with its unreachable data tail cut off: data_length becomes one past the
+// highest code any row uses. A legal vector may carry entries no row references — a
+// lazy filter borrows its source's whole payload (draken cxx_morsel_ops.cpp
+// lazy_select_column), so a 2-row survivor set over a 9-value column arrives with
+// data_length 9. Its codes are then [0, 1]: the identity, yet data_length != length,
+// which classify_codes rightly refuses for the vector as given. Every reachable value
+// is kept, so no row changes. An out-of-range code is left for classify_codes to
+// report. ARRAY (offsets by row) and NULL (no data) are not value-indexed.
+DrakenVector without_unreachable_tail(const DrakenVector& in) {
+    if (in.length == 0 || in.selection == nullptr || in.type == DRAKEN_ARRAY ||
+            in.type == DRAKEN_NULL)
+        return in;
+    uint32_t max_code = 0;
+    for (uint32_t i = 0; i < in.length; ++i)
+        max_code = std::max(max_code, in.selection[i]);
+    DrakenVector out = in;
+    if (max_code < in.data_length) out.data_length = max_code + 1u;
+    return out;
+}
+
 Status write_column_data(const WriteContext& base, NodeCursor& cursor,
                          const CxxColumn& column,
                          const std::string& name, uint32_t field_id,
                          const WriteOptions& options, bool allow_value_order,
                          ColumnPlan* plan) {
-    const DrakenVector& v = column.view;
+    const DrakenVector  v = without_unreachable_tail(column.view);
     const VectorOwner*  own = column.own.get();
     const char*         cname = name.c_str();
 

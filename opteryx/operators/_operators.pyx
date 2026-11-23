@@ -840,8 +840,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_asof_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                             cppvector[size_t] payload_idx, size_t asof_idx, int op)
         void add_band_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
-                            cppvector[size_t] payload_idx, size_t lo_idx,
-                            size_t hi_idx, bint lower_closed, bint upper_closed)
+                            cppvector[size_t] payload_idx, int lo_idx,
+                            int hi_idx, bint lower_closed, bint upper_closed)
         void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf,
                            bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf,
@@ -3471,16 +3471,17 @@ cdef class NativePlan:
         self._e.add_asof_probe(p, ref, keys, pay, asof_idx, op)
 
     def add_band_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
-                       size_t lo_idx, size_t hi_idx, bint lower_closed,
+                       int lo_idx, int hi_idx, bint lower_closed,
                        bint upper_closed):
         """BAND probe: emit the contiguous run of build rows whose band column falls
-        between this probe row's two bounds, within its equi group.
+        between this probe row's two bounds, within its equi group (the whole build
+        side when ``key_idx`` is empty).
 
         The build side is ``set_asof_build_sink`` unchanged — the band's order key is
         captured and sorted by the same machinery — so only the probe is band-specific.
 
-        ``lo_idx``/``hi_idx`` index the PROBE morsel's synthetic bound columns.
-        ``lower_closed``/``upper_closed`` say whether each end is inclusive; they are
+        ``lo_idx``/``hi_idx`` index the PROBE morsel's synthetic bound columns; -1
+        leaves that end unbounded (a one-sided band). ``lower_closed``/``upper_closed`` say whether each end is inclusive; they are
         NOT interchangeable and getting one backwards moves the answer by the rows
         sitting exactly on that boundary."""
         cdef cppvector[size_t] keys

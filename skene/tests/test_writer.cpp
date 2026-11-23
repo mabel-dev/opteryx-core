@@ -553,6 +553,33 @@ static void test_timestamp_without_descriptor_fails_loud() {
     CHECK(st.message().find("LogicalType") != std::string::npos);
 }
 
+static void test_unreachable_data_tail_is_not_written() {
+    // A legal vector may carry data no row references: draken's lazy filter keeps its
+    // source's whole payload. Only data[0, max code] is reachable, so only that is
+    // written — and the shapes the codes then describe must hold exactly.
+    const std::vector<int64_t> nine = {10, 20, 30, 40, 50, 60, 70, 80, 90};
+    struct Case { const char* name; std::vector<uint32_t> codes; SelectionKind kind; uint32_t dl; };
+    const Case cases[] = {
+        {"identity prefix", {0, 1}, SelectionKind::kIdentity, 2},
+        {"one row, code 0", {0}, SelectionKind::kIdentity, 1},
+        {"all zero", {0, 0, 0}, SelectionKind::kConstant, 1},
+        {"stored, dead tail", {2, 0, 2}, SelectionKind::kStored, 3},
+    };
+    for (const Case& c : cases) {
+        auto m = morsel_of({{"v", dict_column<int64_t>(nine, c.codes, DRAKEN_INT64)}});
+        auto bytes = write_or_die(m);
+        ParsedFile f;
+        CHECK(parse(bytes, &f));
+        const ParsedColumn& col = f.columns[0];
+        CHECK_EQ(col.head.selection_kind, static_cast<uint8_t>(c.kind));
+        CHECK_EQ(col.head.data_length, c.dl);
+        CHECK_EQ(col.head.length, static_cast<uint32_t>(c.codes.size()));
+        auto s = sections_of(f, col);
+        CHECK_EQ(s[static_cast<uint16_t>(SectionKind::kData)].plain_bytes,
+                 uint64_t{c.dl * sizeof(int64_t)});
+    }
+}
+
 static void test_out_of_range_selection_fails_loud() {
     // Caught at the boundary, where the producing operator is still nameable,
     // rather than as an out-of-bounds read in a later consumer.
@@ -616,6 +643,7 @@ int main() {
     test_ipv4_descriptor_is_carried();
     test_decimal_descriptor_is_carried();
     test_timestamp_without_descriptor_fails_loud();
+    test_unreachable_data_tail_is_not_written();
     test_out_of_range_selection_fails_loud();
     test_spill_profile_asks_for_nothing();
     test_field_id_must_be_complete_or_absent();

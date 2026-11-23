@@ -515,9 +515,10 @@ _JOIN_OPERATORS = {
     "left existence anti": ("Existence Join", None),
     # ASOF JOIN — nearest-neighbour time-series join
     "asof": ("ASOF Join", "asof"),
-    # BAND JOIN — an equi-join whose ON also closes a range on one build-side
-    # column, executed as a bisect into sorted per-equi-group runs instead of a
-    # full equi fan-out with the range filtered off the top.
+    # BAND JOIN — a join whose ON bounds one build-side column from one or both
+    # ends (within the equi key if any, else over the whole build side), executed as
+    # a bisect into sorted runs instead of a full fan-out with the range filtered off
+    # the top.
     "band": ("Band Join", "band"),
 }
 
@@ -546,16 +547,14 @@ def _create_join_node(logical_node, query_properties, registry, output_rows_esti
             "An ASOF join requires asof_left_column, asof_right_column, and asof_op"
         )
     if join_type == "band":
-        if (
-            logical_node.band_column is None
-            or logical_node.band_lower is None
-            or logical_node.band_upper is None
+        if logical_node.band_column is None or (
+            logical_node.band_lower is None and logical_node.band_upper is None
         ):
             raise InvalidInternalStateError(
-                "A band join requires band_column and both band_lower and band_upper"
+                "A band join requires band_column and at least one of band_lower and band_upper"
             )
-        if not logical_node.left_columns or not logical_node.right_columns:
-            raise InvalidInternalStateError("A band join requires equi-join keys on both legs")
+        if len(logical_node.left_columns or []) != len(logical_node.right_columns or []):
+            raise InvalidInternalStateError("A band join requires aligned equi-join keys on both legs")
     # The join's expected output rows sizes the native build sink (see
     # execution_estimates); None for join types with no build payload.
     return registry.create_step(

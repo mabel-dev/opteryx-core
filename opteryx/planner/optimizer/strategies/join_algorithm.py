@@ -124,8 +124,8 @@ def _contains_non_equi_comparator(condition) -> bool:
 
 # ---- BAND JOIN recognition ---------------------------------------------------------
 #
-# A BAND join is an equi-join whose ON clause also bounds ONE column of one leg
-# BOTH ABOVE AND BELOW by values from the other leg:
+# A BAND join is a join whose ON clause bounds ONE column of one leg, above and/or
+# below, by values from the other leg (usually alongside an equi key):
 #
 #   ON f.client = l.client
 #      AND l.event_time <= f.flow_start
@@ -137,13 +137,15 @@ def _contains_non_equi_comparator(condition) -> bool:
 # group, and a probe row emits the contiguous slice between two bisects — the
 # discarded pairs are never formed. See docs/BAND_JOIN_PROPOSAL.md.
 #
-# ⛔ BOTH bounds are required, and that is a restriction, not an oversight. A
-# one-sided bound selects a PREFIX of the sorted run, unbounded in size, which is
-# usually a worse plan than the hash join it would replace.
+# One bound is enough, and no equi key is needed (architect ruling 2026-11-23):
+# `ON x > y + c` bisects ONE sorted run over the whole build side, selecting a
+# prefix/suffix of it, instead of forming every pair and filtering. A missing end is
+# unbounded. Profiled before the change: the pair-then-filter plan cost ~50% pair
+# fan-out + ~37% payload gather per CANDIDATE pair, independent of how many survived.
 #
-# ⛔ The two band conjuncts are CONSUMED by the range, not also applied as a
+# ⛔ The band conjuncts are CONSUMED by the range, not also applied as a
 # residual. That is only sound because recognition admits NOTHING ELSE in the ON
-# clause: equi conjuncts (which stay join keys) plus exactly the two band conjuncts.
+# clause: equi conjuncts (which stay join keys) plus the one or two band conjuncts.
 # Anything else declines the whole shape, so "consume" and "is exactly equivalent"
 # are one decision rather than two.
 
@@ -193,6 +195,10 @@ def _band_conjunct(conjunct, left_relation_names, right_relation_names):
     if conjunct.left is None or conjunct.right is None:
         return None
 
+    # `a < b` with BOTH operands bare columns has two valid readings (band a, or band
+    # b). The band column must be on the LEFT (build) leg, so take that reading when
+    # it exists instead of whichever operand happens to be written first.
+    chosen = None
     for banded, bound, table in (
         (conjunct.left, conjunct.right, _BAND_BOUND_ON_LEFT),
         (conjunct.right, conjunct.left, _BAND_BOUND_ON_RIGHT),
@@ -208,16 +214,20 @@ def _band_conjunct(conjunct, left_relation_names, right_relation_names):
         if banded_leg == bound_leg:
             continue
         end, closed = table[conjunct.value]
-        return banded, banded_leg, bound, end, closed
-    return None
+        reading = (banded, banded_leg, bound, end, closed)
+        if banded_leg == "left":
+            return reading
+        if chosen is None:
+            chosen = reading
+    return chosen
 
 
 def _recognize_band(node):
     """The band descriptor for this join's ON clause, or None.
 
     Returns (banded_identifier, banded_leg, lower_expr, lower_closed, upper_expr,
-    upper_closed). Called only for INNER joins whose ON already carries a non-equi
-    conjunct.
+    upper_closed); an end the ON clause does not bound is (None, None). Called only
+    for INNER joins whose ON already carries a non-equi conjunct.
     """
     left_names = list(node.left_relation_names or ())
     right_names = list(node.right_relation_names or ())
@@ -226,13 +236,11 @@ def _recognize_band(node):
 
     bounds = {}
     banded = None
-    equi_seen = False
     for conjunct in _and_conjuncts(node.on):
         if (
             conjunct.node_type == NodeType.COMPARISON_OPERATOR
             and conjunct.value == "Eq"
         ):
-            equi_seen = True
             continue
         read = _band_conjunct(conjunct, left_names, right_names)
         if read is None:
@@ -246,16 +254,14 @@ def _recognize_band(node):
             return None   # two lower or two upper bounds do not close a band
         bounds[end] = (bound, closed)
 
-    # An UNKEYED band would build one sorted run over the whole relation. That may
-    # well be a good plan, but it is a different one -- it is the shape the CROSS
-    # JOIN spelling lands on -- and costing it is not this change.
-    if not equi_seen or banded is None:
-        return None
-    if set(bounds) != {"lower", "upper"}:
+    # No band conjunct at all. One bound is enough (a one-sided band `build > bound`),
+    # and no equi key is needed: an unkeyed band is one sorted run over the whole
+    # build side (architect ruling 2026-11-23).
+    if banded is None:
         return None
 
-    lower_expr, lower_closed = bounds["lower"]
-    upper_expr, upper_closed = bounds["upper"]
+    lower_expr, lower_closed = bounds.get("lower", (None, None))
+    upper_expr, upper_closed = bounds.get("upper", (None, None))
 
     # ⛔ ALL THREE must carry the SAME type. The band is answered by BISECTING the
     # build side's sort order with the probe's bound values, so the two sides have to
@@ -270,6 +276,8 @@ def _recognize_band(node):
     # the coerced type before it can be trusted. Declining leaves today's plan.
     band_type = banded[0].schema_column.column_type
     for bound_expr in (lower_expr, upper_expr):
+        if bound_expr is None:
+            continue
         bound_column = bound_expr.schema_column
         if bound_column is None or bound_column.column_type != band_type:
             return None
@@ -782,8 +790,9 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         return context
 
     def _band_or_nested_loop(self, node) -> str:
-        """"band" when the ON clause is an equi-join plus a closed band on a BUILD-side
-        column, otherwise "nested loop" — today's answer, unchanged.
+        """"band" when the ON clause bounds a BUILD-side column from one or both ends
+        (within the equi key if there is one, else over the whole build side),
+        otherwise "nested loop" — today's answer, unchanged.
 
         Unconditional for the shape, by ruling: the band form removes row emissions
         rather than making them cheaper, and its worst case (a band selecting the
@@ -829,11 +838,13 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         node.band_upper = upper_expr
         node.band_upper_closed = upper_closed
         self.telemetry.optimization_band_join += 1
+        scope = "within the equi key" if node.left_columns else "over the whole build side"
         self.record_decision(
             "band join",
             f"applied: {identifier.schema_column.name} bounded"
-            f" {'[' if lower_closed else '('}lower,"
-            f" upper{']' if upper_closed else ')'} within the equi key",
+            f" {'[' if lower_closed else '('}{'lower' if lower_expr is not None else 'unbounded'},"
+            f" {'upper' if upper_expr is not None else 'unbounded'}"
+            f"{']' if upper_closed else ')'} {scope}",
         )
         return "band"
 

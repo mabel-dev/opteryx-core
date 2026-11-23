@@ -1962,11 +1962,13 @@ struct BandProbeState : Join2ProbeState {
 };
 
 struct BandProbeOperator : SortedGroupProbeOperator {
-    size_t lo_idx, hi_idx;        // probe columns holding this row's two bounds
+    // Probe columns holding this row's two bounds; -1 = that end is unbounded (a
+    // one-sided band, `build > bound`, selects from/to the run's edge).
+    int lo_idx, hi_idx;
     bool lower_closed, upper_closed;
 
     BandProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
-                      const Join2Ref* r, size_t lo, size_t hi,
+                      const Join2Ref* r, int lo, int hi,
                       bool lower_closed_, bool upper_closed_)
         : SortedGroupProbeOperator(std::move(keys), std::move(payload), r,
                                    /*outer=*/false),
@@ -1980,8 +1982,8 @@ struct BandProbeOperator : SortedGroupProbeOperator {
     // The half-open [begin, end) of `rows` the band selects. Empty when the bounds
     // cross (an inverted band selects nothing, which is the right answer, not an
     // error) — normalised here so the caller never sees end < begin.
-    void match_range(const std::vector<int64_t>& rows, const AsofKey& lo_key,
-                     const AsofKey& hi_key, const Join2BuildGlobal& g,
+    void match_range(const std::vector<int64_t>& rows, const AsofKey* lo_key,
+                     const AsofKey* hi_key, const Join2BuildGlobal& g,
                      size_t& begin, size_t& end) const {
         const AsofKeyKind kind = g.asof_kind;
         auto cmp = [&](int64_t r, const AsofKey& v) {
@@ -1990,12 +1992,14 @@ struct BandProbeOperator : SortedGroupProbeOperator {
         auto cmp2 = [&](const AsofKey& v, int64_t r) {
             return asof_key_cmp(kind, v, build_key(g, r)) < 0;
         };
-        auto b = lower_closed
-            ? std::lower_bound(rows.begin(), rows.end(), lo_key, cmp)
-            : std::upper_bound(rows.begin(), rows.end(), lo_key, cmp2);
-        auto e = upper_closed
-            ? std::upper_bound(rows.begin(), rows.end(), hi_key, cmp2)
-            : std::lower_bound(rows.begin(), rows.end(), hi_key, cmp);
+        auto b = lo_key == nullptr ? rows.begin()
+            : lower_closed
+            ? std::lower_bound(rows.begin(), rows.end(), *lo_key, cmp)
+            : std::upper_bound(rows.begin(), rows.end(), *lo_key, cmp2);
+        auto e = hi_key == nullptr ? rows.end()
+            : upper_closed
+            ? std::upper_bound(rows.begin(), rows.end(), *hi_key, cmp2)
+            : std::lower_bound(rows.begin(), rows.end(), *hi_key, cmp);
         begin = static_cast<size_t>(b - rows.begin());
         end = static_cast<size_t>(e - rows.begin());
         if (end < begin) end = begin;
@@ -2031,13 +2035,14 @@ struct BandProbeOperator : SortedGroupProbeOperator {
         std::vector<uint32_t> build_rows, probe_rows;
         build_rows.reserve(kBatch);
         probe_rows.reserve(kBatch);
-        const DrakenVector& lov = in->columns[lo_idx].view;
-        const DrakenVector& hiv = in->columns[hi_idx].view;
+        const DrakenVector* lov = lo_idx >= 0 ? &in->columns[lo_idx].view : nullptr;
+        const DrakenVector* hiv = hi_idx >= 0 ? &in->columns[hi_idx].view : nullptr;
 
         while (st.in_run || st.row < n) {
             if (!st.in_run) {
                 const uint32_t row = st.row;
-                bool usable = sort_row_valid(lov, row) && sort_row_valid(hiv, row);
+                bool usable = (lov == nullptr || sort_row_valid(*lov, row))
+                           && (hiv == nullptr || sort_row_valid(*hiv, row));
                 for (size_t k : probe_key_idx) {
                     if (!usable) break;
                     if (!sort_row_valid(in->columns[k].view, row)) usable = false;
@@ -2050,8 +2055,11 @@ struct BandProbeOperator : SortedGroupProbeOperator {
                 const std::vector<int64_t>& rows =
                     g.asof_sorted[static_cast<size_t>(idx)];
                 size_t begin = 0, end = 0;
-                match_range(rows, asof_key_of(lov, row, g.asof_kind),
-                            asof_key_of(hiv, row, g.asof_kind), g, begin, end);
+                AsofKey lo_key, hi_key;
+                if (lov != nullptr) lo_key = asof_key_of(*lov, row, g.asof_kind);
+                if (hiv != nullptr) hi_key = asof_key_of(*hiv, row, g.asof_kind);
+                match_range(rows, lov != nullptr ? &lo_key : nullptr,
+                            hiv != nullptr ? &hi_key : nullptr, g, begin, end);
                 if (begin >= end) { ++st.row; continue; }
                 st.run = &rows;
                 st.run_pos = begin;
@@ -2998,10 +3006,11 @@ struct DeferredJoin2Probe : Operator {
     JoinMode mode;
     int asof_probe_idx = -1;   // >= 0: ASOF probe (asof column index + op below)
     int asof_op = 0;
-    // >= 0: BAND probe. The two probe columns holding each row's bounds, plus
-    // whether each end is closed. Distinct from `asof_probe_idx`: the band's ORDER
-    // key lives on the build side (captured by the same Join2BuildSink the ASOF
-    // build uses), while these two index the PROBE morsel.
+    // BAND probe. The two probe columns holding each row's bounds (-1 = that end is
+    // unbounded; at least one is set), plus whether each end is closed. Distinct from
+    // `asof_probe_idx`: the band's ORDER key lives on the build side (captured by the
+    // same Join2BuildSink the ASOF build uses), while these two index the PROBE morsel.
+    bool is_band = false;
     int band_lo_idx = -1;
     int band_hi_idx = -1;
     bool band_lower_closed = false;
@@ -3040,11 +3049,9 @@ struct DeferredJoin2Probe : Operator {
 
     std::unique_ptr<OperatorState> make_state() override {
         std::call_once(once, [this] {
-            if (band_lo_idx >= 0) {
+            if (is_band) {
                 inner = std::make_unique<BandProbeOperator>(
-                    key_idx, payload_idx, ref,
-                    static_cast<size_t>(band_lo_idx),
-                    static_cast<size_t>(band_hi_idx),
+                    key_idx, payload_idx, ref, band_lo_idx, band_hi_idx,
                     band_lower_closed, band_upper_closed);
             } else if (asof_probe_idx >= 0) {
                 inner = std::make_unique<AsofProbeOperator>(

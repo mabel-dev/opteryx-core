@@ -141,9 +141,11 @@ cdef object _config(PhysicalStep node):
         column = step.band_column_name
         if column is None:
             column = step.band_column.decode("utf8")
-        return "%s %s lower, upper%s" % (
+        return "%s %s %s, %s%s" % (
             column,
             "IN [" if step.band_lower_closed else "IN (",
+            "lower" if step.band_lower is not None else "unbounded",
+            "upper" if step.band_upper is not None else "unbounded",
             "]" if step.band_upper_closed else ")",
         )
     if kind == "DrakenInnerJoinNode":

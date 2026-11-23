@@ -88,9 +88,9 @@ SELECT COUNT(*) AS n, MIN(b.t) AS lo_t, MAX(b.t) AS hi_t, SUM(b.t) AS sum_t
  WHERE b.t >= p.lo AND b.t <= p.hi
 """
 
-# One bound only. Deliberately NOT a band: a single bound selects a PREFIX of the
-# sorted run, unbounded in size, which is usually a worse plan than the hash join
-# it would replace. It must stay a nested loop.
+# One bound only: a prefix of the sorted run. Still a band (architect ruling
+# 2026-11-23): it removes the pair-then-filter, and costs no more emissions than the
+# plan it replaces.
 ONE_SIDED = """
 SELECT f.client, l.tag
   FROM testdata.band_join.flows AS f
@@ -98,6 +98,30 @@ SELECT f.client, l.tag
  WHERE f.flow_start >= l.event_time
  ORDER BY f.client, l.tag
 """
+
+# UNKEYED bands: no equality in the ON, so the whole build side is one sorted run.
+# The expected rows are computed in Python from these literals (three-valued: a NULL
+# never matches), NOT from another plan -- an ON-clause theta join has no
+# "unoptimised" plan to compare against.
+UNKEYED_BUILD = [(1, 10), (2, 20), (3, 20), (4, None), (5, 30)]
+UNKEYED_PROBE = [(1, 20, 0), (2, 10, 0), (3, None, 0), (4, 25, 0), (5, 40, 0)]
+UNKEYED = """
+SELECT b.id, p.pid
+  FROM (SELECT * FROM (VALUES {build}) AS v(id, t)) AS b
+  INNER JOIN (SELECT * FROM (VALUES {probe}) AS v(pid, v, k)) AS p ON {on}
+ ORDER BY b.id, p.pid
+"""
+
+
+def _values(table):
+    return ", ".join(
+        "(" + ", ".join("NULL" if c is None else str(c) for c in row) + ")" for row in table
+    )
+
+
+def _unkeyed_sql(on, build=UNKEYED_BUILD, probe=UNKEYED_PROBE):
+    return UNKEYED.format(build=_values(build), probe=_values(probe), on=on)
+
 
 # The band column here is `event_time`, on `lookups` (23 rows) -- the LARGER side,
 # so JoinAlgorithmStrategy leaves it on the PROBE leg.
@@ -202,10 +226,95 @@ def test_one_probe_row_spanning_many_batches(unoptimized):
     assert rows(BATCH_SPILL) == [(40000, 1, 40000, 800020000)], rows(BATCH_SPILL)
 
 
-def test_a_one_sided_bound_is_not_a_band(unoptimized):
-    # Requiring BOTH bounds is a deliberate restriction, not an oversight.
-    assert "Band Join" not in plan(ONE_SIDED), plan(ONE_SIDED)
+def test_a_one_sided_bound_is_a_band(unoptimized):
+    assert "Band Join" in plan(ONE_SIDED), plan(ONE_SIDED)
     assert rows(ONE_SIDED) == unoptimized(ONE_SIDED)
+
+
+ONE_SIDED_OPS = {
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+}
+
+
+@pytest.mark.parametrize("op", sorted(ONE_SIDED_OPS))
+def test_unkeyed_one_sided_band(op):
+    # `b.t <op> p.v` with no equality: one sorted run, one bound. Equal values sit
+    # on the edge (b.t=20 vs p.v=20, b.t=10 vs p.v=10), so each operator's answer is
+    # distinct and a flipped closedness moves it.
+    sql = _unkeyed_sql(f"b.t {op} p.v")
+    explained = plan(sql)
+    assert "Band Join" in explained, explained
+    expected = sorted(
+        (bid, pid)
+        for bid, t in UNKEYED_BUILD
+        for pid, v, *_ in UNKEYED_PROBE
+        if t is not None and v is not None and ONE_SIDED_OPS[op](t, v)
+    )
+    assert rows(sql) == expected
+
+
+def test_unkeyed_one_sided_edges_are_on_the_fixture():
+    # Open vs closed of the SAME direction must differ, or the fixture has no row on
+    # that edge and the parametrised test above pins nothing for it.
+    size = {op: len(rows(_unkeyed_sql(f"b.t {op} p.v"))) for op in ONE_SIDED_OPS}
+    assert size[">"] != size[">="], size
+    assert size["<"] != size["<="], size
+
+
+def test_unkeyed_band_reads_the_build_column_when_written_second():
+    # `p.v < b.t` has two valid readings; the band column must be the build-side
+    # one whichever operand is written first.
+    swapped = _unkeyed_sql("p.v < b.t")
+    assert "Band Join" in plan(swapped), plan(swapped)
+    assert rows(swapped) == rows(_unkeyed_sql("b.t > p.v"))
+
+
+def test_unkeyed_two_sided_band():
+    probe = [(1, 15, 0), (2, 10, 0), (3, 40, 0)]
+    sql = _unkeyed_sql("b.t >= p.v AND b.t <= p.v + 10", probe=probe)
+    assert "Band Join" in plan(sql), plan(sql)
+    expected = sorted(
+        (bid, pid)
+        for bid, t in UNKEYED_BUILD
+        for pid, v, _ in probe
+        if t is not None and v <= t <= v + 10
+    )
+    assert rows(sql) == expected
+
+
+def test_keyed_one_sided_band():
+    build = [(1, 10, 1), (2, 20, 1), (3, 20, 2), (4, 5, 2)]
+    probe = [(1, 15, 1), (2, 15, 2), (3, 0, 3)]
+    sql = """
+SELECT b.id, p.pid
+  FROM (SELECT * FROM (VALUES {build}) AS v(id, t, k)) AS b
+  INNER JOIN (SELECT * FROM (VALUES {probe}) AS v(pid, v, k)) AS p
+    ON b.k = p.k AND b.t > p.v
+ ORDER BY b.id, p.pid
+""".format(build=_values(build), probe=_values(probe))
+    assert "Band Join" in plan(sql), plan(sql)
+    expected = sorted(
+        (bid, pid)
+        for bid, t, k in build
+        for pid, v, pk in probe
+        if k == pk and t > v
+    )
+    assert rows(sql) == expected
+
+
+def test_unkeyed_one_sided_spanning_many_batches():
+    # One probe row selects all 40,000 build rows: the probe must suspend mid-run
+    # and resume, exactly as in the keyed two-sided case.
+    sql = """
+SELECT COUNT(*) AS n, SUM(b.t) AS sum_t
+  FROM (SELECT CAST(value AS INTEGER) AS t FROM GENERATE_SERIES(1, 40000) AS value) AS b
+  INNER JOIN (SELECT * FROM (VALUES (0)) AS v(lo)) AS p ON b.t > p.lo
+"""
+    assert "Band Join" in plan(sql), plan(sql)
+    assert rows(sql) == [(40000, 800020000)]
 
 
 def test_a_probe_side_band_declines_and_still_answers(unoptimized):

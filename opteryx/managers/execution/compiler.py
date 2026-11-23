@@ -6795,11 +6795,12 @@ class _Compiler:
         band_column = node.step.band_column
         band_lower = node.step.band_lower
         band_upper = node.step.band_upper
-        if band_column is None or band_lower is None or band_upper is None:
-            _unsupported("a band join without a complete band descriptor")
+        if band_column is None or (band_lower is None and band_upper is None):
+            _unsupported("a band join without a band column and at least one bound")
+        # No equi keys = one group holding the whole build side (an unkeyed band).
         left_cols = list(node.step.left_columns or [])
         right_cols = list(node.step.right_columns or [])
-        if not left_cols or len(left_cols) != len(right_cols):
+        if len(left_cols) != len(right_cols):
             _unsupported("a band join without aligned equi-key lists")
 
         left_leg, right_leg = self.plan.legs(nid)
@@ -6831,6 +6832,9 @@ class _Compiler:
         bound_layout = list(playout)
         bound_idx = []
         for bound in (band_lower, band_upper):
+            if bound is None:
+                bound_idx.append(-1)   # one-sided band: this end is unbounded
+                continue
             schema_column = bound.schema_column
             if schema_column is None:
                 _unsupported("a band bound the compiler cannot identify")

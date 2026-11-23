@@ -435,6 +435,23 @@ exactly like dead code — trace real execution instead. And **a `COUNT(*)` quer
 see the pruning fix**, because `live` is empty and empty means UNKNOWN, so pruning is
 off either way; it measures exactly zero there and 1.34x on a query with a live payload.
 
+### Extended 2026-11-23: one-sided and unkeyed
+
+Architect ruling: the equi key and the second bound are now optional. `ON x > y + c`
+(no equality, one bound) bisects one sorted run over the whole build side; equi +
+single inequality and unkeyed two-sided bands take the same path. A missing end is
+unbounded (`-1` bound column in `add_band_probe`). Reverses the 2026-08-23 pins
+"both bounds required" and "an unkeyed band is a different plan".
+
+Motivation, profiled first: a pure-theta join cost ~50% pair fan-out + ~37% payload
+gather per CANDIDATE pair regardless of survivors (60k x 60k, 4,950 survivors: 18.2s
+as a Theta Join; 2.1ms as a band join). Also, `_band_conjunct` now prefers the
+reading whose banded column is on the build leg when both operands are bare columns,
+so `p.v < b.t` and `b.t > p.v` plan alike.
+
+Still declined (unchanged): banded column on the probe leg (inversion not built), so
+`ON x + c > y` with `y` probed stays a Theta Join.
+
 ### Known gaps
 
 🔴 **Bound inversion is not implemented.** The band column must land on the BUILD
