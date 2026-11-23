@@ -39,7 +39,7 @@ jellyfish  # SOUNDEX reference for tests/unit/functions/test_soundex.py
 # tests/unit/connectors/parquet_io/test_flba_uuid.py (reads the UUID logical type + stats).
 # Pinned: also the reference engine for tests/fuzzing/test_sql_fuzzer_reference.py, whose
 # register of known differences is only meaningful against one DuckDB version.
-duckdb==2.0.0
+duckdb==2.0.1
 # Avro oracles for tests/rugo/test_avro_reader.py and test_avro_corpus.py (pyarrow has no Avro reader);
 # python-snappy is the reference `avro` package's snappy codec.
 fastavro
