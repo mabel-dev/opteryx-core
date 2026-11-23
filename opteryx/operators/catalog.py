@@ -371,7 +371,7 @@ def _build_registry() -> OperatorRegistry:
     )
     r.register_step(
         "NestedLoopJoinNode",
-        name="Nested Loop Join",
+        name="Theta Join",
         category=OperatorCategory.JOIN,
         is_join=True,
     )

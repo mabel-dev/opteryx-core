@@ -30,6 +30,7 @@ from draken.draken_native import LogicalKind
 from opteryx.compiled.platform import cpu_count  # HOST_CPU_COUNT-aware (draken/core/host_cpus.h)
 from opteryx.constants import ResultType
 from opteryx.exceptions import CidrAggTypeError
+from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NativeScanRefusedError
 from opteryx.exceptions import NotSupportedError
@@ -494,6 +495,7 @@ def _unsupported(what: str, remedy: str = None):
 
 
 _INT64_MAX = (1 << 63) - 1
+_INT64_MIN = -(1 << 63)
 
 
 def _estimate_to_int64(value, what: str) -> int:
@@ -5120,6 +5122,15 @@ class _Compiler:
             return self._compile_avro_scan(scan)
         if kind == "OrcReadNode":
             return self._compile_orc_scan(scan)
+        if (
+            kind == "FunctionDatasetNode"
+            and scan.function == "GENERATE_SERIES"
+            # An untyped column (the binder could not type the arguments) goes to the
+            # materialised path, which refuses the series by name.
+            and scan.columns[0].schema_column.column_type is not None
+            and scan.columns[0].schema_column.column_type.physical == DrakenType.INT64
+        ):
+            return self._compile_integer_series(scan)
         if kind in ("FunctionDatasetNode", "ReaderNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
@@ -7247,6 +7258,27 @@ class _Compiler:
         self._orc_scan_plans[p] = (plan, scan)
         self._remember_types(scan.columns)
         return p, identities
+
+    def _compile_integer_series(self, node):
+        """GENERATE_SERIES over integers: a plan constant held as (start, step, count) and
+        streamed by the native RangeSource in 64k-row morsels - the series is never built.
+        The planner's only jobs are the extent and proving every value fits INT64."""
+        from opteryx.utils import series
+
+        start, step, count = series.integer_series_extent(
+            *series.integer_series_arguments(*[arg.value for arg in node.args])
+        )
+        last = start + (count - 1) * step if count else start
+        if not (_INT64_MIN <= min(start, last) and max(start, last) <= _INT64_MAX):
+            raise InvalidFunctionParameterError(
+                "GENERATE_SERIES values must fit in a 64-bit integer; "
+                f"this series runs from {start} to {last}."
+            )
+        identity = node.columns[0].schema_column.identity
+        p = self.nplan.new_pipeline()
+        self.nplan.set_range_source(p, start, step, count, identity)
+        self._remember_types(node.columns)
+        return p, [identity]
 
     def _compile_materialized_source(self, node):
         """Virtual datasets ($planets, VALUES, GENERATE_SERIES, READ_CSV/READ_JSONL):

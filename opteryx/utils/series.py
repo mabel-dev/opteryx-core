@@ -46,6 +46,30 @@ def _is_integer_like(v) -> bool:
     return getattr(v, "__index__", None) is not None
 
 
+def integer_series_extent(start, stop, step) -> tuple:
+    """`(start, step, count)` of the integer series `start..stop` by `step`, without
+    building it: a `range` answers its length and last value in O(1). This is the one
+    place the series' length is decided - the native range source and `numeric_range`
+    both take it from here."""
+    start, stop, step = int(start), int(stop), int(step)
+    values = range(start, stop + step, step)
+    count = len(values)
+    if count and values[-1] > stop:
+        count -= 1
+    return start, step, count
+
+
+def integer_series_arguments(*args) -> tuple:
+    """`(start, stop, step)` from GENERATE_SERIES' 1, 2 or 3 numeric arguments."""
+    if len(args) == 1:
+        return 1, args[0], 1
+    if len(args) == 2:
+        return args[0], args[1], 1
+    if len(args) == 3:
+        return args[0], args[1], args[2]
+    raise ValueError("Invalid number of arguments. Expected 1, 2, or 3: start, stop [, step].")
+
+
 def numeric_range(*args) -> list:
     """
     Generate a numeric range of values.
@@ -64,24 +88,12 @@ def numeric_range(*args) -> list:
         numeric_range(1, 5)
         numeric_range(1, 5, 0.5)
     """
-    start, step = 1, 1
-
-    if len(args) == 1:
-        stop = args[0]
-    elif len(args) == 2:
-        start, stop = args
-    elif len(args) == 3:
-        start, stop, step = args
-    else:  # pragma: no cover
-        raise ValueError("Invalid number of arguments. Expected 1, 2, or 3: start, stop [, step].")
+    start, stop, step = integer_series_arguments(*args)
 
     # Use integer arithmetic when all values are integer-like
     if _is_integer_like(start) and _is_integer_like(stop) and _is_integer_like(step):
-        start, stop, step = int(start), int(stop), int(step)
-        result = list(range(start, stop + step, step))
-        if result and result[-1] > stop:
-            result.pop()
-        return result
+        start, step, count = integer_series_extent(start, stop, step)
+        return list(range(start, start + count * step, step))
 
     # Float range: iterative addition with tolerance-based boundary check
     start, stop, step = float(start), float(stop), float(step)

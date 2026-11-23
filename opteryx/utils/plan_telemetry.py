@@ -313,7 +313,7 @@ _OPERATOR_LABELS = {
     # The join KIND is what a reader needs ("is this the inner join I wrote?");
     # hashing is the strategy, and the only one this operator has.
     "DrakenInnerJoinNode": "INNER JOIN",
-    "NestedLoopJoinNode": "NESTED JOIN",
+    "NestedLoopJoinNode": "THETA JOIN",
     "AsofJoinNode": "ASOF JOIN",
     "CrossJoinNode": "CROSS JOIN",
     "UnnestJoinNode": "UNNEST JOIN",

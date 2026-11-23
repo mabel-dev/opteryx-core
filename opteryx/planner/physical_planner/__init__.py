@@ -497,7 +497,7 @@ _JOIN_OPERATORS = {
     # INNER under IS NOT DISTINCT FROM (NULL equals NULL): the join an aggregate
     # window's partition is rewritten to (window_to_join).
     "inner not-distinct": ("Inner Join", "inner not-distinct"),
-    "nested loop": ("Nested Loop Join", "nested_loop"),
+    "nested loop": ("Theta Join", "nested_loop"),
     "left outer": ("Outer Join", None),
     "full outer": ("Outer Join", None),
     "right outer": ("Outer Join", None),

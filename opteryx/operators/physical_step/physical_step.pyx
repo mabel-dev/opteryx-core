@@ -64,7 +64,7 @@ cdef dict _NAMES = {
     "BandJoinNode": "Band Join",
     "DrakenInnerJoinNode": "Inner Join Draken",
     "CrossJoinNode": "Cross Join",
-    "NestedLoopJoinNode": "Nested Loop Join",
+    "NestedLoopJoinNode": "Theta Join",
     "OuterJoinNode": None,
     "FilterJoinNode": None,
     "ExistenceJoinNode": None,

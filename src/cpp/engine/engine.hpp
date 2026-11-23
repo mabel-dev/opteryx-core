@@ -48,6 +48,7 @@
 #include "native_cidr_unnest.hpp"   // CidrUnnestOperator — CROSS JOIN CIDR_UNNEST
 #include "native_grouping_expand.hpp"  // GroupingExpandOperator — GROUP BY ROLLUP
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
+#include "native_range_source.hpp"  // RangeSource — GENERATE_SERIES over integers
 #include "runtime_bound.hpp"        // RuntimeKeyBound — runtime min/max join filter
 #include "native_scalar_guard.hpp"  // ScalarGuardSource — scalar-subquery cardinality
 #include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
@@ -1396,6 +1397,11 @@ public:
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(sink_buffer_(buf)));
         pipelines[p]->reads_buffers = {static_cast<int>(buf)};
+    }
+    // GENERATE_SERIES over integers: (start, step, count) streamed as 64k-row morsels.
+    void set_range_source(size_t p, int64_t start, int64_t step, uint64_t count,
+                          std::string name) {
+        set_source_(p, std::make_unique<RangeSource>(start, step, count, std::move(name)));
     }
     // The read side of a UNION whose legs run concurrently: one buffer per leg, read in
     // leg order (see ConcatBufferSource).

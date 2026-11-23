@@ -725,6 +725,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     cppvector[int] out_from_p2,
                                     cppvector[string] out_names)
         void set_buffer_source(size_t p, size_t buf)
+        void set_range_source(size_t p, int64_t start, int64_t step, uint64_t count,
+                              string name)
         void set_concat_buffer_source(size_t p, const cppvector[size_t]& bufs) except +
         void add_concurrent_span(const cppvector[size_t]& firsts,
                                  const cppvector[size_t]& lasts) except +
@@ -2936,6 +2938,12 @@ cdef class NativePlan:
 
     def set_buffer_source(self, size_t p, size_t buf):
         self._e.set_buffer_source(p, buf)
+
+    def set_range_source(self, size_t p, int64_t start, int64_t step, uint64_t count, name):
+        """GENERATE_SERIES over integers: a Source that streams (start, step, count) as
+        64k-row INT64 morsels. Nothing of the series is materialised at plan time."""
+        cdef string nm = <string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8"))
+        self._e.set_range_source(p, start, step, count, nm)
 
     def set_concat_buffer_source(self, size_t p, list bufs):
         """Pipeline `p` reads several buffers, in order: a UNION whose legs run
