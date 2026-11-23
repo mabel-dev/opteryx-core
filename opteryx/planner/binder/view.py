@@ -301,13 +301,19 @@ def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
     return node, context
 
 
-def bind_schema_only(sql: str, context: BindingContext):
+def bind_schema_only(sql: str, context: BindingContext, *, plan_context=None):
     """Bind `sql` inside this statement's planning, schema-only, and return the
     head (exit) step - for DDL that must know what a statement or a relation
     produces (CREATE VIEW's recorded schema, CREATE PROPERTY GRAPH's columns).
 
     Bound AS the creator (`context.execution_context`), so the sources must
     resolve and the creator must be able to read them; a failure propagates.
+
+    Binding SEALS the plan context's expression arena, so a second bind in the same
+    plan context cannot resolve a column name (its expressions are immutable). A caller
+    that binds more than once, and keeps only names, passes each bind its own
+    `plan_context`; the default is this statement's, whose columns the result is then
+    minted in.
     """
     from opteryx.planner import bind_statement
 
@@ -316,7 +322,8 @@ def bind_schema_only(sql: str, context: BindingContext):
     # Manifest. Left in this statement's registries, the CREATE's own physical planner
     # compiled them as its own and refused their manifest-less scans - so the body
     # binds against empty registries and the statement's are put back after.
-    plan_context = context.plan_context
+    if plan_context is None:
+        plan_context = context.plan_context
     statement_ctes = (
         plan_context.shared_ctes,
         plan_context.physical_shared_ctes,

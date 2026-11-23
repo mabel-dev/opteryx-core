@@ -4704,7 +4704,7 @@ struct GroupByLocal : LocalSinkState {
     // ADAPTIVE RAW MODE (see kGBRawSwitchRatio): set at a flush (or from the planner's
     // estimate at make_local), never cleared.
     bool raw = false;
-    size_t rows_since_flush = 0;      // rows sunk since the last flush
+    size_t rows_since_flush = 0;      // rows since the last flush that asked the table (not the prev-row skips)
     uint64_t rows_total = 0;          // rows sunk by this worker
     // R4: this worker's distinct-group sketch over the hashes of its locally-new
     // groups (probe paths; nothing is fed in raw mode — see kGBMidSkipNDV's block).
@@ -6224,10 +6224,19 @@ struct GroupBySink : Sink {
         // large and reproducible, the high-cardinality gain marginal. The ban now
         // holds on BOTH architectures. Restructure the passes instead.
         if (l.raw) {
-            // ADAPTIVE RAW MODE: every row is a new group of its partition — no probe.
-            // The finalize (radix) merge groups them; see kGBRawSwitchRatio.
+            // ADAPTIVE RAW MODE: no probe — each RUN of one hash is a new group of its
+            // partition (a row repeating the previous row's hash is that row's group, as in
+            // the probing loop below). The finalize (radix) merge groups them; see
+            // kGBRawSwitchRatio.
+            uint64_t prev_h = 0;
+            uint32_t prev_gid = 0;
+            bool have_prev = false;
             for (uint32_t i = 0; i < rows; ++i) {
                 uint64_t h = l.mk_hash[i];
+                if (have_prev && h == prev_h) {
+                    l.mk_ent[i] = prev_gid;
+                    continue;
+                }
                 GBPartition& P = l.parts[gb_part(h)];
                 const int64_t gid = static_cast<int64_t>(P.hashes.size());
                 P.hashes.push_back(h);
@@ -6237,6 +6246,9 @@ struct GroupBySink : Sink {
                     if (err.code != 0) return SinkResult::CONTINUE;
                 }
                 l.mk_ent[i] = static_cast<uint32_t>(gid);
+                prev_h = h;
+                prev_gid = static_cast<uint32_t>(gid);
+                have_prev = true;
             }
         } else {
         // A row whose hash equals the previous row's is that row's group (groups are
@@ -6244,12 +6256,14 @@ struct GroupBySink : Sink {
         uint64_t prev_h = 0;
         uint32_t prev_gid = 0;
         bool have_prev = false;
+        size_t probes = 0;   // counted on the probe path, so the skip path stays bare
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
             if (have_prev && h == prev_h) {
                 l.mk_ent[i] = prev_gid;
                 continue;
             }
+            ++probes;
             GBPartition& P = l.parts[gb_part(h)];
             int64_t gid;
             bool is_new = P.find_or_insert_group(
@@ -6268,6 +6282,11 @@ struct GroupBySink : Sink {
             prev_gid = static_cast<uint32_t>(gid);
             have_prev = true;
         }
+        // The raw-mode trigger (maybe_flush) asks whether the table dedups what it is
+        // ASKED: rows the skip absorbed never probed it. Counting them hid a table that
+        // dedups nothing — keys sorted per file (JSONBench `did`) miss on ~92% of probes
+        // while groups/rows stays ~0.5, under kGBRawSwitchRatio.
+        l.rows_since_flush -= rows - probes;
         }
 
         // Grow lanes ONCE per morsel to each partition's new entry count

@@ -60,9 +60,15 @@ def _relation_columns(parts: List[str], context: BindingContext) -> Dict[str, st
     from opteryx.models import current_name_of
     from opteryx.models.create_statement import quote_identifier
     from opteryx.planner.binder.view import bind_schema_only
+    from opteryx.planner.plan_context import PlanContext
 
     relation = ".".join(quote_identifier(part) for part in parts)
-    head = bind_schema_only(f"SELECT * FROM {relation}", context)
+    # Only the names leave this bind, so it gets its own plan context: a bind seals its
+    # arena, and the next element's bind in the statement's would then be unable to
+    # resolve a view's columns.
+    probe = PlanContext()
+    probe.variables = context.plan_context.variables
+    head = bind_schema_only(f"SELECT * FROM {relation}", context, plan_context=probe)
     names = {}
     for column in head.columns:
         name = current_name_of(column)

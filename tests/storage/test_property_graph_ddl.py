@@ -77,6 +77,30 @@ def session(tmp_path):
 # --- create, show, drop ------------------------------------------------------------
 
 
+def test_views_are_element_tables_wherever_they_appear(session):
+    """Each element's columns are read in a bind of its own: the first bind sealed the
+    statement's expression arena, so a view named after it could not resolve its columns."""
+    run(session, "CREATE VIEW ws.big_companies AS SELECT id, legal_name FROM ws.companies WHERE id > 1")
+    run(session, "CREATE VIEW ws.recent AS SELECT person_id, company_id FROM ws.employment WHERE since > 2000")
+    run(
+        session,
+        """CREATE PROPERTY GRAPH ws.from_views
+  VERTEX TABLES (
+    ws.people KEY (id) LABEL Person PROPERTIES (id, name),
+    ws.big_companies KEY (id) LABEL Company PROPERTIES (id, legal_name AS name)
+  )
+  EDGE TABLES (
+    ws.recent KEY (person_id, company_id)
+      SOURCE KEY (person_id) REFERENCES people (id)
+      DESTINATION KEY (company_id) REFERENCES big_companies (id)
+      LABEL WORKS_AT NO PROPERTIES
+  )""",
+    )
+    statement = show_create(session, "ws.from_views")
+    assert "ws.big_companies AS big_companies" in statement
+    assert "ws.recent AS recent" in statement
+
+
 def test_create_stores_the_canonical_text(session, tmp_path):
     run(session, PEOPLE_GRAPH)
     assert (tmp_path / "ws" / "social" / "property_graph.json").exists()
