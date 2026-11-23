@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
@@ -53,6 +54,25 @@ def test_format_sql_column_coloring():
     assert f"{column_color}age\x1b[0m" in formatted_sql, "Column 'age' should be grey"
     assert f"{column_color}status\x1b[0m" in formatted_sql, "Column 'status' should be grey"
     assert f"{column_color}group\x1b[0m" in formatted_sql, "Column 'group' should be grey (not keyword)"
+
+
+def _plain(sql):
+    """format_sql output with the ANSI colour codes removed"""
+    return re.sub(r"\x1b\[[0-9;]*m", "", format_sql(sql))
+
+
+def test_format_sql_literal_is_not_respaced():
+    """Punctuation and spacing inside a quoted literal are the user's, not the tokeniser's"""
+    for literal in ("'runs_as'", "'x.y, (z)'", "'two  spaces'", "'it''s'", "''", "'a;b'", '"x_y"'):
+        plain = _plain(f"SELECT * FROM t WHERE a = {literal} AND b = 1")
+        assert f"a = {literal} AND b = 1" in plain, plain
+
+
+def test_format_sql_literal_closes_before_next_token():
+    """An empty literal must not swallow the rest of the statement"""
+    formatted = format_sql("SELECT * FROM t WHERE a = '' AND b = 1")
+    assert "\x1b[38;2;80;250;123mAND" not in formatted  # AND is an operator, not a function
+    assert "\x1b[38;2;189;147;249mAND\x1b[0m" in formatted, "AND after '' should still be coloured as an operator"
 
 
 if __name__ == "__main__":  # pragma: no cover

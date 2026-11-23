@@ -4836,8 +4836,10 @@ cdef class CreatePropertyGraphStep(PlanStep):
     cdef object _if_not_exists
     cdef object _or_replace
     cdef object _statement
+    cdef object _vertex_tables
+    cdef object _edge_tables
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, definition=None, graph_name=None, if_not_exists=None, or_replace=None, statement=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, definition=None, graph_name=None, if_not_exists=None, or_replace=None, statement=None, vertex_tables=None, edge_tables=None):
         self.node_type = _step_types().CreatePropertyGraph
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.connector = connector
@@ -4846,6 +4848,8 @@ cdef class CreatePropertyGraphStep(PlanStep):
         self.if_not_exists = if_not_exists
         self.or_replace = or_replace
         self.statement = statement
+        self.vertex_tables = vertex_tables
+        self.edge_tables = edge_tables
 
     @property
     def connector(self):
@@ -4903,6 +4907,26 @@ cdef class CreatePropertyGraphStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._statement = value
 
+    # The bound element tables the statement was rendered from, for the store to
+    # keep beside it (binder/property_graph.py).
+    @property
+    def vertex_tables(self):
+        return self._vertex_tables
+
+    @vertex_tables.setter
+    def vertex_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._vertex_tables = value
+
+    @property
+    def edge_tables(self):
+        return self._edge_tables
+
+    @edge_tables.setter
+    def edge_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._edge_tables = value
+
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -4920,6 +4944,8 @@ cdef class CreatePropertyGraphStep(PlanStep):
         out["if_not_exists"] = self._if_not_exists
         out["or_replace"] = self._or_replace
         out["statement"] = self._statement
+        out["vertex_tables"] = self._vertex_tables
+        out["edge_tables"] = self._edge_tables
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -4938,6 +4964,8 @@ cdef class CreatePropertyGraphStep(PlanStep):
         new._if_not_exists = _copy_field(self._if_not_exists, memo)
         new._or_replace = _copy_field(self._or_replace, memo)
         new._statement = _copy_field(self._statement, memo)
+        new._vertex_tables = _copy_field(self._vertex_tables, memo)
+        new._edge_tables = _copy_field(self._edge_tables, memo)
         new._sync_row()
         return new
 
@@ -4951,6 +4979,8 @@ cdef class CreatePropertyGraphStep(PlanStep):
         new._if_not_exists = self._if_not_exists
         new._or_replace = self._or_replace
         new._statement = self._statement
+        new._vertex_tables = self._vertex_tables
+        new._edge_tables = self._edge_tables
         new._row[0] = self._row[0]
         return new
 

@@ -205,11 +205,12 @@ def visit_create_property_graph(self, node: PlanStep, context: BindingContext) -
             "destination": _endpoint(edge, parsed["destination"], "DESTINATION", by_name, context),
         }
 
-    node.statement = render_create_property_graph(
-        node.graph_name,
-        [vertex.rendered() for vertex in vertices],
-        [edge.rendered() for edge in edges],
-    )
+    # The same bound elements twice: rendered into the canonical text, and kept
+    # as they are for the catalog to store beside it, so a reader that draws the
+    # graph (Studio, OData) never has to parse the text back.
+    node.vertex_tables = [vertex.rendered() for vertex in vertices]
+    node.edge_tables = [edge.rendered() for edge in edges]
+    node.statement = render_create_property_graph(node.graph_name, node.vertex_tables, node.edge_tables)
     node.columns = []
     return node, context
 

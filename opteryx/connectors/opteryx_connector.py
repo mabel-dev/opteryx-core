@@ -200,14 +200,11 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         except DatasetNotFound as exc:
             # Only on the failure path, so a real read pays nothing: a property graph
             # shares the namespace, and "not found" would send the reader hunting a typo.
+            # `table_engine` catches this and serves the graph's structure instead.
             if self.catalog.property_graph_exists(_collection_and_name(self.dataset)):
-                from opteryx.exceptions import UnsupportedSyntaxError
+                from opteryx.connectors.property_graph_structure import PropertyGraphRelation
 
-                raise UnsupportedSyntaxError(
-                    f"'{self.dataset}' is a property graph, not a table. Query it with GQL "
-                    "(the gqlparser package lowers GQL to SQL over the graph's tables), or "
-                    "read its tables directly."
-                ) from exc
+                raise PropertyGraphRelation(self.dataset) from exc
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from exc
 
     def can_push_topn(self, order_by) -> bool:
@@ -1725,13 +1722,28 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         # still exists (SHOW LINEAGE). The resolver is this connector's own
         # `_get_catalog`, so those lookups share its cache and its liveness
         # re-check rather than constructing a second catalog handle.
-        return OpteryxTable(
-            dataset=relative_id,
-            catalog=catalog,
-            workspace=workspace,
-            catalog_resolver=self._get_catalog,
-            **merged_kwargs,
-        )
+        from opteryx.connectors.property_graph_structure import PropertyGraphRelation
+
+        try:
+            return OpteryxTable(
+                dataset=relative_id,
+                catalog=catalog,
+                workspace=workspace,
+                catalog_resolver=self._get_catalog,
+                **merged_kwargs,
+            )
+        except PropertyGraphRelation:
+            # A property graph holds no rows, but its name answers to a read with
+            # its STRUCTURE - one row per element table. Decided only on the path
+            # where the dataset load already missed, so a real table pays nothing.
+            from opteryx.connectors.property_graph_structure import PropertyGraphStructureTable
+
+            return PropertyGraphStructureTable(
+                dataset=relative_id,
+                catalog=catalog,
+                workspace=workspace,
+                telemetry=kwargs.get("telemetry"),
+            )
 
     def view_engine(self, name: str):
         """
@@ -4154,13 +4166,30 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         statement: str,
         update_if_exists: bool = False,
         owner: Optional[str] = None,
+        vertex_tables: Optional[list] = None,
+        edge_tables: Optional[list] = None,
     ):
+        import inspect
+
         workspace, relative_id = self._parse_identifier(graph_name)
-        self._get_catalog(workspace).create_property_graph(
+        catalog = self._get_catalog(workspace)
+        # Engine and catalog deploy separately (see `_provenance_kwargs`): a
+        # catalog older than the stored element tables takes only the text, and
+        # the graph is still fully defined by it - the structure is for readers
+        # that draw it, and is absent until the graph is next created or replaced.
+        kwargs = {}
+        try:
+            accepts = inspect.signature(catalog.create_property_graph).parameters
+        except (TypeError, ValueError):
+            accepts = {}
+        if vertex_tables is not None and "vertex_tables" in accepts and "edge_tables" in accepts:
+            kwargs = {"vertex_tables": vertex_tables, "edge_tables": edge_tables or []}
+        catalog.create_property_graph(
             _collection_and_name(relative_id),
             statement,
             author=owner,
             update_if_exists=update_if_exists,
+            **kwargs,
         )
 
     def drop_property_graph(self, graph_name: str, author: Optional[str] = None):

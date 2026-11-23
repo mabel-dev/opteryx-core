@@ -83,8 +83,16 @@ class Eidetic:
         statement: str,
         update_if_exists: bool = False,
         owner: Optional[str] = None,
+        vertex_tables: Optional[list] = None,
+        edge_tables: Optional[list] = None,
     ):
-        """Create (or, with `update_if_exists`, replace) a property graph."""
+        """Create (or, with `update_if_exists`, replace) a property graph.
+
+        `vertex_tables` / `edge_tables` are the bound element tables the text was
+        rendered from (binder/property_graph.py `_Element.rendered()`). A store
+        may keep them for readers that draw the graph; the text stays the
+        definition, and a store that ignores them loses nothing it needs.
+        """
         raise _no_property_graphs(self)
 
     def drop_property_graph(self, graph_name: str, author: Optional[str] = None):

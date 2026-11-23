@@ -79,6 +79,8 @@ class PropertyGraphManagementNode(BasePlanNode):
                 self.step.statement,
                 update_if_exists=update_if_exists,
                 owner=self._author,
+                vertex_tables=self.step.vertex_tables,
+                edge_tables=self.step.edge_tables,
             )
             # what the store DID: OR REPLACE over an existing graph replaced it
             verb = "replaced" if update_if_exists and existing == TableType.PropertyGraph else "created"

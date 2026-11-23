@@ -6,7 +6,12 @@
 import re
 
 # Precompile regex patterns at module level
-_TOKEN_PATTERN = re.compile(r"[(),;._]|[\r\n]+|[^\s(),;._\r\n]+")
+# A complete quoted literal is ONE token: splitting on `.` `_` `,` `(` `)` inside it would lose
+# the original spacing, which tokenisation cannot give back. (`''` / `""` / ``` `` ``` escape the quote.)
+_LITERAL_PATTERN = re.compile(r"""[NEBXnebx]?'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`""")
+_TOKEN_PATTERN = re.compile(
+    _LITERAL_PATTERN.pattern + r"|[(),;._]|[\r\n]+|[^\s(),;._\r\n]+"
+)
 _COMMENT_PATTERN = re.compile(
     r"(\"[^\"]\"|\'[^\']\'|\`[^\`]\`)|(/\*[^\*/]*\*/|--[^\r\n]*$)", re.MULTILINE | re.DOTALL
 )
@@ -242,10 +247,11 @@ def format_sql(sql):  # pragma: no cover
         quote_char = _leading_quote(word)
         if quote_char:
             formatted_sql += _COLOR_STRING + word
-            if not _closes_literal(word, quote_char):
-                in_string_literal = quote_char
-            else:
+            if _LITERAL_PATTERN.fullmatch(word):
                 formatted_sql += _RESET + " "
+            else:
+                # unterminated literal: the rest of the statement is coloured as string
+                in_string_literal = quote_char
             continue
 
         upper_word = word.upper()

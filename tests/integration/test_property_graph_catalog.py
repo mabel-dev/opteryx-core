@@ -99,10 +99,43 @@ def test_or_replace_and_if_not_exists(catalog):
     assert "LABEL P NO PROPERTIES" in _rows("SHOW CREATE PROPERTY GRAPH pgws.sky.orbits")[0][1]
 
 
-def test_selecting_from_a_graph_says_what_it_is(catalog):
+STRUCTURE = [
+    ("vertex", "planets", "Planet", "pgws.sky.planets", "id", "id, name", None, None, None, None, None, None),
+    ("vertex", "moons", "Moon", "pgws.sky.moons", "id", "id, name", None, None, None, None, None, None),
+    ("edge", "orbit", "ORBITS", "pgws.sky.moons", "id", "", "moons", "id", "id", "planets", "planet_id", "id"),
+]
+
+
+def test_reading_a_graph_returns_its_structure_not_its_data(catalog):
+    """One row per element table - enough to draw the graph, and none of the rows
+    of the tables it names."""
     _rows(GRAPH)
-    with pytest.raises(UnsupportedSyntaxError, match="is a property graph, not a table"):
-        _rows("SELECT * FROM pgws.sky.orbits")
+    assert _rows("SELECT * FROM pgws.sky.orbits") == STRUCTURE
+    assert _rows(
+        "SELECT element_name, source_vertex, destination_vertex FROM pgws.sky.orbits "
+        "WHERE element_kind = 'edge'"
+    ) == [("orbit", "moons", "planets")]
+
+
+def test_a_renamed_property_reads_as_the_statement_spells_it(catalog):
+    _rows(
+        "CREATE PROPERTY GRAPH pgws.sky.named VERTEX TABLES "
+        "(pgws.sky.planets KEY (id) LABEL P PROPERTIES (id, name AS title))"
+    )
+    assert _rows("SELECT properties FROM pgws.sky.named") == [("id, name AS title",)]
+
+
+def test_a_graph_stored_without_its_element_tables_is_read_from_its_statement(catalog):
+    """A graph created before the catalog stored element tables has only the
+    canonical text; the structure is parsed back out of it, and matches."""
+    _rows(GRAPH)
+    instance = catalog(workspace="pgws")
+    record = instance.load_property_graph(("sky", "orbits"))
+    instance.create_property_graph(
+        ("sky", "orbits"), record["statement"], author="tester", update_if_exists=True
+    )
+    assert "vertex-tables" not in instance.load_property_graph(("sky", "orbits"))
+    assert _rows("SELECT * FROM pgws.sky.orbits") == STRUCTURE
 
 
 def test_a_graph_cannot_take_a_table_name(catalog):
@@ -114,3 +147,41 @@ def test_drop_if_exists_on_a_missing_graph(catalog):
     _rows("DROP PROPERTY GRAPH IF EXISTS pgws.sky.nothing")
     with pytest.raises(DatasetNotFoundError):
         _rows("DROP PROPERTY GRAPH pgws.sky.nothing")
+
+
+def test_the_catalog_stores_the_bound_element_tables(catalog):
+    """The binder's elements reach the catalog beside the text, so a reader that
+    draws the graph never parses SQL to get them back."""
+    _rows(GRAPH)
+    record = catalog(workspace="pgws").load_property_graph(("sky", "orbits"))
+
+    assert [(v["name"], v["label"], v["relation"]) for v in record["vertex-tables"]] == [
+        ("planets", "Planet", ["pgws", "sky", "planets"]),
+        ("moons", "Moon", ["pgws", "sky", "moons"]),
+    ]
+    assert record["vertex-tables"][0]["properties"] == [
+        {"column": "id", "name": "id"},
+        {"column": "name", "name": "name"},
+    ]
+    ((edge),) = record["edge-tables"]
+    assert (edge["name"], edge["label"], edge["properties"]) == ("orbit", "ORBITS", [])
+    assert edge["source"] == {"vertex": "moons", "key": ["id"], "references": ["id"]}
+    assert edge["destination"] == {"vertex": "planets", "key": ["planet_id"], "references": ["id"]}
+
+
+def test_a_catalog_without_element_tables_still_gets_the_text():
+    """Engine and catalog deploy separately: a catalog whose create_property_graph
+    predates the element tables is called with the text alone, not refused."""
+    calls = []
+
+    class _OldCatalog:
+        def create_property_graph(self, identifier, statement, author=None, update_if_exists=False):
+            calls.append((identifier, statement, author, update_if_exists))
+
+    connector = object.__new__(OpteryxConnector)
+    connector._parse_identifier = lambda name: ("pgws", name.split(".", 1)[1])
+    connector._get_catalog = lambda workspace: _OldCatalog()
+    connector.create_property_graph(
+        "pgws.sky.orbits", "CREATE ...", owner="tester", vertex_tables=[{}], edge_tables=[]
+    )
+    assert calls == [(("sky", "orbits"), "CREATE ...", "tester", False)]

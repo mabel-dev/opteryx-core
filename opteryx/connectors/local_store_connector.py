@@ -2179,8 +2179,13 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         statement: str,
         update_if_exists: bool = False,
         owner: Optional[str] = None,
+        vertex_tables: Optional[list] = None,
+        edge_tables: Optional[list] = None,
     ) -> None:
         """Create (or replace) a property graph's definition.
+
+        The element tables are accepted and not kept: this store has no reader
+        that draws a graph, and the canonical text alone defines it.
 
         Raises:
             ValueError: If another kind of object holds the name, or the graph
