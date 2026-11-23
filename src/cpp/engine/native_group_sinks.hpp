@@ -4578,6 +4578,9 @@ struct GroupByGlobal : GlobalSinkState {
     bool has_rows = false;
     bool init = false;
     GBKmv kmv;   // R4: union of every worker's sketch (merged under mtx at flush/combine)
+    bool any_raw = false;   // a worker went raw: kmv is then a lower bound (raw rows are not fed)
+    // Per-partition distinct-group bound for the merge (finalize); SIZE_MAX = entries only.
+    size_t merge_groups_bound = SIZE_MAX;
     // R9: the shared ticket table (created once, under mtx), the workers' lanes and
     // arenas handed over at combine, and whether the mode was ever decided.
     std::unique_ptr<GBTicketTable> ticket;
@@ -6263,6 +6266,7 @@ struct GroupBySink : Sink {
         // paid ~1,500 times on a 100M-group query.
         std::lock_guard<std::mutex> lk(g.mtx);
         g.kmv.merge(l.kmv);
+        g.any_raw = g.any_raw || l.raw;
     }
 
     // ---- finalize merge -----------------------------------------------------------
@@ -6886,18 +6890,23 @@ struct GroupBySink : Sink {
         size_t merge_total = 0;
         for (const GBPartData& P : list) merge_total += P.size();
         size_t nb = 1;
-        while (nb < kGBMergeMaxBuckets && merge_total > nb * kGBMergeLeaf) nb <<= 1;
+        // The partition's distinct groups: its queued entries, or fewer by the sketch.
+        const size_t groups = std::min(merge_total, g.merge_groups_bound);
+        // Groups that fit one leaf skip the scatter; otherwise the bucket count stays on
+        // entries, the geometry kGBMergeLeaf was swept against.
+        if (groups > kGBMergeLeaf)
+            while (nb < kGBMergeMaxBuckets && merge_total > nb * kGBMergeLeaf) nb <<= 1;
         std::vector<uint32_t> ge;
 
         if (nb == 1) {
-            // Always a FRESH table sized to the known worst case: its columns are then
-            // one segment each (doubling geometry) and emit reads them in place. A
-            // queued source is never the merge base — the probe of its groups this
-            // costs is bounded by kGBMergeLeaf.
+            // Always a FRESH table sized to the group bound: its columns are then one
+            // segment each (doubling geometry) and emit reads them in place; a bound
+            // that falls short only grows them. A queued source is never the merge
+            // base — the probe of its groups this costs is bounded by kGBMergeLeaf.
             GBPartition merged;
             ready_partition(g, merged);
-            merged.hint_rows(merge_total);
-            merged.index.reserve(merge_total);
+            merged.hint_rows(groups);
+            merged.index.reserve(groups);
             // The merged table references each new group's key values in the source
             // (R5); only the key columns of a source outlive its fold.
             std::vector<std::vector<GroupKeyColumn>> key_sources(list.size());
@@ -6952,8 +6961,10 @@ struct GroupBySink : Sink {
             if (prof) t0 = gb_prof_now();
             GBPartition merged;
             ready_partition(g, merged);
-            merged.hint_rows(frag[b].size());
-            merged.index.reserve(frag[b].size());
+            // Bucket bits are hash-uniform: each holds ~1/nb of the sketch's groups.
+            const size_t bgroups = std::min(frag[b].size(), g.merge_groups_bound / nb + 1);
+            merged.hint_rows(bgroups);
+            merged.index.reserve(bgroups);
             if (!merge_probe(g, merged, frag[b], ge, err)) return;
             frag[b] = GBPartData();
             if (prof) merge_ns += gb_prof_now() - t0;
@@ -7973,6 +7984,12 @@ struct GroupBySink : Sink {
                                       std::memory_order_relaxed);
         if (nt > nonempty_parts) nt = static_cast<unsigned>(nonempty_parts);
         if (total_entries < 65536) nt = 1;   // small agg: inline, no threads
+        // Queued ENTRIES overstate a partition's groups by the flush windows' redundancy
+        // (JSONBench Q4: >= 12.8x), so whether the merge scatters, and its table sizes, take
+        // the sketch union (+25%, spread over the hash-uniform partitions) when it saw every
+        // group: no raw worker (raw rows are not fed) and no statistics seed (not fed).
+        if (!g.any_raw && seed.groups == 0)
+            g.merge_groups_bound = static_cast<size_t>(g.kmv.estimate() * 1.25 / kGBParts) + 1;
         if (spilled) {
             // A partition being merged is in memory about three times over (queued or
             // read back, scattered, merged), so the merge runs only as wide as the
