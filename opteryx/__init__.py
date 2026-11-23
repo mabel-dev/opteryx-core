@@ -235,6 +235,32 @@ def analyze_query(sql: str, user: Optional[str] = None) -> Dict[str, Any]:
     return _parse_query_info(sql, user=user)
 
 
+def preload() -> None:
+    """
+    Import the engine's planner and execution modules now, rather than on first use.
+
+    `import opteryx` stays light and the rest loads lazily, so the first query in a
+    process also pays for importing ~290 compiled modules. A long-lived server calls
+    this once at start so its first query doesn't. No query runs and no data is read.
+    A module that fails to import raises here.
+    """
+    import importlib
+    import pkgutil
+
+    for package in (
+        "opteryx.planner",
+        "opteryx.compiled",
+        "opteryx.operators",
+        "opteryx.expression",
+        "opteryx.managers",
+        "opteryx.connectors",
+        "opteryx.models",
+    ):
+        for module in pkgutil.walk_packages(importlib.import_module(package).__path__, package + "."):
+            importlib.import_module(module.name)
+    importlib.import_module("opteryx.query_session")
+
+
 # Enable all warnings, including DeprecationWarning
 warnings.simplefilter("once", DeprecationWarning)
 
@@ -259,6 +285,8 @@ __all__ = [
     # `session()` is the way in - the Session class itself is deliberately not
     # exported here, so importing opteryx does not pull in the planner.
     "session",
+    # Opt-in: a long-lived server imports the engine up front instead of on its first query.
+    "preload",
     "register_workspace",
     "set_default_connector",
     # Installs the capability that decides permission checks. Absent one, the

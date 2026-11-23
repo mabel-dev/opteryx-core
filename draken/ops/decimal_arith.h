@@ -938,9 +938,10 @@ static inline __int128 dec_pow10_i128(int e) noexcept {
 // These live below dec_pow10_i128 because they use it (and umul128_256 above).
 // ---------------------------------------------------------------------------
 
-// Unsigned 256-bit (hi:lo) divided by 128-bit divisor d, via restoring binary
-// long division (256 iterations — the "correct-but-scalar" tier; there is no
-// native 256/128 divide). Writes the quotient's low 128 bits to quo and the
+// Unsigned 256-bit (hi:lo) divided by 128-bit divisor d. A numerator that fits
+// 128 bits (hi == 0 — e.g. |a| < 10^17 scaled by 10^8) takes the native 128/128
+// divide; wider ones take restoring binary long division (256 iterations — the
+// "correct-but-scalar" tier; there is no native 256/128 divide). Writes the quotient's low 128 bits to quo and the
 // remainder (< d) to rem. Returns false if the true quotient needs more than
 // 128 bits (overflow). REQUIRES d != 0 and d < 2^127 — guaranteed for DECIMAL128
 // unscaled values (|v| < 10^38 < 2^127), which keeps the running remainder below
@@ -948,6 +949,11 @@ static inline __int128 dec_pow10_i128(int e) noexcept {
 static inline bool udivmod_256_by_128(
     unsigned __int128 hi, unsigned __int128 lo, unsigned __int128 d,
     unsigned __int128& quo, unsigned __int128& rem) {
+    if (hi == 0) {                   // numerator fits 128 bits: one native divide, same answer
+        quo = lo / d;
+        rem = lo % d;
+        return true;
+    }
     unsigned __int128 q = 0;
     unsigned __int128 r = 0;
     bool overflow = false;

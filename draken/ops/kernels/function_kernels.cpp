@@ -246,7 +246,8 @@ VecResult draken_lower(void* /*ctx*/, const DrakenVector* const* args, uint32_t 
 // one. A kernel that is scale-invariant end to end needs no ctx — SIGN is the only
 // one: sign(unscaled) == sign(value), and it returns INTEGER.
 //
-// DECIMAL128 is int128-backed and is NOT admitted — it has no reader below.
+// DECIMAL128 is int128-backed and is NOT admitted by fk_is_numeric — only the
+// ROUND/FLOOR/CEILING family reads it (fk_round_family).
 
 namespace {
 
@@ -456,19 +457,21 @@ inline bool fk_read_digits(const DrakenVector* v, uint32_t row, int64_t& out) {
 }
 
 // One DECIMAL value rounded to `d` digits from scale `s` (requires d >= s, or
-// s - d <= 18 — the caller owns the out-of-domain error). Exact in the int64 domain.
-inline double fk_round_dec_value(int64_t raw, int64_t s, int64_t d, int op) {
+// s - d <= 18 for int64 / 38 for int128 — the caller owns the out-of-domain
+// error). Exact in the raw integer domain of T (int64 DECIMAL, int128 DECIMAL128).
+template <typename T>
+inline double fk_round_dec_value(T raw, int64_t s, int64_t d, int op) {
     if (d >= s) {
         // no fractional information beyond scale s — the value is exact
         return static_cast<double>(raw) / std::pow(10.0, static_cast<double>(s));
     }
     const int64_t steps = s - d;
-    int64_t p = 1;
+    T p = 1;
     for (int64_t k = 0; k < steps; ++k) p *= 10;
-    int64_t q = raw / p;
-    int64_t r = raw % p;
+    T q = raw / p;
+    T r = raw % p;
     if (op == 0) {                       // half away from zero, exact
-        int64_t ar = r < 0 ? -r : r;
+        T ar = r < 0 ? -r : r;
         if (ar * 2 >= p) q += (raw > 0) - (raw < 0);
     } else if (op == 1) {                // floor
         if (r != 0 && raw < 0) q -= 1;
@@ -495,6 +498,42 @@ inline bool fk_round_const_digits(const DrakenVector* dg, int64_t& d) {
     return draken_is_constant(dg) && dg->validity == nullptr && fk_read_digits(dg, 0, d);
 }
 
+// The DECIMAL / DECIMAL128 arm of fk_round_family, over the raw unscaled integer T.
+// `max_steps` is the largest power of ten T holds (18 / 38).
+template <typename T>
+VecResult fk_round_decimal(const DrakenVector* v, const DrakenVector* dg, int s,
+                           const char* who, int op, int64_t max_steps, const char* domain) {
+    const T* vals = static_cast<const T*>(v->data);
+    const uint32_t n = v->length;
+    int64_t cd = 0;
+    if (draken_is_compressed(v) && fk_round_const_digits(dg, cd)
+            && (cd >= s || s - cd <= max_steps)) {
+        return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
+            return fk_round_dec_value<T>(vals[j], s, cd, op);
+        });
+    }
+    auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
+    if (out == nullptr) return draken_error_sentinel("allocation failed");
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fk_row_valid(v, i)) { out[i] = 0.0; continue; }
+        const T raw = vals[v->selection[i]];
+        int64_t d = 0;
+        if (dg != nullptr) {
+            if (!fk_row_valid(dg, i) || !fk_read_digits(dg, i, d)) {
+                draken_free(out);
+                return draken_error_sentinel_fmt("%s: integer digits required", who);
+            }
+        }
+        if (d < s && s - d > max_steps) {
+            draken_free(out);
+            return draken_error_sentinel_fmt(
+                "%s: rounding step exceeds the %s decimal domain", who, domain);
+        }
+        out[i] = fk_round_dec_value<T>(raw, s, d, op);
+    }
+    return fk_numeric_result(v, out, n, DRAKEN_FLOAT64);
+}
+
 // ROUND/FLOOR/CEILING(x[, digits]) -> FLOAT64 (catalog contract). `op`: 0=round
 // (half-away-from-zero, the SQL convention), 1=floor, 2=ceil.
 //
@@ -510,39 +549,15 @@ VecResult fk_round_family(void* ctx, const DrakenVector* const* args, uint32_t n
     const DrakenVector* dg = (nargs == 2) ? args[1] : nullptr;
     uint32_t n = v->length;
 
-    if (v->type == DRAKEN_DECIMAL) {
+    if (v->type == DRAKEN_DECIMAL || v->type == DRAKEN_DECIMAL128) {
         if (ctx == nullptr) {
             return draken_error_sentinel_fmt(
                 "%s: DECIMAL operand needs its bind-time scale context", who);
         }
         int s = static_cast<const binary_op_ctx*>(ctx)->left_scale;
-        int64_t cd = 0;
-        if (draken_is_compressed(v) && fk_round_const_digits(dg, cd)
-                && (cd >= s || s - cd <= 18)) {
-            return kernel_map_compressed<double>(v, DRAKEN_FLOAT64, [&](uint32_t j) {
-                return fk_round_dec_value(fk_read_int64_at(v, j), s, cd, op);
-            });
-        }
-        auto* out = static_cast<double*>(draken_malloc((n > 0 ? n : 1) * sizeof(double)));
-        if (out == nullptr) return draken_error_sentinel("allocation failed");
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(v, i)) { out[i] = 0.0; continue; }
-            int64_t raw = fk_read_int64(v, i);
-            int64_t d = 0;
-            if (dg != nullptr) {
-                if (!fk_row_valid(dg, i) || !fk_read_digits(dg, i, d)) {
-                    draken_free(out);
-                    return draken_error_sentinel_fmt("%s: integer digits required", who);
-                }
-            }
-            if (d < s && s - d > 18) {
-                draken_free(out);
-                return draken_error_sentinel_fmt(
-                    "%s: rounding step exceeds the int64 decimal domain", who);
-            }
-            out[i] = fk_round_dec_value(raw, s, d, op);
-        }
-        return fk_numeric_result(v, out, n, DRAKEN_FLOAT64);
+        if (v->type == DRAKEN_DECIMAL)
+            return fk_round_decimal<int64_t>(v, dg, s, who, op, 18, "int64");
+        return fk_round_decimal<__int128>(v, dg, s, who, op, 38, "int128");
     }
 
     if (!fk_is_numeric(v->type))

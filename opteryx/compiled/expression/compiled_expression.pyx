@@ -3189,7 +3189,8 @@ cdef Py_ssize_t _linearize(
             # LogicalType detail the DrakenVector cannot carry — via a bind-time ctx
             # (binary_op_ctx, the same vehicle the decimal binops use):
             #   ROUND/FLOOR/CEILING/CEIL/TRUNC — round/truncate EXACTLY in the raw
-            #                              int64 domain.
+            #                              int64 domain (ROUND/FLOOR/CEILING also
+            #                              int128, for DECIMAL128).
             #   SQRT/POWER/LOG/HUMANIZE  — need the VALUE, not the unscaled int64.
             #   ABS                      — |unscaled| is scale-free arithmetic, but the
             #                              result is DECIMAL(p, s) and the kernel stamps
@@ -3210,7 +3211,7 @@ cdef Py_ssize_t _linearize(
                 _fn_p0_sc = <object>node.parameters[0].schema_column
                 _fn_p0_ct = (_fn_p0_sc.column_type if _fn_p0_sc is not None else None)
                 if (_fn_p0_ct is not None and _fn_p0_ct.logical is not None
-                        and getattr(_fn_p0_ct.physical, "name", "") == "DECIMAL"):
+                        and getattr(_fn_p0_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")):
                     from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
                     _fn_ctx_alloc = alloc_binary_op_ctx
                     _fn_dec_sc = _binop_dec_scale(_fn_p0_ct)

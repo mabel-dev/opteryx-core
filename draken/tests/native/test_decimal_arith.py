@@ -415,6 +415,25 @@ class TestDecimalDiv:
         b = dec([Decimal('2.00')])
         assert a.div(b).type == dn.DrakenType.DECIMAL
 
+    def test_decimal128_numerator_fits_128_bits(self):
+        # |a| * 10^8 < 2^128: the native 128/128 divide in udivmod_256_by_128.
+        # Rows 3-4 are half-even ties at scale 8 (0.5e-8 -> 0, 1.5e-8 -> 2e-8).
+        a = dn.vector_decimal128_from_sequence(
+            [Decimal('7.00'), Decimal('-7.00'), Decimal('1.00'), Decimal('3.00')], precision=38, scale=2)
+        b = dn.vector_decimal128_from_sequence(
+            [Decimal('3.00'), Decimal('3.00'), Decimal('200000000.00'), Decimal('200000000.00')],
+            precision=38, scale=2)
+        r = a.div(b)
+        assert r.type == dn.DrakenType.DECIMAL128
+        assert pylist(r) == [Decimal('2.33333333'), Decimal('-2.33333333'), Decimal(0), Decimal('2E-8')]
+
+    def test_decimal128_numerator_wider_than_128_bits(self):
+        # |a| * 10^6 = 10^43 > 2^128: the 256-bit long-division path.
+        a = dn.vector_decimal128_from_sequence([Decimal(10**37), Decimal(-10**37)], precision=38, scale=0)
+        b = dn.vector_decimal128_from_sequence([Decimal(3 * 10**10), Decimal(10**10)], precision=38, scale=0)
+        assert pylist(a.div(b)) == [
+            Decimal('333333333333333333333333333.333333'), Decimal(-10**27)]
+
 
 # ===========================================================================
 # MOD

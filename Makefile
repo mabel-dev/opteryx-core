@@ -1204,7 +1204,7 @@ define tpcds_suite
 	@test -d testdata/tpcds_$(1) || $(PYTHON) dev/tpcds/generate_data.py --scale $(1)
 	$(call mirror_rugo,testdata/tpcds_$(1),testdata/tpcds_$(1)_rugo)
 	@clear || true
-	@$(PYTHON) tests/performance/tpcds/runner.py --scale $(1) --variant rugo
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/tpcds/runner.py --scale $(1) --variant rugo
 endef
 
 tpcds-sf1: ## Run TPC-DS SF1 vs DuckDB on the rugo-written parquet mirror
