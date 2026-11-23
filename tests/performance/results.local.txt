@@ -1,12 +1,12 @@
-make clickbench-rugo                       3794ms    (31-OCT) [0.37x] [0.9.175 @ 4137ms last clickbench]
+make clickbench-rugo                       3767ms    (23-NOV) [0.37x] [0.9.175 @ 4137ms last clickbench]
 make clickbench-skene                      5165ms    (06-NOV) [0.51x]
-make clickbench-canon                      5152ms    (06-NOV) [0.49x] [0.9.175 @ 5485ms last clickbench]
-make clickbench-canon-single               5585ms    (02-NOV) [0.55x]
-make clickbench-rugo-extended              6650ms    (22-NOV) [0.36x]
+make clickbench-canon                      4999ms    (23-NOV) [0.49x] [0.9.175 @ 5485ms last clickbench]
+make clickbench-canon-single               5411ms    (23-NOV) [0.53x]
+make clickbench-rugo-extended              6650ms    (23-NOV) [0.36x]
 make clickbench-json                     427180ms    (12-OCT) [3-runs only] [396,240ms 07-NOV, 1 fail]
 make clickbench-avro                     140630ms    (12-OCT) [3-runs only]
 make clickbench-orc                        6486ms    (29-OCT)
-make clickbench-iceberg                    4891ms    (19-NOV)
+make clickbench-iceberg                    4544ms    (23-NOV)
 make tpch-sf1                             265.4ms    (07-NOV) [0.76x]
 make tpch-sf10                           1440.1ms    (07-NOV) [0.39x]
 make tpch-sf100                         18973.5ms    (07-NOV) [0.79x]

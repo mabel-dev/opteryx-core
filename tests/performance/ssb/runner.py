@@ -7,8 +7,8 @@ the best time to the DuckDB baseline at the same scale factor, and writes
 per-iteration results to `results/<sha>-<ts>.csv`.
 
 Usage:
-    make ssb-sf1 | ssb-sf10 | ssb-sf100          # skene v3 mirror, 3 warm iterations
-    python tests/performance/ssb/runner.py --scale 1 --variant skene
+    make ssb-sf1 | ssb-sf10 | ssb-sf100          # rugo parquet mirror, 3 warm iterations
+    python tests/performance/ssb/runner.py --scale 1 --variant rugo
 
 Inputs:
     tests/performance/ssb/queries/q*.sql                 - query bodies (shared with DuckDB)
@@ -90,7 +90,7 @@ def main() -> int:
     parser.add_argument("--iterations", type=int, default=3, help="Warm iterations per query")
     parser.add_argument(
         "--variant", type=str, default="",
-        help="Format variant: runs against testdata/ssb_<scale>_<variant> (e.g. `skene`)",
+        help="Format variant: runs against testdata/ssb_<scale>_<variant> (e.g. `rugo`)",
     )
     parser.add_argument("--queries", type=str, default="", help="Comma-separated names, e.g. Q1.1,Q4.3")
     args = parser.parse_args()
@@ -101,7 +101,7 @@ def main() -> int:
         print(f"ERROR: dataset not found at {dataset_path}")
         print(f"       generate it: python dev/ssb_generate.py {args.scale}")
         if args.variant:
-            print(f"       then:        python dev/parquet_to_skene.py testdata/ssb_{args.scale} {dataset_path}")
+            print(f"       then:        make ssb-sf{args.scale}")
         return 1
 
     queries = _load_queries(args.scale, args.variant)

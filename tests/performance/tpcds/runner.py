@@ -24,7 +24,7 @@ would in a server — later queries are not cold-process runs.
 
 Usage:
     make tpcds-sf1 | tpcds-sf001
-    python tests/performance/tpcds/runner.py --scale 1 --variant skene
+    python tests/performance/tpcds/runner.py --scale 1 --variant rugo
     python tests/performance/tpcds/runner.py --scale 1
     python tests/performance/tpcds/runner.py --query 23   # run one query
     python tests/performance/tpcds/runner.py --timeout 60
@@ -32,9 +32,9 @@ Usage:
 Inputs:
     tests/performance/tpcds/opteryx/queries/*.sql        — query bodies (dev/tpcds/generate_queries.py)
     testdata/tpcds_<scale>/<table>/*.parquet             — parquet source (dev/tpcds/generate_data.py)
-    testdata/tpcds_<scale>_skene/<table>/*.skene         — skene v2 mirror (dev/parquet_to_skene.py)
+    testdata/tpcds_<scale>_rugo/<table>/*.parquet        — rugo-written parquet mirror (make tpcds-sf<scale>)
 
-The make targets run the SKENE MIRROR; the parquet source is the intermediate
+The make targets run the RUGO PARQUET MIRROR; the parquet source is the intermediate
 it is built from and stays reachable by dropping --variant.
 """
 
@@ -77,7 +77,7 @@ _WORKER_PATH = os.path.join(os.path.dirname(__file__), "_query_worker.py")
 
 
 def _dataset_suffix(scale: str, variant: str) -> str:
-    """`tpcds_<scale>` or `tpcds_<scale>_<variant>` (e.g. variant `skene`)."""
+    """`tpcds_<scale>` or `tpcds_<scale>_<variant>` (e.g. variant `rugo`)."""
     return f"tpcds_{scale}_{variant}" if variant else f"tpcds_{scale}"
 
 
@@ -181,7 +181,7 @@ def main() -> int:
         type=str,
         default="",
         help="Dataset format variant: runs against testdata/tpcds_<scale>_<variant> "
-        "(e.g. `skene` for the skene v2 mirror; default: the parquet dataset). "
+        "(e.g. `rugo` for the rugo-written parquet mirror; default: the parquet dataset). "
         "`aistor` runs against the parquet source on AIStor (aistor.tpcds_sf<scale>).",
     )
     parser.add_argument(
@@ -200,8 +200,7 @@ def main() -> int:
         print(f"ERROR: dataset not found at {dataset_path}")
         print(f"       expected: testdata/{suffix}")
         if args.variant:
-            print(f"       generate it: python dev/parquet_to_skene.py "
-                  f"testdata/tpcds_{args.scale} testdata/{suffix} lz4")
+            print(f"       generate it: make tpcds-sf{args.scale}")
         else:
             print(f"       generate it: python dev/tpcds/generate_data.py --scale {args.scale}")
         return 1

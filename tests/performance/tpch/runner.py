@@ -7,8 +7,8 @@ best Opteryx time to the DuckDB baseline at the same scale factor, and writes
 per-iteration results to `results/<sha>-<ts>.csv`.
 
 Usage:
-    make tpch-sf1 | tpch-sf10 | tpch-sf100     # skene v2 mirror, 3 warm iterations
-    python tests/performance/tpch/runner.py --scale 1 --variant skene
+    make tpch-sf1 | tpch-sf10 | tpch-sf100     # rugo parquet mirror, 3 warm iterations
+    python tests/performance/tpch/runner.py --scale 1 --variant rugo
     python tests/performance/tpch/runner.py --scale 001
     python tests/performance/tpch/runner.py --iterations 5
 
@@ -62,7 +62,7 @@ _RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
 
 def _dataset_suffix(scale: str, variant: str) -> str:
-    """`tpch_<scale>` or `tpch_<scale>_<variant>` (e.g. variant `skene`)."""
+    """`tpch_<scale>` or `tpch_<scale>_<variant>` (e.g. variant `rugo`)."""
     return f"tpch_{scale}_{variant}" if variant else f"tpch_{scale}"
 
 
@@ -286,10 +286,9 @@ def _profile_pass(queries: list[tuple[str, str]]) -> None:
     print("PARQUET READ DECODE PHASE BREAKDOWN")
     print(f"{'=' * 100}\n")
     if pq_total == 0:
-        # Zero across every phase means nothing read parquet - the `skene` variant
-        # is the usual reason. Saying so beats a table of 0.0% shares under a
-        # denominator that was never measured.
-        print("  no parquet decode in the profiled queries (skene variant reads no parquet)")
+        # Zero across every phase means nothing read parquet. Saying so beats a
+        # table of 0.0% shares under a denominator that was never measured.
+        print("  no parquet decode in the profiled queries")
     else:
         print(f"{'Phase':<20} {'Time':>12} {'Share':>8}")
         print("-" * 42)
@@ -325,7 +324,7 @@ def main() -> int:
         type=str,
         default="",
         help="Dataset format variant: runs against testdata/tpch_<scale>_<variant> "
-        "(e.g. `skene` for the skene mirror; default: the parquet dataset). "
+        "(e.g. `rugo` for the rugo-written parquet mirror; default: the parquet dataset). "
         "`aistor` runs against the parquet source on AIStor (aistor.tpch_sf<scale>).",
     )
     parser.add_argument(
@@ -357,8 +356,7 @@ def main() -> int:
             print(f"ERROR: dataset not found at {dataset_path}")
             print(f"       expected: testdata/{suffix}")
             if args.variant:
-                print(f"       generate it: python dev/parquet_to_skene.py "
-                      f"testdata/tpch_{args.scale} testdata/{suffix}")
+                print(f"       generate it: make tpch-sf{args.scale}")
             return 1
         warm_relation = f"testdata.{suffix}"
 

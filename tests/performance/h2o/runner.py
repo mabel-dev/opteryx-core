@@ -63,25 +63,23 @@ def _query_sort_key(path: Path):
 
 
 def _dataset_prefix(variant: str, size: str) -> str:
-    """`testdata.h2o_rugo.`, `testdata.h2o_skene.`, `testdata.h2o.<size>.` or
+    """`testdata.h2o_rugo.`, `testdata.h2o.<size>.` or
     `aistor.h2o_<size>.` — never a silent fallback.
 
-    The rugo and skene mirrors are built at one size (medium), so they carry no
-    size level: `testdata.h2o_rugo.<table>` is the parquet tree rewritten by
-    rugo's writer, `testdata.h2o_skene.<table>` the skene mirror. The parquet
+    The rugo mirror is built at one size (medium), so it carries no size
+    level: `testdata.h2o_rugo.<table>` is the parquet tree rewritten by
+    rugo's writer. The parquet
     tree keeps its per-size layout, and `aistor` is that parquet tree registered
     as Iceberg tables on AIStor. An unknown variant is a hard failure rather than
     a fallback to the other corpus.
     """
     if variant == "rugo":
         return "testdata.h2o_rugo."
-    if variant == "skene":
-        return "testdata.h2o_skene."
     if variant == "parquet":
         return f"testdata.h2o.{size}."
     if variant == AISTOR_WORKSPACE:
         return f"{AISTOR_WORKSPACE}.h2o_{size}."
-    raise ValueError(f"unknown variant {variant!r}; expected 'rugo', 'skene', 'parquet' or 'aistor'")
+    raise ValueError(f"unknown variant {variant!r}; expected 'rugo', 'parquet' or 'aistor'")
 
 
 def _rewrite_query(sql: str, size: str, workload: str, variant: str = "rugo") -> str:
@@ -145,7 +143,7 @@ def main() -> int:
         "--size",
         # `small` is gone LOCALLY. At 1e7 rows it is 630MB, which sits entirely in
         # page cache on any development machine, so it measured compute with the
-        # storage layer removed — and the skene mirror is built at medium only.
+        # storage layer removed — and the rugo mirror is built at medium only.
         # It is allowed for `--variant aistor` only: remote reads have no page
         # cache to hide in, so there it is the quick remote scale (checked below).
         choices=["small", "medium", "large"],
@@ -165,8 +163,8 @@ def main() -> int:
         "--variant",
         type=str,
         default="rugo",
-        choices=("rugo", "skene", "parquet", AISTOR_WORKSPACE),
-        help="dataset format: runs against testdata/h2o_rugo, testdata/h2o_skene, "
+        choices=("rugo", "parquet", AISTOR_WORKSPACE),
+        help="dataset format: runs against testdata/h2o_rugo, "
              "testdata/h2o/<size>, or the parquet tree on AIStor (aistor.h2o_<size>) "
              "(default: rugo)",
     )

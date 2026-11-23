@@ -82,7 +82,7 @@ DATASET_PREFIX = "testdata.job_rugo."
 
 
 def _dataset_prefix(variant: str) -> str:
-    """`testdata.job_rugo.`, `testdata.job_skene.`, `testdata.job.` or
+    """`testdata.job_rugo.`, `testdata.job.` or
     `aistor.job.` — never a silent fallback. `parquet` is the source corpus as
     generated; `rugo` is that corpus rewritten by rugo's writer; `aistor` is the
     parquet corpus registered as Iceberg on AIStor.
@@ -93,13 +93,11 @@ def _dataset_prefix(variant: str) -> str:
     """
     if variant == "rugo":
         return "testdata.job_rugo."
-    if variant == "skene":
-        return "testdata.job_skene."
     if variant == "parquet":
         return "testdata.job."
     if variant == AISTOR_WORKSPACE:
         return f"{AISTOR_WORKSPACE}.job."
-    raise ValueError(f"unknown variant {variant!r}; expected 'rugo', 'skene', 'parquet' or 'aistor'")
+    raise ValueError(f"unknown variant {variant!r}; expected 'rugo', 'parquet' or 'aistor'")
 QUERY_RE = re.compile(r"^([0-9]+)([a-z])\.sql$")
 _TABLE_ALT = "|".join(re.escape(t) for t in TABLES)
 # Rewrite is scoped to the FROM clause: only tokens immediately following
@@ -175,8 +173,8 @@ def main() -> int:
         "--variant",
         type=str,
         default="rugo",
-        choices=("rugo", "skene", "parquet", AISTOR_WORKSPACE),
-        help="dataset format: runs against testdata/job_rugo, testdata/job_skene, "
+        choices=("rugo", "parquet", AISTOR_WORKSPACE),
+        help="dataset format: runs against testdata/job_rugo, "
         "testdata/job, or the parquet corpus on AIStor (aistor.job) (default: rugo)",
     )
     parser.add_argument(

@@ -777,19 +777,19 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 	    -o $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench
 	@cd $(CURDIR) && $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench $(JSON_VALIDATE_BENCH_ARGS)
 
-# === Benchmark mirrors (rugo parquet by default, skene on request) ===
+# === Benchmark mirrors (rugo parquet) ===
 #
-# The local suites (tpch, ssb, job, h2o) run on a MIRROR of their parquet
+# The local suites (tpch, ssb, tpcds, job, h2o) run on a MIRROR of their parquet
 # source, never on the source itself: the source's layout is whatever its
 # generator produced, so a mirror built by our own writer is what makes runs
-# comparable over time. Two mirror kinds, one macro each, ($(1) source dir,
-# $(2) mirror dir, one sub-directory per table in both):
+# comparable over time. Skene is benchmarked by clickbench-skene alone; every
+# suite that does not name a format reads this mirror. ($(1) source dir, $(2)
+# mirror dir, one sub-directory per table in both):
 #
-#  - mirror_rugo  — the DEFAULT (architect, 2026-10-18). Each table streamed
+#  - mirror_rugo  — (architect, 2026-10-18). Each table streamed
 #    through rugo's parquet writer at its defaults, spelled out so a writer
 #    default change cannot silently change the corpus: zstd, 65,536-row row
-#    groups, column-major blocks of 4, files closed at 4 GiB (the skene
-#    mirrors' file target). STREAMING repack (--file-bytes), not the per-file
+#    groups, column-major blocks of 4, files closed at 4 GiB. STREAMING repack (--file-bytes), not the per-file
 #    rewrite: that one decodes a whole source file in memory and ran a 15 GB
 #    box out of memory on H2O medium. Measured on the x86 box 2026-10-18,
 #    rugo parquet vs skene lz4: TPC-H SF1 0.79x, SF10 0.82x, JOB 0.61x, H2O
@@ -801,9 +801,7 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 #    frequent values, 2026-11-07), so a mirror written by an older writer
 #    regenerates instead of being benchmarked.
 #
-#  - mirror_skene — the `-skene` targets. skene v3, lz4 (see gate 3 below).
-#
-# Both gate on a completion stamp outside the mirror, not on the directory: an
+# It gates on a completion stamp outside the mirror, not on the directory: an
 # interrupted build leaves a partial tree that `test -d` would accept, silently
 # benchmarking a fraction of the dataset.
 define mirror_rugo
@@ -817,27 +815,18 @@ define mirror_rugo
 	}
 endef
 
-define mirror_skene
-	@test -f $(2).skene-v3 || { \
-		rm -rf $(2) && \
-		$(PYTHON) dev/parquet_to_skene.py $(1) $(2) lz4 && \
-		touch $(2).skene-v3; \
-	}
-endef
-
-# === TPC-H (rugo parquet / skene v3 mirrors, DuckDB-calibrated) ===
+# === TPC-H (rugo parquet mirror, DuckDB-calibrated) ===
 #
 # Three scales, one body: `make tpch-sf1`, `make tpch-sf10`, `make tpch-sf100`
-# on the rugo parquet mirror, `make tpch-sf<sf>-skene` on the skene mirror.
+# on the rugo parquet mirror.
 # `make tpch` stays as an alias for tpch-sf10 — that is the scale every number
 # in docs/ and the M4 design notes was quoted at. Those numbers were taken on
-# the skene mirror; compare a new tpch-sf10 number with tpch-sf10-skene, not
-# with them.
+# the skene mirror, so a new tpch-sf10 number does not compare with them.
 #
 # The plain-parquet variant (the old `tpch` body, the generator's own files)
 # was removed 2026-08-16 and stays removed: the mirror is the artifact.
 #
-# Every scale passes the same four gates before a query runs:
+# Every scale passes the same three gates before a query runs:
 #
 #  1. PARQUET SOURCE. testdata/tpch_<sf> is not vendored (SF100 alone is ~39GB)
 #     and has no in-tree generator: every scale here was produced out-of-band by
@@ -848,23 +837,9 @@ endef
 #     writer that would lay the files out differently. The parquet is an
 #     intermediate; the mirror below is the benchmark artifact.
 #
-#  2. MIRROR, STAMPED ON THE LAYOUT (mirror_rugo / mirror_skene above). For
-#     skene, the stamp is not just on the directory: a mirror
-#     written before row groups were packed into files — or at format v1 — is a
-#     different set of objects under different names, and the converter refuses
-#     to write over it. A missing stamp with a populated directory therefore
-#     means "regenerate", which is what the rm does. The stamp is named for the
-#     FORMAT VERSION so an older tree can never satisfy the v3 gate — every
-#     mirror stamped .skene-v2 regenerates as v3 on its next run.
+#  2. MIRROR (mirror_rugo above), gated on its writer-version stamp.
 #
-#  3. CODEC (skene). The `lz4` argument is NOT optional: it is WriteOptions::for_fast_reads,
-#     the local-benchmark posture (architect 2026-08-11) shared with
-#     clickbench-skene and job. Dropping it rebuilds an UNCOMPRESSED mirror into
-#     the same path and nothing downstream would say so — the suite would report
-#     a different number for a dataset nobody knew had changed. Deployed data
-#     takes the OPPOSITE posture; see the clickbench-skene comment for why.
-#
-#  4. DUCKDB BASELINE. duckdb/results.sf<sf>.json is what the runner compares
+#  3. DUCKDB BASELINE. duckdb/results.sf<sf>.json is what the runner compares
 #     against, for time AND for result shape — the shape check is the only
 #     correctness gate this suite has. Running without a baseline silently
 #     downgrades the benchmark to "some numbers", so a missing one is a hard
@@ -883,7 +858,7 @@ define tpch_suite
 		echo "Generating testdata/tpch_$(1) (SF$(1)) via tpchgen-cli..."; \
 		tpchgen-cli -s $(1) --format parquet --parts 16 --output-dir testdata/tpch_$(1); \
 	}
-	$(call mirror_$(2),testdata/tpch_$(1),testdata/tpch_$(1)_$(2))
+	$(call mirror_rugo,testdata/tpch_$(1),testdata/tpch_$(1)_rugo)
 	@test -s tests/performance/tpch/duckdb/results.sf$(1).json || { \
 		echo "ERROR: no DuckDB baseline at tests/performance/tpch/duckdb/results.sf$(1).json"; \
 		echo "       the suite compares timings AND result shapes against it — generate it with:"; \
@@ -891,32 +866,20 @@ define tpch_suite
 		exit 1; \
 	}
 	@clear || true
-	@env $(BENCH_ENV) $(PYTHON) tests/performance/tpch/runner.py --scale $(1) --variant $(2)
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/tpch/runner.py --scale $(1) --variant rugo
 endef
 
 tpch-sf1: ## Run TPC-H SF1 vs DuckDB on the rugo-written parquet mirror (fast iteration; planning is ~19% of the work at this scale)
 	$(call print_blue,Running TPC-H SF1 benchmark vs DuckDB (rugo parquet)...)
-	$(call tpch_suite,1,rugo)
+	$(call tpch_suite,1)
 
 tpch-sf10: ## Run TPC-H SF10 vs DuckDB on the rugo-written parquet mirror (the quoted scale)
 	$(call print_blue,Running TPC-H SF10 benchmark vs DuckDB (rugo parquet)...)
-	$(call tpch_suite,10,rugo)
+	$(call tpch_suite,10)
 
 tpch-sf100: ## Run TPC-H SF100 vs DuckDB on the rugo-written parquet mirror (generates the ~39GB parquet source on first run)
 	$(call print_blue,Running TPC-H SF100 benchmark vs DuckDB (rugo parquet)...)
-	$(call tpch_suite,100,rugo)
-
-tpch-sf1-skene: ## Run TPC-H SF1 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running TPC-H SF1 benchmark vs DuckDB (skene)...)
-	$(call tpch_suite,1,skene)
-
-tpch-sf10-skene: ## Run TPC-H SF10 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running TPC-H SF10 benchmark vs DuckDB (skene)...)
-	$(call tpch_suite,10,skene)
-
-tpch-sf100-skene: ## Run TPC-H SF100 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running TPC-H SF100 benchmark vs DuckDB (skene)...)
-	$(call tpch_suite,100,skene)
+	$(call tpch_suite,100)
 
 tpch: tpch-sf10 ## Alias for tpch-sf10 (the scale docs/ and the design notes quote)
 
@@ -929,19 +892,18 @@ tpch-sf10-duckdb: ## Re-run the DuckDB SF10 calibration (regenerates duckdb/resu
 tpch-sf100-duckdb: ## Re-run the DuckDB SF100 calibration (regenerates duckdb/results.sf100.json)
 	@$(PYTHON) tests/performance/tpch/duckdb/runner.py --scale 100
 
-.PHONY: tpch tpch-sf1 tpch-sf10 tpch-sf100 tpch-sf1-skene tpch-sf10-skene tpch-sf100-skene \
+.PHONY: tpch tpch-sf1 tpch-sf10 tpch-sf100 \
 	tpch-sf1-duckdb tpch-sf10-duckdb tpch-sf100-duckdb
 
-# === Star Schema Benchmark (rugo parquet / skene v3 mirrors, DuckDB-calibrated) ===
+# === Star Schema Benchmark (rugo parquet mirror, DuckDB-calibrated) ===
 #
-# `make ssb-sf1`, `make ssb-sf10`, `make ssb-sf100` on the rugo parquet mirror,
-# `make ssb-sf<sf>-skene` on the skene mirror. SSB is NOT TPC-H data: it has
+# `make ssb-sf1`, `make ssb-sf10`, `make ssb-sf100` on the rugo parquet mirror.
+# SSB is NOT TPC-H data: it has
 # its own generator (eyalroz/ssb-dbgen, pinned in dev/ssb_generate.py, built under
 # scratch/ssb — needs cmake + a C compiler) and its own tables (lineorder,
 # customer, supplier, part, date). Same shape as the tpch_suite above:
 #  1. testdata/ssb_<sf>            parquet source, generated on first run.
-#  2. testdata/ssb_<sf>_rugo       rugo parquet mirror (mirror_rugo), or
-#     testdata/ssb_<sf>_skene      skene v3 / lz4 mirror for -skene, built from (1).
+#  2. testdata/ssb_<sf>_rugo       rugo parquet mirror (mirror_rugo), built from (1).
 #  3. DuckDB baseline              tests/performance/ssb/duckdb/results.sf<sf>.json,
 #                                  regenerated by `make ssb-sf<sf>-duckdb` (parquet).
 define ssb_suite
@@ -949,39 +911,27 @@ define ssb_suite
 		echo "Generating testdata/ssb_$(1) (SF$(1)) via ssb-dbgen..."; \
 		$(PYTHON) dev/ssb_generate.py $(1); \
 	}
-	$(call mirror_$(2),testdata/ssb_$(1),testdata/ssb_$(1)_$(2))
+	$(call mirror_rugo,testdata/ssb_$(1),testdata/ssb_$(1)_rugo)
 	@test -s tests/performance/ssb/duckdb/results.sf$(1).json || { \
 		echo "ERROR: no DuckDB baseline at tests/performance/ssb/duckdb/results.sf$(1).json"; \
 		echo "       the suite compares timings AND result shapes against it — generate it with:"; \
 		echo "         make ssb-sf$(1)-duckdb"; \
 		exit 1; \
 	}
-	@env $(BENCH_ENV) $(PYTHON) tests/performance/ssb/runner.py --scale $(1) --variant $(2)
+	@env $(BENCH_ENV) $(PYTHON) tests/performance/ssb/runner.py --scale $(1) --variant rugo
 endef
 
 ssb-sf1: ## Run SSB SF1 vs DuckDB on the rugo-written parquet mirror
 	$(call print_blue,Running SSB SF1 benchmark vs DuckDB (rugo parquet)...)
-	$(call ssb_suite,1,rugo)
+	$(call ssb_suite,1)
 
 ssb-sf10: ## Run SSB SF10 vs DuckDB on the rugo-written parquet mirror
 	$(call print_blue,Running SSB SF10 benchmark vs DuckDB (rugo parquet)...)
-	$(call ssb_suite,10,rugo)
+	$(call ssb_suite,10)
 
 ssb-sf100: ## Run SSB SF100 vs DuckDB on the rugo-written parquet mirror (generates ~600M lineorder rows on first run)
 	$(call print_blue,Running SSB SF100 benchmark vs DuckDB (rugo parquet)...)
-	$(call ssb_suite,100,rugo)
-
-ssb-sf1-skene: ## Run SSB SF1 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running SSB SF1 benchmark vs DuckDB (skene)...)
-	$(call ssb_suite,1,skene)
-
-ssb-sf10-skene: ## Run SSB SF10 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running SSB SF10 benchmark vs DuckDB (skene)...)
-	$(call ssb_suite,10,skene)
-
-ssb-sf100-skene: ## Run SSB SF100 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running SSB SF100 benchmark vs DuckDB (skene)...)
-	$(call ssb_suite,100,skene)
+	$(call ssb_suite,100)
 
 ssb-sf1-duckdb: ## Re-run the DuckDB SSB SF1 calibration on the parquet source
 	@test -d testdata/ssb_1 || $(PYTHON) dev/ssb_generate.py 1
@@ -995,7 +945,7 @@ ssb-sf100-duckdb: ## Re-run the DuckDB SSB SF100 calibration on the parquet sour
 	@test -d testdata/ssb_100 || $(PYTHON) dev/ssb_generate.py 100
 	@$(PYTHON) tests/performance/ssb/duckdb/runner.py --scale 100
 
-.PHONY: ssb-sf1 ssb-sf10 ssb-sf100 ssb-sf1-skene ssb-sf10-skene ssb-sf100-skene \
+.PHONY: ssb-sf1 ssb-sf10 ssb-sf100 \
 	ssb-sf1-duckdb ssb-sf10-duckdb ssb-sf100-duckdb
 
 b: check-python
@@ -1065,8 +1015,6 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@# `make clickbench` are NOT a like-for-like format comparison: they are
 	@# different codecs by design. Comparing them measures the codec choice as
 	@# much as the format. Say which posture any quoted figure came from.
-	@# (`make tpch-sf10-skene` is skene/lz4 too, so it IS comparable to this
-	@# one on codec; `make tpch` is rugo parquet/zstd, like `make clickbench`.)
 	@#
 	@# The stamp is named for the FORMAT VERSION the mirror was written at, not
 	@# just for "converted". A mirror written before row groups were packed into
@@ -1226,7 +1174,7 @@ jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opter
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
 
-# === TPC-DS (skene v3 mirrors) ===
+# === TPC-DS (rugo parquet mirror) ===
 #
 # Scale is in the target name — `make tpcds-sf1`, `make tpcds-sf001` — for the
 # same reason it is on the TPC-H targets: a bare `tpcds` does not say which of
@@ -1246,38 +1194,25 @@ jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opter
 #     (dev/tpcds/generate_data.py) rather than vendored: 24 tables as
 #     <table>/data.parquet. Regenerate by removing testdata/tpcds_<sf>.
 #
-#  2. SKENE v3 MIRROR — what the suite actually reads. TPC-DS is measured on
-#     the same format the engine is measured on everywhere else (TPC-H, JOB,
-#     ClickBench, h2o); a coverage suite reading a format nothing else reads
-#     would certify a path production does not take. Stamped on the FORMAT
-#     VERSION, not the directory: a v1 tree, or one packed before row groups
-#     were grouped into files, is a different set of objects under different
-#     names and the converter refuses to write over it — so a missing stamp
-#     with a populated directory means "regenerate", which is what the rm does.
-#     The parquet source stays reachable for comparison via
+#  2. RUGO PARQUET MIRROR (mirror_rugo, see "Benchmark mirrors" above) — what
+#     the suite actually reads, like every suite that does not name a format.
+#     Skene is measured by clickbench-skene alone. The parquet source stays
+#     reachable for comparison via
 #     `python tests/performance/tpcds/runner.py --scale 1` (no --variant).
-#
-#  3. CODEC. `lz4` is NOT optional — WriteOptions::for_fast_reads, the local
-#     posture every mirror in this tree uses (architect 2026-08-11). See the
-#     clickbench-skene comment for why deployed data takes the opposite one.
 
 define tpcds_suite
 	@test -d testdata/tpcds_$(1) || $(PYTHON) dev/tpcds/generate_data.py --scale $(1)
-	@test -f testdata/tpcds_$(1)_skene.skene-v3 || { \
-		rm -rf testdata/tpcds_$(1)_skene && \
-		$(PYTHON) dev/parquet_to_skene.py testdata/tpcds_$(1) testdata/tpcds_$(1)_skene lz4 && \
-		touch testdata/tpcds_$(1)_skene.skene-v3; \
-	}
+	$(call mirror_rugo,testdata/tpcds_$(1),testdata/tpcds_$(1)_rugo)
 	@clear || true
-	@$(PYTHON) tests/performance/tpcds/runner.py --scale $(1) --variant skene
+	@$(PYTHON) tests/performance/tpcds/runner.py --scale $(1) --variant rugo
 endef
 
-tpcds-sf1: ## Run TPC-DS SF1 vs DuckDB on the skene v3 mirror
-	$(call print_blue,Running TPC-DS SF1 benchmark vs DuckDB (skene)...)
+tpcds-sf1: ## Run TPC-DS SF1 vs DuckDB on the rugo-written parquet mirror
+	$(call print_blue,Running TPC-DS SF1 benchmark vs DuckDB...)
 	$(call tpcds_suite,1)
 
-tpcds-sf001: ## Run TPC-DS SF0.01 vs DuckDB on the skene v3 mirror (fast iteration; label matches testdata/tpch_001)
-	$(call print_blue,Running TPC-DS SF0.01 benchmark vs DuckDB (skene)...)
+tpcds-sf001: ## Run TPC-DS SF0.01 vs DuckDB on the rugo-written parquet mirror (fast iteration; label matches testdata/tpch_001)
+	$(call print_blue,Running TPC-DS SF0.01 benchmark vs DuckDB...)
 	$(call tpcds_suite,001)
 
 tpcds: tpcds-sf1 ## Alias for tpcds-sf1
@@ -1335,20 +1270,12 @@ job: ## Run Join Order Benchmark (JOB) on the rugo-written parquet mirror (gener
 	$(call print_blue,"Running JOB on rugo parquet...")
 	@# JOB does not stipulate a storage format — upstream ships the IMDB CSVs,
 	@# not files — so the choice was always ours: rugo parquet by default (see
-	@# "Benchmark mirrors" above), skene via `make job-skene`. The weekly suite
-	@# (mabel-dev/wrenchy-bench) still runs JOB on skene, so a laptop `make job`
-	@# number is comparable with a CI number only through `make job-skene`.
+	@# "Benchmark mirrors" above). The weekly suite (mabel-dev/wrenchy-bench)
+	@# still runs JOB on skene, so a laptop `make job` number does not compare
+	@# with a CI number.
 	$(call mirror_rugo,testdata/job,testdata/job_rugo)
 	@clear || true
 	@env $(BENCH_ENV) $(PYTHON) tests/performance/job/runner.py --variant rugo
-
-job-skene: ## Run Join Order Benchmark (JOB) on the skene mirror (generates testdata/job_skene from testdata/job on first run)
-	$(call print_blue,"Running JOB on skene...")
-	@# Same measurement as the weekly suite (mabel-dev/wrenchy-bench). The `lz4`
-	@# in mirror_skene is NOT optional — see gate 3 of the TPC-H comment.
-	$(call mirror_skene,testdata/job,testdata/job_skene)
-	@clear || true
-	@env $(BENCH_ENV) $(PYTHON) tests/performance/job/runner.py --variant skene
 
 job-duckdb: ## Re-run DuckDB JOB calibration (regenerates duckdb/results.json)
 	@$(PYTHON) tests/performance/job/duckdb/runner.py
@@ -1361,23 +1288,15 @@ h2o: ## Run H2O db-benchmark on the rugo-written parquet mirror (groupby + join,
 	@#
 	@# rugo parquet for the same reason as `job` above: H2O ships a data
 	@# GENERATOR, not files, so the storage format was always this repo's
-	@# choice; skene via `make h2o-skene`. H2O is the one suite where skene
-	@# still wins overall (g10/j5, ~100M-row outputs; 2026-10-18).
+	@# choice. H2O was the one suite where skene measured faster overall
+	@# (g10/j5, ~100M-row outputs; 2026-10-18).
 	@#
-	@# The mirrors are flat — testdata/h2o_rugo/<table>, testdata/h2o_skene/<table>
-	@# — because they are built at one size, so there is no size level to carry.
+	@# The mirror is flat — testdata/h2o_rugo/<table> — because it is built at one size, so there is no size level to carry.
 	@# The parquet tree keeps its testdata/h2o/<size>/<table> layout.
 	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
 	$(call mirror_rugo,testdata/h2o/medium,testdata/h2o_rugo)
 	@clear || true
 	@env $(BENCH_ENV) $(PYTHON) tests/performance/h2o/runner.py --variant rugo --size medium --workload both
-
-h2o-skene: ## Run H2O db-benchmark on the skene mirror (groupby + join, medium; generates testdata/h2o_skene on first run)
-	$(call print_blue,"Running H2O on skene...")
-	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
-	$(call mirror_skene,testdata/h2o/medium,testdata/h2o_skene)
-	@clear || true
-	@env $(BENCH_ENV) $(PYTHON) tests/performance/h2o/runner.py --variant skene --size medium --workload both
 
 h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
 	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size medium --workload both
@@ -1389,9 +1308,7 @@ h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.
 # the PARQUET corpora the local targets are built from, registered as-is with
 # pyiceberg's add_files - same files, same row groups - so a difference against a
 # local `--variant parquet` run is the remote path. Skene has no Iceberg form
-# (data files must be parquet/orc/avro), so there is no remote skene variant, and
-# these numbers compare with the parquet variants, not the skene figures the
-# plain targets print.
+# (data files must be parquet/orc/avro), so there is no remote skene variant.
 #
 # Nothing is generated or uploaded here. A table missing from the catalog fails
 # the run; it is never replaced by the local copy.
