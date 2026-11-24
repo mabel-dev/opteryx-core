@@ -75,6 +75,20 @@ def test_format_sql_literal_closes_before_next_token():
     assert "\x1b[38;2;189;147;249mAND\x1b[0m" in formatted, "AND after '' should still be coloured as an operator"
 
 
+def test_format_sql_underscored_names_are_not_split_into_keywords():
+    """`runs_as` is one name; reading its tail as the AS keyword printed it `runs_AS`"""
+    for name in ("runs_as", "has_role", "x_on", "a_by", "my_group", "is_null_flag", "_as"):
+        plain = _plain(f"SELECT {name} FROM g.{name} AS t WHERE {name} = 1")
+        assert f"SELECT {name} FROM g.{name} AS t WHERE {name} = 1" in plain, plain
+
+
+def test_format_sql_keeps_the_space_before_a_joined_subquery():
+    for join in ("INNER JOIN", "LEFT JOIN", "CROSS JOIN", "JOIN", "LEFT OUTER JOIN"):
+        plain = _plain(f"SELECT * FROM a {join} (SELECT 1 AS x) AS b")
+        assert f"{join} (SELECT 1 AS x) AS b" in plain, plain
+    assert "\x1b[38;2;139;233;253mJOIN\x1b[0m" in format_sql("SELECT * FROM a INNER JOIN b ON a.x = b.x")
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

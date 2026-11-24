@@ -6,11 +6,13 @@
 import re
 
 # Precompile regex patterns at module level
-# A complete quoted literal is ONE token: splitting on `.` `_` `,` `(` `)` inside it would lose
+# A complete quoted literal is ONE token: splitting on `.` `,` `(` `)` inside it would lose
 # the original spacing, which tokenisation cannot give back. (`''` / `""` / ``` `` ``` escape the quote.)
+# `_` is NOT a separator: it is part of a name, and splitting `runs_as` left a bare `as`
+# to be read as the keyword.
 _LITERAL_PATTERN = re.compile(r"""[NEBXnebx]?'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`""")
 _TOKEN_PATTERN = re.compile(
-    _LITERAL_PATTERN.pattern + r"|[(),;._]|[\r\n]+|[^\s(),;._\r\n]+"
+    _LITERAL_PATTERN.pattern + r"|[(),;.]|[\r\n]+|[^\s(),;.\r\n]+"
 )
 _COMMENT_PATTERN = re.compile(
     r"(\"[^\"]\"|\'[^\']\'|\`[^\`]\`)|(/\*[^\*/]*\*/|--[^\r\n]*$)", re.MULTILINE | re.DOTALL
@@ -30,7 +32,9 @@ _COLOR_NUMBER = "\033[38;2;255;184;108m"
 _COLOR_COLUMN = "\033[38;2;150;150;150m"
 _COLOR_RELATION = "\033[38;2;166;226;46m"
 
-_PUNCTUATION_TOKENS = {"(", ")", ",", ";", "[", "]", ".", "_"}
+_PUNCTUATION_TOKENS = {"(", ")", ",", ";", "[", "]", "."}
+# Words that come before JOIN; a JOIN after one is the keyword, never a name.
+_JOIN_MODIFIERS = {"INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ANTI", "SEMI", "NATURAL"}
 _BOOLEAN_LITERALS = {"TRUE", "FALSE", "NULL"}
 _OPERATOR_TOKENS = {
     "=",
@@ -265,12 +269,12 @@ def format_sql(sql):  # pragma: no cover
                     prev_token = words[j].upper()
                     break
 
-        # For punctuation like . or _, skip back to find the context keyword
+        # For a dot, skip back to find the context keyword
         # This handles qualified names like schema.table
         context_token = prev_token
-        if prev_token in (".", "_"):
+        if prev_token == ".":
             for j in range(i - 2, -1, -1):
-                if words[j] != "\n" and words[j] not in (".", "_"):
+                if words[j] != "\n" and words[j] != ".":
                     tk = words[j].upper()
                     # If we find a context keyword (FROM, JOIN, etc.), use it
                     if tk in _RELATION_CONTEXT or tk in ("SELECT", ",") or tk in _COLUMN_CONTEXT:
@@ -292,11 +296,11 @@ def format_sql(sql):  # pragma: no cover
             "ANTI",
             "SEMI",
             "NATURAL",
-        )
+        ) and not (upper_word == "JOIN" and prev_token in _JOIN_MODIFIERS)
 
         if word in _PUNCTUATION_TOKENS:
-            # Don't add space after dots and underscores for qualified names
-            if word in (".", "_"):
+            # Don't add space after dots for qualified names
+            if word == ".":
                 formatted_sql += f"{_COLOR_PUNCTUATION}{word}{_RESET}"
             else:
                 formatted_sql += f"{_COLOR_PUNCTUATION}{word}{_RESET} "
@@ -359,14 +363,10 @@ def format_sql(sql):  # pragma: no cover
     formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION})", f"{_COLOR_PUNCTUATION})")
     formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION},", f"{_COLOR_PUNCTUATION},")
     formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION};", f"{_COLOR_PUNCTUATION};")
-    # Remove spaces around dots and underscores for qualified names
+    # Remove spaces around dots for qualified names
     formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION}.", f"{_COLOR_PUNCTUATION}.")
-    formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION}_", f"{_COLOR_PUNCTUATION}_")
     formatted_sql = formatted_sql.replace(
         f"{_RESET} {_COLOR_PUNCTUATION}.", f"{_RESET}{_COLOR_PUNCTUATION}."
-    )
-    formatted_sql = formatted_sql.replace(
-        f"{_RESET} {_COLOR_PUNCTUATION}_", f"{_RESET}{_COLOR_PUNCTUATION}_"
     )
 
     return color_comments(formatted_sql).strip()
