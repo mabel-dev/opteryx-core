@@ -85,8 +85,13 @@ morsels = session.execute_to_morsels(sql)
 ## Rulings (architect, 2026-11-22 / 23)
 
 **Language and parser**
-- **Language:** GQL (ISO/IEC 39075). Not Cypher, and not `GRAPH_TABLE`
-  inside SQL.
+- **Language:** GQL (ISO/IEC 39075). Not Cypher.
+- **`GRAPH_TABLE` inside SQL: reversed 2026-11-23.** The original ruling was
+  "not `GRAPH_TABLE` inside SQL", because sqlparser has no PGQ grammar and
+  vendoring a fork's patch was rejected. It turned out to need no fork - see
+  [GRAPH_TABLE](#5-graph_table-a-pattern-in-the-from-clause) - and it is what
+  lets a pattern compose with joins, aggregates, CTEs and views, which a
+  second query language beside SQL cannot.
 - **Parser:** our own, in Python, published separately as `gqlparser`.
   sqlparser has no PGQ grammar, and vendoring a fork's patch was rejected.
 - **gqlparser's error contract (narrower):** an unrecognised GQL construct may
@@ -207,8 +212,11 @@ is released before core (as views were).
 tables and views:
 - `CREATE PROPERTY GRAPH x` fails if a table or view `x` exists, and the
   reverse is also true;
-- `SELECT ... FROM x` on a graph is refused with "`x` is a property graph;
-  query it with GQL (see gqlparser)", not "dataset not found";
+- `SELECT ... FROM x` on a graph returns its STRUCTURE - one row per element
+  table (`connectors/property_graph_structure.py`) - not "dataset not found",
+  and never the contents of the tables it names. (Changed 2026-11-23; it was
+  first a refusal pointing at GQL.) The graph's contents are read with
+  `GRAPH_TABLE`, or with GQL through gqlparser;
 - `SHOW` listings that enumerate relations include graphs, marked with their
   kind.
 
@@ -240,6 +248,59 @@ reads the underlying relations, and the invoker's permissions on them apply.
 - **End to end, test-only:** GQL queries lowered by gqlparser (installed from
   PyPI as a test dependency, never imported by `opteryx/`) return the same
   results as hand-written SQL over `testdata/tpch_01` and `testdata/org`.
+
+## 5. `GRAPH_TABLE`: a pattern in the FROM clause
+
+```sql
+SELECT manager, COUNT(*) AS reports
+FROM GRAPH_TABLE (hr.org.g
+       MATCH (m:Person)-[:MANAGES]->(r:Person)
+       COLUMNS (m.name AS manager, r.id AS report_id))
+GROUP BY manager
+```
+
+SQL/PGQ's table factor. Built 2026-11-23 in
+[graph_table.py](../opteryx/planner/graph_table.py), in two steps that divide at
+the line between what needs the catalog and what does not:
+
+1. **Text, in the SQL rewriter.** The span sqlparser cannot read becomes a
+   table-function call it can: `GRAPH_TABLE('<graph>', '<pattern>')`. The edit
+   is recorded like every other rewrite's, so positions after it still map
+   back. No catalog is touched, so `parse_statement` stays syntax-only and
+   `analyze_query` reports the graph among the statement's tables.
+2. **AST, in the logical planner.** `create_node_relation` replaces that call
+   with the derived subquery the pattern lowers to. gqlparser emits the same
+   sqlparser statement dict this engine's parser produces, so it is spliced in
+   dict-to-dict, with no SQL text round trip, and is then planned, resolved and
+   bound as the ordinary subquery it now is.
+
+**What this changes in D7/D8.** Standalone GQL still lives outside the engine.
+A pattern INSIDE a SQL statement is the engine's to plan, so
+`planner/graph_table.py` - and nothing else under `opteryx/` - imports
+gqlparser, lazily. Without the package this one table factor is refused by
+name; nothing else is affected. `SQLPARSER_FORMAT` there must equal the
+sqlparser release in `Cargo.toml` (a test compares them).
+
+**Permissions.** Both reads are the caller's. READ on the graph is checked in
+the planner BEFORE the definition is consulted - an error about the pattern
+would otherwise tell a caller with no access which labels exist. The plan
+context carries the session's execution context for exactly this. The data is
+read by the lowered subquery's scans, each READ-checked by the binder as any
+scan is: a graph lends no access to its tables.
+
+**Views.** A view's stored text holds the function form, so the pattern is
+lowered again on every read and a redefined graph flows through. `SHOW CREATE
+VIEW` therefore shows `GRAPH_TABLE('g', 'MATCH ...')` rather than the PGQ form
+the author wrote - known, not yet rendered back.
+
+**Not yet:**
+- gqlparser's errors carry a line and column within the pattern; they are
+  dropped rather than mapped onto the statement, so a pattern error names the
+  graph but draws no caret.
+- `IS Label` (PGQ's usual spelling) is refused by gqlparser; write `:Label`.
+- `COLUMNS (...)` must be the last clause.
+- A self-edge (an edge table that is also its vertex table) plans a join the
+  optimizer could eliminate.
 
 ## Follow-ups (not in this proposal)
 

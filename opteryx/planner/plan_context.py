@@ -38,6 +38,7 @@ class PlanContext:
         "statement_with",
         "nested_ctes",
         "variables",
+        "execution_context",
         "statistics_estimated_by_optimizer",
         "collision_qualified_outputs",
     )
@@ -92,6 +93,12 @@ class PlanContext:
         # worker count). Set by whoever plans a session's query; None = no session, and
         # resolve() then answers each variable's default.
         self.variables = None
+        # Whose query this is - the session's execution context, set beside
+        # `variables` by whoever plans it. Planning itself decides almost nothing
+        # by identity (the binder does that), with one exception: a GRAPH_TABLE
+        # reads a graph's DEFINITION while the plan is being built, and that read
+        # is checked then (planner/graph_table.py). None = no session.
+        self.execution_context = None
         # Output names the last bound Exit qualified (`a.id`) only because two outputs
         # shared the bare name (binder/project.py visit_exit). CTAS and CREATE VIEW
         # refuse to store them (binder relation.visit_insert, view._view_output_schema).

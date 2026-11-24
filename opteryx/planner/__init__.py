@@ -615,6 +615,7 @@ def query_planner(
         # queries, and never stored on plan nodes.
         plan_context = PlanContext()
         plan_context.variables = execution_context.variables
+        plan_context.execution_context = execution_context
         # Parse, resolve, rewrite and bind - the same path `Session.check` stops at the
         # end of.
         bound_plan, _clean_sql, _ast = bind_statement(

@@ -581,9 +581,15 @@ def do_sql_rewrite(
     if source is None:
         source = statement
 
+    from opteryx.planner.graph_table import rewrite_graph_tables
+
     passes: List[List[Edit]] = []
     for rewrite in (
         _rewrite_escaped_breaks,
+        # Before every pass that reads the statement's own syntax: once a graph
+        # pattern is inside a string literal, the passes below leave it alone,
+        # which is right - it is GQL in there, not SQL.
+        rewrite_graph_tables,
         _rewrite_temporal_units,
         _rewrite_object_types,
         _rewrite_prefixed_strings,

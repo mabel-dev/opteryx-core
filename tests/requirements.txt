@@ -12,6 +12,9 @@ pycln
 
 valkey
 rich
+# GRAPH_TABLE lowers its pattern with gqlparser (opteryx/planner/graph_table.py),
+# imported lazily; without it those tests skip and that one table factor is refused.
+gqlparser
 
 protobuf
 

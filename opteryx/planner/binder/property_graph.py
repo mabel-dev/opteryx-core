@@ -68,6 +68,7 @@ def _relation_columns(parts: List[str], context: BindingContext) -> Dict[str, st
     # resolve a view's columns.
     probe = PlanContext()
     probe.variables = context.plan_context.variables
+    probe.execution_context = context.plan_context.execution_context
     head = bind_schema_only(f"SELECT * FROM {relation}", context, plan_context=probe)
     names = {}
     for column in head.columns:

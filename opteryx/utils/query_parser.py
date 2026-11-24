@@ -196,7 +196,12 @@ def _collect_relations(node: Any, tables: Set[str], cte_names: Set[str]) -> None
     # `FROM users`, a join's relation, `UPDATE users`, `DELETE FROM users`
     relation = node.get("Table")
     if isinstance(relation, dict):
-        name = _extract_table_name(relation.get("name"))
+        from opteryx.planner.graph_table import graph_table_name
+
+        # `GRAPH_TABLE (g MATCH ...)` reads the graph `g`. The tables behind it
+        # are not knowable without the catalog; the binder checks each of those.
+        graph = graph_table_name(relation)
+        name = graph or _extract_table_name(relation.get("name"))
         if name and name.upper() not in _TABLE_FUNCTIONS:
             tables.add(name)
 

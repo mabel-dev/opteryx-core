@@ -3705,6 +3705,13 @@ def process_join_tree(join: dict, *, plan_context) -> PlanStep:
 
 
 def create_node_relation(relation: dict, *, plan_context):
+    # A GRAPH_TABLE is planned as the subquery its pattern lowers to; from here
+    # on it IS that subquery. Every FROM item and every join's right side comes
+    # through this function, so this is the one place it has to happen.
+    from opteryx.planner.graph_table import expand_graph_table
+
+    relation = expand_graph_table(relation, plan_context)
+
     sub_plan = LogicalPlan(plan_context)
     root_node = None
 
