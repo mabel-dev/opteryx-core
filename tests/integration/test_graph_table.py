@@ -241,6 +241,21 @@ def test_reading_the_graph_needs_read_on_the_graph(catalog, monkeypatch):
             _rows(f"SELECT * FROM GRAPH_TABLE (gt.org.g MATCH {pattern} COLUMNS (p.name AS n))")
 
 
+def test_show_create_of_a_graph_needs_read_not_write(catalog, monkeypatch):
+    """A reader writes patterns against the graph's labels, so the definition is
+    theirs to read (ruled 2026-11-24): READ on the graph, not WRITE as a view's."""
+    def read_only(_context, relation, action="READ"):
+        return action == "READ"
+
+    monkeypatch.setattr("opteryx.managers.permissions.can_perform_action", read_only)
+    (row,) = _rows("SHOW CREATE PROPERTY GRAPH gt.org.g")
+    assert row[1].startswith("CREATE PROPERTY GRAPH gt.org.g")
+
+    _deny(monkeypatch, "gt.org.g")
+    with pytest.raises(PermissionError, match="read required"):
+        _rows("SHOW CREATE PROPERTY GRAPH gt.org.g")
+
+
 def test_a_graph_lends_no_access_to_its_tables(catalog, monkeypatch):
     _deny(monkeypatch, "gt.org.memberships")
     with pytest.raises(PermissionError, match="gt.org.memberships"):

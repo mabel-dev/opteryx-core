@@ -35,9 +35,11 @@
    (with no `KEY ... REFERENCES`) takes the edge table's single informational
    `FOREIGN KEY` to that vertex table. Zero or several are refused by name.
    Foreign keys are single-column, so a defaulted endpoint is too.
-6. **Permission tiers mirror views exactly.** `analyze_query` classes the DDL
-   as owner-tier at pre-flight, as it does `CREATE VIEW`, and the binder gates
-   create, drop and `SHOW CREATE` at WRITE.
+6. **Permission tiers mirror views, except `SHOW CREATE`.** `analyze_query`
+   classes the DDL as owner-tier at pre-flight, as it does `CREATE VIEW`, and
+   the binder gates create and drop at WRITE. `SHOW CREATE PROPERTY GRAPH` is
+   READ (ruled 2026-11-24): readers need the labels to write patterns, and the
+   structure read, `GRAPH_TABLE` and GQL submission were all READ already.
 7. **The `SELECT * FROM <graph>` refusal** ("is a property graph, not a
    table") is in both stores' dataset read, on its failure path only (see the
    `get_relation` note above).
@@ -222,7 +224,7 @@ tables and views:
 
 **Permissions.** Creating and dropping a graph follow the same rules as
 creating and dropping a view. Reading a graph's definition through `SHOW CREATE`
-follows view rules too. Querying needs nothing new, because the lowered SQL
+needs READ, not a view's WRITE (ruled 2026-11-24). Querying needs nothing new, because the lowered SQL
 reads the underlying relations, and the invoker's permissions on them apply.
 
 ## 4. `SHOW CREATE PROPERTY GRAPH`

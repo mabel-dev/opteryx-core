@@ -224,9 +224,10 @@ _SHOW_CREATE_ACTIONS = {
     # unattended runs carry, which is exactly what makes a task's definition
     # AUTOMATE-gated.
     "TRIGGER": "AUTOMATE",
-    # Same tier as VIEW: the definition names the tables it maps, which the
-    # caller may hold no grant on.
-    "PROPERTY GRAPH": "WRITE",
+    # READ, unlike VIEW (ruled 2026-11-24): a graph exists to be queried, and a
+    # reader needs its labels to write a pattern. Its structure read, GRAPH_TABLE
+    # and GQL submission are all READ-gated already.
+    "PROPERTY GRAPH": "READ",
 }
 
 
@@ -254,6 +255,10 @@ def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         alter one, and only an owner may read what it runs.
       TRIGGER - AUTOMATE. A trigger's definition names the identity its
         unattended runs carry, same sensitivity as a task's.
+      PROPERTY GRAPH - READ. It names tables too, but it is a published map
+        for readers to query against; reading the graph's own name already
+        returns the same structure at READ, and querying still needs READ on
+        every table it names.
       INDEXES (`SHOW INDEXES FROM t`) - READ, as TABLE: an index's definition is
         part of the table's DDL, and its counts disclose no path (§7A).
 
